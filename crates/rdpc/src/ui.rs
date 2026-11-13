@@ -10,8 +10,8 @@
 use ffwd_render::{Canvas, FontId, Rect, TextEngine};
 
 use crate::store::{
-    Connection, Group, Inherit, PRESETS, Quality, SessionOptions, Store, normalize_path, parent_of,
-    preset_name,
+    Connection, Group, Inherit, PRESETS, Quality, SessionOptions, Store, WinKeys, normalize_path,
+    parent_of, preset_name,
 };
 use crate::text_field::TextField;
 use crate::theme::*;
@@ -129,6 +129,9 @@ pub enum Hit {
     /// Server certificate prompt: trust (and remember) or refuse.
     CertTrust(u64),
     CertRefuse(u64),
+    /// Windows key combinations: panel (live) and connection form.
+    TabWinKeys(u64, usize),
+    FormWinKeys(usize),
     /// Quality: speed preset (index into PRESETS), colour depth, experience toggle.
     FormPreset(usize),
     FormDepth(usize),
@@ -217,6 +220,8 @@ pub struct Tab {
     pub quality_live: Quality,
     /// The server certificate waits for the user's decision.
     pub cert: Option<CertPrompt>,
+    /// Where Windows key combinations go (changeable live).
+    pub win_keys: WinKeys,
 }
 
 /// A server certificate to trust or refuse.
@@ -241,6 +246,7 @@ struct TabView {
     quality_live: Quality,
     state: TabState,
     host: String,
+    win_keys: WinKeys,
 }
 
 pub enum Action {
@@ -500,6 +506,7 @@ impl Ui {
             quality: Quality::default(),
             quality_live: Quality::default(),
             cert: None,
+            win_keys: WinKeys::default(),
         });
         self.active = Some(id);
         self.session_focus = false;
@@ -1151,6 +1158,11 @@ impl Ui {
                 self.drawer_scroll = 0;
             }
             Hit::FullScreen => return Some(Action::SetFullscreen(!self.fullscreen)),
+            Hit::TabWinKeys(id, i) => {
+                let t = self.tab_mut(id)?;
+                t.win_keys = WinKeys::ALL[i];
+            }
+            Hit::FormWinKeys(i) => self.opts.win_keys = WinKeys::ALL[i],
             Hit::CertTrust(id) => return Some(Action::CertAnswer(id, true)),
             Hit::CertRefuse(id) => return Some(Action::CertAnswer(id, false)),
             Hit::TabPreset(id, i) => {
@@ -2489,6 +2501,7 @@ impl Ui {
             y += row;
 
             let q = self.opts.quality;
+            let q_keys = self.opts.win_keys;
             label(cv, te, y, "Quality");
             let items: Vec<(String, bool, Hit)> = PRESETS
                 .iter()
@@ -2525,6 +2538,21 @@ impl Ui {
                 (text, on, Hit::FormExperience(i as u8))
             })
             .collect();
+            y = self.chip_rows(cv, te, f, fx, y, fw, fh, &items) + row - fh;
+
+            label(cv, te, y, "Win keys");
+            let items: Vec<(String, bool, Hit)> = WinKeys::ALL
+                .iter()
+                .enumerate()
+                .map(|(i, k)| {
+                    let text = match k {
+                        WinKeys::Local => "On this PC".to_string(),
+                        WinKeys::Remote => "On the remote".to_string(),
+                        WinKeys::FullScreen => "Remote in full screen".to_string(),
+                    };
+                    (text, q_keys == *k, Hit::FormWinKeys(i))
+                })
+                .collect();
             y = self.chip_rows(cv, te, f, fx, y, fw, fh, &items) + row - fh;
         }
 
@@ -3016,6 +3044,7 @@ impl Ui {
             quality_live: tab.quality_live,
             state: tab.state.clone(),
             host: tab.host.clone(),
+            win_keys: tab.win_keys,
         };
         let x = d.x + p(16.0);
         let w = d.w - p(32.0);
@@ -3429,6 +3458,22 @@ impl Ui {
             );
         }
         y += 5 * p(38.0) + p(20.0);
+
+        self.caption(cv, te, f, x, y, w, "WINDOWS KEYS (WIN, ALT+TAB)");
+        y += p(24.0);
+        let items: Vec<(String, bool, Hit)> = WinKeys::ALL
+            .iter()
+            .enumerate()
+            .map(|(i, k)| {
+                (
+                    k.label().to_string(),
+                    t.win_keys == *k,
+                    Hit::TabWinKeys(id, i),
+                )
+            })
+            .collect();
+        self.segmented(cv, te, f, Rect::new(x, y, w, p(32.0)), &items);
+        y += p(32.0) + p(20.0);
 
         self.caption(cv, te, f, x, y, w, "ACTIONS");
         y += p(24.0);

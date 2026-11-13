@@ -137,6 +137,33 @@ pub struct SessionOptions {
     pub drives: Vec<String>,
     /// Picture quality and desktop experience (part of Display for inheritance).
     pub quality: Quality,
+    /// Where Windows key combinations go (part of Display for inheritance).
+    pub win_keys: WinKeys,
+}
+
+/// Where Win, Alt+Tab and the like go, as mstsc's "Apply Windows key combinations".
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WinKeys {
+    /// This PC keeps them.
+    Local,
+    /// The remote session gets them whenever it has the keyboard.
+    Remote,
+    /// The remote session gets them only in full screen (mstsc's default).
+    #[default]
+    FullScreen,
+}
+
+impl WinKeys {
+    pub const ALL: [WinKeys; 3] = [WinKeys::Local, WinKeys::Remote, WinKeys::FullScreen];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            WinKeys::Local => "This PC",
+            WinKeys::Remote => "Remote",
+            WinKeys::FullScreen => "Full screen",
+        }
+    }
 }
 
 /// Picture quality, as on mstsc's Display and Experience tabs. Fixed at
@@ -560,12 +587,14 @@ impl Store {
             out.height = g.height;
             out.options.scale = g.options.scale;
             out.options.quality = g.options.quality;
+            out.options.win_keys = g.options.win_keys;
         }
         if let Some(g) = self.source_of(&c.group, &c.inherit, |i| i.sharing) {
-            let (scale, quality) = (out.options.scale, out.options.quality);
+            let own = out.options.clone();
             out.options = g.options.clone();
-            out.options.scale = scale;
-            out.options.quality = quality;
+            out.options.scale = own.scale;
+            out.options.quality = own.quality;
+            out.options.win_keys = own.win_keys;
         }
         out
     }

@@ -18,6 +18,7 @@ mod controls;
 #[cfg(windows)]
 mod frame;
 mod icon;
+mod keyhook;
 mod known_hosts;
 mod printing;
 mod session;

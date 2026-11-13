@@ -27,7 +27,7 @@ use winit::window::{CursorIcon, CustomCursor, Window, WindowId};
 
 use crate::controls::Controls;
 use crate::session::{self, Worker};
-use crate::store::{SessionOptions, Store};
+use crate::store::{SessionOptions, Store, WinKeys};
 use crate::theme;
 use crate::ui::{self, Action, Fonts, Key, SharedDrive, TabState, Ui};
 
@@ -39,6 +39,8 @@ pub enum UserEvent {
     Vault(VaultResult),
     /// Time for the next automatic reconnect attempt of a dropped session.
     Retry(u64),
+    /// A Windows key combination taken by the keyboard hook: (scancode, extended, down).
+    HookKey(u8, bool, bool),
     /// A session waits for the user to trust its server certificate.
     Certificate(u64, ui::CertPrompt, std::sync::mpsc::Sender<bool>),
     /// The update check found a newer release.
@@ -230,7 +232,24 @@ impl App {
         }
     }
 
+    /// The keyboard hook takes Windows key combinations only while the
+    /// session has the keyboard and its setting asks for it.
+    fn update_key_hook(&self) {
+        let on = self.win.as_ref().is_some_and(|m| {
+            let ui = &m.ui;
+            ui.window_active
+                && ui.session_focus
+                && ui.active_tab().is_some_and(|t| match t.win_keys {
+                    WinKeys::Local => false,
+                    WinKeys::Remote => true,
+                    WinKeys::FullScreen => ui.fullscreen,
+                })
+        });
+        crate::keyhook::set_active(on);
+    }
+
     fn dirty(&mut self) {
+        self.update_key_hook();
         if let Some(w) = &mut self.win {
             w.chrome_dirty = true;
             w.gfx.window.request_redraw();
@@ -260,6 +279,7 @@ impl App {
         // Auto scale follows this PC's Windows scaling.
         cfg.scale = opts.scale.unwrap_or_else(|| self.auto_scale());
         cfg.verify_certificate = Some(certificate_check(self.proxy.clone(), self.next_id));
+        cfg.keyboard_layout = crate::keyhook::local_layout();
         // Picture quality is fixed at logon; reconnects keep this config.
         opts.quality.apply(&mut cfg);
         let id = self.next_id;
@@ -324,6 +344,7 @@ impl App {
         if let Some(t) = self.win.as_mut().and_then(|w| w.ui.tab_mut(id)) {
             t.quality = opts.quality;
             t.quality_live = opts.quality;
+            t.win_keys = opts.win_keys;
             t.scale = opts.scale;
             t.clipboard = clipboard;
             t.sound = sound;
@@ -353,6 +374,7 @@ impl App {
             smart_cards: t.smart_cards,
             drives: t.drives.iter().map(|d| d.path.clone()).collect(),
             quality: t.quality,
+            win_keys: t.win_keys,
         }
     }
 
@@ -1084,6 +1106,12 @@ impl ApplicationHandler<UserEvent> for App {
                 Ok(mut gfx) => {
                     // Before reading the size: removing the caption grows the client area.
                     let framed = self.install_frame(&gfx);
+                    let proxy = std::sync::Mutex::new(self.proxy.clone());
+                    crate::keyhook::install(move |scancode, extended, down| {
+                        if let Ok(p) = proxy.lock() {
+                            let _ = p.send_event(UserEvent::HookKey(scancode, extended, down));
+                        }
+                    });
                     let scale = gfx.window.scale_factor() as f32;
                     let sz = gfx.window.inner_size();
                     if let (Some(w), Some(h)) =
@@ -1148,6 +1176,24 @@ impl ApplicationHandler<UserEvent> for App {
                     m.ui.update_busy = false;
                 }
                 return self.message(format!("Update failed: {e}"), theme::ERR);
+            }
+            UserEvent::HookKey(scancode, extended, down) => {
+                if let Some(id) = self
+                    .win
+                    .as_ref()
+                    .filter(|m| m.ui.session_focus)
+                    .and_then(|m| m.ui.session_area.map(|(id, _)| id))
+                {
+                    self.send(
+                        id,
+                        vec![InputEvent::Key {
+                            scancode,
+                            extended,
+                            down,
+                        }],
+                    );
+                }
+                return;
             }
             UserEvent::Certificate(id, prompt, reply) => {
                 match self.sessions.get_mut(&id) {
