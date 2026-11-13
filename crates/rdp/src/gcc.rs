@@ -25,6 +25,8 @@ const RNS_UD_CS_WANT_32BPP_SESSION: u16 = 0x0002;
 const RNS_UD_CS_STRONG_ASYMMETRIC_KEYS: u16 = 0x0008;
 const RNS_UD_CS_VALID_CONNECTION_TYPE: u16 = 0x0020;
 const RNS_UD_CS_SUPPORT_DYNVC_GFX_PROTOCOL: u16 = 0x0100;
+/// The client handles Server Heartbeat PDUs (MS-RDPBCGR 2.2.1.3.2, 2.2.16.1).
+const RNS_UD_CS_SUPPORT_HEARTBEAT_PDU: u16 = 0x0400;
 
 pub struct ClientSettings<'a> {
     pub width: u16,
@@ -94,6 +96,7 @@ pub fn client_data_blocks(s: &ClientSettings) -> Vec<u8> {
             | want32
             | RNS_UD_CS_STRONG_ASYMMETRIC_KEYS
             | RNS_UD_CS_VALID_CONNECTION_TYPE
+            | RNS_UD_CS_SUPPORT_HEARTBEAT_PDU
             | if s.gfx {
                 RNS_UD_CS_SUPPORT_DYNVC_GFX_PROTOCOL
             } else {
@@ -228,9 +231,9 @@ mod tests {
         // Scale fields at the end of the core block: desktop 150, device 140.
         assert_eq!(&b[226..234], &[150, 0, 0, 0, 140, 0, 0, 0]);
         // earlyCapabilityFlags (offset 144): ERRINFO | WANT_32BPP |
-        // STRONG_ASYMMETRIC_KEYS | VALID_CONNECTION_TYPE, no GFX.
-        assert_eq!(u16::from_le_bytes([b[144], b[145]]), 0x002B);
+        // STRONG_ASYMMETRIC_KEYS | VALID_CONNECTION_TYPE | HEARTBEAT, no GFX.
+        assert_eq!(u16::from_le_bytes([b[144], b[145]]), 0x042B);
         let gfx = client_data_blocks(&ClientSettings { gfx: true, ..s });
-        assert_eq!(u16::from_le_bytes([gfx[144], gfx[145]]), 0x012B);
+        assert_eq!(u16::from_le_bytes([gfx[144], gfx[145]]), 0x052B);
     }
 }

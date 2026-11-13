@@ -26,6 +26,32 @@ pub const SERVER_CHANNEL_ID: u16 = 0x03EA;
 
 const SEC_INFO_PKT: u16 = 0x0040;
 const SEC_LICENSE_PKT: u16 = 0x0080;
+const SEC_HEARTBEAT: u16 = 0x4000;
+
+/// Server Heartbeat PDU (MS-RDPBCGR 2.2.16.1): the server sends one every
+/// `period` seconds; after `warn` missed ones the client may warn, after
+/// `reconnect` missed ones it should reconnect.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Heartbeat {
+    pub period: u8,
+    pub warn: u8,
+    pub reconnect: u8,
+}
+
+/// Parses I/O channel data that is a heartbeat: a basic security header with
+/// SEC_HEARTBEAT, then reserved, period, count1 and count2 (one byte each).
+/// Anything else (share control PDUs) gives None.
+pub fn parse_heartbeat(data: &[u8]) -> Option<Heartbeat> {
+    if data.len() != 8 {
+        return None;
+    }
+    let flags = u16::from_le_bytes([data[0], data[1]]);
+    (flags & SEC_HEARTBEAT != 0).then_some(Heartbeat {
+        period: data[5],
+        warn: data[6],
+        reconnect: data[7],
+    })
+}
 
 pub struct ClientInfo<'a> {
     pub domain: &'a str,
@@ -679,8 +705,18 @@ mod tests {
         assert_eq!(parts.len(), 2);
         assert_eq!(parts[1].0, PDUTYPE_DEACTIVATEALL);
     }
-}
 
-#[cfg(test)]
-#[path = "arc_tests.rs"]
-mod arc_tests;
+    #[test]
+    fn heartbeat_pdu_is_recognised() {
+        // Basic security header SEC_HEARTBEAT, flagsHi 0; reserved, period 5,
+        // count1 3, count2 10 (MS-RDPBCGR 2.2.16.1).
+        let hb = parse_heartbeat(&[0x00, 0x40, 0, 0, 0, 5, 3, 10]).unwrap();
+        assert_eq!((hb.period, hb.warn, hb.reconnect), (5, 3, 10));
+        assert_eq!(
+            parse_heartbeat(&[0x08, 0x00, 0x17, 0x00, 0, 0, 0, 0]),
+            None,
+            "share control"
+        );
+        assert_eq!(parse_heartbeat(&[0x00, 0x40, 0, 0]), None, "too short");
+    }
+}

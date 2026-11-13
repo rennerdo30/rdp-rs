@@ -35,6 +35,8 @@ fn session() -> (Client, TcpStream) {
         },
         active: true,
         last_error_info: 0,
+        heartbeat: None,
+        last_seen: std::time::Instant::now(),
         channels: Vec::new(),
         pointers: PointerCache::default(),
         arc_cookie: None,

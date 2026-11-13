@@ -173,6 +173,15 @@ enum CloseCause<'a> {
     Ultimatum(&'a str),
 }
 
+/// How long a heartbeat-sending server may stay silent before the connection
+/// counts as dropped: `reconnect` missed periods (MS-RDPBCGR 2.2.16.1).
+fn silence_limit(hb: pdu::Heartbeat) -> Option<Duration> {
+    if hb.period == 0 || hb.reconnect == 0 {
+        return None;
+    }
+    Some(Duration::from_secs(hb.period as u64 * hb.reconnect as u64))
+}
+
 fn close_reason(cause: CloseCause, error_info: u32) -> CloseReason {
     let (base, transport) = match cause {
         CloseCause::Transport(m) => (m, true),
@@ -208,6 +217,10 @@ pub struct Client {
     info: ConnectionInfo,
     active: bool,
     last_error_info: u32,
+    /// Heartbeat settings from the server (if it sends them), and when data
+    /// last arrived: a silent connection is a dropped one.
+    heartbeat: Option<pdu::Heartbeat>,
+    last_seen: Instant,
     channels: Vec<Slot>,
     pointers: PointerCache,
     arc_cookie: Option<AutoReconnectCookie>,
@@ -533,6 +546,8 @@ impl Client {
             },
             active: false,
             last_error_info: 0,
+            heartbeat: None,
+            last_seen: Instant::now(),
             channels: slots,
             pointers: PointerCache::default(),
             // The server regenerates the cookie on every connect (5.5) and
@@ -597,9 +612,26 @@ impl Client {
         let end = Instant::now() + budget;
         loop {
             match self.f.read_frame(None) {
-                Ok(Some(Frame::X224(v))) => self.handle_x224(&v, &mut out)?,
-                Ok(Some(Frame::FastPath(v))) => self.handle_fastpath(&v, &mut out)?,
-                Ok(None) => {}
+                Ok(Some(Frame::X224(v))) => {
+                    self.last_seen = Instant::now();
+                    self.handle_x224(&v, &mut out)?
+                }
+                Ok(Some(Frame::FastPath(v))) => {
+                    self.last_seen = Instant::now();
+                    self.handle_fastpath(&v, &mut out)?
+                }
+                Ok(None) => {
+                    if let Some(limit) = self.heartbeat.and_then(silence_limit)
+                        && self.last_seen.elapsed() > limit
+                    {
+                        let text = format!(
+                            "no data from the server for {} s (heartbeat missed)",
+                            limit.as_secs()
+                        );
+                        out.closed = Some(close_reason(CloseCause::Transport(&text), 0));
+                        return Ok(out);
+                    }
+                }
                 Err(Error::ConnectionLost(m)) => {
                     out.closed = Some(close_reason(
                         CloseCause::Transport(&m),
@@ -671,6 +703,13 @@ impl Client {
         let payload = x224::data_payload(frame)?;
         match mcs::parse_domain_pdu(payload)? {
             DomainPdu::SendDataIndication { channel, data } if channel == self.io_channel => {
+                if let Some(hb) = pdu::parse_heartbeat(data) {
+                    if self.heartbeat != Some(hb) {
+                        trace!("server heartbeat: {hb:?}");
+                    }
+                    self.heartbeat = Some(hb);
+                    return Ok(());
+                }
                 let data = data.to_vec();
                 self.handle_share(&data, out)
             }
