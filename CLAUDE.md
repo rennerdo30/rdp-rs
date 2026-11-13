@@ -1,0 +1,1 @@
+Read `E:/Development/AGENTS.md`, `E:/Development/general-agent-rules.md` and this repository's `AGENTS.md` before work. `AGENTS.md` is the canonical project policy; do not duplicate or contradict it here.
