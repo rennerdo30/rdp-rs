@@ -204,7 +204,9 @@ impl App {
         (worker, controls)
     }
 
-    fn start_session(&mut self, name: String, cfg: Config, fit: bool) {
+    fn start_session(&mut self, name: String, mut cfg: Config, fit: bool) {
+        // New tabs start on Auto scale: the remote matches this PC's scaling.
+        cfg.scale = self.auto_scale();
         let id = self.next_id;
         self.next_id += 1;
         let (worker, controls) = self.spawn_worker(id, cfg.clone());
@@ -227,9 +229,10 @@ impl App {
     }
 
     fn reconnect(&mut self, id: u64) {
-        let Some(cfg) = self.sessions.get(&id).map(|s| s.cfg.clone()) else {
+        let Some(mut cfg) = self.sessions.get(&id).map(|s| s.cfg.clone()) else {
             return;
         };
+        cfg.scale = self.tab_scale(id);
         if let Some(mut old) = self.sessions.get_mut(&id).and_then(|s| s.worker.take()) {
             old.close();
         }
@@ -309,6 +312,7 @@ impl App {
                 self.toggle_result(id, r, on, "Smart cards", |t| t.smart_cards = false);
             }
             Action::SetClipboard(id, on) => {
+                rdp::trace!("ui: Clipboard switched {}", if on { "on" } else { "off" });
                 let r = self.sessions.get(&id).map(|s| s.controls.set_clipboard(on));
                 if let Some(Err(e)) = r {
                     if let Some(t) = self.win.as_mut().and_then(|w| w.ui.tab_mut(id)) {
@@ -325,6 +329,14 @@ impl App {
                         theme::TEXT_2,
                     );
                 }
+            }
+            Action::SetScale(id, choice) => {
+                let pct = self.tab_scale(id);
+                rdp::trace!("ui: scale for session {id}: {choice:?} -> {pct} %");
+                if let Some(s) = self.sessions.get(&id) {
+                    s.controls.set_scale(pct);
+                }
+                self.message(format!("Remote desktop scale {pct} %."), theme::TEXT_2);
             }
             Action::SetFit(id, on) => {
                 if let Some(s) = self.sessions.get_mut(&id) {
@@ -583,6 +595,26 @@ impl App {
     }
 
     /// Reports a sharing toggle; a failure switches it back off in the drawer.
+    /// This PC's display scaling for the window, in percent.
+    fn auto_scale(&self) -> u32 {
+        self.win
+            .as_ref()
+            .map_or(100, |m| {
+                (m.gfx.window.scale_factor() * 100.0).round() as u32
+            })
+            .clamp(100, 500)
+    }
+
+    /// The scale a tab should use: its own choice, or Auto.
+    fn tab_scale(&self, id: u64) -> u32 {
+        let own = self
+            .win
+            .as_ref()
+            .and_then(|w| w.ui.tabs.iter().find(|t| t.id == id))
+            .and_then(|t| t.scale);
+        own.unwrap_or_else(|| self.auto_scale())
+    }
+
     fn toggle_result(
         &mut self,
         id: u64,
@@ -591,6 +623,7 @@ impl App {
         what: &str,
         reset: impl FnOnce(&mut ui::Tab),
     ) {
+        rdp::trace!("ui: {what} switched {}", if on { "on" } else { "off" });
         match r {
             Some(Err(e)) => {
                 if let Some(t) = self.win.as_mut().and_then(|w| w.ui.tab_mut(id)) {
@@ -950,6 +983,23 @@ impl App {
             }
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
                 self.win.as_mut().unwrap().ui.scale = scale_factor as f32;
+                // Tabs on Auto follow the monitor the window moved to.
+                let auto: Vec<u64> = self
+                    .win
+                    .as_ref()
+                    .unwrap()
+                    .ui
+                    .tabs
+                    .iter()
+                    .filter(|t| t.scale.is_none())
+                    .map(|t| t.id)
+                    .collect();
+                let pct = self.auto_scale();
+                for id in auto {
+                    if let Some(s) = self.sessions.get(&id) {
+                        s.controls.set_scale(pct);
+                    }
+                }
                 self.dirty();
             }
             WindowEvent::RedrawRequested => {

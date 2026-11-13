@@ -110,6 +110,11 @@ impl Controls {
         Ok(())
     }
 
+    /// Desktop scale in percent; the session re-renders at once.
+    pub fn set_scale(&self, percent: u32) {
+        self.display.set_scale(percent);
+    }
+
     /// Asks the server to resize the desktop to the tab. The request waits
     /// until the server has opened the Display Control channel; servers
     /// without it (before Windows 8.1 / Server 2012 R2) keep their size.

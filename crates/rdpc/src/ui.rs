@@ -60,6 +60,9 @@ pub fn load_fonts(te: &mut TextEngine) -> Option<Fonts> {
 
 /// Fixed starting sizes. The Display choice before them, "Fit window", is
 /// stored as 0 x 0 and sizes the desktop to the session tab.
+/// Fixed desktop scales offered in the drawer, besides Auto.
+pub const SCALES: [u32; 4] = [100, 125, 150, 200];
+
 pub const SIZES: [(u16, u16); 4] = [(1280, 800), (1600, 900), (1920, 1080), (2560, 1440)];
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -101,6 +104,8 @@ pub enum Hit {
     Sound(u64),
     SmartCards(u64),
     Fit(u64),
+    /// Scale choice: 0 = Auto, else an index into SCALES + 1.
+    Scale(u64, usize),
     AddDrive(u64),
     RemoveDrive(u64, usize),
     CtrlAltDel(u64),
@@ -146,6 +151,8 @@ pub struct Tab {
     pub sound: bool,
     pub smart_cards: bool,
     pub fit: bool,
+    /// Remote desktop scale in percent; None follows this PC's scaling.
+    pub scale: Option<u32>,
     pub drives: Vec<SharedDrive>,
 }
 
@@ -164,6 +171,7 @@ pub enum Action {
     SetSound(u64, bool),
     SetSmartCards(u64, bool),
     SetFit(u64, bool),
+    SetScale(u64, Option<u32>),
     AddDrive(u64, String),
     RemoveDrive(u64, usize),
     CtrlAltDel(u64),
@@ -319,6 +327,7 @@ impl Ui {
             sound: false,
             smart_cards: false,
             fit,
+            scale: None,
             drives: Vec::new(),
         });
         self.active = Some(id);
@@ -578,6 +587,11 @@ impl Ui {
                 let t = self.tab_mut(id)?;
                 t.clipboard = !t.clipboard;
                 return Some(Action::SetClipboard(id, t.clipboard));
+            }
+            Hit::Scale(id, i) => {
+                let t = self.tab_mut(id)?;
+                t.scale = if i == 0 { None } else { Some(SCALES[i - 1]) };
+                return Some(Action::SetScale(id, t.scale));
             }
             Hit::Fit(id) => {
                 let t = self.tab_mut(id)?;
@@ -1430,6 +1444,7 @@ impl Ui {
             return;
         };
         let (clip_on, fit_on, drives) = (tab.clipboard, tab.fit, tab.drives.clone());
+        let scale = tab.scale;
         let (printers_on, cards_on, sound_on) = (tab.printers, tab.smart_cards, tab.sound);
         let x = d.x + p(18.0);
         let w = d.w - p(36.0);
@@ -1585,7 +1600,50 @@ impl Ui {
             fit_on,
             Hit::Fit(id),
         );
-        y += p(56.0);
+        y += p(52.0);
+        te.draw(
+            cv,
+            f.ui,
+            13.0 * s,
+            x as f32,
+            (y + p(13.0)) as f32,
+            "Scale",
+            TEXT,
+            w as f32,
+        );
+        let auto = format!("Auto ({} %)", (self.scale * 100.0).round() as u32);
+        let choices: Vec<String> = std::iter::once(auto)
+            .chain(SCALES.iter().map(|v| format!("{v} %")))
+            .collect();
+        let mut cx = x;
+        let mut cy = y + p(24.0);
+        for (i, text) in choices.iter().enumerate() {
+            let cw = te.measure(f.ui, 12.0 * s, text) as i32 + p(18.0);
+            if cx + cw > x + w {
+                cx = x;
+                cy += p(32.0);
+            }
+            let r = Rect::new(cx, cy, cw, p(26.0));
+            let hit = Hit::Scale(id, i);
+            let chosen = match (i, scale) {
+                (0, None) => true,
+                (0, Some(_)) => false,
+                (i, Some(v)) => SCALES[i - 1] == v,
+                _ => false,
+            };
+            let (border, fill, color) = if chosen {
+                (ACCENT_BORDER, BG_CHOSEN, TEXT)
+            } else if self.hover == Some(hit) {
+                (BORDER_HOVER, CONTROL_HOVER, TEXT_2)
+            } else {
+                (BORDER, BG_SIDEBAR, TEXT_3)
+            };
+            cv.round_border(r, 6.0 * s, border, fill);
+            centered(cv, te, f.ui, 12.0 * s, r, text, color);
+            self.hits.push((r, hit));
+            cx += cw + p(6.0);
+        }
+        y = cy + p(48.0);
 
         section(cv, te, y, "SESSION");
         y += p(28.0);

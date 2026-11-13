@@ -97,7 +97,22 @@ pub fn clamp_size(width: u32, height: u32, caps: Option<&DisplayCaps>) -> (u32, 
 
 /// DISPLAYCONTROL_MONITOR_LAYOUT_PDU (MS-RDPEDISP 2.2.2.2) with one primary
 /// monitor at (0,0): no physical size, landscape, 100 % scale.
-pub fn monitor_layout_pdu(width: u32, height: u32) -> Vec<u8> {
+/// DeviceScaleFactor for a desktop scale: the spec allows only 100, 140 and
+/// 180 (MS-RDPEDISP 2.2.2.2.1). Thresholds as Windows clients use them, so
+/// 125 % stays at 100.
+pub fn device_scale(desktop_scale: u32) -> u32 {
+    match desktop_scale {
+        0..140 => 100,
+        140..180 => 140,
+        _ => 180,
+    }
+}
+
+/// One-monitor layout. `scale` is the desktop scale in percent (100..=500,
+/// like Windows' "Scale" setting); the remote session renders its UI that much
+/// larger so it looks the same size as on a local high-DPI screen.
+pub fn monitor_layout_pdu(width: u32, height: u32, scale: u32) -> Vec<u8> {
+    let scale = scale.clamp(100, 500);
     let len = 8 + 8 + MONITOR_LAYOUT_SIZE;
     let mut v = Vec::with_capacity(len as usize);
     v.put_u32(PDU_TYPE_MONITOR_LAYOUT);
@@ -113,8 +128,8 @@ pub fn monitor_layout_pdu(width: u32, height: u32) -> Vec<u8> {
     v.put_u32(0); // PhysicalWidth
     v.put_u32(0); // PhysicalHeight
     v.put_u32(0); // Orientation: ORIENTATION_LANDSCAPE
-    v.put_u32(100); // DesktopScaleFactor
-    v.put_u32(100); // DeviceScaleFactor
+    v.put_u32(scale); // DesktopScaleFactor
+    v.put_u32(device_scale(scale)); // DeviceScaleFactor
     v
 }
 
@@ -124,6 +139,10 @@ struct Shared {
     /// `PENDING | width << 32 | height`, or 0 when nothing is pending.
     request: AtomicU64,
     ready: AtomicBool,
+    /// Desktop scale in percent for the next layout.
+    scale: std::sync::atomic::AtomicU32,
+    /// The last requested size (same packing, without PENDING), for re-sends.
+    last_size: AtomicU64,
 }
 
 /// UI side of the Display Control channel.
@@ -135,8 +154,21 @@ pub struct DisplayHandle {
 impl DisplayHandle {
     /// Asks for a new remote size. Only the latest request is kept.
     pub fn request_resize(&self, width: u32, height: u32) {
-        let v = PENDING | ((width.min(0x7FFF_FFFF) as u64) << 32) | height as u64;
-        self.shared.request.store(v, Ordering::Release);
+        let size = ((width.min(0x7FFF_FFFF) as u64) << 32) | height as u64;
+        self.shared.last_size.store(size, Ordering::Release);
+        self.shared.request.store(PENDING | size, Ordering::Release);
+    }
+
+    /// Sets the desktop scale in percent (100..=500) and re-sends the current
+    /// size with it, so the session re-renders at once (no reconnect).
+    pub fn set_scale(&self, percent: u32) {
+        let percent = percent.clamp(100, 500);
+        if self.shared.scale.swap(percent, Ordering::AcqRel) != percent {
+            let size = self.shared.last_size.load(Ordering::Acquire);
+            if size != 0 {
+                self.shared.request.store(PENDING | size, Ordering::Release);
+            }
+        }
     }
 
     /// True once the server sent its capabilities, so resizes take effect.
@@ -163,6 +195,8 @@ pub fn display_control_with_clock(clock: Clock) -> (DisplayControl, DisplayHandl
     let shared = Arc::new(Shared {
         request: AtomicU64::new(0),
         ready: AtomicBool::new(false),
+        scale: std::sync::atomic::AtomicU32::new(100),
+        last_size: AtomicU64::new(0),
     });
     let ch = DisplayControl {
         shared: shared.clone(),
@@ -220,8 +254,9 @@ impl DynamicChannel for DisplayControl {
         }
         let (w, h) = (((v >> 32) & 0x7FFF_FFFF) as u32, v as u32);
         let (w, h) = clamp_size(w, h, self.caps.as_ref());
-        trace!("display control layout {w}x{h}");
-        out.send(monitor_layout_pdu(w, h));
+        let scale = self.shared.scale.load(Ordering::Acquire);
+        trace!("display control layout {w}x{h} at {scale} %");
+        out.send(monitor_layout_pdu(w, h, scale));
         self.last_sent = Some(now);
         Ok(())
     }
@@ -294,7 +329,7 @@ mod tests {
             0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // physical size, orientation
             0x64, 0, 0, 0, 0x64, 0, 0, 0, // scale factors 100
         ];
-        assert_eq!(monitor_layout_pdu(1920, 1080), expect);
+        assert_eq!(monitor_layout_pdu(1920, 1080, 100), expect);
     }
 
     #[test]
@@ -332,7 +367,7 @@ mod tests {
         ch.process(&CAPS, &mut DvcOut::default()).unwrap();
         assert!(handle.ready());
         let sent = tick(&mut ch);
-        assert_eq!(sent, vec![monitor_layout_pdu(1920, 1080)]);
+        assert_eq!(sent, vec![monitor_layout_pdu(1920, 1080, 100)]);
         assert!(tick(&mut ch).is_empty());
         ch.closed();
         assert!(!handle.ready());
@@ -386,7 +421,44 @@ mod tests {
         handle.request_resize(1280, 720);
         d.tick(&mut out).unwrap();
         let mut expect = vec![0x30, 0x04];
-        expect.extend_from_slice(&monitor_layout_pdu(1280, 720));
+        expect.extend_from_slice(&monitor_layout_pdu(1280, 720, 100));
         assert_eq!(out.take(), vec![expect]);
+    }
+
+    #[test]
+    fn scale_goes_into_the_layout_and_resends_the_size() {
+        let pdu = monitor_layout_pdu(1920, 1080, 150);
+        // DesktopScaleFactor and DeviceScaleFactor are the last two fields.
+        assert_eq!(&pdu[pdu.len() - 8..], &[150, 0, 0, 0, 140, 0, 0, 0]);
+        assert_eq!(
+            &monitor_layout_pdu(800, 600, 50)[48..52],
+            &[100, 0, 0, 0],
+            "clamped to 100"
+        );
+        assert_eq!(
+            (
+                device_scale(100),
+                device_scale(125),
+                device_scale(150),
+                device_scale(200)
+            ),
+            (100, 100, 140, 180)
+        );
+        let (_ch, h) = display_control();
+        h.request_resize(1000, 800);
+        h.shared.request.store(0, Ordering::Release); // pretend it was sent
+        h.set_scale(150);
+        assert_ne!(
+            h.shared.request.load(Ordering::Acquire),
+            0,
+            "scale change re-sends the size"
+        );
+        h.shared.request.store(0, Ordering::Release);
+        h.set_scale(150);
+        assert_eq!(
+            h.shared.request.load(Ordering::Acquire),
+            0,
+            "same scale: no re-send"
+        );
     }
 }

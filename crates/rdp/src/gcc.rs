@@ -32,6 +32,8 @@ pub struct ClientSettings<'a> {
     pub keyboard_layout: u32,
     pub client_name: &'a str,
     pub selected_protocol: u32,
+    /// Desktop scale in percent (100..=500), as Windows' display scaling.
+    pub scale: u32,
     /// Static virtual channels: (name, options).
     pub channels: &'a [(&'a str, u32)],
 }
@@ -84,6 +86,15 @@ pub fn client_data_blocks(s: &ClientSettings) -> Vec<u8> {
     core.put_u8(CONNECTION_TYPE_LAN); // connectionType (valid per the flag above)
     core.put_u8(0); // pad1octet
     core.put_u32(s.selected_protocol);
+    // Display scaling (MS-RDPBCGR 2.2.1.3.2): the physical size is derived
+    // from the pixels at 96 DPI x scale, so the server's DPI math matches.
+    let scale = s.scale.clamp(100, 500);
+    let mm = |px: u16| (px as u32 * 2540 / (96 * scale)).clamp(10, 10_000);
+    core.put_u32(mm(s.width)); // desktopPhysicalWidth (mm)
+    core.put_u32(mm(s.height)); // desktopPhysicalHeight (mm)
+    core.put_u16(0); // desktopOrientation: landscape
+    core.put_u32(scale); // desktopScaleFactor
+    core.put_u32(crate::disp::device_scale(scale)); // deviceScaleFactor
     block(&mut out, CS_CORE, &core);
 
     let mut sec = Vec::new();
@@ -187,10 +198,13 @@ mod tests {
             keyboard_layout: 0x409,
             client_name: "TEST",
             selected_protocol: 3,
+            scale: 150,
             channels: &[],
         };
         let b = client_data_blocks(&s);
         assert_eq!(u16::from_le_bytes([b[0], b[1]]), CS_CORE);
-        assert_eq!(u16::from_le_bytes([b[2], b[3]]), 216);
+        assert_eq!(u16::from_le_bytes([b[2], b[3]]), 234);
+        // Scale fields at the end of the core block: desktop 150, device 140.
+        assert_eq!(&b[226..234], &[150, 0, 0, 0, 140, 0, 0, 0]);
     }
 }

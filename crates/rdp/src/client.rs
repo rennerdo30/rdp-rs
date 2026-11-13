@@ -31,6 +31,8 @@ pub struct Config {
     pub height: u16,
     pub client_name: String,
     pub keyboard_layout: u32,
+    /// Desktop scale in percent (100..=500), like Windows' display scaling.
+    pub scale: u32,
     /// Bound on every step of the connection sequence.
     pub timeout: Duration,
 }
@@ -47,6 +49,7 @@ impl Config {
             height: 800,
             client_name: "RDP-RS".into(),
             keyboard_layout: 0x0409,
+            scale: 100,
             timeout: Duration::from_secs(20),
         }
     }
@@ -241,6 +244,7 @@ impl Client {
             keyboard_layout: cfg.keyboard_layout,
             client_name: &cfg.client_name,
             selected_protocol: protocol,
+            scale: cfg.scale,
             channels: &def_refs,
         };
         f.write(&x224::data(&mcs::connect_initial(
