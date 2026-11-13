@@ -1912,7 +1912,8 @@ fn remembered_exists(ui: &mut Ui) -> bool {
 }
 
 /// Removes files copied from sessions more than a day ago: the clipboard
-/// pointed at them, so they stay until then (`%TEMP%dpc-clip\<transfer>`).
+/// pointed at them, so they stay until then (one folder per transfer in
+/// `rdpc-clip` in the temp folder).
 fn clean_clipboard_files(root: &std::path::Path) {
     let Ok(entries) = std::fs::read_dir(root) else {
         return;
