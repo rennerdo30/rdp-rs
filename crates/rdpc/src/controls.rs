@@ -10,6 +10,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::clipboard::WindowsClipboard;
 use crate::printing::WindowsSpooler;
+use crate::smartcard::WinSCard;
 
 pub struct Controls {
     display: DisplayHandle,
@@ -17,6 +18,8 @@ pub struct Controls {
     devices: RdpdrHandle,
     /// Device ids of the printers currently shared.
     printers: Mutex<Vec<u32>>,
+    /// Device id of the shared smart card subsystem, while shared.
+    smart_card: Mutex<Option<u32>>,
 }
 
 impl Controls {
@@ -37,6 +40,7 @@ impl Controls {
                 clipboard,
                 devices,
                 printers: Mutex::new(Vec::new()),
+                smart_card: Mutex::new(None),
             },
         )
     }
@@ -64,9 +68,18 @@ impl Controls {
         Ok(())
     }
 
-    /// Shares the local smart card readers (RDP-8, not merged yet).
-    pub fn set_smart_cards(&self, _on: bool) -> Result<(), String> {
-        Err("smart card sharing is not available in this build yet".into())
+    /// Shares the local smart card readers and cards (calls go to WinSCard).
+    pub fn set_smart_cards(&self, on: bool) -> Result<(), String> {
+        let mut shared = self.smart_card.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(id) = shared.take() {
+            // Releases every local card and context the session held.
+            self.devices.remove(id);
+        }
+        if on {
+            let device = rdp::smart_card_device(Arc::new(WinSCard));
+            *shared = Some(self.devices.add_device(device));
+        }
+        Ok(())
     }
 
     /// Asks the server to resize the desktop to the tab. The request waits

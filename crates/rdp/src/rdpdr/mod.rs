@@ -16,6 +16,7 @@
 //! - [`printer`]: the printer device ([`Printer`], MS-RDPEPC) and its
 //!   [`PrintBackend`]
 //! - [`fscc`]: NTSTATUS values, FILETIME conversion and MS-FSCC structures
+//! - [`smartcard`]: smart card redirection (MS-RDPESC), [`smart_card_device`]
 //!
 //! # Devices
 //!
@@ -45,6 +46,7 @@ pub mod drive;
 pub mod fscc;
 pub mod path;
 pub mod printer;
+pub mod smartcard;
 
 #[cfg(test)]
 mod tests;
@@ -58,6 +60,7 @@ pub use self::drive::Drive;
 pub use self::printer::{
     PrintBackend, PrintFormat, Printer, PrinterInfo, SharedBackend, share_printers,
 };
+pub use self::smartcard::{SmartCard, SmartCardBackend, smart_card_device};
 
 /// DeviceType values (MS-RDPEFS 2.2.1.3).
 pub const RDPDR_DTYP_SERIAL: u32 = 0x0000_0001;

@@ -21,7 +21,8 @@ MD4, MD5, HMAC-MD5, RC4 and the ASN.1 DER/BER/PER encodings. Only TLS
 - **Connection:** X.224 negotiation (TLS, NLA, NLA with early user authorization), TLS upgrade, CredSSP v6 with NTLMv2 (MIC, key exchange, sealing, public key binding), MCS/GCC, licensing ("valid client"), capability exchange, finalization, reactivation.
 - **Display:** fast-path and slow-path bitmap updates; planar (32 bpp) and interleaved RLE (15/16/24 bpp) codecs; live resize to the window via Display Control over dynamic virtual channels.
 - **Input:** fast-path keyboard (scancodes) and mouse (buttons, wheel); Ctrl+Alt+Del button.
-- **Sharing, switchable live without reconnecting:** clipboard (Unicode text, both ways), shared folders (drive redirection, confined to the shared folder). Printers and smart cards are in progress.
+- **Sharing, switchable live without reconnecting:** clipboard (Unicode text, both ways), shared folders (drive redirection, confined to the shared folder), printers (Easy Print / XPS, no drivers on the server), smart cards (MS-RDPESC, forwarded to the local WinSCard).
+- **Cursor:** the remote pointer shapes (32/24/16/8/1 bpp, large pointers) as native cursors.
 - **Client UI:** one window with a connections sidebar, a tab per session and a control panel per session. Saved connections live in `%APPDATA%\rdp-rs\connections.json`; passwords are never stored.
 
 ## Not yet
@@ -85,7 +86,8 @@ itself, where GPU rendering would fall back to software.
 vectors), DER/TSRequest encoding, MCS/GCC/PDU framing, both bitmap codecs,
 fast-path reassembly and input, the virtual channel framework, dynamic
 channels and Display Control, the clipboard channel (MS-RDPECLIP example
-bytes) and drive redirection (including path-escape tests).
+bytes) drive redirection (including path-escape tests), printer and smart card
+redirection (NDR encoding) and pointer decoding.
 
 ## License
 

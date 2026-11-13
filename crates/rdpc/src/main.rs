@@ -15,6 +15,7 @@ mod controls;
 mod icon;
 mod printing;
 mod session;
+mod smartcard;
 mod store;
 mod text_field;
 mod theme;
