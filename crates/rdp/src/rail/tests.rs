@@ -984,6 +984,28 @@ fn handle_actions_encode() {
     assert_eq!(&syscommand(1, SysCommand::Close)[8..], &[0x60, 0xf0]);
 }
 
+#[test]
+fn handle_exec_queues_another_program() {
+    let h = model();
+    let app = RemoteApp {
+        program: "||calc".into(),
+        ..Default::default()
+    };
+    h.exec(&app).unwrap();
+    // A program the server could not accept is refused before sending.
+    assert!(h.exec(&RemoteApp::default()).is_err());
+    h.set_work_area([0, 0, 1920, 1040], [0, 1040, 1920, 1080]);
+    let out = std::mem::take(&mut h.lock().outgoing);
+    assert_eq!(out.len(), 3);
+    assert_eq!(out[0], exec(&app).unwrap());
+    assert_eq!(le16(&out[1], 0), TS_RAIL_ORDER_SYSPARAM);
+    assert_eq!(&out[1][4..8], &SPI_SETWORKAREA.to_le_bytes());
+    assert_eq!(le16(&out[1], 12), 1920);
+    assert_eq!(le16(&out[1], 14), 1040);
+    assert_eq!(&out[2][4..8], &RAIL_SPI_TASKBARPOS.to_le_bytes());
+    assert_eq!(le16(&out[2], 10), 1040);
+}
+
 // ---- connection setup (MS-RDPERP 3.2.5.1) ----
 
 #[test]
