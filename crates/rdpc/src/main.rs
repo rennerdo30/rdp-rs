@@ -20,6 +20,7 @@ mod frame;
 mod icon;
 mod keyhook;
 mod known_hosts;
+mod mic;
 mod printing;
 mod session;
 mod smartcard;
@@ -49,6 +50,9 @@ struct Args {
     scale: f32,
     wait: u64,
     verbose: bool,
+    /// `--microphone [index]`: Some(None) is the default device.
+    microphone: Option<Option<u32>>,
+    list_microphones: bool,
 }
 
 fn usage() -> ! {
@@ -56,6 +60,7 @@ fn usage() -> ! {
         "usage: rdpc                                   (connection manager)\n\
          \x20      rdpc <host[:port]> -u <[DOMAIN\\]user> [-d domain] [--size WxH] [-v]\n\
          \x20      rdpc <host> -u <user> --screenshot out.png [--wait SECONDS]\n\
+         \x20      rdpc ... --microphone [INDEX]   (microphone on; see --list-microphones)\n\
          \x20      rdpc --snapshot-ui out.png [--scale 1.5]\n\
          \x20      rdpc --icon-png out.png [--icon-size N]\n\
          \x20      rdpc --version\n\
@@ -72,7 +77,7 @@ fn parse_args() -> Args {
         icon_size: 256,
         ..Default::default()
     };
-    let mut it = std::env::args().skip(1);
+    let mut it = std::env::args().skip(1).peekable();
     while let Some(arg) = it.next() {
         let mut val = || it.next().unwrap_or_else(|| usage());
         match arg.as_str() {
@@ -100,6 +105,11 @@ fn parse_args() -> Args {
             "--scale" => a.scale = val().parse().unwrap_or_else(|_| usage()),
             "--wait" => a.wait = val().parse().unwrap_or_else(|_| usage()),
             "-v" | "--verbose" => a.verbose = true,
+            "--microphone" => {
+                let index = it.next_if(|v| v.parse::<u32>().is_ok());
+                a.microphone = Some(index.and_then(|v| v.parse().ok()));
+            }
+            "--list-microphones" => a.list_microphones = true,
             "-h" | "--help" => usage(),
             s if s.starts_with('-') => usage(),
             s => {
@@ -171,6 +181,15 @@ fn main() {
             std::process::exit(1);
         }
         return;
+    }
+    if args.list_microphones {
+        for (i, name) in mic::input_devices().iter().enumerate() {
+            println!("{i}: {name}");
+        }
+        return;
+    }
+    if let Some(device) = args.microphone {
+        controls::enable_microphone_for_all(device);
     }
     if args.host.is_empty() {
         #[cfg(windows)]

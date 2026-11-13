@@ -184,7 +184,7 @@ pub struct AudioFormat {
 }
 
 impl AudioFormat {
-    fn parse(r: &mut Reader) -> Result<Self> {
+    pub(crate) fn parse(r: &mut Reader) -> Result<Self> {
         let tag = r.u16()?;
         let channels = r.u16()?;
         let samples_per_sec = r.u32()?;
@@ -204,7 +204,7 @@ impl AudioFormat {
         })
     }
 
-    fn write(&self, out: &mut Vec<u8>) {
+    pub(crate) fn write(&self, out: &mut Vec<u8>) {
         out.put_u16(self.tag);
         out.put_u16(self.channels);
         out.put_u32(self.samples_per_sec);
@@ -218,10 +218,16 @@ impl AudioFormat {
     /// The matching entry of [`CLIENT_FORMATS`], if this is one of them with
     /// consistent PCM fields.
     fn client_pcm(&self) -> Option<PcmFormat> {
+        self.pcm_in(CLIENT_FORMATS)
+    }
+
+    /// The entry of `formats` this is, if it is WAVE_FORMAT_PCM with
+    /// consistent nBlockAlign and nAvgBytesPerSec.
+    pub(crate) fn pcm_in(&self, formats: &[PcmFormat]) -> Option<PcmFormat> {
         if self.tag != WAVE_FORMAT_PCM {
             return None;
         }
-        CLIENT_FORMATS.iter().copied().find(|f| {
+        formats.iter().copied().find(|f| {
             f.channels == self.channels
                 && f.sample_rate == self.samples_per_sec
                 && f.bits == self.bits_per_sample

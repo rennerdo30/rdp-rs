@@ -12,8 +12,10 @@
 //! - [`cliprdr`]: clipboard redirection on the `cliprdr` channel (MS-RDPECLIP)
 //! - [`client`]: the connection sequence and the session loop
 //! - [`rdpsnd`]: audio output on the `rdpsnd` channel (MS-RDPEA)
+//! - [`audin`]: microphone redirection on the `AUDIO_INPUT` dynamic channel (MS-RDPEAI)
 //! - [`rdpdr`]: device redirection (MS-RDPEFS) with shared drives, printers (MS-RDPEPC) and smart cards (MS-RDPESC)
 
+pub mod audin;
 pub mod channel;
 pub mod client;
 pub mod cliprdr;
@@ -40,6 +42,7 @@ pub mod rdpsnd;
 pub mod transport;
 pub mod x224;
 
+pub use audin::{AudioInput, AudioInputHandle, CaptureBackend, audin};
 pub use channel::{ChannelOut, StaticChannel};
 pub use client::{
     CertificateCheck, Client, CloseReason, Config, ConnectionInfo, PollOutcome, ServerCertificate,
