@@ -881,6 +881,14 @@ fn traversal_and_escape_paths_are_refused() {
     let mut d = Drive::new("t", root.clone(), false);
     let secret = base.path().join("secret.txt");
     let abs = secret.to_str().unwrap().to_string();
+    // A host-absolute path: on Windows it carries a drive letter and is
+    // refused by name; on Unix it has none, so the server-path rules read it
+    // as a path *inside* the share, where it does not exist. Either way it
+    // never reaches the real file (checked below).
+    #[cfg(windows)]
+    let abs_status = STATUS_OBJECT_NAME_INVALID;
+    #[cfg(not(windows))]
+    let abs_status = STATUS_OBJECT_PATH_NOT_FOUND;
     let cases: Vec<(&str, u32)> = vec![
         ("\\..\\secret.txt", STATUS_ACCESS_DENIED),
         ("..\\secret.txt", STATUS_ACCESS_DENIED),
@@ -890,7 +898,7 @@ fn traversal_and_escape_paths_are_refused() {
         ("\\.\\ok.txt", STATUS_OBJECT_NAME_INVALID),
         ("C:\\Windows\\win.ini", STATUS_OBJECT_NAME_INVALID),
         ("\\C:secret.txt", STATUS_OBJECT_NAME_INVALID),
-        (&abs, STATUS_OBJECT_NAME_INVALID),
+        (&abs, abs_status),
         ("\\\\server\\share\\x", STATUS_OBJECT_NAME_INVALID),
         ("\\\\?\\C:\\x", STATUS_OBJECT_NAME_INVALID),
         ("//server/share/x", STATUS_OBJECT_NAME_INVALID),
