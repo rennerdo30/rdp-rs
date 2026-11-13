@@ -41,6 +41,7 @@ fn session() -> (Client, TcpStream) {
         pointers: PointerCache::default(),
         arc_cookie: None,
         gfx: None,
+        rail: None,
     };
     (client, server)
 }
@@ -264,4 +265,91 @@ fn gfx_reset_resizes_the_session_framebuffer() {
     let mut poll = PollOutcome::default();
     client.present_gfx(&mut poll);
     assert!(!poll.resized && !poll.updated && poll.damage.is_empty());
+}
+
+/// A New Window order (MS-RDPERP 2.2.1.3.1.2.1) with only a title.
+fn new_window_order(id: u32, title: &str) -> Vec<u8> {
+    use crate::cursor::Put;
+    use crate::rail::orders::*;
+    let text = crate::cursor::utf16le(title);
+    let mut o = vec![0x2e];
+    o.put_u16((11 + 2 + text.len()) as u16);
+    o.put_u32(WINDOW_ORDER_TYPE_WINDOW | WINDOW_ORDER_STATE_NEW | WINDOW_ORDER_FIELD_TITLE);
+    o.put_u32(id);
+    o.put_u16(text.len() as u16);
+    o.extend(text);
+    o
+}
+
+fn remote_app_session() -> (Client, TcpStream, crate::RailHandle) {
+    let (mut client, server) = session();
+    let (_, handle) = crate::rail::rail(
+        crate::RemoteApp {
+            program: "notepad".into(),
+            ..Default::default()
+        },
+        4,
+        4,
+        0,
+    )
+    .unwrap();
+    client.rail = Some(handle.clone());
+    (client, server, handle)
+}
+
+/// Fast-path orders update (MS-RDPEGDI 2.2.2.2) reaches the window model and
+/// the poll outcome.
+#[test]
+fn fastpath_window_orders_reach_the_poll_outcome() {
+    let (mut client, mut server, rail) = remote_app_session();
+    let order = new_window_order(42, "Notepad");
+    let mut update = vec![1, 0]; // numberOrders
+    update.extend(&order);
+    let mut frame = vec![0x00, (2 + 3 + update.len()) as u8, 0x00];
+    frame.extend((update.len() as u16).to_le_bytes());
+    frame.extend(&update);
+    server.write_all(&frame).unwrap();
+    let mut events = Vec::new();
+    for _ in 0..50 {
+        events.extend(client.poll(Duration::from_millis(20)).unwrap().rail);
+        if !events.is_empty() {
+            break;
+        }
+    }
+    assert_eq!(events, vec![crate::RailEvent::WindowCreated(42)]);
+    assert_eq!(rail.window(42).unwrap().title, "Notepad");
+    assert_eq!(client.rail().unwrap().state().windows.len(), 1);
+}
+
+/// Slow-path orders (PDUTYPE2_UPDATE, updateType UPDATETYPE_ORDERS) go to the
+/// model, and a desktop session ignores window orders.
+#[test]
+fn slowpath_window_orders_and_non_remoteapp_sessions() {
+    let mut body = vec![0xea, 0x03, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 2, 0, 0, 0];
+    body.extend([0, 0, 0, 0, 1, 0, 0, 0]);
+    body.extend(new_window_order(7, "A"));
+    let (mut client, _server, rail) = remote_app_session();
+    let mut out = PollOutcome::default();
+    client.handle_data(&body, &mut out).unwrap();
+    assert_eq!(rail.window(7).unwrap().title, "A");
+
+    let (mut plain, _server) = session();
+    plain.handle_data(&body, &mut out).unwrap();
+    assert!(plain.rail().is_none());
+    // Garbage orders never end the session.
+    let mut bad = body.clone();
+    bad.truncate(body.len() - 3);
+    client.handle_data(&bad, &mut out).unwrap();
+}
+
+#[test]
+fn remote_app_config() {
+    let mut cfg = Config::new("h", "u", "p");
+    assert!(cfg.remote_app.is_none());
+    cfg.remote_app = Some(crate::RemoteApp::default());
+    // An empty program is refused before any network traffic.
+    assert!(matches!(
+        Client::connect(&cfg),
+        Err(Error::Protocol(m)) if m.contains("RemoteApp")
+    ));
 }

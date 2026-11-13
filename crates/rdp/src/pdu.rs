@@ -65,6 +65,8 @@ pub struct ClientInfo<'a> {
     /// Highest bulk compression type (PACKET_COMPR_TYPE_*), sent as
     /// INFO_COMPRESSION plus CompressionTypeMask (2.2.1.11.1.1); `None` sends neither.
     pub compression: Option<u8>,
+    /// RemoteApp: INFO_RAIL instead of INFO_MAXIMIZESHELL (MS-RDPERP 3.2.5.1.3).
+    pub rail: bool,
 }
 
 /// Client Info PDU (TS_INFO_PACKET with extended info), preceded by the basic security header.
@@ -77,6 +79,7 @@ pub fn client_info(ci: &ClientInfo) -> Vec<u8> {
     const INFO_LOGONNOTIFY: u32 = 0x0040;
     const INFO_ENABLEWINDOWSKEY: u32 = 0x0100;
     const INFO_COMPRESSION: u32 = 0x0080;
+    const INFO_RAIL: u32 = 0x8000;
     const COMPRESSION_TYPE_SHIFT: u32 = 9; // CompressionTypeMask 0x00001E00
 
     let mut out = Vec::new();
@@ -89,7 +92,11 @@ pub fn client_info(ci: &ClientInfo) -> Vec<u8> {
             | INFO_DISABLECTRLALTDEL
             | INFO_AUTOLOGON
             | INFO_UNICODE
-            | INFO_MAXIMIZESHELL
+            | if ci.rail {
+                INFO_RAIL
+            } else {
+                INFO_MAXIMIZESHELL
+            }
             | INFO_LOGONNOTIFY
             | INFO_ENABLEWINDOWSKEY
             | ci.compression.map_or(0, |t| {
@@ -375,6 +382,35 @@ pub struct DemandActive {
     pub width: u16,
     pub height: u16,
     pub bpp: u16,
+    /// RailSupportLevel of the Remote Programs Capability Set (MS-RDPERP 2.2.1.1.1).
+    pub rail_support_level: Option<u32>,
+    /// The Window List Capability Set (MS-RDPERP 2.2.1.1.2).
+    pub window_list: Option<WindowListCaps>,
+}
+
+/// Window List Capability Set fields (MS-RDPERP 2.2.1.1.2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WindowListCaps {
+    /// WndSupportLevel: TS_WINDOW_LEVEL_*.
+    pub level: u32,
+    pub icon_caches: u8,
+    pub icon_cache_entries: u16,
+}
+
+/// The client's RemoteApp capability sets for the Confirm Active PDU.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RailCaps {
+    pub rail_support_level: u32,
+    pub window: WindowListCaps,
+}
+
+impl DemandActive {
+    /// The server offers RemoteApp: both RAIL capability sets, with
+    /// TS_RAIL_LEVEL_SUPPORTED and a nonzero window level (MS-RDPERP 3.2.5.1.5).
+    pub fn supports_rail(&self) -> bool {
+        self.rail_support_level.is_some_and(|l| l & 1 != 0)
+            && self.window_list.is_some_and(|w| w.level != 0)
+    }
 }
 
 pub fn parse_demand_active(body: &[u8]) -> Result<DemandActive> {
@@ -390,6 +426,8 @@ pub fn parse_demand_active(body: &[u8]) -> Result<DemandActive> {
         width: 0,
         height: 0,
         bpp: 0,
+        rail_support_level: None,
+        window_list: None,
     };
     for _ in 0..count {
         let ty = r.u16()?;
@@ -402,6 +440,16 @@ pub fn parse_demand_active(body: &[u8]) -> Result<DemandActive> {
             da.bpp = le16(cap, 0).unwrap();
             da.width = le16(cap, 8).unwrap();
             da.height = le16(cap, 10).unwrap();
+        }
+        if ty == CAPSTYPE_RAIL {
+            da.rail_support_level = crate::cursor::le32(cap, 0);
+        }
+        if ty == CAPSTYPE_WINDOW && cap.len() >= 7 {
+            da.window_list = Some(WindowListCaps {
+                level: crate::cursor::le32(cap, 0).unwrap(),
+                icon_caches: cap[4],
+                icon_cache_entries: le16(cap, 5).unwrap(),
+            });
         }
     }
     if da.width == 0 || da.height == 0 {
@@ -428,6 +476,9 @@ const CAPSTYPE_OFFSCREENCACHE: u16 = 17;
 const CAPSTYPE_VIRTUALCHANNEL: u16 = 20;
 const CAPSTYPE_MULTIFRAGMENTUPDATE: u16 = 26;
 const CAPSTYPE_LARGE_POINTER: u16 = 27;
+/// MS-RDPERP 2.2.1.1.1 and 2.2.1.1.2.
+const CAPSTYPE_RAIL: u16 = 0x17;
+const CAPSTYPE_WINDOW: u16 = 0x18;
 
 fn cap(out: &mut Vec<u8>, count: &mut u16, ty: u16, body: &[u8]) {
     out.put_u16(ty);
@@ -442,6 +493,7 @@ fn capabilities(
     keyboard_layout: u32,
     bpp: u16,
     vc_compression: bool,
+    rail: Option<&RailCaps>,
 ) -> (u16, Vec<u8>) {
     let mut out = Vec::new();
     let mut n = 0;
@@ -578,6 +630,20 @@ fn capabilities(
     b.put_u32(8 * 1024 * 1024);
     cap(&mut out, &mut n, CAPSTYPE_MULTIFRAGMENTUPDATE, &b);
 
+    if let Some(rc) = rail {
+        cap(
+            &mut out,
+            &mut n,
+            CAPSTYPE_RAIL,
+            &rc.rail_support_level.to_le_bytes(),
+        );
+        let mut b = Vec::new();
+        b.put_u32(rc.window.level);
+        b.put_u8(rc.window.icon_caches);
+        b.put_u16(rc.window.icon_cache_entries);
+        cap(&mut out, &mut n, CAPSTYPE_WINDOW, &b);
+    }
+
     (n, out)
 }
 
@@ -590,7 +656,29 @@ pub fn confirm_active(
     bpp: u16,
     vc_compression: bool,
 ) -> Vec<u8> {
-    let (count, caps) = capabilities(width, height, keyboard_layout, bpp, vc_compression);
+    confirm_active_with(
+        share_id,
+        user_id,
+        (width, height),
+        keyboard_layout,
+        bpp,
+        vc_compression,
+        None,
+    )
+}
+
+/// Confirm Active PDU, with the RemoteApp capability sets when `rail` is set
+/// (MS-RDPERP 3.2.5.1.4).
+pub fn confirm_active_with(
+    share_id: u32,
+    user_id: u16,
+    (width, height): (u16, u16),
+    keyboard_layout: u32,
+    bpp: u16,
+    vc_compression: bool,
+    rail: Option<&RailCaps>,
+) -> Vec<u8> {
+    let (count, caps) = capabilities(width, height, keyboard_layout, bpp, vc_compression, rail);
     let source = b"RDPRS\0";
     let mut b = Vec::new();
     b.put_u32(share_id);
@@ -672,6 +760,7 @@ mod tests {
                 auto_reconnect: None,
                 performance_flags: 0,
                 compression,
+                rail: false,
             })
         };
         let flags = |pdu: &[u8]| u32::from_le_bytes(pdu[8..12].try_into().unwrap());
