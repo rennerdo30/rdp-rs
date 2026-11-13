@@ -95,6 +95,8 @@ pub enum Hit {
     Reconnect(u64),
     Disconnect(u64),
     Clipboard(u64),
+    Printers(u64),
+    SmartCards(u64),
     Fit(u64),
     AddDrive(u64),
     RemoveDrive(u64, usize),
@@ -135,6 +137,8 @@ pub struct Tab {
     pub host: String,
     pub state: TabState,
     pub clipboard: bool,
+    pub printers: bool,
+    pub smart_cards: bool,
     pub fit: bool,
     pub drives: Vec<SharedDrive>,
 }
@@ -145,6 +149,8 @@ pub enum Action {
     Reconnect(u64),
     CloseTab(u64),
     SetClipboard(u64, bool),
+    SetPrinters(u64, bool),
+    SetSmartCards(u64, bool),
     SetFit(u64, bool),
     AddDrive(u64, String),
     RemoveDrive(u64, usize),
@@ -254,6 +260,8 @@ impl Ui {
             host,
             state: TabState::Connecting,
             clipboard: false,
+            printers: false,
+            smart_cards: false,
             fit: true,
             drives: Vec::new(),
         });
@@ -487,6 +495,16 @@ impl Ui {
             Hit::Drawer => self.drawer = !self.drawer,
             Hit::Reconnect(id) => return Some(Action::Reconnect(id)),
             Hit::Disconnect(id) => return Some(Action::Disconnect(id)),
+            Hit::Printers(id) => {
+                let t = self.tab_mut(id)?;
+                t.printers = !t.printers;
+                return Some(Action::SetPrinters(id, t.printers));
+            }
+            Hit::SmartCards(id) => {
+                let t = self.tab_mut(id)?;
+                t.smart_cards = !t.smart_cards;
+                return Some(Action::SetSmartCards(id, t.smart_cards));
+            }
             Hit::Clipboard(id) => {
                 let t = self.tab_mut(id)?;
                 t.clipboard = !t.clipboard;
@@ -1255,6 +1273,7 @@ impl Ui {
             return;
         };
         let (clip_on, fit_on, drives) = (tab.clipboard, tab.fit, tab.drives.clone());
+        let (printers_on, cards_on) = (tab.printers, tab.smart_cards);
         let x = d.x + p(18.0);
         let w = d.w - p(36.0);
         let mut y = d.y + p(16.0);
@@ -1281,6 +1300,28 @@ impl Ui {
             "Text, both directions",
             clip_on,
             Hit::Clipboard(id),
+        );
+        y += p(48.0);
+        self.switch_row(
+            cv,
+            te,
+            f,
+            Rect::new(x, y, w, p(30.0)),
+            "Printers",
+            "Local printers in the session",
+            printers_on,
+            Hit::Printers(id),
+        );
+        y += p(48.0);
+        self.switch_row(
+            cv,
+            te,
+            f,
+            Rect::new(x, y, w, p(30.0)),
+            "Smart cards",
+            "Local readers and cards",
+            cards_on,
+            Hit::SmartCards(id),
         );
         y += p(48.0);
 

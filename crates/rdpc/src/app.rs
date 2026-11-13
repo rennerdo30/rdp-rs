@@ -203,6 +203,8 @@ impl App {
             t.state = TabState::Connecting;
             t.drives.clear();
             t.clipboard = false;
+            t.printers = false;
+            t.smart_cards = false;
         }
         self.dirty();
     }
@@ -239,6 +241,17 @@ impl App {
                     w.ui.close_tab(id);
                 }
                 self.dirty();
+            }
+            Action::SetPrinters(id, on) => {
+                let r = self.sessions.get(&id).map(|s| s.controls.set_printers(on));
+                self.toggle_result(id, r, on, "Printers", |t| t.printers = false);
+            }
+            Action::SetSmartCards(id, on) => {
+                let r = self
+                    .sessions
+                    .get(&id)
+                    .map(|s| s.controls.set_smart_cards(on));
+                self.toggle_result(id, r, on, "Smart cards", |t| t.smart_cards = false);
             }
             Action::SetClipboard(id, on) => {
                 let r = self.sessions.get(&id).map(|s| s.controls.set_clipboard(on));
@@ -505,6 +518,34 @@ impl App {
             if let Some(a) = action {
                 self.handle_action(a);
             }
+        }
+    }
+
+    /// Reports a sharing toggle; a failure switches it back off in the drawer.
+    fn toggle_result(
+        &mut self,
+        id: u64,
+        r: Option<Result<(), String>>,
+        on: bool,
+        what: &str,
+        reset: impl FnOnce(&mut ui::Tab),
+    ) {
+        match r {
+            Some(Err(e)) => {
+                if let Some(t) = self.win.as_mut().and_then(|w| w.ui.tab_mut(id)) {
+                    reset(t);
+                }
+                self.message(e, theme::WARN);
+            }
+            Some(Ok(())) => {
+                let text = if on {
+                    format!("{what} shared.")
+                } else {
+                    format!("{what} no longer shared.")
+                };
+                self.message(text, theme::TEXT_2);
+            }
+            None => {}
         }
     }
 

@@ -41,6 +41,16 @@ impl Controls {
         Ok(())
     }
 
+    /// Shares every local printer (RDP-7, not merged yet).
+    pub fn set_printers(&self, _on: bool) -> Result<(), String> {
+        Err("printer sharing is not available in this build yet".into())
+    }
+
+    /// Shares the local smart card readers (RDP-8, not merged yet).
+    pub fn set_smart_cards(&self, _on: bool) -> Result<(), String> {
+        Err("smart card sharing is not available in this build yet".into())
+    }
+
     /// Asks the server to resize the desktop to the tab. The request waits
     /// until the server has opened the Display Control channel; servers
     /// without it (before Windows 8.1 / Server 2012 R2) keep their size.
