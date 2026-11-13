@@ -6,6 +6,8 @@
 //!   rdpc <host> -u <user> --screenshot out.png [--wait SECONDS]
 //!                                            headless: save the desktop as PNG
 //!   rdpc --snapshot-ui out.png [--scale 1.5] render the manager offscreen
+//!   rdpc --icon-png out.png [--icon-size N]  write the app icon as a PNG
+//!   rdpc --version                           print `rdpc <version>`
 //!
 //! The password comes from RDP_PASSWORD or an interactive prompt.
 
@@ -40,6 +42,8 @@ struct Args {
     screenshot: Option<String>,
     snapshot_ui: Option<String>,
     icon_png: Option<String>,
+    icon_size: usize,
+    version: bool,
     scale: f32,
     wait: u64,
     verbose: bool,
@@ -51,6 +55,8 @@ fn usage() -> ! {
          \x20      rdpc <host[:port]> -u <[DOMAIN\\]user> [-d domain] [--size WxH] [-v]\n\
          \x20      rdpc <host> -u <user> --screenshot out.png [--wait SECONDS]\n\
          \x20      rdpc --snapshot-ui out.png [--scale 1.5]\n\
+         \x20      rdpc --icon-png out.png [--icon-size N]\n\
+         \x20      rdpc --version\n\
          password: RDP_PASSWORD environment variable, otherwise prompted"
     );
     std::process::exit(2)
@@ -61,6 +67,7 @@ fn parse_args() -> Args {
         port: 3389,
         scale: 1.0,
         wait: 15,
+        icon_size: 256,
         ..Default::default()
     };
     let mut it = std::env::args().skip(1);
@@ -80,6 +87,14 @@ fn parse_args() -> Args {
             "--screenshot" => a.screenshot = Some(val()),
             "--snapshot-ui" => a.snapshot_ui = Some(val()),
             "--icon-png" => a.icon_png = Some(val()),
+            "--icon-size" => {
+                a.icon_size = val()
+                    .parse()
+                    .ok()
+                    .filter(|n| (16..=1024).contains(n))
+                    .unwrap_or_else(|| usage())
+            }
+            "-V" | "--version" => a.version = true,
             "--scale" => a.scale = val().parse().unwrap_or_else(|_| usage()),
             "--wait" => a.wait = val().parse().unwrap_or_else(|_| usage()),
             "-v" | "--verbose" => a.verbose = true,
@@ -124,9 +139,15 @@ fn main() {
     let args = parse_args();
     rdp::set_verbose(args.verbose);
 
+    if args.version {
+        // The installer test and support reports read this line.
+        println!("rdpc {}", env!("CARGO_PKG_VERSION"));
+        return;
+    }
     if let Some(path) = &args.icon_png {
-        // The app icon as a 256 px PNG with transparency (packaging, README).
-        let size = 256;
+        // The app icon as a PNG with transparency (packaging, README);
+        // scripts/make-icon.ps1 builds assets/rdpc.ico from several sizes.
+        let size = args.icon_size;
         let write = || -> Result<(), Box<dyn std::error::Error>> {
             let file = std::io::BufWriter::new(std::fs::File::create(path)?);
             let mut enc = png::Encoder::new(file, size as u32, size as u32);
@@ -150,6 +171,10 @@ fn main() {
         return;
     }
     if args.host.is_empty() {
+        #[cfg(windows)]
+        if !args.verbose {
+            release_own_console();
+        }
         std::process::exit(app::run(None));
     }
 
@@ -177,6 +202,22 @@ fn main() {
             }
         }
         None => std::process::exit(app::run(Some((args.host.clone(), cfg)))),
+    }
+}
+
+/// The connection manager started from the Start menu or Explorer gets a
+/// console window of its own (rdpc is a console program for its command
+/// line modes). Nobody reads it there, so the manager lets go of it. A
+/// console shared with a shell (a terminal or `cargo run`) stays.
+#[cfg(windows)]
+fn release_own_console() {
+    use windows_sys::Win32::System::Console::{FreeConsole, GetConsoleProcessList};
+    let mut pids = [0u32; 2];
+    // SAFETY: the buffer is valid for its stated length.
+    let attached = unsafe { GetConsoleProcessList(pids.as_mut_ptr(), pids.len() as u32) };
+    if attached == 1 {
+        // SAFETY: no arguments; a failure only leaves the console open.
+        unsafe { FreeConsole() };
     }
 }
 

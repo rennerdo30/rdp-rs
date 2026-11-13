@@ -1,0 +1,119 @@
+name: release
+
+# A version tag builds and tests the Windows packages and attaches them to a
+# DRAFT GitHub release. Publishing the draft is the owner's yes
+# (docs/RELEASING.md); nothing here publishes. A tag with "-" (0.2.0-beta.1)
+# becomes a prerelease. Only rdpc for Windows is packaged: the client is a
+# Windows program today; the rdp library is a source crate.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing version tag to build (vX.Y.Z or vX.Y.Z-pre.N)'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+
+jobs:
+  windows:
+    name: Windows setup and zip
+    runs-on: windows-latest
+    timeout-minutes: 60
+    env:
+      RUSTC_WRAPPER: sccache
+      SCCACHE_GHA_ENABLED: "true"
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+          persist-credentials: false
+      - name: Tag matches the workspace version
+        shell: pwsh
+        run: |
+          $toml = Get-Content Cargo.toml -Raw
+          if ($toml -notmatch '(?m)^\[workspace\.package\][\s\S]*?^version\s*=\s*"([^"]+)"') { throw 'No workspace version' }
+          if ($env:RELEASE_TAG -cne "v$($Matches[1])") { throw "Tag $env:RELEASE_TAG does not match the workspace version $($Matches[1])" }
+      - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
+        with:
+          tool: cargo-about@0.9.3
+      - name: Release build
+        run: cargo build --release --locked -p rdpc
+      - name: Package (pinned NSIS 3.13)
+        shell: pwsh
+        run: |
+          $makensis = ./scripts/fetch-nsis.ps1 -Destination "$env:RUNNER_TEMP/nsis"
+          $meta = cargo metadata --format-version 1 --no-deps | ConvertFrom-Json
+          ./scripts/package.ps1 -MakeNsis $makensis -BinDir (Join-Path $meta.target_directory 'release')
+      - name: Installer lifecycle on the disposable runner
+        shell: pwsh
+        run: |
+          $v = $env:RELEASE_TAG.TrimStart('v')
+          ./scripts/test-installer.ps1 -Setup (Resolve-Path "artifacts/installer/rdpc-$v-setup.exe") -Version $v
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: windows
+          path: |
+            artifacts/installer/rdpc-*-setup.exe
+            artifacts/installer/rdpc-*-windows-x64.zip
+          if-no-files-found: error
+
+  draft:
+    name: draft release (owner publishes)
+    needs: [windows]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+          persist-credentials: false
+          sparse-checkout: CHANGELOG.md
+          sparse-checkout-cone-mode: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Create or refresh the draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${RELEASE_TAG#v}"
+          # One checksum file over every package: the updater's contract.
+          (cd dist && sha256sum rdpc-* > SHA256SUMS.txt && cat SHA256SUMS.txt)
+          awk -v v="$version" '$0 ~ "^## "v"[[:space:]]*$" {on=1; next} /^## / {on=0} on' CHANGELOG.md > notes.md || true
+          {
+            echo
+            echo "**Install:** Windows: run the setup (per user, no admin rights) or unpack the zip."
+            echo "Installed copies update themselves; every download is checked against SHA256SUMS.txt."
+          } >> notes.md
+          flags=(--draft --verify-tag --title "rdpc $RELEASE_TAG" --notes-file notes.md)
+          case "$RELEASE_TAG" in *-*) flags+=(--prerelease) ;; esac
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            # Never touch a published release; refresh only a draft.
+            if [ "$(gh release view "$RELEASE_TAG" --json isDraft --jq .isDraft)" != "true" ]; then
+              echo "Release $RELEASE_TAG is already published; nothing changed." >&2
+              exit 1
+            fi
+            gh release upload "$RELEASE_TAG" dist/* --clobber
+          else
+            gh release create "$RELEASE_TAG" dist/* "${flags[@]}"
+          fi
+          echo "Draft ready: the owner publishes it on GitHub."
