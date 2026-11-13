@@ -11,6 +11,7 @@
 //! - [`dvc`] + [`disp`]: dynamic virtual channels (MS-RDPEDYC) and Display Control (MS-RDPEDISP)
 //! - [`cliprdr`]: clipboard redirection on the `cliprdr` channel (MS-RDPECLIP)
 //! - [`client`]: the connection sequence and the session loop
+//! - [`rdpdr`]: device redirection (MS-RDPEFS) with shared drives
 
 pub mod channel;
 pub mod client;
@@ -31,6 +32,7 @@ pub mod log;
 pub mod mcs;
 pub mod ntlm;
 pub mod pdu;
+pub mod rdpdr;
 pub mod transport;
 pub mod x224;
 
@@ -43,3 +45,4 @@ pub use error::{Error, Result};
 pub use framebuffer::{Damage, Framebuffer};
 pub use input::InputEvent;
 pub use log::set_verbose;
+pub use rdpdr::{Device, Drive, IoCompletion, IoRequest, Rdpdr, RdpdrHandle, rdpdr};
