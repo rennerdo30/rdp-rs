@@ -6,12 +6,17 @@
 
 use rdp::{ClipboardHandle, DisplayHandle, Drdynvc, RdpdrHandle, StaticChannel};
 
+use std::sync::{Arc, Mutex};
+
 use crate::clipboard::WindowsClipboard;
+use crate::printing::WindowsSpooler;
 
 pub struct Controls {
     display: DisplayHandle,
     clipboard: ClipboardHandle,
     devices: RdpdrHandle,
+    /// Device ids of the printers currently shared.
+    printers: Mutex<Vec<u32>>,
 }
 
 impl Controls {
@@ -31,6 +36,7 @@ impl Controls {
                 display,
                 clipboard,
                 devices,
+                printers: Mutex::new(Vec::new()),
             },
         )
     }
@@ -41,9 +47,21 @@ impl Controls {
         Ok(())
     }
 
-    /// Shares every local printer (RDP-7, not merged yet).
-    pub fn set_printers(&self, _on: bool) -> Result<(), String> {
-        Err("printer sharing is not available in this build yet".into())
+    /// Shares every local printer (Easy Print: the server needs no drivers).
+    pub fn set_printers(&self, on: bool) -> Result<(), String> {
+        let mut shared = self.printers.lock().unwrap_or_else(|p| p.into_inner());
+        for id in shared.drain(..) {
+            self.devices.remove(id);
+        }
+        if on {
+            let backend: rdp::rdpdr::SharedBackend =
+                Arc::new(Mutex::new(WindowsSpooler::default()));
+            *shared = rdp::share_printers(&self.devices, backend);
+            if shared.is_empty() {
+                return Err("No local printers found to share.".into());
+            }
+        }
+        Ok(())
     }
 
     /// Shares the local smart card readers (RDP-8, not merged yet).
