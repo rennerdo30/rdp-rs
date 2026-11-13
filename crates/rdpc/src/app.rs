@@ -345,6 +345,7 @@ impl App {
         let c = &s.controls;
         c.set_scale(scale);
         c.set_speaker(crate::audio::device_index(opts.speaker.as_deref()));
+        c.set_microphone_device(crate::mic::device_index(opts.mic.as_deref()));
         let mut warn = Vec::new();
         let mut on = |r: Result<(), String>, what: &str| match r {
             Ok(()) => true,
@@ -357,6 +358,7 @@ impl App {
         let sound = opts.sound && on(c.set_sound(true), "Sound");
         let printers = opts.printers && on(c.set_printers(true), "Printers");
         let smart_cards = opts.smart_cards && on(c.set_smart_cards(true), "Smart cards");
+        let microphone = opts.microphone && on(c.set_microphone(true), "Microphone");
         let mut drives = Vec::new();
         for path in &opts.drives {
             let name = drive_name(path);
@@ -374,6 +376,8 @@ impl App {
             t.quality_live = opts.quality;
             t.win_keys = opts.win_keys;
             t.speaker = opts.speaker.clone();
+            t.microphone = microphone;
+            t.mic = opts.mic.clone();
             t.scale = opts.scale;
             t.clipboard = clipboard;
             t.sound = sound;
@@ -405,6 +409,8 @@ impl App {
             quality: t.quality,
             win_keys: t.win_keys,
             speaker: t.speaker.clone(),
+            microphone: t.microphone,
+            mic: t.mic.clone(),
         }
     }
 
@@ -477,6 +483,22 @@ impl App {
                         let _ = p.send_event(UserEvent::Picked(target, path));
                     }
                 });
+            }
+            Action::SetMicrophone(id, on) => {
+                let r = self
+                    .sessions
+                    .get(&id)
+                    .map(|s| s.controls.set_microphone(on));
+                if let Some(Err(e)) = r {
+                    self.message(format!("Microphone: {e}"), theme::ERR);
+                }
+                self.dirty();
+            }
+            Action::SetMic(id, name) => {
+                if let Some(s) = self.sessions.get(&id) {
+                    s.controls
+                        .set_microphone_device(crate::mic::device_index(name.as_deref()));
+                }
             }
             Action::SetSpeaker(id, name) => {
                 if let Some(s) = self.sessions.get(&id) {
@@ -1171,6 +1193,7 @@ impl ApplicationHandler<UserEvent> for App {
                             let mut ui = Ui::new(Store::load(), scale);
                             remembered_unlock(&mut ui);
                             ui.speakers = crate::audio::output_devices();
+                            ui.mics = crate::mic::input_devices();
                             // Loads the folder picker's shell components early.
                             crate::picker::prewarm();
                             check_for_update(self.proxy.clone());

@@ -293,6 +293,15 @@ mod win {
     }
 }
 
+/// The waveIn index of a microphone saved by name; None: the default (or gone).
+pub fn device_index(name: Option<&str>) -> Option<u32> {
+    let name = name?;
+    input_devices()
+        .iter()
+        .position(|d| d == name)
+        .map(|i| i as u32)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

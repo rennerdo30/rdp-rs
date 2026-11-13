@@ -144,6 +144,10 @@ pub struct SessionOptions {
     /// Output device for the session's sound, by name; None: the default.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub speaker: Option<String>,
+    /// This PC's microphone in the session, and its device by name.
+    pub microphone: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mic: Option<String>,
     /// Picture quality and desktop experience (part of Display for inheritance).
     pub quality: Quality,
     /// Where Windows key combinations go (part of Display for inheritance).

@@ -339,6 +339,10 @@ fn snapshot_ui(path: &str, scale: f32) -> Result<(), Box<dyn std::error::Error>>
     }
     // The quick panel pages, and full screen.
     for (page, full, suffix) in [
+        (21, false, "-form-display"),
+        (22, false, "-form-experience"),
+        (23, false, "-form-sharing"),
+        (24, false, "-form-advanced"),
         (8, false, "-cert"),
         (9, false, "-cert-changed"),
         (1, false, "-panel-display"),
@@ -348,6 +352,7 @@ fn snapshot_ui(path: &str, scale: f32) -> Result<(), Box<dyn std::error::Error>>
     ] {
         let mut m = match page {
             8 | 9 => ui::sample_cert(page == 9),
+            20.. => ui::sample_form(page - 20),
             _ => ui::sample_panel(page, full),
         };
         m.scale = scale;

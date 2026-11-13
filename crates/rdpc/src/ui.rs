@@ -120,8 +120,15 @@ pub enum Hit {
     Update,
     /// New connection inside the open group.
     NewInGroup,
-    /// Connection/group form: inherit chip (credentials, display, sharing).
+    /// Connection/group form: inherit switch (credentials, display, sharing).
     FormInherit(u8),
+    /// Connection editor page (General, Display, Experience, Sharing, Advanced).
+    FormPage(u8),
+    /// Microphone device: index into `mics` + 1 (0 = default); form and panel.
+    FormMic(usize),
+    TabMic(u64, usize),
+    /// Microphone on/off in the panel (live).
+    Microphone(u64),
     /// Quick panel: page, and the session's quality (applies on reconnect).
     DrawerPage(u8),
     TabPreset(u64, usize),
@@ -240,6 +247,9 @@ pub struct Tab {
     pub win_keys: WinKeys,
     /// The output device its sound plays on (None: default).
     pub speaker: Option<String>,
+    /// Microphone on, and the device it records from (None: default).
+    pub microphone: bool,
+    pub mic: Option<String>,
 }
 
 /// A server certificate to trust or refuse.
@@ -268,6 +278,8 @@ struct TabView {
     host: String,
     win_keys: WinKeys,
     speaker: Option<String>,
+    microphone: bool,
+    mic: Option<String>,
 }
 
 pub enum Action {
@@ -316,6 +328,9 @@ pub enum Action {
     Browse(Option<u64>),
     /// Sound of a session to this output (None: default).
     SetSpeaker(u64, Option<String>),
+    /// A session's microphone on or off, and its device (None: default).
+    SetMicrophone(u64, bool),
+    SetMic(u64, Option<String>),
 }
 
 pub enum Key {
@@ -375,6 +390,10 @@ pub struct Ui {
     pub fullscreen: bool,
     /// Local sound output devices (the app fills it in).
     pub speakers: Vec<String>,
+    /// Local microphones (the app fills it in).
+    pub mics: Vec<String>,
+    /// Connection editor page.
+    form_page: u8,
     /// Asking whether to quit while this many sessions are open.
     pub confirm_exit: Option<usize>,
     /// Keyboard goes to the active session (set by clicking into it).
@@ -447,6 +466,8 @@ impl Ui {
             drawer_area: Rect::default(),
             fullscreen: false,
             speakers: Vec::new(),
+            mics: Vec::new(),
+            form_page: 0,
             confirm_exit: None,
             session_focus: false,
             session_area: None,
@@ -541,6 +562,8 @@ impl Ui {
             cert: None,
             win_keys: WinKeys::default(),
             speaker: None,
+            microphone: false,
+            mic: None,
         });
         self.active = Some(id);
         self.session_focus = false;
@@ -1066,6 +1089,11 @@ impl Ui {
         if self.vault_setup {
             return vec![Field::Master, Field::MasterConfirm];
         }
+        match self.form_page {
+            0 => {}
+            3 if !self.form_inherit().sharing => return vec![Field::FormDrive],
+            _ => return Vec::new(),
+        }
         let mut v = vec![Field::Name];
         if self.group_edit.is_none() {
             v.extend([Field::Host, Field::Port]);
@@ -1199,6 +1227,25 @@ impl Ui {
                 let g = self.context_group();
                 self.new_connection_in(&g);
             }
+            Hit::FormPage(i) => {
+                self.form_page = i;
+                self.home_scroll = 0;
+                self.focus = None;
+            }
+            Hit::FormMic(i) => {
+                self.opts.mic = i.checked_sub(1).and_then(|i| self.mics.get(i).cloned());
+            }
+            Hit::TabMic(id, i) => {
+                let name = i.checked_sub(1).and_then(|i| self.mics.get(i).cloned());
+                let t = self.tab_mut(id)?;
+                t.mic = name.clone();
+                return Some(Action::SetMic(id, name));
+            }
+            Hit::Microphone(id) => {
+                let t = self.tab_mut(id)?;
+                t.microphone = !t.microphone;
+                return Some(Action::SetMicrophone(id, t.microphone));
+            }
             Hit::DrawerPage(i) => {
                 self.drawer_page = i;
                 self.drawer_scroll = 0;
@@ -1326,7 +1373,8 @@ impl Ui {
                     0 => &mut o.clipboard,
                     1 => &mut o.sound,
                     2 => &mut o.printers,
-                    _ => &mut o.smart_cards,
+                    3 => &mut o.smart_cards,
+                    _ => &mut o.microphone,
                 };
                 *flag = !*flag;
             }
@@ -1540,6 +1588,9 @@ impl Ui {
                 let order = self.form_order();
                 let i = self.focus.and_then(|f| order.iter().position(|&x| x == f));
                 let n = order.len();
+                if n == 0 {
+                    return None;
+                }
                 let next = match (i, back) {
                     (Some(i), false) => (i + 1) % n,
                     (Some(i), true) => (i + n - 1) % n,
@@ -2177,33 +2228,6 @@ impl Ui {
         }
     }
 
-    /// Chips that wrap to new rows at width `w`; returns the bottom of the last row.
-    #[allow(clippy::too_many_arguments)]
-    fn chip_rows(
-        &mut self,
-        cv: &mut Canvas,
-        te: &mut TextEngine,
-        f: &Fonts,
-        x: i32,
-        y: i32,
-        w: i32,
-        h: i32,
-        items: &[(String, bool, Hit)],
-    ) -> i32 {
-        let s = self.scale;
-        let p = |v: f32| (v * s).round() as i32;
-        let (mut cx, mut y) = (x, y);
-        for (text, on, hit) in items {
-            let cw = te.measure(f.ui, 12.5 * s, text) as i32 + p(24.0);
-            if cx > x && cx + cw > x + w {
-                cx = x;
-                y += h + p(4.0);
-            }
-            cx += self.chip(cv, te, f, cx, y, h, text, *on, *hit) + p(6.0);
-        }
-        y + h
-    }
-
     /// A selectable chip at (x, y); returns its width.
     #[allow(clippy::too_many_arguments)]
     fn chip(
@@ -2387,6 +2411,9 @@ impl Ui {
         cv.set_clip(old);
     }
 
+    /// The connection (or group) editor: a header with the actions, a section
+    /// switcher and one page of cards at a time. A section a connection takes
+    /// from its group shows one switch and where the values come from.
     fn paint_home(&mut self, cv: &mut Canvas, te: &mut TextEngine, f: &Fonts, area: Rect) {
         let s = self.scale;
         let p = |v: f32| (v * s).round() as i32;
@@ -2394,502 +2421,137 @@ impl Ui {
         let first_hit = self.hits.len();
         self.home_area = area;
         let top = area.y - self.home_scroll;
-        let x0 = area.x + p(32.0);
-        let label_w = p(96.0);
-        let fx = x0 + label_w;
-        let fw = p(440.0).min(area.right() - p(32.0) - fx).max(p(160.0));
-        let form_w = label_w + fw;
+        let x = area.x + p(40.0);
+        let w = p(620.0).min(area.w - p(80.0)).max(p(300.0));
         let group_mode = self.group_edit.is_some();
         let open_group = self.group_edit.clone().flatten();
 
+        // Header: title, one line about it, and the actions on the right.
         let title = match (&open_group, self.selected) {
             (Some(path), _) => path.rsplit('/').next().unwrap_or(path).to_string(),
             (None, _) if group_mode => "New group".into(),
             (None, Some(i)) => self.store.connections[i].name.clone(),
             (None, None) => "New connection".into(),
         };
-        te.draw(
-            cv,
-            f.semi,
-            20.0 * s,
-            x0 as f32,
-            (top + p(42.0)) as f32,
-            &title,
-            TEXT,
-            form_w as f32,
-        );
         let sub = if let Some(path) = &open_group {
             let n = self.store.members(path).count();
-            format!(
-                "Group with {n} connection{}. Members take the sections they inherit from here.",
-                if n == 1 { "" } else { "s" }
-            )
+            format!("Group · {n} connection{}", if n == 1 { "" } else { "s" })
         } else if group_mode {
-            "Not saved yet. Connections in a group can inherit its settings.".to_string()
+            "New group · not saved yet".to_string()
         } else {
-            format!(
-                "{} {}",
-                if self.selected.is_some() {
-                    "Saved connection."
-                } else {
-                    "Not saved yet."
-                },
-                if self.store.is_vault() {
-                    "Saved passwords stay in the encrypted vault."
-                } else {
-                    "Passwords are only saved once you set a master password."
-                }
-            )
+            let host = self.field(Field::Host).text.trim().to_string();
+            let user = self.field(Field::User).text.trim().to_string();
+            match (host.is_empty(), user.is_empty(), self.selected.is_some()) {
+                (true, _, _) => "Not saved yet".to_string(),
+                (false, true, _) => host,
+                (false, false, _) => format!("{host} · {user}"),
+            }
         };
-        te.draw(
-            cv,
-            f.ui,
-            12.5 * s,
-            x0 as f32,
-            (top + p(64.0)) as f32,
-            &sub,
-            TEXT_3,
-            form_w as f32,
-        );
-
-        let mut y = top + p(88.0);
-        let row = p(44.0);
-        let fh = p(32.0);
-        let label = |cv: &mut Canvas, te: &mut TextEngine, y: i32, text: &str| {
-            te.draw_in(
-                cv,
-                f.ui,
-                13.0 * s,
-                Rect::new(x0, y, label_w, fh),
-                0.0,
-                text,
-                TEXT_2,
-            );
-        };
-        let summary = |cv: &mut Canvas, te: &mut TextEngine, y: i32, text: &str| {
-            te.draw(
-                cv,
-                f.ui,
-                13.0 * s,
-                fx as f32,
-                (y + p(21.0)) as f32,
-                text,
-                TEXT_3,
-                fw as f32,
-            );
-        };
-        label(cv, te, y, "Name");
-        self.text_input(
-            cv,
-            te,
-            f,
-            Rect::new(fx, y, fw, fh),
-            Field::Name,
-            if group_mode {
-                "Group name"
-            } else {
-                "Defaults to the host"
-            },
-        );
-        y += row;
-        if !group_mode {
-            label(cv, te, y, "Host");
-            let port_w = p(96.0);
-            self.text_input(
-                cv,
-                te,
-                f,
-                Rect::new(fx, y, fw - port_w - p(8.0), fh),
-                Field::Host,
-                "Name or IP address",
-            );
-            self.text_input(
-                cv,
-                te,
-                f,
-                Rect::new(fx + fw - port_w, y, port_w, fh),
-                Field::Port,
-                "Port",
-            );
-            y += row;
-        }
-        label(cv, te, y, if group_mode { "Parent" } else { "Group" });
-        self.text_input(
-            cv,
-            te,
-            f,
-            Rect::new(fx, y, fw, fh),
-            Field::GroupPath,
-            if group_mode {
-                "None (top level)"
-            } else {
-                "None (top level), e.g. Work/Servers"
-            },
-        );
-        y += row;
-        let parent = normalize_path(&self.field(Field::GroupPath).text);
-        let inh = self.form_inherit();
-        if !parent.is_empty() {
-            label(cv, te, y, "Inherit");
-            let mut cx = fx;
-            for (k, (text, on)) in [
-                ("Credentials", inh.credentials),
-                ("Display", inh.display),
-                ("Sharing", inh.sharing),
-            ]
-            .into_iter()
-            .enumerate()
-            {
-                let text = if on {
-                    format!("✓ {text}")
-                } else {
-                    text.to_string()
-                };
-                cx +=
-                    self.chip(cv, te, f, cx, y, fh, &text, on, Hit::FormInherit(k as u8)) + p(6.0);
-            }
-            y += row;
-        }
-
-        // Credentials
-        if inh.credentials {
-            label(cv, te, y, "User");
-            summary(cv, te, y, &self.inherited_text(&parent, 0));
-            y += row;
-            label(cv, te, y, "Password");
-            let saved_in = self
-                .store
-                .source_of(&parent, &Inherit::ALL, |i| i.credentials)
-                .filter(|g| g.password.is_some())
-                .map(|g| g.path.clone());
-            let hint = match saved_in {
-                Some(g) => format!("Saved in {g} (type to override)"),
-                None => "Asked for each connection".to_string(),
-            };
-            self.text_input(cv, te, f, Rect::new(fx, y, fw, fh), Field::Password, &hint);
-            y += row;
-        } else {
-            label(cv, te, y, "User");
-            self.text_input(
-                cv,
-                te,
-                f,
-                Rect::new(fx, y, fw, fh),
-                Field::User,
-                r"DOMAIN\user or user@domain",
-            );
-            y += row;
-            label(cv, te, y, "Password");
-            let saved = self.save_password && self.own_password().is_some();
-            let chip_text = if self.save_password {
-                "✓ Save password"
-            } else {
-                "Save password"
-            };
-            let chip_w = te.measure(f.ui, 12.5 * s, chip_text) as i32 + p(24.0);
-            self.text_input(
-                cv,
-                te,
-                f,
-                Rect::new(fx, y, fw - chip_w - p(8.0), fh),
-                Field::Password,
-                if saved {
-                    "Saved (type to change)"
-                } else if group_mode {
-                    "Used by members that inherit it"
-                } else {
-                    "Asked for each connection"
-                },
-            );
-            let save_on = self.save_password;
-            self.chip(
-                cv,
-                te,
-                f,
-                fx + fw - chip_w,
-                y,
-                fh,
-                chip_text,
-                save_on,
-                Hit::SavePassword,
-            );
-            y += row;
-            label(cv, te, y, "Gateway");
-            self.text_input(
-                cv,
-                te,
-                f,
-                Rect::new(fx, y, fw, fh),
-                Field::Gateway,
-                "None (direct), or an RD Gateway, e.g. rdg.example.com",
-            );
-            y += row;
-        }
-
-        // Display and scale
-        if inh.display {
-            label(cv, te, y, "Display");
-            summary(cv, te, y, &self.inherited_text(&parent, 1));
-            y += row;
-        } else {
-            label(cv, te, y, "Display");
-            let mut cx = fx;
-            let choices = std::iter::once("Fit window".to_string())
-                .chain(SIZES.iter().map(|(sw, sh)| format!("{sw} × {sh}")));
-            for (i, text) in choices.enumerate() {
-                cx += self.chip(cv, te, f, cx, y, fh, &text, self.size == i, Hit::Size(i)) + p(6.0);
-            }
-            y += row - p(4.0);
-            te.draw(
-                cv,
-                f.ui,
-                11.5 * s,
-                fx as f32,
-                (y + p(12.0)) as f32,
-                "Fit window matches the tab and follows resizes; a fixed size stays as chosen.",
-                TEXT_4,
-                fw as f32,
-            );
-            y += p(34.0);
-
-            label(cv, te, y, "Scale");
-            let auto = format!("Auto ({} %)", (self.scale * 100.0).round() as u32);
-            let mut cx = fx;
-            for (i, text) in std::iter::once(auto)
-                .chain(SCALES.iter().map(|v| format!("{v} %")))
-                .enumerate()
-            {
-                let chosen = match (i, self.opts.scale) {
-                    (0, None) => true,
-                    (i, Some(v)) if i > 0 => SCALES[i - 1] == v,
-                    _ => false,
-                };
-                cx += self.chip(cv, te, f, cx, y, fh, &text, chosen, Hit::FormScale(i)) + p(6.0);
-            }
-            y += row;
-
-            let q = self.opts.quality;
-            let q_keys = self.opts.win_keys;
-            label(cv, te, y, "Quality");
-            let items: Vec<(String, bool, Hit)> = PRESETS
-                .iter()
-                .enumerate()
-                .map(|(i, (c, name))| (name.to_string(), q.connection == *c, Hit::FormPreset(i)))
-                .collect();
-            y = self.chip_rows(cv, te, f, fx, y, fw, fh, &items) + row - fh;
-
-            label(cv, te, y, "Colours");
-            let items: Vec<(String, bool, Hit)> = DEPTHS
-                .iter()
-                .enumerate()
-                .map(|(i, d)| (format!("{d}-bit"), q.color_depth == *d, Hit::FormDepth(i)))
-                .collect();
-            y = self.chip_rows(cv, te, f, fx, y, fw, fh, &items) + row - fh;
-
-            label(cv, te, y, "Show");
-            let items: Vec<(String, bool, Hit)> = [
-                ("Wallpaper", q.wallpaper),
-                ("Font smoothing", q.font_smoothing),
-                ("Composition", q.composition),
-                ("Drag contents", q.window_drag),
-                ("Animations", q.animations),
-                ("Visual styles", q.visual_styles),
-            ]
-            .into_iter()
-            .enumerate()
-            .map(|(i, (t, on))| {
-                let text = if on {
-                    format!("✓ {t}")
-                } else {
-                    t.to_string()
-                };
-                (text, on, Hit::FormExperience(i as u8))
-            })
-            .collect();
-            y = self.chip_rows(cv, te, f, fx, y, fw, fh, &items) + row - fh;
-
-            label(cv, te, y, "Compression");
-            let items: Vec<(String, bool, Hit)> = COMPRESSION
-                .iter()
-                .enumerate()
-                .map(|(i, (key, name))| {
-                    (
-                        name.to_string(),
-                        q.compression == *key,
-                        Hit::FormCompression(i),
-                    )
-                })
-                .collect();
-            y = self.chip_rows(cv, te, f, fx, y, fw, fh, &items) + row - fh;
-
-            label(cv, te, y, "Win keys");
-            let items: Vec<(String, bool, Hit)> = WinKeys::ALL
-                .iter()
-                .enumerate()
-                .map(|(i, k)| {
-                    let text = match k {
-                        WinKeys::Local => "On this PC".to_string(),
-                        WinKeys::Remote => "On the remote".to_string(),
-                        WinKeys::FullScreen => "Remote in full screen".to_string(),
-                    };
-                    (text, q_keys == *k, Hit::FormWinKeys(i))
-                })
-                .collect();
-            y = self.chip_rows(cv, te, f, fx, y, fw, fh, &items) + row - fh;
-        }
-
-        // Sharing and shared folders
-        if inh.sharing {
-            label(cv, te, y, "Sharing");
-            summary(cv, te, y, &self.inherited_text(&parent, 2));
-            y += row + p(8.0);
-        } else {
-            label(cv, te, y, "Sharing");
-            let o = self.opts.clone();
-            let mut cx = fx;
-            for (i, (text, on)) in [
-                ("Clipboard", o.clipboard),
-                ("Sound", o.sound),
-                ("Printers", o.printers),
-                ("Smart cards", o.smart_cards),
-            ]
-            .into_iter()
-            .enumerate()
-            {
-                let text = if on {
-                    format!("✓ {text}")
-                } else {
-                    text.to_string()
-                };
-                cx += self.chip(cv, te, f, cx, y, fh, &text, on, Hit::FormShare(i as u8)) + p(6.0);
-            }
-            y += row;
-
-            if o.sound {
-                label(cv, te, y, "Sound on");
-                let chosen = o
-                    .speaker
-                    .as_ref()
-                    .and_then(|s| self.speakers.iter().position(|d| d == s))
-                    .map_or(0, |i| i + 1);
-                let items: Vec<(String, bool, Hit)> = std::iter::once("Default output".to_string())
-                    .chain(self.speakers.iter().cloned())
-                    .enumerate()
-                    .map(|(i, n)| (n, chosen == i, Hit::FormSpeaker(i)))
-                    .collect();
-                y = self.chip_rows(cv, te, f, fx, y, fw, fh, &items) + row - fh;
-            }
-
-            label(cv, te, y, "Folders");
-            let mut cx = fx;
-            for (i, path) in o.drives.iter().enumerate() {
-                let text = format!("{path}  ×");
-                let w = self.chip(cv, te, f, cx, y, fh, &text, true, Hit::FormRemoveDrive(i));
-                cx += w + p(6.0);
-                if cx > fx + fw - p(120.0) {
-                    cx = fx;
-                    y += p(36.0);
-                }
-            }
-            if !o.drives.is_empty() {
-                y += p(38.0);
-            }
-            let add_w = p(64.0);
-            let browse_w = p(88.0);
-            self.text_input(
-                cv,
-                te,
-                f,
-                Rect::new(fx, y, fw - add_w - browse_w - p(16.0), fh),
-                Field::FormDrive,
-                r"Folder to share, e.g. C:\Share",
-            );
-            self.button(
-                cv,
-                te,
-                f,
-                Rect::new(fx + fw - add_w - browse_w - p(8.0), y, browse_w, fh),
-                "Browse…",
-                Style::Secondary,
-                Hit::BrowseForm,
-            );
-            self.button(
-                cv,
-                te,
-                f,
-                Rect::new(fx + fw - add_w, y, add_w, fh),
-                "Add",
-                Style::Secondary,
-                Hit::FormAddDrive,
-            );
-            y += row + p(8.0);
-        }
-
         let bh = p(34.0);
-        let (connect, cw) = if group_mode {
-            ("Connect all", p(116.0))
-        } else {
-            ("Connect", p(116.0))
-        };
+        let connect = if group_mode { "Connect all" } else { "Connect" };
+        let cw = te.measure(f.semi, 13.0 * s, connect) as i32 + p(36.0);
+        let mut bx = x + w - cw;
+        let by = top + p(30.0);
         self.button(
             cv,
             te,
             f,
-            Rect::new(fx, y, cw, bh),
+            Rect::new(bx, by, cw, bh),
             connect,
             Style::Primary,
             Hit::Connect,
         );
-        let mut bx = fx + cw + p(8.0);
+        bx -= p(84.0) + p(8.0);
         self.button(
             cv,
             te,
             f,
-            Rect::new(bx, y, p(84.0), bh),
+            Rect::new(bx, by, p(84.0), bh),
             "Save",
             Style::Secondary,
             Hit::Save,
         );
-        bx += p(92.0);
         if open_group.is_some() {
+            let nw = p(124.0);
+            bx -= nw + p(8.0);
             self.button(
                 cv,
                 te,
                 f,
-                Rect::new(bx, y, p(120.0), bh),
+                Rect::new(bx, by, nw, bh),
                 "+ Connection",
                 Style::Secondary,
                 Hit::NewInGroup,
             );
         }
         if self.selected.is_some() || open_group.is_some() {
+            bx -= p(84.0) + p(8.0);
             self.button(
                 cv,
                 te,
                 f,
-                Rect::new(fx + fw - p(84.0), y, p(84.0), bh),
+                Rect::new(bx, by, p(84.0), bh),
                 "Delete",
                 Style::Danger,
                 Hit::Delete,
             );
         }
-        let hint = if group_mode {
-            "Connect all opens members with a saved or typed password."
-        } else {
-            "Enter connects · Tab next field · Ctrl+N new · Ctrl+S save"
-        };
+        let tw = (bx - x - p(16.0)) as f32;
+        te.draw(
+            cv,
+            f.semi,
+            20.0 * s,
+            x as f32,
+            (top + p(48.0)) as f32,
+            &title,
+            TEXT,
+            tw,
+        );
         te.draw(
             cv,
             f.ui,
-            11.5 * s,
-            fx as f32,
-            (y + bh + p(22.0)) as f32,
-            hint,
-            TEXT_4,
-            fw as f32,
+            12.5 * s,
+            x as f32,
+            (top + p(70.0)) as f32,
+            &sub,
+            TEXT_3,
+            tw,
         );
+
+        // Section switcher
+        let pages: Vec<(String, bool, Hit)> =
+            ["General", "Display", "Experience", "Sharing", "Advanced"]
+                .iter()
+                .enumerate()
+                .map(|(i, n)| {
+                    (
+                        n.to_string(),
+                        self.form_page == i as u8,
+                        Hit::FormPage(i as u8),
+                    )
+                })
+                .collect();
+        self.segmented(cv, te, f, Rect::new(x, top + p(92.0), w, p(36.0)), &pages);
+
+        let mut y = top + p(148.0);
+        let parent = normalize_path(&self.field(Field::GroupPath).text);
+        let inh = self.form_inherit();
+        y = match self.form_page {
+            0 => self.form_general(cv, te, f, x, y, w, group_mode, &parent, inh),
+            1 => self.form_display(cv, te, f, x, y, w, &parent, inh),
+            2 => self.form_experience(cv, te, f, x, y, w, &parent, inh),
+            3 => self.form_sharing(cv, te, f, x, y, w, &parent, inh),
+            _ => self.form_advanced(cv, te, f, x, y, w, &parent, inh),
+        };
+        let hint = if group_mode {
+            "Connect all opens every member with a saved password, or the one typed here."
+        } else {
+            "Enter connects · Ctrl+S saves · Ctrl+N new connection"
+        };
+        self.hint(cv, te, f, x, y + p(22.0), w, hint);
+
         // Scrolling: remember the height, keep the offset in range, show a bar.
-        self.home_content = y + bh + p(40.0) - top;
+        self.home_content = y + p(48.0) - top;
         let max = (self.home_content - area.h).max(0);
         if self.home_scroll > max {
             self.home_scroll = max;
@@ -2897,15 +2559,690 @@ impl Ui {
         if max > 0 {
             let track = area.h - p(8.0);
             let bar = (track * area.h / self.home_content).max(p(24.0));
-            let by = area.y + p(4.0) + (track - bar) * self.home_scroll / max;
+            let sy = area.y + p(4.0) + (track - bar) * self.home_scroll / max;
             cv.fill_round(
-                Rect::new(area.right() - p(7.0), by, p(4.0), bar),
+                Rect::new(area.right() - p(7.0), sy, p(4.0), bar),
                 2.0 * s,
                 BORDER_HOVER,
             );
         }
         self.clip_hits(first_hit, area);
         cv.set_clip(old);
+    }
+
+    /// A card row with a label on the left and a text field on the right.
+    #[allow(clippy::too_many_arguments)]
+    fn field_row(
+        &mut self,
+        cv: &mut Canvas,
+        te: &mut TextEngine,
+        f: &Fonts,
+        r: Rect,
+        label: &str,
+        field: Field,
+        placeholder: &str,
+    ) {
+        let s = self.scale;
+        let p = |v: f32| (v * s).round() as i32;
+        te.draw(
+            cv,
+            f.ui,
+            13.0 * s,
+            (r.x + p(16.0)) as f32,
+            (r.y + r.h / 2 + p(5.0)) as f32,
+            label,
+            TEXT_2,
+            p(110.0) as f32,
+        );
+        let input = Rect::new(
+            r.x + p(132.0),
+            r.y + p(9.0),
+            r.w - p(132.0) - p(12.0),
+            r.h - p(18.0),
+        );
+        self.text_input(cv, te, f, input, field, placeholder);
+    }
+
+    /// The first card of an inheritable page in a group: the switch, and
+    /// where the values come from. Returns true when the page is inherited.
+    #[allow(clippy::too_many_arguments)]
+    fn inherit_card(
+        &mut self,
+        cv: &mut Canvas,
+        te: &mut TextEngine,
+        f: &Fonts,
+        x: i32,
+        y: &mut i32,
+        w: i32,
+        parent: &str,
+        section: u8,
+        on: bool,
+        what: &str,
+    ) -> bool {
+        let s = self.scale;
+        let p = |v: f32| (v * s).round() as i32;
+        if parent.is_empty() {
+            return false;
+        }
+        let label = format!(
+            "Use {}'s {what}",
+            parent.rsplit('/').next().unwrap_or(parent)
+        );
+        let sub = if on {
+            self.inherited_text(parent, section)
+        } else {
+            "Off: this one sets its own".to_string()
+        };
+        let cells = self.card(cv, x, *y, w, &[p(58.0)]);
+        self.card_switch(
+            cv,
+            te,
+            f,
+            cells[0],
+            &label,
+            &sub,
+            on,
+            Hit::FormInherit(section),
+        );
+        *y += p(58.0) + p(20.0);
+        on
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn form_general(
+        &mut self,
+        cv: &mut Canvas,
+        te: &mut TextEngine,
+        f: &Fonts,
+        x: i32,
+        mut y: i32,
+        w: i32,
+        group_mode: bool,
+        parent: &str,
+        inh: Inherit,
+    ) -> i32 {
+        let s = self.scale;
+        let p = |v: f32| (v * s).round() as i32;
+        let rh = p(52.0);
+        self.caption(
+            cv,
+            te,
+            f,
+            x,
+            y,
+            w,
+            if group_mode { "GROUP" } else { "CONNECTION" },
+        );
+        y += p(24.0);
+        if group_mode {
+            let cells = self.card(cv, x, y, w, &[rh; 2]);
+            self.field_row(cv, te, f, cells[0], "Name", Field::Name, "Group name");
+            self.field_row(
+                cv,
+                te,
+                f,
+                cells[1],
+                "Parent",
+                Field::GroupPath,
+                "None (top level)",
+            );
+            y += 2 * rh;
+        } else {
+            let cells = self.card(cv, x, y, w, &[rh; 3]);
+            self.field_row(
+                cv,
+                te,
+                f,
+                cells[0],
+                "Name",
+                Field::Name,
+                "Defaults to the host",
+            );
+            // Host and port share a row.
+            let r = cells[1];
+            te.draw(
+                cv,
+                f.ui,
+                13.0 * s,
+                (r.x + p(16.0)) as f32,
+                (r.y + r.h / 2 + p(5.0)) as f32,
+                "Host",
+                TEXT_2,
+                p(110.0) as f32,
+            );
+            let port_w = p(84.0);
+            let hx = r.x + p(132.0);
+            let hw = r.right() - p(12.0) - port_w - p(8.0) - hx;
+            self.text_input(
+                cv,
+                te,
+                f,
+                Rect::new(hx, r.y + p(9.0), hw, r.h - p(18.0)),
+                Field::Host,
+                "Name or IP address",
+            );
+            self.text_input(
+                cv,
+                te,
+                f,
+                Rect::new(
+                    r.right() - p(12.0) - port_w,
+                    r.y + p(9.0),
+                    port_w,
+                    r.h - p(18.0),
+                ),
+                Field::Port,
+                "Port",
+            );
+            self.field_row(
+                cv,
+                te,
+                f,
+                cells[2],
+                "Group",
+                Field::GroupPath,
+                "None (top level), e.g. Work/Servers",
+            );
+            y += 3 * rh;
+        }
+        y += p(20.0);
+
+        self.caption(cv, te, f, x, y, w, "SIGN-IN");
+        y += p(24.0);
+        let inherited = self.inherit_card(
+            cv,
+            te,
+            f,
+            x,
+            &mut y,
+            w,
+            parent,
+            0,
+            inh.credentials,
+            "sign-in",
+        );
+        if inherited {
+            let cells = self.card(cv, x, y, w, &[rh]);
+            let saved_in = self
+                .store
+                .source_of(parent, &Inherit::ALL, |i| i.credentials)
+                .filter(|g| g.password.is_some())
+                .map(|g| format!("Saved in {} (type to override)", g.path));
+            let hint = saved_in.unwrap_or_else(|| "Asked for each connection".into());
+            self.field_row(cv, te, f, cells[0], "Password", Field::Password, &hint);
+            return y + rh;
+        }
+        let saved = self.save_password && self.own_password().is_some();
+        let cells = self.card(cv, x, y, w, &[rh, rh, p(58.0), rh]);
+        self.field_row(
+            cv,
+            te,
+            f,
+            cells[0],
+            "User",
+            Field::User,
+            r"DOMAIN\user or user@domain",
+        );
+        let pw_hint = if saved {
+            "Saved (type to change)"
+        } else if group_mode {
+            "Used by members that inherit it"
+        } else {
+            "Asked for each connection"
+        };
+        self.field_row(cv, te, f, cells[1], "Password", Field::Password, pw_hint);
+        let save_sub = if self.store.is_vault() {
+            "Kept in the encrypted vault"
+        } else {
+            "Asks for a master password first"
+        };
+        self.card_switch(
+            cv,
+            te,
+            f,
+            cells[2],
+            "Save password",
+            save_sub,
+            self.save_password,
+            Hit::SavePassword,
+        );
+        self.field_row(
+            cv,
+            te,
+            f,
+            cells[3],
+            "Gateway",
+            Field::Gateway,
+            "None (direct), or rdg.example.com",
+        );
+        y + 3 * rh + p(58.0)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn form_display(
+        &mut self,
+        cv: &mut Canvas,
+        te: &mut TextEngine,
+        f: &Fonts,
+        x: i32,
+        mut y: i32,
+        w: i32,
+        parent: &str,
+        inh: Inherit,
+    ) -> i32 {
+        let s = self.scale;
+        let p = |v: f32| (v * s).round() as i32;
+        if self.inherit_card(
+            cv,
+            te,
+            f,
+            x,
+            &mut y,
+            w,
+            parent,
+            1,
+            inh.display,
+            "display settings",
+        ) {
+            return y - p(20.0);
+        }
+        self.caption(cv, te, f, x, y, w, "DESKTOP SIZE");
+        y += p(24.0);
+        let items: Vec<(String, bool, Hit)> = std::iter::once("Fit window".to_string())
+            .chain(SIZES.iter().map(|(sw, sh)| format!("{sw} × {sh}")))
+            .enumerate()
+            .map(|(i, t)| (t, self.size == i, Hit::Size(i)))
+            .collect();
+        self.segmented(cv, te, f, Rect::new(x, y, w, p(34.0)), &items);
+        y += p(34.0);
+        self.hint(
+            cv,
+            te,
+            f,
+            x,
+            y + p(16.0),
+            w,
+            "Fit window follows the tab's size; a fixed size stays as chosen.",
+        );
+        y += p(40.0);
+
+        self.caption(cv, te, f, x, y, w, "SCALE");
+        y += p(24.0);
+        let auto = format!("Auto ({} %)", (self.scale * 100.0).round() as u32);
+        let items: Vec<(String, bool, Hit)> = std::iter::once(auto)
+            .chain(SCALES.iter().map(|v| format!("{v} %")))
+            .enumerate()
+            .map(|(i, t)| {
+                let chosen = match (i, self.opts.scale) {
+                    (0, None) => true,
+                    (i, Some(v)) if i > 0 => SCALES[i - 1] == v,
+                    _ => false,
+                };
+                (t, chosen, Hit::FormScale(i))
+            })
+            .collect();
+        self.segmented(cv, te, f, Rect::new(x, y, w, p(34.0)), &items);
+        y + p(34.0)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn form_experience(
+        &mut self,
+        cv: &mut Canvas,
+        te: &mut TextEngine,
+        f: &Fonts,
+        x: i32,
+        mut y: i32,
+        w: i32,
+        parent: &str,
+        inh: Inherit,
+    ) -> i32 {
+        let s = self.scale;
+        let p = |v: f32| (v * s).round() as i32;
+        if self.inherit_card(
+            cv,
+            te,
+            f,
+            x,
+            &mut y,
+            w,
+            parent,
+            1,
+            inh.display,
+            "display settings",
+        ) {
+            return y - p(20.0);
+        }
+        let q = self.opts.quality;
+        self.caption(cv, te, f, x, y, w, "CONNECTION SPEED");
+        y += p(24.0);
+        let subs = [
+            "Everything on",
+            "Everything on, for slower links",
+            "No wallpaper or animations",
+            "Visual styles only",
+            "Plain desktop, least data",
+        ];
+        let cells = self.card(cv, x, y, w, &[p(50.0); 5]);
+        for (i, (r, ((c, name), sub))) in cells.iter().zip(PRESETS.iter().zip(subs)).enumerate() {
+            self.card_choice(
+                cv,
+                te,
+                f,
+                *r,
+                name,
+                sub,
+                q.connection == *c,
+                Hit::FormPreset(i),
+            );
+        }
+        y += 5 * p(50.0) + p(20.0);
+
+        self.caption(cv, te, f, x, y, w, "COLOURS");
+        y += p(24.0);
+        let items: Vec<(String, bool, Hit)> = DEPTHS
+            .iter()
+            .enumerate()
+            .map(|(i, d)| (format!("{d}-bit"), q.color_depth == *d, Hit::FormDepth(i)))
+            .collect();
+        self.segmented(cv, te, f, Rect::new(x, y, w, p(34.0)), &items);
+        y += p(34.0) + p(20.0);
+
+        self.caption(cv, te, f, x, y, w, "SHOW");
+        y += p(24.0);
+        let rows = [
+            ("Desktop background", q.wallpaper),
+            ("Font smoothing", q.font_smoothing),
+            ("Desktop composition", q.composition),
+            ("Window contents while dragging", q.window_drag),
+            ("Menu and window animations", q.animations),
+            ("Visual styles", q.visual_styles),
+        ];
+        let cells = self.card(cv, x, y, w, &[p(44.0); 6]);
+        for (i, (r, (label, on))) in cells.iter().zip(rows).enumerate() {
+            self.card_switch(cv, te, f, *r, label, "", on, Hit::FormExperience(i as u8));
+        }
+        y + 6 * p(44.0)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn form_sharing(
+        &mut self,
+        cv: &mut Canvas,
+        te: &mut TextEngine,
+        f: &Fonts,
+        x: i32,
+        mut y: i32,
+        w: i32,
+        parent: &str,
+        inh: Inherit,
+    ) -> i32 {
+        let s = self.scale;
+        let p = |v: f32| (v * s).round() as i32;
+        if self.inherit_card(cv, te, f, x, &mut y, w, parent, 2, inh.sharing, "sharing") {
+            return y - p(20.0);
+        }
+        let o = self.opts.clone();
+        let rows = [
+            ("Clipboard", "Text and files, both ways", o.clipboard),
+            ("Sound", "Remote audio plays on this PC", o.sound),
+            (
+                "Microphone",
+                "This PC's microphone in the session",
+                o.microphone,
+            ),
+            ("Printers", "Local printers in the session", o.printers),
+            ("Smart cards", "Local readers and cards", o.smart_cards),
+        ];
+        let cells = self.card(cv, x, y, w, &[p(56.0); 5]);
+        for (r, (i, label, sub, on)) in cells.iter().zip([
+            (0u8, rows[0].0, rows[0].1, rows[0].2),
+            (1, rows[1].0, rows[1].1, rows[1].2),
+            (4, rows[2].0, rows[2].1, rows[2].2),
+            (2, rows[3].0, rows[3].1, rows[3].2),
+            (3, rows[4].0, rows[4].1, rows[4].2),
+        ]) {
+            self.card_switch(cv, te, f, *r, label, sub, on, Hit::FormShare(i));
+        }
+        y += 5 * p(56.0) + p(20.0);
+
+        if o.sound {
+            y = self.device_card(
+                cv,
+                te,
+                f,
+                x,
+                y,
+                w,
+                "PLAY SOUND ON",
+                "Default output",
+                &self.speakers.clone(),
+                o.speaker.as_deref(),
+                Hit::FormSpeaker,
+            );
+        }
+        if o.microphone {
+            y = self.device_card(
+                cv,
+                te,
+                f,
+                x,
+                y,
+                w,
+                "RECORD FROM",
+                "Default microphone",
+                &self.mics.clone(),
+                o.mic.as_deref(),
+                Hit::FormMic,
+            );
+        }
+
+        self.caption(cv, te, f, x, y, w, "SHARED FOLDERS");
+        y += p(24.0);
+        let n = o.drives.len();
+        let mut heights = vec![p(46.0); n];
+        heights.push(p(52.0));
+        let cells = self.card(cv, x, y, w, &heights);
+        for (i, (r, path)) in cells.iter().zip(&o.drives).enumerate() {
+            let close = Rect::new(r.right() - p(40.0), r.y + p(11.0), p(24.0), p(24.0));
+            te.draw(
+                cv,
+                f.ui,
+                13.0 * s,
+                (r.x + p(16.0)) as f32,
+                (r.y + r.h / 2 + p(5.0)) as f32,
+                path,
+                TEXT,
+                (close.x - r.x - p(24.0)) as f32,
+            );
+            let hit = Hit::FormRemoveDrive(i);
+            if self.hover == Some(hit) {
+                cv.fill_round(close, 5.0 * s, CONTROL_HOVER);
+            }
+            let (cx, cy, dd) = (
+                (close.x + close.w / 2) as f32,
+                (close.y + close.h / 2) as f32,
+                4.0 * s,
+            );
+            cv.stroke(&[(cx - dd, cy - dd), (cx + dd, cy + dd)], 1.4 * s, TEXT_2);
+            cv.stroke(&[(cx - dd, cy + dd), (cx + dd, cy - dd)], 1.4 * s, TEXT_2);
+            self.hits.push((close, hit));
+        }
+        let r = cells[n];
+        let (bw, aw) = (p(96.0), p(64.0));
+        let inner = Rect::new(r.x + p(12.0), r.y + p(9.0), r.w - p(24.0), r.h - p(18.0));
+        self.button(
+            cv,
+            te,
+            f,
+            Rect::new(inner.x, inner.y, bw, inner.h),
+            "Browse…",
+            Style::Secondary,
+            Hit::BrowseForm,
+        );
+        self.text_input(
+            cv,
+            te,
+            f,
+            Rect::new(
+                inner.x + bw + p(8.0),
+                inner.y,
+                inner.w - bw - aw - p(16.0),
+                inner.h,
+            ),
+            Field::FormDrive,
+            r"or type a path, e.g. C:\Share",
+        );
+        self.button(
+            cv,
+            te,
+            f,
+            Rect::new(inner.right() - aw, inner.y, aw, inner.h),
+            "Add",
+            Style::Secondary,
+            Hit::FormAddDrive,
+        );
+        y + heights.iter().sum::<i32>()
+    }
+
+    /// The panel's device card (hits carry the session id).
+    #[allow(clippy::too_many_arguments)]
+    fn device_card_tab(
+        &mut self,
+        cv: &mut Canvas,
+        te: &mut TextEngine,
+        f: &Fonts,
+        x: i32,
+        mut y: i32,
+        w: i32,
+        caption: &str,
+        default: &str,
+        devices: &[String],
+        chosen: Option<&str>,
+        id: u64,
+        hit: fn(u64, usize) -> Hit,
+    ) -> i32 {
+        let s = self.scale;
+        let p = |v: f32| (v * s).round() as i32;
+        self.caption(cv, te, f, x, y, w, caption);
+        y += p(24.0);
+        let names: Vec<&str> = std::iter::once(default)
+            .chain(devices.iter().map(String::as_str))
+            .collect();
+        let pick = chosen
+            .and_then(|c| devices.iter().position(|d| d == c))
+            .map_or(0, |i| i + 1);
+        let cells = self.card(cv, x, y, w, &vec![p(40.0); names.len()]);
+        for (i, (r, name)) in cells.iter().zip(&names).enumerate() {
+            self.card_radio(cv, te, f, *r, name, pick == i, hit(id, i));
+        }
+        y + names.len() as i32 * p(40.0) + p(20.0)
+    }
+
+    /// A caption and a card choosing one local device (or the default).
+    #[allow(clippy::too_many_arguments)]
+    fn device_card(
+        &mut self,
+        cv: &mut Canvas,
+        te: &mut TextEngine,
+        f: &Fonts,
+        x: i32,
+        mut y: i32,
+        w: i32,
+        caption: &str,
+        default: &str,
+        devices: &[String],
+        chosen: Option<&str>,
+        hit: fn(usize) -> Hit,
+    ) -> i32 {
+        let s = self.scale;
+        let p = |v: f32| (v * s).round() as i32;
+        self.caption(cv, te, f, x, y, w, caption);
+        y += p(24.0);
+        let names: Vec<&str> = std::iter::once(default)
+            .chain(devices.iter().map(String::as_str))
+            .collect();
+        let pick = chosen
+            .and_then(|c| devices.iter().position(|d| d == c))
+            .map_or(0, |i| i + 1);
+        let cells = self.card(cv, x, y, w, &vec![p(42.0); names.len()]);
+        for (i, (r, name)) in cells.iter().zip(&names).enumerate() {
+            self.card_radio(cv, te, f, *r, name, pick == i, hit(i));
+        }
+        y + names.len() as i32 * p(42.0) + p(20.0)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn form_advanced(
+        &mut self,
+        cv: &mut Canvas,
+        te: &mut TextEngine,
+        f: &Fonts,
+        x: i32,
+        mut y: i32,
+        w: i32,
+        parent: &str,
+        inh: Inherit,
+    ) -> i32 {
+        let s = self.scale;
+        let p = |v: f32| (v * s).round() as i32;
+        if self.inherit_card(
+            cv,
+            te,
+            f,
+            x,
+            &mut y,
+            w,
+            parent,
+            1,
+            inh.display,
+            "display settings",
+        ) {
+            return y - p(20.0);
+        }
+        let q = self.opts.quality;
+        self.caption(cv, te, f, x, y, w, "WINDOWS KEYS (WIN, ALT+TAB, …)");
+        y += p(24.0);
+        let items: Vec<(String, bool, Hit)> = WinKeys::ALL
+            .iter()
+            .enumerate()
+            .map(|(i, k)| {
+                let t = match k {
+                    WinKeys::Local => "On this PC",
+                    WinKeys::Remote => "On the remote",
+                    WinKeys::FullScreen => "Remote in full screen",
+                };
+                (t.to_string(), self.opts.win_keys == *k, Hit::FormWinKeys(i))
+            })
+            .collect();
+        self.segmented(cv, te, f, Rect::new(x, y, w, p(34.0)), &items);
+        y += p(34.0) + p(20.0);
+
+        self.caption(cv, te, f, x, y, w, "COMPRESSION");
+        y += p(24.0);
+        let items: Vec<(String, bool, Hit)> = COMPRESSION
+            .iter()
+            .enumerate()
+            .map(|(i, (key, name))| {
+                (
+                    name.to_string(),
+                    q.compression == *key,
+                    Hit::FormCompression(i),
+                )
+            })
+            .collect();
+        self.segmented(cv, te, f, Rect::new(x, y, w, p(34.0)), &items);
+        y += p(34.0);
+        self.hint(
+            cv,
+            te,
+            f,
+            x,
+            y + p(16.0),
+            w,
+            "Less data on slow links, a little more CPU. Off is fastest on a LAN.",
+        );
+        y + p(24.0)
     }
 
     /// Mouse wheel over the quick panel or the connection form; true when
@@ -3253,6 +3590,8 @@ impl Ui {
             host: tab.host.clone(),
             win_keys: tab.win_keys,
             speaker: tab.speaker.clone(),
+            microphone: tab.microphone,
+            mic: tab.mic.clone(),
         };
         let x = d.x + p(16.0);
         let w = d.w - p(32.0);
@@ -3330,6 +3669,12 @@ impl Ui {
             ),
             ("Sound", "Remote audio on this PC", t.sound, Hit::Sound(id)),
             (
+                "Microphone",
+                "This PC's microphone",
+                t.microphone,
+                Hit::Microphone(id),
+            ),
+            (
                 "Printers",
                 "Local printers in the session",
                 t.printers,
@@ -3342,11 +3687,28 @@ impl Ui {
                 Hit::SmartCards(id),
             ),
         ];
-        let cells = self.card(cv, x, y, w, &[p(52.0); 4]);
+        let cells = self.card(cv, x, y, w, &[p(52.0); 5]);
         for (r, (label, sub, on, hit)) in cells.iter().zip(rows) {
             self.card_switch(cv, te, f, *r, label, sub, on, hit);
         }
-        y += 4 * p(52.0) + p(20.0);
+        y += 5 * p(52.0) + p(20.0);
+        if t.microphone {
+            let mics = self.mics.clone();
+            y = self.device_card_tab(
+                cv,
+                te,
+                f,
+                x,
+                y,
+                w,
+                "RECORD FROM",
+                "Default microphone",
+                &mics,
+                t.mic.as_deref(),
+                id,
+                Hit::TabMic,
+            );
+        }
 
         if t.sound {
             self.caption(cv, te, f, x, y, w, "PLAY SOUND ON");
@@ -4339,6 +4701,23 @@ fn session_action(r: &Connection, password: &str) -> Action {
     }
 }
 
+/// The connection editor on `page` for a top-level connection.
+pub fn sample_form(page: u8) -> Ui {
+    let mut m = sample(false);
+    m.select(2);
+    m.form_page = page;
+    m.speakers = vec![
+        "Speakers (Realtek Audio)".into(),
+        "Headset (USB Audio)".into(),
+    ];
+    m.mics = vec!["Headset microphone (USB Audio)".into()];
+    m.opts.sound = true;
+    m.opts.microphone = true;
+    m.opts.clipboard = true;
+    m.opts.drives = vec![r"C:\Share".into()];
+    m
+}
+
 /// A session tab waiting for the user to trust the server certificate.
 pub fn sample_cert(changed: bool) -> Ui {
     let mut m = sample(true);
@@ -4509,6 +4888,7 @@ mod tests {
         };
         let mut m = sample(false);
         m.select(2); // top level, no inheritance: every row shown
+        m.form_page = 2; // Experience: the tallest page
         let (w, h) = (1100usize, 520usize);
         let mut px = vec![0u32; w * h];
         m.paint(&mut Canvas::new(&mut px, w, h), &mut te, &fonts);
@@ -4531,8 +4911,8 @@ mod tests {
         );
         assert!(inside(&m));
         assert!(
-            m.hits.iter().any(|(_, h)| *h == Hit::Connect),
-            "buttons reachable"
+            m.hits.iter().any(|(_, h)| *h == Hit::FormExperience(5)),
+            "the last row is reachable"
         );
         assert!(m.scroll_home(cx, cy, 100.0));
         assert_eq!(m.home_scroll, 0);
@@ -4573,7 +4953,7 @@ mod tests {
                 .all(|(_, h)| matches!(h, Hit::Modal | Hit::ExitConfirm | Hit::ExitCancel))
         );
         assert!(
-            matches!(m.key(Key::Esc), None) && m.confirm_exit.is_none(),
+            m.key(Key::Esc).is_none() && m.confirm_exit.is_none(),
             "Esc stays"
         );
     }
