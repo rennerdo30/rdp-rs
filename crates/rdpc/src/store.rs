@@ -36,6 +36,10 @@ pub struct Connection {
     /// RD Gateway as host[:port]; empty: direct. Part of Credentials.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub gateway: String,
+    /// Sign in with Windows (Kerberos, NTLM fallback) instead of rdpc's own
+    /// NTLM. Part of Credentials.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub kerberos: bool,
     /// Sections taken from the group instead of this connection.
     #[serde(default)]
     pub inherit: Inherit,
@@ -73,6 +77,9 @@ pub struct Group {
     /// RD Gateway as host[:port]; empty: direct.
     #[serde(skip_serializing_if = "String::is_empty")]
     pub gateway: String,
+    /// Sign in with Windows (Kerberos).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub kerberos: bool,
     pub width: u16,
     pub height: u16,
     pub options: SessionOptions,
@@ -721,6 +728,7 @@ impl Store {
             out.user = g.user.clone();
             out.password = g.password.clone();
             out.gateway = g.gateway.clone();
+            out.kerberos = g.kerberos;
         }
         if let Some(g) = self.source_of(&c.group, &c.inherit, |i| i.display) {
             out.width = g.width;

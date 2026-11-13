@@ -132,6 +132,8 @@ pub enum Hit {
     FormInherit(u8),
     /// Connection editor page (General, Display, Experience, Sharing, Advanced).
     FormPage(u8),
+    /// Sign in with Windows (Kerberos) on or off.
+    FormKerberos,
     /// Settings page and its controls.
     OpenSettings,
     AutoLock(usize),
@@ -427,6 +429,8 @@ pub struct Ui {
     group_edit: Option<Option<String>>,
     /// Inherit choices of the edited connection or group.
     inherit: Inherit,
+    /// The edited connection or group signs in with Windows (Kerberos).
+    kerberos: bool,
     /// Collapsed group paths in the sidebar.
     collapsed: std::collections::HashSet<String>,
     /// Session settings of the connection being edited.
@@ -533,6 +537,7 @@ impl Ui {
             selected: None,
             group_edit: None,
             inherit: Inherit::default(),
+            kerberos: false,
             collapsed: Default::default(),
             opts: SessionOptions::default(),
             save_password: false,
@@ -702,6 +707,7 @@ impl Ui {
         self.field_mut(Field::Password).set("");
         self.field_mut(Field::GroupPath).set(&c.group);
         self.field_mut(Field::Gateway).set(&c.gateway);
+        self.kerberos = c.kerberos;
         self.size = size_index(c.width, c.height);
         self.opts = c.options.clone();
         self.save_password = c.password.is_some();
@@ -722,6 +728,7 @@ impl Ui {
         self.field_mut(Field::GroupPath).set(g.parent());
         self.field_mut(Field::User).set(&g.user);
         self.field_mut(Field::Gateway).set(&g.gateway);
+        self.kerberos = g.kerberos;
         self.size = size_index(g.width, g.height);
         self.opts = g.options.clone();
         self.save_password = g.password.is_some();
@@ -847,7 +854,8 @@ impl Ui {
         };
         let inherit = self.form_inherit();
         let user = self.field(Field::User).text.trim().to_string();
-        if user.is_empty() && !inherit.credentials {
+        // Windows sign-in may use the logged-on user (single sign-on).
+        if user.is_empty() && !inherit.credentials && !self.kerberos {
             return Err("Enter a user name.".into());
         }
         let name = match self.field(Field::Name).text.trim() {
@@ -866,6 +874,7 @@ impl Ui {
             password: self.form_password(inherit.credentials),
             group: normalize_path(&self.field(Field::GroupPath).text),
             gateway: self.field(Field::Gateway).text.trim().to_string(),
+            kerberos: self.kerberos,
             inherit,
         })
     }
@@ -896,6 +905,7 @@ impl Ui {
             user: self.field(Field::User).text.trim().to_string(),
             password: self.form_password(inherit.credentials),
             gateway: self.field(Field::Gateway).text.trim().to_string(),
+            kerberos: self.kerberos,
             width,
             height,
             options: self.opts.clone(),
@@ -1022,7 +1032,7 @@ impl Ui {
             }
         }
         let r = self.store.resolve(&c);
-        if r.user.is_empty() {
+        if r.user.is_empty() && !r.kerberos {
             self.set_message("No user name: enter one here or in the group.", ERR);
             return None;
         }
@@ -1393,6 +1403,7 @@ impl Ui {
                 self.vault_error = None;
                 self.focus = Some(Field::Master);
             }
+            Hit::FormKerberos => self.kerberos = !self.kerberos,
             Hit::FormPage(i) => {
                 self.form_page = i;
                 self.home_scroll = 0;
@@ -3425,7 +3436,7 @@ impl Ui {
             return y + rh;
         }
         let saved = self.save_password && self.own_password().is_some();
-        let cells = self.card(cv, x, y, w, &[rh, rh, p(58.0), rh]);
+        let cells = self.card(cv, x, y, w, &[rh, rh, p(58.0), p(58.0), rh]);
         self.field_row(
             cv,
             te,
@@ -3458,16 +3469,27 @@ impl Ui {
             self.save_password,
             Hit::SavePassword,
         );
-        self.field_row(
+        let kerberos = self.kerberos;
+        self.card_switch(
             cv,
             te,
             f,
             cells[3],
+            "Sign in with Windows",
+            "Kerberos for domain servers, NTLM as a fallback; no user: you",
+            kerberos,
+            Hit::FormKerberos,
+        );
+        self.field_row(
+            cv,
+            te,
+            f,
+            cells[4],
             "Gateway",
             Field::Gateway,
             "None (direct), or rdg.example.com",
         );
-        y + 3 * rh + p(58.0)
+        y + 3 * rh + 2 * p(58.0)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -5525,6 +5547,10 @@ fn size_index(w: u16, h: u16) -> usize {
 fn session_action(r: &Connection, password: &str) -> Action {
     let mut cfg = rdp::Config::new(&r.host, &r.user, password);
     cfg.port = r.port;
+    #[cfg(windows)]
+    if r.kerberos {
+        cfg.auth = Some(crate::sspi::factory());
+    }
     if let Some(gw) = parse_gateway(&r.gateway) {
         // The gateway login uses the connection's credentials.
         let mut g = rdp::GatewayConfig::new(&gw.0, &r.user, password);
@@ -5647,6 +5673,7 @@ pub fn sample(session_tab: bool) -> Ui {
             options: SessionOptions::default(),
             password: None,
             gateway: String::new(),
+            kerberos: false,
             group: "Work".into(),
             inherit: Inherit::ALL,
         },
@@ -5660,6 +5687,7 @@ pub fn sample(session_tab: bool) -> Ui {
             options: SessionOptions::default(),
             password: None,
             gateway: String::new(),
+            kerberos: false,
             group: "Work/Lab".into(),
             inherit: Inherit {
                 credentials: true,
@@ -5676,6 +5704,7 @@ pub fn sample(session_tab: bool) -> Ui {
             options: SessionOptions::default(),
             password: None,
             gateway: String::new(),
+            kerberos: false,
             group: String::new(),
             inherit: Inherit::default(),
         },
