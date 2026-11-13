@@ -9,10 +9,12 @@
 //! - [`fastpath`] + [`input`]: fast-path output updates and fast-path input events
 //! - [`codec`]: interleaved RLE and planar bitmap codecs (MS-RDPBCGR 2.2.9.1.1.3.1.2.4, MS-RDPEGDI 2.2.2.5.1)
 //! - [`dvc`] + [`disp`]: dynamic virtual channels (MS-RDPEDYC) and Display Control (MS-RDPEDISP)
+//! - [`cliprdr`]: clipboard redirection on the `cliprdr` channel (MS-RDPECLIP)
 //! - [`client`]: the connection sequence and the session loop
 
 pub mod channel;
 pub mod client;
+pub mod cliprdr;
 pub mod codec;
 pub mod credssp;
 pub mod crypto;
@@ -34,6 +36,7 @@ pub mod x224;
 
 pub use channel::{ChannelOut, StaticChannel};
 pub use client::{Client, Config, ConnectionInfo, PollOutcome};
+pub use cliprdr::{ClipboardBackend, ClipboardHandle, Cliprdr, cliprdr};
 pub use disp::{DisplayControl, DisplayHandle, display_control};
 pub use dvc::{Drdynvc, DvcOut, DynamicChannel};
 pub use error::{Error, Result};

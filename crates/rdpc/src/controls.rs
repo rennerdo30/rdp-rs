@@ -4,22 +4,37 @@
 //! Every session declares all channels at connect time (the protocol cannot
 //! add them later); sharing itself starts off and follows the drawer toggles.
 
-use rdp::{DisplayHandle, Drdynvc, StaticChannel};
+use rdp::{ClipboardHandle, DisplayHandle, Drdynvc, StaticChannel};
+
+use crate::clipboard::WindowsClipboard;
 
 pub struct Controls {
     display: DisplayHandle,
+    clipboard: ClipboardHandle,
 }
 
 impl Controls {
     /// The channel handlers for a new session, and the handles to steer them.
     pub fn build() -> (Vec<Box<dyn StaticChannel>>, Controls) {
         let (display, display_handle) = rdp::display_control();
-        let channels: Vec<Box<dyn StaticChannel>> = vec![Box::new(Drdynvc::new(vec![Box::new(display)]))];
-        (channels, Controls { display: display_handle })
+        let (cliprdr, clipboard) = rdp::cliprdr(Box::new(WindowsClipboard));
+        let channels: Vec<Box<dyn StaticChannel>> = vec![
+            Box::new(Drdynvc::new(vec![Box::new(display)])),
+            Box::new(cliprdr),
+        ];
+        (
+            channels,
+            Controls {
+                display: display_handle,
+                clipboard,
+            },
+        )
     }
 
-    pub fn set_clipboard(&self, _on: bool) -> Result<(), String> {
-        Err("clipboard sharing is not available in this build".into())
+    /// Text clipboard sharing, both directions; applies on the next session poll.
+    pub fn set_clipboard(&self, on: bool) -> Result<(), String> {
+        self.clipboard.set_enabled(on);
+        Ok(())
     }
 
     /// Asks the server to resize the desktop to the tab. The request waits
