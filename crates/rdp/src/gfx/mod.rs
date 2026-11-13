@@ -12,11 +12,13 @@
 //! - [`h264`]: the H.264 decoder interface and colour conversion (3.3.8.3).
 //! - [`clearcodec`]: ClearCodec and its caches (2.2.4.1, 3.3.8.1), with the
 //!   NSCodec subcodec in [`nsc`] (MS-RDPNSC).
+//! - [`progressive`]: RemoteFX Progressive (2.2.4.2, 3.3.8.2) and its
+//!   codec contexts, on the RemoteFX core in [`rfx`] (MS-RDPRFX).
 //!
-//! Codecs: uncompressed, planar (MS-RDPEGDI 2.2.2.5.1), ClearCodec and
-//! AVC420 (2.2.4.4) when an H.264 decoder is supplied. Not implemented: AVC444,
-//! RemoteFX and RemoteFX Progressive (WireToSurface2) and Alpha; their
-//! updates are dropped and traced. The persistent bitmap cache is not
+//! Codecs: uncompressed, planar (MS-RDPEGDI 2.2.2.5.1), ClearCodec, RemoteFX
+//! Progressive (WireToSurface2) and AVC420 (2.2.4.4) when an H.264 decoder
+//! is supplied. Not implemented: AVC444, RemoteFX in WireToSurface1 and
+//! Alpha; their updates are dropped and traced. The persistent bitmap cache is not
 //! offered (no RDPGFX_CACHE_IMPORT_OFFER_PDU, 3.3.5.16).
 //!
 //! Frames are composed into the output buffer at RDPGFX_END_FRAME_PDU and
@@ -27,11 +29,15 @@ pub mod clearcodec;
 pub mod h264;
 pub mod nsc;
 pub mod pdu;
+pub mod progressive;
+pub mod rfx;
 pub mod surface;
 pub mod zgfx;
 
 #[cfg(test)]
 mod clearcodec_tests;
+#[cfg(test)]
+mod progressive_tests;
 #[cfg(test)]
 mod tests;
 
@@ -46,6 +52,7 @@ use crate::trace;
 use clearcodec::ClearCodec;
 use h264::H264Decoder;
 use pdu::{CapSet, Rect16, ServerPdu};
+use progressive::Progressive;
 use surface::{Area, GfxState};
 
 /// Dynamic virtual channel name (2.1).
@@ -117,6 +124,8 @@ pub struct GraphicsChannel {
     /// ClearCodec storages and cursors; they belong to the channel, not to
     /// a surface (3.3.1.9 - 3.3.1.13).
     clear: ClearCodec,
+    /// RemoteFX Progressive tiles and codec contexts (3.3.1.1 - 3.3.1.3).
+    progressive: Progressive,
     /// The capability set the server confirmed (3.3.1.14).
     confirmed: Option<CapSet>,
     /// Frames decoded since the channel opened (2.2.2.13).
@@ -133,6 +142,7 @@ pub fn graphics(h264: Option<Box<dyn H264Decoder>>) -> (GraphicsChannel, GfxHand
             zgfx: zgfx::Zgfx::new(),
             h264,
             clear: ClearCodec::new(),
+            progressive: Progressive::new(),
             confirmed: None,
             frames: 0,
         },
@@ -194,6 +204,8 @@ impl GraphicsChannel {
                 trace!(
                     "gfx: create surface {surface_id} {width}x{height} format {pixel_format:#x}"
                 );
+                // A new surface starts without tiles (3.3.1.3).
+                self.progressive.delete_surface(surface_id);
                 if let Err(e) = self
                     .state()
                     .create(surface_id, width as usize, height as usize)
@@ -201,7 +213,10 @@ impl GraphicsChannel {
                     trace!("{e}");
                 }
             }
-            ServerPdu::DeleteSurface { surface_id } => self.state().delete(surface_id),
+            ServerPdu::DeleteSurface { surface_id } => {
+                self.progressive.delete_surface(surface_id);
+                self.state().delete(surface_id);
+            }
             ServerPdu::MapSurfaceToOutput { surface_id, x, y } => {
                 if !self.state().map(surface_id, x as usize, y as usize) {
                     missing("map to output", surface_id);
@@ -292,6 +307,21 @@ impl GraphicsChannel {
                     trace!("gfx: wire to surface {surface_id} codec {codec_id:#x}: {e}");
                 }
             }
+            ServerPdu::WireToSurface2 {
+                surface_id,
+                codec_id,
+                context_id,
+                data,
+                ..
+            } => {
+                if let Err(e) = self.wire_to_surface2(surface_id, codec_id, context_id, data) {
+                    trace!("gfx: wire to surface 2 {surface_id} context {context_id}: {e}");
+                }
+            }
+            ServerPdu::DeleteEncodingContext {
+                surface_id,
+                context_id,
+            } => self.progressive.delete_context(surface_id, context_id),
             ServerPdu::Other(cmd) => {
                 trace!("gfx: command {cmd:#x} not supported, ignored");
             }
@@ -355,6 +385,29 @@ impl GraphicsChannel {
             trace!("gfx: wire to surface for unknown surface {id}");
         }
         Ok(())
+    }
+
+    /// RDPGFX_WIRE_TO_SURFACE_PDU_2 (3.3.5.2): RemoteFX Progressive tiles
+    /// painted into the surface, clipped to the region rectangles.
+    fn wire_to_surface2(&mut self, id: u16, codec: u16, ctx: u32, data: &[u8]) -> Result<()> {
+        if codec != pdu::CODECID_CAPROGRESSIVE {
+            trace!("gfx: codec {codec:#x} in wire to surface 2 not implemented");
+            return Ok(());
+        }
+        let mut st = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        let Some(surface) = st.surface_mut(id) else {
+            trace!("gfx: wire to surface 2 for unknown surface {id}");
+            return Ok(());
+        };
+        let mut painted = Vec::new();
+        let r = self
+            .progressive
+            .decode(id, ctx, data, surface, &mut painted);
+        // What was painted before an error stays and is shown.
+        for a in painted {
+            st.mark(id, a);
+        }
+        r
     }
 
     /// AVC420 (2.2.4.4): decode the frame, then copy the region rectangles
@@ -435,6 +488,7 @@ impl DynamicChannel for GraphicsChannel {
         trace!("gfx: channel closed");
         self.zgfx = zgfx::Zgfx::new();
         self.clear = ClearCodec::new();
+        self.progressive = Progressive::new();
         self.confirmed = None;
     }
 }

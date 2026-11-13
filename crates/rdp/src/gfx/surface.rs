@@ -166,6 +166,11 @@ impl GfxState {
         self.surfaces.get(&id)
     }
 
+    /// Writable surface; the caller marks what it changes with [`Self::mark`].
+    pub fn surface_mut(&mut self, id: u16) -> Option<&mut Surface> {
+        self.surfaces.get_mut(&id)
+    }
+
     pub fn output(&self) -> &Framebuffer {
         &self.output
     }
