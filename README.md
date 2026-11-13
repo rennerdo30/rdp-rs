@@ -15,9 +15,9 @@ MD4, MD5, HMAC-MD5, RC4 and the ASN.1 DER/BER/PER encodings. Only TLS
 > path; the graphics pipeline (GFX, H.264) is experimental. Expect rough edges
 > and please report them.
 
-## RDP coverage: about 47 %
+## RDP coverage: about 61 %
 
-Of the 38 features a full RDP client offers (below), 16 are done and 4 partly (47 %, counting a partial one as half). That covers the everyday desktop: logon with NLA, the picture, keyboard and mouse, clipboard, drives, printers, smart cards and sound. The missing ones are mostly special cases and enterprise features.
+Of the 38 features a full RDP client offers (below), 21 are done and 4 partly (61 %, counting a partial one as half). That covers the everyday desktop: logon with NLA, the picture, keyboard and mouse, clipboard, drives, printers, smart cards and sound. The missing ones are mostly special cases and enterprise features.
 
 <details>
 <summary>Feature list</summary>
@@ -26,12 +26,12 @@ Of the 38 features a full RDP client offers (below), 16 are done and 4 partly (4
 |---|---|---|---|
 | Connection and security | Connection sequence (X.224, MCS, GCC, capabilities, finalization) | ✅ | MS-RDPBCGR |
 |  | TLS and NLA (CredSSP with NTLMv2) | ✅ | MS-CSSP, MS-NLMP |
-|  | Kerberos authentication | — | MS-KILE |
+|  | Kerberos authentication | ✅ | MS-KILE via Windows SSPI Negotiate; single sign-on |
 |  | Legacy RDP security (RC4, no TLS) | — | MS-RDPBCGR 5.3 |
 |  | Licensing | ◐ | MS-RDPELE: the TLS 'valid client' path only |
 |  | Auto-reconnect and heartbeat | ✅ | MS-RDPBCGR 5.5, 2.2.16 |
 |  | Server certificate check | ✅ | trust on first use |
-|  | Session broker redirection | — | MS-RDPBCGR 2.2.13 |
+|  | Session broker redirection | ◐ | MS-RDPBCGR 2.2.13: followed while connecting, not yet mid-session |
 |  | RD Gateway | ◐ | MS-TSGU: HTTP/WebSocket with NTLM; no RPC over HTTP, no UDP |
 |  | UDP transport and multitransport | — | MS-RDPEMT, MS-RDPEUDP |
 |  | Network auto-detect | — | MS-RDPBCGR 2.2.14 |
@@ -41,13 +41,13 @@ Of the 38 features a full RDP client offers (below), 16 are done and 4 partly (4
 |  | Persistent bitmap cache | — | MS-RDPBCGR 2.2.1.17 |
 |  | Graphics pipeline: ZGFX, surfaces, ClearCodec, Progressive | ✅ | MS-RDPEGFX (experimental) |
 |  | H.264 AVC420 | ✅ | MS-RDPEGFX 2.2.4.4 |
-|  | H.264 AVC444 | — | MS-RDPEGFX 2.2.4.5 |
+|  | H.264 AVC444 | ✅ | MS-RDPEGFX 2.2.4.5, 2.2.4.6 (AVC444v2) |
 |  | RemoteFX surface bits (RDP 7) | — | MS-RDPRFX |
 |  | Pointer shapes | ✅ | MS-RDPBCGR 2.2.9.1.1.4 |
 |  | Display Control (resize, scaling) | ✅ | MS-RDPEDISP |
-|  | Multiple monitors | — | MS-RDPBCGR 2.2.1.3.6 |
+|  | Multiple monitors | ✅ | MS-RDPBCGR 2.2.1.3.6: any chosen monitors, one window each |
 | Input | Keyboard and mouse (fast-path) | ✅ | MS-RDPBCGR 2.2.8.1.2 |
-|  | Unicode keyboard input | ◐ | in the library; the client sends scancodes |
+|  | Unicode keyboard input | ✅ | touch keyboard, emoji panel, injected text |
 |  | Touch and pen | — | MS-RDPEI |
 | Device redirection | Clipboard: text and files | ✅ | MS-RDPECLIP |
 |  | Drives | ✅ | MS-RDPEFS |
@@ -57,10 +57,10 @@ Of the 38 features a full RDP client offers (below), 16 are done and 4 partly (4
 |  | USB devices | — | MS-RDPEUSB |
 |  | Cameras | — | MS-RDPECAM |
 |  | Plug and play devices | — | MS-RDPEPNP |
-| Audio and video | Audio playback | ◐ | MS-RDPEA: PCM only, no compressed formats |
+| Audio and video | Audio playback | ✅ | MS-RDPEA: PCM, ADPCM, AAC, MP3 |
 |  | Microphone | ✅ | MS-RDPEAI |
 |  | Video redirection | — | MS-RDPEVOR, MS-RDPEV |
-| Remote apps and collaboration | RemoteApp (seamless windows) | — | MS-RDPERP |
+| Remote apps and collaboration | RemoteApp (seamless windows) | ◐ | MS-RDPERP: protocol and window model; no seamless windows yet |
 |  | Multiparty and shadowing | — | MS-RDPEMC |
 
 </details>
