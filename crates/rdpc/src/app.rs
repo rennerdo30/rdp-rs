@@ -205,6 +205,20 @@ pub fn run(direct: Option<(String, Config)>) -> i32 {
 }
 
 impl App {
+    fn set_fullscreen(&mut self, on: bool) {
+        let Some(m) = &mut self.win else { return };
+        if on && m.ui.active.is_none() {
+            return;
+        }
+        m.gfx
+            .window
+            .set_fullscreen(on.then_some(winit::window::Fullscreen::Borderless(None)));
+        m.ui.fullscreen = on;
+        m.shown.clear();
+        self.settle();
+        self.dirty();
+    }
+
     /// Full presents for a moment (see `MainWin::settle`).
     fn settle(&mut self) {
         if let Some(m) = &mut self.win {
@@ -302,6 +316,8 @@ impl App {
             }
         }
         if let Some(t) = self.win.as_mut().and_then(|w| w.ui.tab_mut(id)) {
+            t.quality = opts.quality;
+            t.quality_live = opts.quality;
             t.scale = opts.scale;
             t.clipboard = clipboard;
             t.sound = sound;
@@ -330,7 +346,7 @@ impl App {
             printers: t.printers,
             smart_cards: t.smart_cards,
             drives: t.drives.iter().map(|d| d.path.clone()).collect(),
-            ..Default::default()
+            quality: t.quality,
         }
     }
 
@@ -388,6 +404,14 @@ impl App {
                 }
                 self.start_session(name, *cfg, fit, opts);
             }
+            Action::SetQuality(id, q) => {
+                // Used by the next logon of this session.
+                if let Some(s) = self.sessions.get_mut(&id) {
+                    q.apply(&mut s.cfg);
+                }
+                self.dirty();
+            }
+            Action::SetFullscreen(on) => self.set_fullscreen(on),
             Action::InstallUpdate => {
                 let Some(c) = self.update.clone() else {
                     return;
@@ -737,6 +761,18 @@ impl App {
     }
 
     fn keyboard(&mut self, ev: winit::event::KeyEvent) {
+        // Ctrl+Alt+Break switches full screen (as in mstsc), also from inside a session.
+        if ev.state.is_pressed()
+            && self.mods.control_key()
+            && self.mods.alt_key()
+            && matches!(
+                ev.logical_key,
+                WKey::Named(NamedKey::Pause | NamedKey::Cancel)
+            )
+        {
+            let on = self.win.as_ref().is_some_and(|m| m.ui.fullscreen);
+            return self.set_fullscreen(!on);
+        }
         let Some(m) = &mut self.win else { return };
         let session = if m.ui.session_focus {
             m.ui.session_area.map(|(id, _)| id)
@@ -1387,7 +1423,7 @@ impl App {
                         MouseScrollDelta::LineDelta(_, l) => l,
                         MouseScrollDelta::PixelDelta(p) => p.y as f32 / 40.0,
                     };
-                    if self.win.as_mut().unwrap().ui.scroll_home(x, y, lines) {
+                    if self.win.as_mut().unwrap().ui.scroll(x, y, lines) {
                         self.dirty();
                     }
                 }

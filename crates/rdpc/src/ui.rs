@@ -119,6 +119,13 @@ pub enum Hit {
     NewInGroup,
     /// Connection/group form: inherit chip (credentials, display, sharing).
     FormInherit(u8),
+    /// Quick panel: page, and the session's quality (applies on reconnect).
+    DrawerPage(u8),
+    TabPreset(u64, usize),
+    TabDepth(u64, usize),
+    TabExperience(u64, u8),
+    /// Enter or leave full screen.
+    FullScreen,
     /// Quality: speed preset (index into PRESETS), colour depth, experience toggle.
     FormPreset(usize),
     FormDepth(usize),
@@ -202,6 +209,24 @@ pub struct Tab {
     /// Remote desktop scale in percent; None follows this PC's scaling.
     pub scale: Option<u32>,
     pub drives: Vec<SharedDrive>,
+    /// Quality chosen in the panel, and the one the session logged on with.
+    pub quality: Quality,
+    pub quality_live: Quality,
+}
+
+/// The tab values the panel paints (copied out to paint without borrowing).
+struct TabView {
+    clipboard: bool,
+    sound: bool,
+    printers: bool,
+    smart_cards: bool,
+    fit: bool,
+    scale: Option<u32>,
+    drives: Vec<SharedDrive>,
+    quality: Quality,
+    quality_live: Quality,
+    state: TabState,
+    host: String,
 }
 
 pub enum Action {
@@ -239,6 +264,9 @@ pub enum Action {
     Batch(Vec<Action>),
     /// Download, verify and start the setup of the offered update.
     InstallUpdate,
+    /// A session's quality for its next logon.
+    SetQuality(u64, Quality),
+    SetFullscreen(bool),
 }
 
 pub enum Key {
@@ -289,6 +317,13 @@ pub struct Ui {
     /// None: the Connections tab.
     pub active: Option<u64>,
     pub drawer: bool,
+    /// Quick panel page (0 Sharing, 1 Display, 2 Quality, 3 Session) and scrolling.
+    drawer_page: u8,
+    drawer_scroll: i32,
+    drawer_content: i32,
+    drawer_area: Rect,
+    /// The window is full screen (the app sets it): only the session and its bar.
+    pub fullscreen: bool,
     /// Keyboard goes to the active session (set by clicking into it).
     pub session_focus: bool,
     /// Where the active session's picture goes, set by `paint`.
@@ -353,6 +388,11 @@ impl Ui {
             tabs: Vec::new(),
             active: None,
             drawer: true,
+            drawer_page: 0,
+            drawer_scroll: 0,
+            drawer_content: 0,
+            drawer_area: Rect::default(),
+            fullscreen: false,
             session_focus: false,
             session_area: None,
             hover: None,
@@ -407,11 +447,14 @@ impl Ui {
     /// pixels: the same layout as `paint` (sidebar, tab strip, toolbar, drawer).
     pub fn session_size_for(&self, w: i32, h: i32) -> (i32, i32) {
         let p = |v: f32| (v * self.scale).round() as i32;
-        let side_w = p(260.0).min(w / 3);
-        let mut aw = w - side_w - 1;
-        let ah = h - p(28.0) - p(38.0) - p(40.0);
+        let (mut aw, ah) = if self.fullscreen {
+            (w, h - p(40.0))
+        } else {
+            let side_w = p(260.0).min(w / 3);
+            (w - side_w - 1, h - p(28.0) - p(38.0) - p(40.0))
+        };
         if self.drawer {
-            aw -= p(290.0).min(aw / 2) + 1;
+            aw -= p(320.0).min(aw / 2) + 1;
         }
         (aw.max(1), ah.max(1))
     }
@@ -438,6 +481,8 @@ impl Ui {
             fit,
             scale: None,
             drives: Vec::new(),
+            quality: Quality::default(),
+            quality_live: Quality::default(),
         });
         self.active = Some(id);
         self.session_focus = false;
@@ -1084,6 +1129,35 @@ impl Ui {
                 let g = self.context_group();
                 self.new_connection_in(&g);
             }
+            Hit::DrawerPage(i) => {
+                self.drawer_page = i;
+                self.drawer_scroll = 0;
+            }
+            Hit::FullScreen => return Some(Action::SetFullscreen(!self.fullscreen)),
+            Hit::TabPreset(id, i) => {
+                let t = self.tab_mut(id)?;
+                t.quality = Quality::preset(PRESETS[i].0, t.quality.color_depth);
+                return Some(Action::SetQuality(id, t.quality));
+            }
+            Hit::TabDepth(id, i) => {
+                let t = self.tab_mut(id)?;
+                t.quality.color_depth = DEPTHS[i];
+                return Some(Action::SetQuality(id, t.quality));
+            }
+            Hit::TabExperience(id, i) => {
+                let t = self.tab_mut(id)?;
+                let q = &mut t.quality;
+                let flag = match i {
+                    0 => &mut q.wallpaper,
+                    1 => &mut q.font_smoothing,
+                    2 => &mut q.composition,
+                    3 => &mut q.window_drag,
+                    4 => &mut q.animations,
+                    _ => &mut q.visual_styles,
+                };
+                *flag = !*flag;
+                return Some(Action::SetQuality(id, t.quality));
+            }
             Hit::FormPreset(i) => {
                 let depth = self.opts.quality.color_depth;
                 self.opts.quality = Quality::preset(PRESETS[i].0, depth);
@@ -1420,6 +1494,14 @@ impl Ui {
         let p = |v: f32| (v * s).round() as i32;
         let (w, h) = (cv.width() as i32, cv.height() as i32);
         cv.fill(Rect::new(0, 0, w, h), BG);
+        // Full screen: the session with its toolbar and panel, nothing else.
+        if self.fullscreen
+            && let Some(id) = self.active_tab().map(|t| t.id)
+        {
+            self.title_height = 0;
+            self.paint_session(cv, te, f, Rect::new(0, 0, w, h), id);
+            return;
+        }
         let bar_h = p(28.0);
         let body_h = h - bar_h;
         let side_w = p(260.0).min(w / 3);
@@ -2568,18 +2650,21 @@ impl Ui {
                 BORDER_HOVER,
             );
         }
-        // Hits of rows scrolled out of view must not catch clicks.
-        let mut i = first_hit;
-        while i < self.hits.len() {
-            let r = self.hits[i].0.intersect(area);
-            if r.w <= 0 || r.h <= 0 {
-                self.hits.remove(i);
-            } else {
-                self.hits[i].0 = r;
-                i += 1;
-            }
-        }
+        self.clip_hits(first_hit, area);
         cv.set_clip(old);
+    }
+
+    /// Mouse wheel over the quick panel or the connection form; true when
+    /// something scrolled.
+    pub fn scroll(&mut self, x: i32, y: i32, lines: f32) -> bool {
+        if self.active.is_some() && self.drawer && self.drawer_area.contains(x, y) {
+            let max = (self.drawer_content - self.drawer_area.h).max(0);
+            let next = (self.drawer_scroll - (lines * 48.0 * self.scale) as i32).clamp(0, max);
+            let changed = next != self.drawer_scroll;
+            self.drawer_scroll = next;
+            return changed;
+        }
+        self.scroll_home(x, y, lines)
     }
 
     /// Mouse wheel over the connection form; true when it scrolled.
@@ -2620,6 +2705,9 @@ impl Ui {
         );
         let info = match &state {
             TabState::Connecting => format!("{host} · connecting…"),
+            TabState::Connected { width, height, bpp } if self.fullscreen => {
+                format!("{name} · {host} · {width} × {height} · {bpp}-bit")
+            }
             TabState::Connected { width, height, bpp } => {
                 format!("{host} · {width} × {height} · {bpp} bpp")
             }
@@ -2627,11 +2715,22 @@ impl Ui {
             TabState::Failed(why) => format!("{host} · failed: {why}"),
         };
         let mut bx = tb.right() - p(8.0);
-        let mut buttons: Vec<(&str, Hit, Style)> = vec![(
-            if self.drawer { "Hide panel" } else { "Panel" },
-            Hit::Drawer,
-            Style::Secondary,
-        )];
+        let mut buttons: Vec<(&str, Hit, Style)> = vec![
+            (
+                if self.fullscreen {
+                    "Exit full screen"
+                } else {
+                    "Full screen"
+                },
+                Hit::FullScreen,
+                Style::Secondary,
+            ),
+            (
+                if self.drawer { "Hide panel" } else { "Panel" },
+                Hit::Drawer,
+                Style::Secondary,
+            ),
+        ];
         match state {
             TabState::Connected { .. } | TabState::Connecting => {
                 buttons.insert(0, ("Disconnect", Hit::Disconnect(id), Style::Secondary))
@@ -2670,7 +2769,7 @@ impl Ui {
             content.bottom() - tb.bottom(),
         );
         if self.drawer {
-            let dw = p(290.0).min(area.w / 2);
+            let dw = p(320.0).min(area.w / 2);
             let drawer = Rect::new(area.right() - dw, area.y, dw, area.h);
             area.w -= dw + 1;
             cv.fill(Rect::new(area.right(), area.y, 1, area.h), BORDER_SOFT);
@@ -2744,145 +2843,190 @@ impl Ui {
         }
     }
 
+    /// The quick panel: four pages (Sharing, Display, Quality, Session) of
+    /// grouped cards, like Windows Settings. Its body scrolls.
     fn paint_drawer(&mut self, cv: &mut Canvas, te: &mut TextEngine, f: &Fonts, d: Rect, id: u64) {
         let s = self.scale;
         let p = |v: f32| (v * s).round() as i32;
         cv.fill(d, BG_SIDEBAR);
         let old = cv.set_clip(d);
         let Some(tab) = self.tabs.iter().find(|t| t.id == id) else {
+            cv.set_clip(old);
             return;
         };
-        let (clip_on, fit_on, drives) = (tab.clipboard, tab.fit, tab.drives.clone());
-        let scale = tab.scale;
-        let (printers_on, cards_on, sound_on) = (tab.printers, tab.smart_cards, tab.sound);
-        let x = d.x + p(18.0);
-        let w = d.w - p(36.0);
-        let mut y = d.y + p(16.0);
-
-        let section = |cv: &mut Canvas, te: &mut TextEngine, y: i32, text: &str| {
-            te.draw_in(
-                cv,
-                f.semi,
-                11.5 * s,
-                Rect::new(x, y, w, p(18.0)),
-                0.0,
-                text,
-                TEXT_3,
-            );
+        let t = TabView {
+            clipboard: tab.clipboard,
+            sound: tab.sound,
+            printers: tab.printers,
+            smart_cards: tab.smart_cards,
+            fit: tab.fit,
+            scale: tab.scale,
+            drives: tab.drives.clone(),
+            quality: tab.quality,
+            quality_live: tab.quality_live,
+            state: tab.state.clone(),
+            host: tab.host.clone(),
         };
-        section(cv, te, y, "SHARING");
-        y += p(28.0);
-        self.switch_row(
-            cv,
-            te,
-            f,
-            Rect::new(x, y, w, p(30.0)),
-            "Clipboard",
-            "Text, both directions",
-            clip_on,
-            Hit::Clipboard(id),
-        );
-        y += p(48.0);
-        self.switch_row(
-            cv,
-            te,
-            f,
-            Rect::new(x, y, w, p(30.0)),
-            "Sound",
-            "Remote audio on this PC",
-            sound_on,
-            Hit::Sound(id),
-        );
-        y += p(48.0);
-        self.switch_row(
-            cv,
-            te,
-            f,
-            Rect::new(x, y, w, p(30.0)),
-            "Printers",
-            "Local printers in the session",
-            printers_on,
-            Hit::Printers(id),
-        );
-        y += p(48.0);
-        self.switch_row(
-            cv,
-            te,
-            f,
-            Rect::new(x, y, w, p(30.0)),
-            "Smart cards",
-            "Local readers and cards",
-            cards_on,
-            Hit::SmartCards(id),
-        );
-        y += p(48.0);
+        let x = d.x + p(16.0);
+        let w = d.w - p(32.0);
 
-        te.draw_in(
-            cv,
-            f.ui,
-            13.0 * s,
-            Rect::new(x, y, w, p(20.0)),
-            0.0,
-            "Shared folders",
-            TEXT,
+        // Page switcher
+        let seg = Rect::new(x, d.y + p(14.0), w, p(32.0));
+        let pages: Vec<(String, bool, Hit)> = ["Sharing", "Display", "Quality", "Session"]
+            .iter()
+            .enumerate()
+            .map(|(i, n)| {
+                (
+                    n.to_string(),
+                    self.drawer_page == i as u8,
+                    Hit::DrawerPage(i as u8),
+                )
+            })
+            .collect();
+        self.segmented(cv, te, f, seg, &pages);
+
+        let body = Rect::new(
+            d.x,
+            seg.bottom() + p(10.0),
+            d.w,
+            d.bottom() - seg.bottom() - p(10.0),
         );
+        self.drawer_area = body;
+        let inner = cv.set_clip(body);
+        let first_hit = self.hits.len();
+        let top = body.y + p(6.0) - self.drawer_scroll;
+        let mut y = top;
+        match self.drawer_page {
+            0 => y = self.page_sharing(cv, te, f, x, y, w, id, &t),
+            1 => y = self.page_display(cv, te, f, x, y, w, id, &t),
+            2 => y = self.page_quality(cv, te, f, x, y, w, id, &t),
+            _ => y = self.page_session(cv, te, f, x, y, w, id, &t),
+        }
+        self.drawer_content = y - top + p(16.0);
+        let max = (self.drawer_content - body.h).max(0);
+        self.drawer_scroll = self.drawer_scroll.min(max);
+        if max > 0 {
+            let track = body.h - p(8.0);
+            let bar = (track * body.h / self.drawer_content).max(p(24.0));
+            let by = body.y + p(4.0) + (track - bar) * self.drawer_scroll / max;
+            cv.fill_round(
+                Rect::new(body.right() - p(5.0), by, p(3.0), bar),
+                1.5 * s,
+                BORDER_HOVER,
+            );
+        }
+        self.clip_hits(first_hit, body);
+        cv.set_clip(inner);
+        cv.set_clip(old);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn page_sharing(
+        &mut self,
+        cv: &mut Canvas,
+        te: &mut TextEngine,
+        f: &Fonts,
+        x: i32,
+        mut y: i32,
+        w: i32,
+        id: u64,
+        t: &TabView,
+    ) -> i32 {
+        let s = self.scale;
+        let p = |v: f32| (v * s).round() as i32;
+        let rows = [
+            (
+                "Clipboard",
+                "Text and files, both ways",
+                t.clipboard,
+                Hit::Clipboard(id),
+            ),
+            ("Sound", "Remote audio on this PC", t.sound, Hit::Sound(id)),
+            (
+                "Printers",
+                "Local printers in the session",
+                t.printers,
+                Hit::Printers(id),
+            ),
+            (
+                "Smart cards",
+                "Local readers and cards",
+                t.smart_cards,
+                Hit::SmartCards(id),
+            ),
+        ];
+        let cells = self.card(cv, x, y, w, &[p(52.0); 4]);
+        for (r, (label, sub, on, hit)) in cells.iter().zip(rows) {
+            self.card_switch(cv, te, f, *r, label, sub, on, hit);
+        }
+        y += 4 * p(52.0) + p(20.0);
+
+        self.caption(cv, te, f, x, y, w, "SHARED FOLDERS");
         y += p(24.0);
-        if drives.is_empty() {
+        if t.drives.is_empty() {
+            let cells = self.card(cv, x, y, w, &[p(44.0)]);
             te.draw_in(
                 cv,
                 f.ui,
                 12.0 * s,
-                Rect::new(x, y, w, p(18.0)),
+                Rect::new(
+                    cells[0].x + p(14.0),
+                    cells[0].y,
+                    cells[0].w - p(28.0),
+                    cells[0].h,
+                ),
                 0.0,
-                "None. They appear in the remote Explorer.",
-                TEXT_4,
-            );
-            y += p(24.0);
-        }
-        for (i, drv) in drives.iter().enumerate() {
-            let r = Rect::new(x, y, w, p(40.0));
-            cv.round_border(r, 6.0 * s, BORDER_SOFT, BG_BAR);
-            let close = Rect::new(r.right() - p(30.0), r.y + p(10.0), p(20.0), p(20.0));
-            te.draw(
-                cv,
-                f.semi,
-                12.5 * s,
-                (r.x + p(10.0)) as f32,
-                (r.y + p(17.0)) as f32,
-                &drv.name,
-                TEXT,
-                (close.x - r.x - p(14.0)) as f32,
-            );
-            te.draw(
-                cv,
-                f.ui,
-                11.5 * s,
-                (r.x + p(10.0)) as f32,
-                (r.y + p(32.0)) as f32,
-                &drv.path,
+                "None yet. Shared folders show in the remote Explorer.",
                 TEXT_3,
-                (close.x - r.x - p(14.0)) as f32,
             );
-            let hit = Hit::RemoveDrive(id, i);
-            if self.hover == Some(hit) {
-                cv.fill_round(close, 4.0 * s, CONTROL_HOVER);
+            y += p(44.0);
+        } else {
+            let n = t.drives.len();
+            let cells = self.card(cv, x, y, w, &vec![p(50.0); n]);
+            for (i, (r, drv)) in cells.iter().zip(&t.drives).enumerate() {
+                let close = Rect::new(r.right() - p(38.0), r.y + p(13.0), p(24.0), p(24.0));
+                te.draw(
+                    cv,
+                    f.semi,
+                    12.5 * s,
+                    (r.x + p(14.0)) as f32,
+                    (r.y + p(21.0)) as f32,
+                    &drv.name,
+                    TEXT,
+                    (close.x - r.x - p(20.0)) as f32,
+                );
+                te.draw(
+                    cv,
+                    f.ui,
+                    11.5 * s,
+                    (r.x + p(14.0)) as f32,
+                    (r.y + p(38.0)) as f32,
+                    &drv.path,
+                    TEXT_3,
+                    (close.x - r.x - p(20.0)) as f32,
+                );
+                let hit = Hit::RemoveDrive(id, i);
+                if self.hover == Some(hit) {
+                    cv.fill_round(close, 5.0 * s, CONTROL_HOVER);
+                }
+                let (cx, cy, dd) = (
+                    (close.x + close.w / 2) as f32,
+                    (close.y + close.h / 2) as f32,
+                    4.0 * s,
+                );
+                cv.stroke(&[(cx - dd, cy - dd), (cx + dd, cy + dd)], 1.4 * s, TEXT_2);
+                cv.stroke(&[(cx - dd, cy + dd), (cx + dd, cy - dd)], 1.4 * s, TEXT_2);
+                self.hits.push((close, hit));
             }
-            let (cx, cy, dd) = (
-                (close.x + close.w / 2) as f32,
-                (close.y + close.h / 2) as f32,
-                4.0 * s,
-            );
-            cv.stroke(&[(cx - dd, cy - dd), (cx + dd, cy + dd)], 1.4 * s, TEXT_2);
-            cv.stroke(&[(cx - dd, cy + dd), (cx + dd, cy - dd)], 1.4 * s, TEXT_2);
-            self.hits.push((close, hit));
-            y += p(46.0);
+            y += n as i32 * p(50.0);
         }
-        let add_w = p(56.0);
+        y += p(10.0);
+        let add_w = p(60.0);
         self.text_input(
             cv,
             te,
             f,
-            Rect::new(x, y, w - add_w - p(6.0), p(30.0)),
+            Rect::new(x, y, w - add_w - p(6.0), p(32.0)),
             Field::DrivePath,
             r"Folder, e.g. C:\Share",
         );
@@ -2890,107 +3034,368 @@ impl Ui {
             cv,
             te,
             f,
-            Rect::new(x + w - add_w, y, add_w, p(30.0)),
+            Rect::new(x + w - add_w, y, add_w, p(32.0)),
             "Add",
             Style::Secondary,
             Hit::AddDrive(id),
         );
-        y += p(52.0);
+        y += p(32.0);
+        self.hint(cv, te, f, x, y + p(10.0), w, "Sharing switches apply live.");
+        y + p(30.0)
+    }
 
-        section(cv, te, y, "DISPLAY");
-        y += p(28.0);
-        self.switch_row(
+    #[allow(clippy::too_many_arguments)]
+    fn page_display(
+        &mut self,
+        cv: &mut Canvas,
+        te: &mut TextEngine,
+        f: &Fonts,
+        x: i32,
+        mut y: i32,
+        w: i32,
+        id: u64,
+        t: &TabView,
+    ) -> i32 {
+        let s = self.scale;
+        let p = |v: f32| (v * s).round() as i32;
+        let full = self.fullscreen;
+        let cells = self.card(cv, x, y, w, &[p(52.0); 2]);
+        self.card_switch(
             cv,
             te,
             f,
-            Rect::new(x, y, w, p(30.0)),
+            cells[0],
+            "Full screen",
+            "Ctrl+Alt+Break switches it",
+            full,
+            Hit::FullScreen,
+        );
+        self.card_switch(
+            cv,
+            te,
+            f,
+            cells[1],
             "Fit to window",
-            "Remote resizes with the tab",
-            fit_on,
+            "The remote desktop follows the window",
+            t.fit,
             Hit::Fit(id),
         );
-        y += p(52.0);
-        te.draw(
-            cv,
-            f.ui,
-            13.0 * s,
-            x as f32,
-            (y + p(13.0)) as f32,
-            "Scale",
-            TEXT,
-            w as f32,
-        );
-        let auto = format!("Auto ({} %)", (self.scale * 100.0).round() as u32);
-        let choices: Vec<String> = std::iter::once(auto)
-            .chain(SCALES.iter().map(|v| format!("{v} %")))
-            .collect();
-        let mut cx = x;
-        let mut cy = y + p(24.0);
-        for (i, text) in choices.iter().enumerate() {
-            let cw = te.measure(f.ui, 12.0 * s, text) as i32 + p(18.0);
-            if cx + cw > x + w {
-                cx = x;
-                cy += p(32.0);
-            }
-            let r = Rect::new(cx, cy, cw, p(26.0));
-            let hit = Hit::Scale(id, i);
-            let chosen = match (i, scale) {
-                (0, None) => true,
-                (0, Some(_)) => false,
-                (i, Some(v)) => SCALES[i - 1] == v,
-                _ => false,
-            };
-            let (border, fill, color) = if chosen {
-                (ACCENT_BORDER, BG_CHOSEN, TEXT)
-            } else if self.hover == Some(hit) {
-                (BORDER_HOVER, CONTROL_HOVER, TEXT_2)
-            } else {
-                (BORDER, BG_SIDEBAR, TEXT_3)
-            };
-            cv.round_border(r, 6.0 * s, border, fill);
-            centered(cv, te, f.ui, 12.0 * s, r, text, color);
-            self.hits.push((r, hit));
-            cx += cw + p(6.0);
-        }
-        y = cy + p(48.0);
+        y += 2 * p(52.0) + p(20.0);
 
-        section(cv, te, y, "SESSION");
-        y += p(28.0);
+        self.caption(cv, te, f, x, y, w, "SCALE");
+        y += p(24.0);
+        let items: Vec<(String, bool, Hit)> = std::iter::once("Auto".to_string())
+            .chain(SCALES.iter().map(|v| format!("{v} %")))
+            .enumerate()
+            .map(|(i, text)| {
+                let chosen = match (i, t.scale) {
+                    (0, None) => true,
+                    (i, Some(v)) if i > 0 => SCALES[i - 1] == v,
+                    _ => false,
+                };
+                (text, chosen, Hit::Scale(id, i))
+            })
+            .collect();
+        self.segmented(cv, te, f, Rect::new(x, y, w, p(32.0)), &items);
+        y += p(32.0);
+        let auto = format!(
+            "Auto follows this PC's scaling ({} %). Applies live.",
+            (self.scale * 100.0).round() as u32
+        );
+        self.hint(cv, te, f, x, y + p(10.0), w, &auto);
+        y + p(30.0)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn page_quality(
+        &mut self,
+        cv: &mut Canvas,
+        te: &mut TextEngine,
+        f: &Fonts,
+        x: i32,
+        mut y: i32,
+        w: i32,
+        id: u64,
+        t: &TabView,
+    ) -> i32 {
+        let s = self.scale;
+        let p = |v: f32| (v * s).round() as i32;
+        let q = t.quality;
+        if q != t.quality_live {
+            let r = Rect::new(x, y, w, p(96.0));
+            cv.round_border(r, 8.0 * s, ACCENT_BORDER, BG_SELECT);
+            te.draw(
+                cv,
+                f.semi,
+                13.0 * s,
+                (r.x + p(14.0)) as f32,
+                (r.y + p(24.0)) as f32,
+                "Reconnect to apply",
+                TEXT,
+                (r.w - p(28.0)) as f32,
+            );
+            te.draw(
+                cv,
+                f.ui,
+                11.5 * s,
+                (r.x + p(14.0)) as f32,
+                (r.y + p(42.0)) as f32,
+                "Quality is fixed when the session logs on.",
+                TEXT_2,
+                (r.w - p(28.0)) as f32,
+            );
+            self.button(
+                cv,
+                te,
+                f,
+                Rect::new(r.x + p(14.0), r.y + p(54.0), p(132.0), p(30.0)),
+                "Reconnect now",
+                Style::Primary,
+                Hit::Reconnect(id),
+            );
+            y += p(96.0) + p(16.0);
+        }
+
+        self.caption(cv, te, f, x, y, w, "CONNECTION SPEED");
+        y += p(24.0);
+        let subs = [
+            "Everything on",
+            "Everything on, for slower links",
+            "No wallpaper or animations",
+            "Visual styles only",
+            "Plain desktop, least data",
+        ];
+        let cells = self.card(cv, x, y, w, &[p(48.0); 5]);
+        for (i, (r, ((c, name), sub))) in cells.iter().zip(PRESETS.iter().zip(subs)).enumerate() {
+            self.card_choice(
+                cv,
+                te,
+                f,
+                *r,
+                name,
+                sub,
+                q.connection == *c,
+                Hit::TabPreset(id, i),
+            );
+        }
+        y += 5 * p(48.0) + p(20.0);
+
+        self.caption(cv, te, f, x, y, w, "COLOURS");
+        y += p(24.0);
+        let items: Vec<(String, bool, Hit)> = DEPTHS
+            .iter()
+            .enumerate()
+            .map(|(i, d)| {
+                (
+                    format!("{d}-bit"),
+                    q.color_depth == *d,
+                    Hit::TabDepth(id, i),
+                )
+            })
+            .collect();
+        self.segmented(cv, te, f, Rect::new(x, y, w, p(32.0)), &items);
+        y += p(32.0) + p(20.0);
+
+        self.caption(cv, te, f, x, y, w, "SHOW");
+        y += p(24.0);
+        let rows = [
+            ("Desktop background", q.wallpaper),
+            ("Font smoothing", q.font_smoothing),
+            ("Desktop composition", q.composition),
+            ("Window contents while dragging", q.window_drag),
+            ("Menu and window animations", q.animations),
+            ("Visual styles", q.visual_styles),
+        ];
+        let cells = self.card(cv, x, y, w, &[p(42.0); 6]);
+        for (i, (r, (label, on))) in cells.iter().zip(rows).enumerate() {
+            self.card_switch(
+                cv,
+                te,
+                f,
+                *r,
+                label,
+                "",
+                on,
+                Hit::TabExperience(id, i as u8),
+            );
+        }
+        y + 6 * p(42.0) + p(10.0)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn page_session(
+        &mut self,
+        cv: &mut Canvas,
+        te: &mut TextEngine,
+        f: &Fonts,
+        x: i32,
+        mut y: i32,
+        w: i32,
+        id: u64,
+        t: &TabView,
+    ) -> i32 {
+        let s = self.scale;
+        let p = |v: f32| (v * s).round() as i32;
+        let (status, desktop, colours) = match &t.state {
+            TabState::Connected { width, height, bpp } => (
+                "Connected".to_string(),
+                format!("{width} × {height}"),
+                format!("{bpp}-bit"),
+            ),
+            TabState::Connecting => ("Connecting…".into(), "–".into(), "–".into()),
+            TabState::Ended(_) => ("Ended".into(), "–".into(), "–".into()),
+            TabState::Failed(_) => ("Failed".into(), "–".into(), "–".into()),
+        };
+        let rows = [
+            ("Host", t.host.clone()),
+            ("Status", status),
+            ("Desktop", desktop),
+            ("Colours", colours),
+            ("Speed", preset_name(t.quality_live.connection).to_string()),
+        ];
+        let cells = self.card(cv, x, y, w, &[p(38.0); 5]);
+        for (r, (label, value)) in cells.iter().zip(rows) {
+            te.draw(
+                cv,
+                f.ui,
+                12.5 * s,
+                (r.x + p(14.0)) as f32,
+                (r.y + r.h / 2 + p(5.0)) as f32,
+                label,
+                TEXT_3,
+                p(80.0) as f32,
+            );
+            let vw = te.measure(f.ui, 12.5 * s, &value) as i32;
+            let room = r.w - p(110.0);
+            te.draw(
+                cv,
+                f.ui,
+                12.5 * s,
+                (r.right() - p(14.0) - vw.min(room)) as f32,
+                (r.y + r.h / 2 + p(5.0)) as f32,
+                &value,
+                TEXT,
+                room as f32,
+            );
+        }
+        y += 5 * p(38.0) + p(20.0);
+
+        self.caption(cv, te, f, x, y, w, "ACTIONS");
+        y += p(24.0);
         self.button(
             cv,
             te,
             f,
-            Rect::new(x, y, w, p(32.0)),
+            Rect::new(x, y, w, p(34.0)),
             "Send Ctrl+Alt+Del",
             Style::Secondary,
             Hit::CtrlAltDel(id),
         );
-        y += p(46.0);
-        te.draw(
+        y += p(42.0);
+        let half = (w - p(8.0)) / 2;
+        self.button(
             cv,
-            f.ui,
-            11.5 * s,
-            x as f32,
-            (y + p(4.0)) as f32,
-            "Changes apply live, without reconnecting.",
-            TEXT_4,
-            w as f32,
+            te,
+            f,
+            Rect::new(x, y, half, p(34.0)),
+            "Reconnect",
+            Style::Secondary,
+            Hit::Reconnect(id),
         );
-        te.draw(
+        if matches!(t.state, TabState::Connected { .. } | TabState::Connecting) {
+            self.button(
+                cv,
+                te,
+                f,
+                Rect::new(x + w - half, y, half, p(34.0)),
+                "Disconnect",
+                Style::Danger,
+                Hit::Disconnect(id),
+            );
+        }
+        y += p(34.0);
+        self.hint(
             cv,
-            f.ui,
-            11.5 * s,
-            x as f32,
-            (y + p(22.0)) as f32,
+            te,
+            f,
+            x,
+            y + p(14.0),
+            w,
             "Ctrl+Alt+Home gives the keyboard back.",
-            TEXT_4,
-            w as f32,
         );
-        cv.set_clip(old);
+        self.hint(
+            cv,
+            te,
+            f,
+            x,
+            y + p(32.0),
+            w,
+            "Ctrl+Alt+Break switches full screen.",
+        );
+        y + p(50.0)
     }
 
+    /// Equal-width segments in one rounded frame; the chosen one is raised.
+    fn segmented(
+        &mut self,
+        cv: &mut Canvas,
+        te: &mut TextEngine,
+        f: &Fonts,
+        r: Rect,
+        items: &[(String, bool, Hit)],
+    ) {
+        let s = self.scale;
+        let p = |v: f32| (v * s).round() as i32;
+        cv.round_border(r, 7.0 * s, BORDER, BG);
+        let pad = p(3.0);
+        let n = items.len().max(1) as i32;
+        let inner = r.w - 2 * pad;
+        for (i, (text, on, hit)) in items.iter().enumerate() {
+            let i = i as i32;
+            let x0 = r.x + pad + inner * i / n;
+            let x1 = r.x + pad + inner * (i + 1) / n;
+            let cell = Rect::new(x0, r.y + pad, x1 - x0, r.h - 2 * pad);
+            if *on {
+                cv.round_border(cell, 5.0 * s, ACCENT_BORDER, BG_CHOSEN);
+            } else if self.hover == Some(*hit) {
+                cv.fill_round(cell, 5.0 * s, BG_HOVER);
+            }
+            let font = if *on { f.semi } else { f.ui };
+            centered(
+                cv,
+                te,
+                font,
+                12.0 * s,
+                cell,
+                text,
+                if *on { TEXT } else { TEXT_3 },
+            );
+            self.hits.push((cell, *hit));
+        }
+    }
+
+    /// A rounded card with rows of the given heights and dividers between them;
+    /// returns the row rectangles.
+    fn card(&self, cv: &mut Canvas, x: i32, y: i32, w: i32, heights: &[i32]) -> Vec<Rect> {
+        let s = self.scale;
+        let p = |v: f32| (v * s).round() as i32;
+        let total: i32 = heights.iter().sum();
+        cv.round_border(Rect::new(x, y, w, total), 8.0 * s, BORDER_SOFT, BG_BAR);
+        let mut out = Vec::with_capacity(heights.len());
+        let mut ry = y;
+        for (i, &h) in heights.iter().enumerate() {
+            if i > 0 {
+                cv.fill(Rect::new(x + p(14.0), ry, w - p(28.0), 1), BORDER_SOFT);
+            }
+            out.push(Rect::new(x, ry, w, h));
+            ry += h;
+        }
+        out
+    }
+
+    /// A card row with a label, an optional second line and a switch.
     #[allow(clippy::too_many_arguments)]
-    fn switch_row(
+    fn card_switch(
         &mut self,
         cv: &mut Canvas,
         te: &mut TextEngine,
@@ -3005,32 +3410,118 @@ impl Ui {
         let p = |v: f32| (v * s).round() as i32;
         if self.hover == Some(hit) {
             cv.fill_round(
-                Rect::new(r.x - p(8.0), r.y - p(4.0), r.w + p(16.0), r.h + p(12.0)),
+                Rect::new(r.x + p(3.0), r.y + p(3.0), r.w - p(6.0), r.h - p(6.0)),
                 6.0 * s,
                 BG_HOVER,
             );
         }
+        let text_w = (r.w - p(78.0)) as f32;
+        let mid = r.y + r.h / 2;
+        if sub.is_empty() {
+            te.draw(
+                cv,
+                f.ui,
+                13.0 * s,
+                (r.x + p(14.0)) as f32,
+                (mid + p(5.0)) as f32,
+                label,
+                TEXT,
+                text_w,
+            );
+        } else {
+            te.draw(
+                cv,
+                f.ui,
+                13.0 * s,
+                (r.x + p(14.0)) as f32,
+                (mid - p(2.0)) as f32,
+                label,
+                TEXT,
+                text_w,
+            );
+            te.draw(
+                cv,
+                f.ui,
+                11.5 * s,
+                (r.x + p(14.0)) as f32,
+                (mid + p(14.0)) as f32,
+                sub,
+                TEXT_3,
+                text_w,
+            );
+        }
+        self.draw_switch(cv, r.right() - p(50.0), mid - p(10.0), on);
+        self.hits.push((r, hit));
+    }
+
+    /// A card row that is one of several choices (a radio button on the right).
+    #[allow(clippy::too_many_arguments)]
+    fn card_choice(
+        &mut self,
+        cv: &mut Canvas,
+        te: &mut TextEngine,
+        f: &Fonts,
+        r: Rect,
+        label: &str,
+        sub: &str,
+        chosen: bool,
+        hit: Hit,
+    ) {
+        let s = self.scale;
+        let p = |v: f32| (v * s).round() as i32;
+        if self.hover == Some(hit) {
+            cv.fill_round(
+                Rect::new(r.x + p(3.0), r.y + p(3.0), r.w - p(6.0), r.h - p(6.0)),
+                6.0 * s,
+                BG_HOVER,
+            );
+        }
+        let text_w = (r.w - p(64.0)) as f32;
+        let mid = r.y + r.h / 2;
+        let font = if chosen { f.semi } else { f.ui };
         te.draw(
             cv,
-            f.ui,
+            font,
             13.0 * s,
-            r.x as f32,
-            (r.y + p(13.0)) as f32,
+            (r.x + p(14.0)) as f32,
+            (mid - p(2.0)) as f32,
             label,
             TEXT,
-            (r.w - p(50.0)) as f32,
+            text_w,
         );
         te.draw(
             cv,
             f.ui,
             11.5 * s,
-            r.x as f32,
-            (r.y + p(30.0)) as f32,
+            (r.x + p(14.0)) as f32,
+            (mid + p(14.0)) as f32,
             sub,
             TEXT_3,
-            (r.w - p(50.0)) as f32,
+            text_w,
         );
-        let sw = Rect::new(r.right() - p(36.0), r.y + p(6.0), p(36.0), p(20.0));
+        let (cx, cy) = ((r.right() - p(26.0)) as f32, mid as f32);
+        if chosen {
+            cv.fill_circle(cx, cy, 9.0 * s, ACCENT);
+            cv.stroke(
+                &[
+                    (cx - 4.0 * s, cy),
+                    (cx - 1.2 * s, cy + 3.0 * s),
+                    (cx + 4.2 * s, cy - 3.2 * s),
+                ],
+                1.8 * s,
+                ACCENT_TEXT,
+            );
+        } else {
+            cv.fill_circle(cx, cy, 9.0 * s, BORDER_HOVER);
+            cv.fill_circle(cx, cy, 7.5 * s, BG_BAR);
+        }
+        self.hits.push((r, hit));
+    }
+
+    fn draw_switch(&self, cv: &mut Canvas, x: i32, y: i32, on: bool) {
+        let s = self.scale;
+        let p = |v: f32| (v * s).round() as i32;
+        let sw = Rect::new(x, y, p(36.0), p(20.0));
         cv.fill_round(
             sw,
             sw.h as f32 / 2.0,
@@ -3047,10 +3538,68 @@ impl Ui {
             sw.h as f32 / 2.0 - 2.5 * s,
             if on { ACCENT_TEXT } else { TEXT_2 },
         );
-        self.hits.push((
-            Rect::new(r.x - p(8.0), r.y - p(4.0), r.w + p(16.0), r.h + p(12.0)),
-            hit,
-        ));
+    }
+
+    /// A small upper-case heading above a card.
+    #[allow(clippy::too_many_arguments)]
+    fn caption(
+        &self,
+        cv: &mut Canvas,
+        te: &mut TextEngine,
+        f: &Fonts,
+        x: i32,
+        y: i32,
+        w: i32,
+        text: &str,
+    ) {
+        let s = self.scale;
+        te.draw_in(
+            cv,
+            f.semi,
+            11.0 * s,
+            Rect::new(x + (4.0 * s) as i32, y, w, (18.0 * s) as i32),
+            0.0,
+            text,
+            TEXT_3,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn hint(
+        &self,
+        cv: &mut Canvas,
+        te: &mut TextEngine,
+        f: &Fonts,
+        x: i32,
+        y: i32,
+        w: i32,
+        text: &str,
+    ) {
+        let s = self.scale;
+        te.draw(
+            cv,
+            f.ui,
+            11.5 * s,
+            x as f32,
+            y as f32,
+            text,
+            TEXT_4,
+            w as f32,
+        );
+    }
+
+    /// Hits of rows scrolled out of `area` must not catch clicks.
+    fn clip_hits(&mut self, from: usize, area: Rect) {
+        let mut i = from;
+        while i < self.hits.len() {
+            let r = self.hits[i].0.intersect(area);
+            if r.w <= 0 || r.h <= 0 {
+                self.hits.remove(i);
+            } else {
+                self.hits[i].0 = r;
+                i += 1;
+            }
+        }
     }
 
     fn text_input(
@@ -3258,6 +3807,21 @@ fn session_action(r: &Connection, password: &str) -> Action {
         fit,
         opts: r.options.clone(),
     }
+}
+
+/// A session tab with the quick panel on `page`; page 2 shows a quality
+/// change waiting for a reconnect. `fullscreen` lays it out full screen.
+pub fn sample_panel(page: u8, fullscreen: bool) -> Ui {
+    let mut m = sample(true);
+    m.drawer_page = page;
+    m.fullscreen = fullscreen;
+    if let Some(t) = m.tab_mut(1) {
+        t.clipboard = true;
+        if page == 2 {
+            t.quality.wallpaper = false;
+        }
+    }
+    m
 }
 
 /// The sample with the "Work" group open (snapshot of the group form).
