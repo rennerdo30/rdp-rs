@@ -2,6 +2,7 @@
 //!
 //!   rdpc                                     connection manager
 //!   rdpc <host[:port]> -u <[DOMAIN\]user> [-d domain] [--size WxH] [-v]
+//!        [--compression off|rdp4|rdp5|rdp6|rdp61]
 //!                                            one session window
 //!   rdpc <host> -u <user> --screenshot out.png [--wait SECONDS]
 //!                                            headless: save the desktop as PNG
@@ -52,6 +53,7 @@ struct Args {
     scale: f32,
     wait: u64,
     verbose: bool,
+    compression: rdp::Compression,
 }
 
 fn usage() -> ! {
@@ -59,6 +61,7 @@ fn usage() -> ! {
         "usage: rdpc                                   (connection manager)\n\
          \x20      rdpc <host[:port]> -u <[DOMAIN\\]user> [-d domain] [--size WxH] [-v]\n\
          \x20           [--gateway gwhost[:port]]   (RD Gateway, same credentials)\n\
+         \x20           [--compression off|rdp4|rdp5|rdp6|rdp61]\n\
          \x20      rdpc <host> -u <user> --screenshot out.png [--wait SECONDS]\n\
          \x20      rdpc --snapshot-ui out.png [--scale 1.5]\n\
          \x20      rdpc --icon-png out.png [--icon-size N]\n\
@@ -111,6 +114,9 @@ fn parse_args() -> Args {
             "--scale" => a.scale = val().parse().unwrap_or_else(|_| usage()),
             "--wait" => a.wait = val().parse().unwrap_or_else(|_| usage()),
             "-v" | "--verbose" => a.verbose = true,
+            "--compression" => {
+                a.compression = rdp::Compression::from_name(&val()).unwrap_or_else(|| usage())
+            }
             "-h" | "--help" => usage(),
             s if s.starts_with('-') => usage(),
             s => {
@@ -208,6 +214,7 @@ fn main() {
         gw.domain = args.domain.clone();
         cfg.gateway = Some(gw);
     }
+    cfg.compression = args.compression;
     if let Some((w, h)) = args.size {
         cfg.width = w;
         cfg.height = h;

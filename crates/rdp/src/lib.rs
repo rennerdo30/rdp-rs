@@ -8,6 +8,7 @@
 //! - [`mcs`] + [`gcc`]: T.125 MCS domain and T.124 GCC conference data (MS-RDPBCGR 2.2.1.3-2.2.1.9)
 //! - [`pdu`]: share control/data PDUs, client info, capabilities, finalization
 //! - [`fastpath`] + [`input`]: fast-path output updates and fast-path input events
+//! - [`compress`]: bulk decompression, RDP 4.0 to 6.1 (MS-RDPBCGR 3.1.8, MS-RDPEGDI 3.1.8)
 //! - [`codec`]: interleaved RLE and planar bitmap codecs (MS-RDPBCGR 2.2.9.1.1.3.1.2.4, MS-RDPEGDI 2.2.2.5.1)
 //! - [`dvc`] + [`disp`]: dynamic virtual channels (MS-RDPEDYC) and Display Control (MS-RDPEDISP)
 //! - [`cliprdr`]: clipboard redirection on the `cliprdr` channel (MS-RDPECLIP)
@@ -19,6 +20,7 @@ pub mod channel;
 pub mod client;
 pub mod cliprdr;
 pub mod codec;
+pub mod compress;
 pub mod credssp;
 pub mod crypto;
 pub mod cursor;
@@ -47,6 +49,7 @@ pub use client::{
     CertificateCheck, Client, CloseReason, Config, ConnectionInfo, PollOutcome, ServerCertificate,
 };
 pub use cliprdr::{ClipboardBackend, ClipboardHandle, Cliprdr, cliprdr};
+pub use compress::Compression;
 pub use disp::{DisplayControl, DisplayHandle, display_control};
 pub use dvc::{Drdynvc, DvcOut, DynamicChannel, StaticOverDvc};
 pub use error::{Error, Result};
