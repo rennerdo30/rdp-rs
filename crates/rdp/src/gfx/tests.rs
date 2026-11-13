@@ -8,7 +8,7 @@ use crate::cursor::Put;
 use crate::dvc::Drdynvc;
 use crate::error::Error;
 
-fn hex(s: &str) -> Vec<u8> {
+pub(super) fn hex(s: &str) -> Vec<u8> {
     s.split_whitespace()
         .map(|b| u8::from_str_radix(b, 16).unwrap())
         .collect()
@@ -140,7 +140,7 @@ fn zgfx_random_input_never_panics() {
 
 // ---- PDUs (MS-RDPEGFX 2.2.2) ----
 
-fn pdu(cmd: u16, body: &[u8]) -> Vec<u8> {
+pub(super) fn pdu(cmd: u16, body: &[u8]) -> Vec<u8> {
     let mut v = Vec::new();
     v.put_u16(cmd);
     v.put_u16(0);
@@ -149,7 +149,7 @@ fn pdu(cmd: u16, body: &[u8]) -> Vec<u8> {
     v
 }
 
-fn rect(l: u16, t: u16, r: u16, b: u16) -> Vec<u8> {
+pub(super) fn rect(l: u16, t: u16, r: u16, b: u16) -> Vec<u8> {
     [l, t, r, b].iter().flat_map(|v| v.to_le_bytes()).collect()
 }
 
@@ -168,11 +168,18 @@ fn caps_advertise_layout() {
     want.extend(hex("02 00 0A 00 04 00 00 00 22 00 00 00")); // 10.0
     want.extend(hex("05 01 08 00 04 00 00 00 02 00 00 00")); // 8.1
     assert_eq!(v, want);
+    // With a decoder: 10.x without AVC_DISABLED (AVC444 obliged), then 8.1
+    // with AVC420.
     let v = caps_advertise(&advertised_caps(true));
-    assert_eq!(
-        v,
-        hex("12 00 00 00 16 00 00 00 01 00 05 01 08 00 04 00 00 00 12 00 00 00")
-    );
+    let mut want = hex("12 00 00 00 5E 00 00 00 07 00");
+    want.extend(hex("01 07 0A 00 04 00 00 00 82 00 00 00")); // 10.7
+    want.extend(hex("00 06 0A 00 04 00 00 00 02 00 00 00")); // 10.6
+    want.extend(hex("02 05 0A 00 04 00 00 00 02 00 00 00")); // 10.5
+    want.extend(hex("00 04 0A 00 04 00 00 00 02 00 00 00")); // 10.4
+    want.extend(hex("00 02 0A 00 04 00 00 00 02 00 00 00")); // 10.2
+    want.extend(hex("02 00 0A 00 04 00 00 00 02 00 00 00")); // 10.0
+    want.extend(hex("05 01 08 00 04 00 00 00 12 00 00 00")); // 8.1
+    assert_eq!(v, want);
 }
 
 #[test]
@@ -798,7 +805,7 @@ fn a_bad_pdu_does_not_cost_the_frame_acknowledgement() {
     );
 }
 
-fn wire(id: u16, codec: u16, dest: (u16, u16, u16, u16), data: &[u8]) -> Vec<u8> {
+pub(super) fn wire(id: u16, codec: u16, dest: (u16, u16, u16, u16), data: &[u8]) -> Vec<u8> {
     let mut body = id.to_le_bytes().to_vec();
     body.extend(codec.to_le_bytes());
     body.push(PIXEL_FORMAT_XRGB_8888);
@@ -808,13 +815,13 @@ fn wire(id: u16, codec: u16, dest: (u16, u16, u16, u16), data: &[u8]) -> Vec<u8>
     pdu(CMDID_WIRETOSURFACE_1, &body)
 }
 
-fn run(ch: &mut GraphicsChannel, pdus: &[Vec<u8>]) -> Vec<Vec<u8>> {
+pub(super) fn run(ch: &mut GraphicsChannel, pdus: &[Vec<u8>]) -> Vec<Vec<u8>> {
     let mut out = DvcOut::default();
     ch.process(&zgfx_raw(pdus), &mut out).unwrap();
     out.take()
 }
 
-fn setup(ch: &mut GraphicsChannel) {
+pub(super) fn setup(ch: &mut GraphicsChannel) {
     run(
         ch,
         &[

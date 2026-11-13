@@ -1,4 +1,5 @@
-//! H.264 decoding for the AVC420 codec (MS-RDPEGFX 2.2.4.4, 3.3.8.3).
+//! H.264 decoding for the AVC420 codec (MS-RDPEGFX 2.2.4.4, 3.3.8.3) and
+//! the two YUV420 subframes of AVC444 (2.2.4.5, 2.2.4.6; see `avc444`).
 //!
 //! The library defines the decoder interface and the colour conversion; the
 //! decoder itself is platform code supplied through [`H264Factory`] (rdpc
