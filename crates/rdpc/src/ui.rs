@@ -89,6 +89,10 @@ pub enum Field {
     GroupPath,
     /// RD Gateway host[:port].
     Gateway,
+    /// Settings: new master password (current one in Master, confirmation
+    /// in MasterConfirm), and the password of a backup to import.
+    NewMaster,
+    ImportPass,
 }
 
 /// Fields cleared for a new connection or group.
@@ -124,6 +128,19 @@ pub enum Hit {
     FormInherit(u8),
     /// Connection editor page (General, Display, Experience, Sharing, Advanced).
     FormPage(u8),
+    /// Settings page and its controls.
+    OpenSettings,
+    AutoLock(usize),
+    RememberKey,
+    ChangeMasterOpen,
+    ChangeMasterOk,
+    ChangeMasterCancel,
+    Export,
+    Import,
+    ImportOk,
+    ImportCancel,
+    CheckUpdates,
+    SetupVault,
     /// Microphone device: index into `mics` + 1 (0 = default); form and panel.
     FormMic(usize),
     TabMic(u64, usize),
@@ -325,6 +342,20 @@ pub enum Action {
     SetFullscreen(bool),
     /// Quit now (confirmed).
     Quit,
+    /// Settings.
+    SetAutoLock(u32),
+    SetCheckUpdates(bool),
+    SetRemember(bool),
+    ChangeMaster {
+        current: zeroize::Zeroizing<String>,
+        new: zeroize::Zeroizing<String>,
+    },
+    Export,
+    PickImport,
+    Import {
+        path: std::path::PathBuf,
+        password: zeroize::Zeroizing<String>,
+    },
     /// The user's answer about a server certificate.
     CertAnswer(u64, bool),
     /// Open the folder picker; None: for the connection form.
@@ -377,7 +408,7 @@ pub struct Ui {
     /// Key derivation running.
     pub unlocking: bool,
     vault_error: Option<String>,
-    fields: [TextField; 12],
+    fields: [TextField; 14],
     size: usize,
     focus: Option<Field>,
     pub tabs: Vec<Tab>,
@@ -397,6 +428,16 @@ pub struct Ui {
     pub mics: Vec<String>,
     /// Connection editor page.
     form_page: u8,
+    /// The Settings page is open (instead of the editor).
+    pub settings_open: bool,
+    /// Settings state the app fills in.
+    pub auto_lock: u32,
+    pub check_updates: bool,
+    pub remembered: bool,
+    /// Settings: the change-master form is open; a backup waits for its password.
+    change_master: bool,
+    pub import_file: Option<std::path::PathBuf>,
+    pub settings_note: Option<(String, u32)>,
     /// Asking whether to quit while this many sessions are open.
     pub confirm_exit: Option<usize>,
     /// Keyboard goes to the active session (set by clicking into it).
@@ -471,6 +512,13 @@ impl Ui {
             speakers: Vec::new(),
             mics: Vec::new(),
             form_page: 0,
+            settings_open: false,
+            auto_lock: 15,
+            check_updates: true,
+            remembered: false,
+            change_master: false,
+            import_file: None,
+            settings_note: None,
             confirm_exit: None,
             session_focus: false,
             session_area: None,
@@ -498,6 +546,8 @@ impl Ui {
         m.fields[Field::Password as usize] = TextField::secret();
         m.fields[Field::Master as usize] = TextField::secret();
         m.fields[Field::MasterConfirm as usize] = TextField::secret();
+        m.fields[Field::NewMaster as usize] = TextField::secret();
+        m.fields[Field::ImportPass as usize] = TextField::secret();
         m.store.adopt_groups();
         if m.store.connections.is_empty() {
             m.new_connection();
@@ -1185,10 +1235,12 @@ impl Ui {
             Hit::Row(i) => {
                 self.select(i);
                 self.active = None;
+                self.settings_open = false;
             }
             Hit::GroupRow(gi) => {
                 self.select_group(gi);
                 self.active = None;
+                self.settings_open = false;
             }
             Hit::GroupToggle(gi) => {
                 if let Some(g) = self.store.groups.get(gi) {
@@ -1225,10 +1277,47 @@ impl Ui {
             Hit::NewGroup => {
                 self.new_group();
                 self.active = None;
+                self.settings_open = false;
             }
             Hit::NewInGroup => {
                 let g = self.context_group();
                 self.new_connection_in(&g);
+            }
+            Hit::OpenSettings => {
+                self.settings_open = true;
+                self.active = None;
+                self.home_scroll = 0;
+                self.focus = None;
+            }
+            Hit::AutoLock(i) => return Some(Action::SetAutoLock(crate::settings::AUTO_LOCK[i])),
+            Hit::CheckUpdates => return Some(Action::SetCheckUpdates(!self.check_updates)),
+            Hit::RememberKey => return Some(Action::SetRemember(!self.remembered)),
+            Hit::ChangeMasterOpen => {
+                self.change_master = true;
+                self.settings_note = None;
+                for f in [Field::Master, Field::NewMaster, Field::MasterConfirm] {
+                    self.field_mut(f).set("");
+                }
+                self.focus = Some(Field::Master);
+            }
+            Hit::ChangeMasterCancel => {
+                self.change_master = false;
+                for f in [Field::Master, Field::NewMaster, Field::MasterConfirm] {
+                    self.field_mut(f).set("");
+                }
+            }
+            Hit::ChangeMasterOk => return self.change_master_action(),
+            Hit::Export => return Some(Action::Export),
+            Hit::Import => return Some(Action::PickImport),
+            Hit::ImportOk => return self.import_action(),
+            Hit::ImportCancel => {
+                self.import_file = None;
+                self.field_mut(Field::ImportPass).set("");
+            }
+            Hit::SetupVault => {
+                self.vault_setup = true;
+                self.vault_error = None;
+                self.focus = Some(Field::Master);
             }
             Hit::FormPage(i) => {
                 self.form_page = i;
@@ -1341,6 +1430,7 @@ impl Ui {
                 let g = self.context_group();
                 self.new_connection_in(&g);
                 self.active = None;
+                self.settings_open = false;
             }
             Hit::Field(f) => self.focus = Some(f),
             Hit::Size(i) => self.size = i,
@@ -1525,6 +1615,24 @@ impl Ui {
         self.field_mut(Field::FormDrive).set("");
     }
 
+    pub fn store_is_vault(&self) -> bool {
+        self.store.is_vault()
+    }
+
+    pub fn focus_import(&mut self) {
+        self.focus = Some(Field::ImportPass);
+    }
+
+    /// After an import: keep the selection valid.
+    pub fn refresh_selection(&mut self) {
+        if self.selected.is_none()
+            && !self.store.connections.is_empty()
+            && self.group_edit.is_none()
+        {
+            self.select(0);
+        }
+    }
+
     /// A folder chosen in the picker for the connection form.
     pub fn form_add_folder(&mut self, path: String) {
         if !self.opts.drives.contains(&path) {
@@ -1567,6 +1675,15 @@ impl Ui {
             }
             Key::Enter if self.focus == Some(Field::FormDrive) => self.form_add_drive(),
             Key::Enter if self.store.is_locked() => return self.unlock(),
+            Key::Enter
+                if self.settings_open && self.active.is_none() && self.import_file.is_some() =>
+            {
+                return self.import_action();
+            }
+            Key::Enter if self.settings_open && self.active.is_none() && self.change_master => {
+                return self.change_master_action();
+            }
+            Key::Enter if self.settings_open && self.active.is_none() && !self.vault_setup => {}
             Key::Enter if self.vault_setup => return self.create_vault(),
             Key::Enter if self.active.is_none() => return self.connect(),
             Key::Enter => {}
@@ -1766,6 +1883,7 @@ impl Ui {
             None if self.store.is_locked() || self.vault_setup => {
                 self.paint_vault(cv, te, f, content)
             }
+            None if self.settings_open => self.paint_settings(cv, te, f, content),
             None => self.paint_home(cv, te, f, content),
         }
 
@@ -1877,7 +1995,21 @@ impl Ui {
             );
         }
 
-        let list = Rect::new(0, p(86.0), area.w, area.h - p(86.0));
+        let foot = p(52.0);
+        let sr = Rect::new(
+            pad,
+            area.bottom() - foot + p(10.0),
+            area.w - 2 * pad,
+            p(32.0),
+        );
+        cv.fill(Rect::new(0, area.bottom() - foot, area.w, 1), BORDER_SOFT);
+        let settings_style = if self.settings_open && self.active.is_none() {
+            Style::Secondary
+        } else {
+            Style::Ghost
+        };
+        self.button(cv, te, f, sr, "Settings", settings_style, Hit::OpenSettings);
+        let list = Rect::new(0, p(86.0), area.w, area.h - p(86.0) - foot);
         let old = cv.set_clip(list);
         let rows = self.rows();
         if self.store.connections.is_empty() && self.store.groups.is_empty() {
@@ -2418,6 +2550,364 @@ impl Ui {
             );
         }
         cv.set_clip(old);
+    }
+
+    fn change_master_action(&mut self) -> Option<Action> {
+        let current = zeroize::Zeroizing::new(self.field(Field::Master).text.clone());
+        let new = zeroize::Zeroizing::new(self.field(Field::NewMaster).text.clone());
+        let again = zeroize::Zeroizing::new(self.field(Field::MasterConfirm).text.clone());
+        if current.is_empty() {
+            self.settings_note = Some(("Enter your current master password.".into(), ERR));
+            return None;
+        }
+        if new.chars().count() < 8 {
+            self.settings_note = Some(("Use at least 8 characters for the new one.".into(), ERR));
+            return None;
+        }
+        if new != again {
+            self.settings_note = Some(("The two new passwords differ.".into(), ERR));
+            return None;
+        }
+        for f in [Field::Master, Field::NewMaster, Field::MasterConfirm] {
+            self.field_mut(f).set("");
+        }
+        self.unlocking = true;
+        self.settings_note = Some(("Changing the master password…".into(), TEXT_2));
+        Some(Action::ChangeMaster { current, new })
+    }
+
+    fn import_action(&mut self) -> Option<Action> {
+        let path = self.import_file.clone()?;
+        let password = zeroize::Zeroizing::new(self.field(Field::ImportPass).text.clone());
+        if password.is_empty() {
+            self.settings_note = Some(("Enter the backup's master password.".into(), ERR));
+            return None;
+        }
+        self.field_mut(Field::ImportPass).set("");
+        self.unlocking = true;
+        self.settings_note = Some(("Opening the backup…".into(), TEXT_2));
+        Some(Action::Import { path, password })
+    }
+
+    /// The app reports the end of a settings job (change master, export, import).
+    pub fn settings_done(&mut self, ok: bool, text: String) {
+        self.unlocking = false;
+        if ok {
+            self.change_master = false;
+            self.import_file = None;
+        }
+        self.settings_note = Some((text, if ok { OK } else { ERR }));
+    }
+
+    /// App settings: security, backup, updates, about.
+    fn paint_settings(&mut self, cv: &mut Canvas, te: &mut TextEngine, f: &Fonts, area: Rect) {
+        let s = self.scale;
+        let p = |v: f32| (v * s).round() as i32;
+        let old = cv.set_clip(area);
+        let first_hit = self.hits.len();
+        self.home_area = area;
+        let top = area.y - self.home_scroll;
+        let x = area.x + p(40.0);
+        let w = p(620.0).min(area.w - p(80.0)).max(p(300.0));
+        te.draw(
+            cv,
+            f.semi,
+            20.0 * s,
+            x as f32,
+            (top + p(48.0)) as f32,
+            "Settings",
+            TEXT,
+            w as f32,
+        );
+        let version = format!("rdpc {}", env!("CARGO_PKG_VERSION"));
+        te.draw(
+            cv,
+            f.ui,
+            12.5 * s,
+            x as f32,
+            (top + p(70.0)) as f32,
+            &version,
+            TEXT_3,
+            w as f32,
+        );
+        let mut y = top + p(100.0);
+        if let Some((note, color)) = self.settings_note.clone() {
+            te.draw(
+                cv,
+                f.ui,
+                12.5 * s,
+                x as f32,
+                (y + p(4.0)) as f32,
+                &note,
+                color,
+                w as f32,
+            );
+            y += p(24.0);
+        }
+
+        // Security
+        self.caption(cv, te, f, x, y, w, "SECURITY");
+        y += p(24.0);
+        if self.store.is_vault() {
+            let cells = self.card(cv, x, y, w, &[p(58.0), p(58.0)]);
+            let remembered = self.remembered;
+            self.card_switch(
+                cv,
+                te,
+                f,
+                cells[0],
+                "Unlock automatically on this PC",
+                "Windows keeps the key for your user account (DPAPI)",
+                remembered,
+                Hit::RememberKey,
+            );
+            self.card_action(
+                cv,
+                te,
+                f,
+                cells[1],
+                "Master password",
+                "Encrypts saved passwords and backups",
+                "Change…",
+                Hit::ChangeMasterOpen,
+            );
+            y += p(116.0) + p(16.0);
+            if self.change_master {
+                let rh = p(52.0);
+                let cells = self.card(cv, x, y, w, &[rh, rh, rh, p(56.0)]);
+                self.field_row(
+                    cv,
+                    te,
+                    f,
+                    cells[0],
+                    "Current",
+                    Field::Master,
+                    "Current master password",
+                );
+                self.field_row(
+                    cv,
+                    te,
+                    f,
+                    cells[1],
+                    "New",
+                    Field::NewMaster,
+                    "At least 8 characters",
+                );
+                self.field_row(
+                    cv,
+                    te,
+                    f,
+                    cells[2],
+                    "Again",
+                    Field::MasterConfirm,
+                    "The new one once more",
+                );
+                let r = cells[3];
+                let label = if self.unlocking {
+                    "Working…"
+                } else {
+                    "Change password"
+                };
+                self.button(
+                    cv,
+                    te,
+                    f,
+                    Rect::new(r.x + p(16.0), r.y + p(11.0), p(150.0), p(34.0)),
+                    label,
+                    Style::Primary,
+                    Hit::ChangeMasterOk,
+                );
+                self.button(
+                    cv,
+                    te,
+                    f,
+                    Rect::new(r.x + p(174.0), r.y + p(11.0), p(96.0), p(34.0)),
+                    "Cancel",
+                    Style::Secondary,
+                    Hit::ChangeMasterCancel,
+                );
+                y += 3 * rh + p(56.0) + p(16.0);
+            }
+            self.caption(cv, te, f, x, y, w, "LOCK AUTOMATICALLY WHEN IDLE");
+            y += p(24.0);
+            let items: Vec<(String, bool, Hit)> = crate::settings::AUTO_LOCK
+                .iter()
+                .enumerate()
+                .map(|(i, m)| {
+                    let t = match m {
+                        0 => "Never".to_string(),
+                        60 => "After 1 hour".to_string(),
+                        m => format!("After {m} min"),
+                    };
+                    (t, self.auto_lock == *m, Hit::AutoLock(i))
+                })
+                .collect();
+            self.segmented(cv, te, f, Rect::new(x, y, w, p(34.0)), &items);
+            y += p(34.0) + p(24.0);
+        } else {
+            let cells = self.card(cv, x, y, w, &[p(58.0)]);
+            self.card_action(
+                cv,
+                te,
+                f,
+                cells[0],
+                "Encrypt your connections",
+                "A master password lets rdpc save passwords and back up",
+                "Set up…",
+                Hit::SetupVault,
+            );
+            y += p(58.0) + p(24.0);
+        }
+
+        // Backup
+        self.caption(cv, te, f, x, y, w, "BACKUP");
+        y += p(24.0);
+        let cells = self.card(cv, x, y, w, &[p(58.0), p(58.0)]);
+        self.card_action(
+            cv,
+            te,
+            f,
+            cells[0],
+            "Export connections",
+            "One encrypted file, opened with your master password",
+            "Export…",
+            Hit::Export,
+        );
+        self.card_action(
+            cv,
+            te,
+            f,
+            cells[1],
+            "Import connections",
+            "Adds the connections and groups of a backup",
+            "Import…",
+            Hit::Import,
+        );
+        y += p(116.0) + p(16.0);
+        if let Some(path) = self.import_file.clone() {
+            let name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let cells = self.card(cv, x, y, w, &[p(44.0), p(52.0), p(56.0)]);
+            te.draw(
+                cv,
+                f.ui,
+                12.5 * s,
+                (cells[0].x + p(16.0)) as f32,
+                (cells[0].y + p(27.0)) as f32,
+                &format!("Import from {name}"),
+                TEXT_2,
+                (w - p(32.0)) as f32,
+            );
+            self.field_row(
+                cv,
+                te,
+                f,
+                cells[1],
+                "Password",
+                Field::ImportPass,
+                "Master password of the backup",
+            );
+            let r = cells[2];
+            let label = if self.unlocking {
+                "Working…"
+            } else {
+                "Import"
+            };
+            self.button(
+                cv,
+                te,
+                f,
+                Rect::new(r.x + p(16.0), r.y + p(11.0), p(120.0), p(34.0)),
+                label,
+                Style::Primary,
+                Hit::ImportOk,
+            );
+            self.button(
+                cv,
+                te,
+                f,
+                Rect::new(r.x + p(144.0), r.y + p(11.0), p(96.0), p(34.0)),
+                "Cancel",
+                Style::Secondary,
+                Hit::ImportCancel,
+            );
+            y += p(152.0) + p(16.0);
+        }
+        y += p(8.0);
+
+        // Updates
+        self.caption(cv, te, f, x, y, w, "UPDATES");
+        y += p(24.0);
+        let cells = self.card(cv, x, y, w, &[p(58.0)]);
+        let check = self.check_updates;
+        self.card_switch(
+            cv,
+            te,
+            f,
+            cells[0],
+            "Check for updates daily",
+            "Installed copies offer new releases in the status bar",
+            check,
+            Hit::CheckUpdates,
+        );
+        y += p(58.0);
+
+        self.home_content = y + p(40.0) - top;
+        let max = (self.home_content - area.h).max(0);
+        self.home_scroll = self.home_scroll.min(max);
+        self.clip_hits(first_hit, area);
+        cv.set_clip(old);
+    }
+
+    /// A card row with a label, a second line and a button on the right.
+    #[allow(clippy::too_many_arguments)]
+    fn card_action(
+        &mut self,
+        cv: &mut Canvas,
+        te: &mut TextEngine,
+        f: &Fonts,
+        r: Rect,
+        label: &str,
+        sub: &str,
+        button: &str,
+        hit: Hit,
+    ) {
+        let s = self.scale;
+        let p = |v: f32| (v * s).round() as i32;
+        let bw = te.measure(f.ui, 13.0 * s, button) as i32 + p(32.0);
+        let mid = r.y + r.h / 2;
+        let tw = (r.w - bw - p(44.0)) as f32;
+        te.draw(
+            cv,
+            f.ui,
+            13.0 * s,
+            (r.x + p(16.0)) as f32,
+            (mid - p(2.0)) as f32,
+            label,
+            TEXT,
+            tw,
+        );
+        te.draw(
+            cv,
+            f.ui,
+            11.5 * s,
+            (r.x + p(16.0)) as f32,
+            (mid + p(14.0)) as f32,
+            sub,
+            TEXT_3,
+            tw,
+        );
+        self.button(
+            cv,
+            te,
+            f,
+            Rect::new(r.right() - p(14.0) - bw, mid - p(16.0), bw, p(32.0)),
+            button,
+            Style::Secondary,
+            hit,
+        );
     }
 
     /// The connection (or group) editor: a header with the actions, a section
@@ -4743,6 +5233,17 @@ fn session_action(r: &Connection, password: &str) -> Action {
         fit,
         opts: r.options.clone(),
     }
+}
+
+/// The Settings page (with the vault open when `vault`).
+pub fn sample_settings(vault: bool) -> Ui {
+    let mut m = sample(false);
+    m.settings_open = true;
+    if vault {
+        m.store.vault_sample();
+        m.change_master = true;
+    }
+    m
 }
 
 /// The connection editor on `page` for a top-level connection.

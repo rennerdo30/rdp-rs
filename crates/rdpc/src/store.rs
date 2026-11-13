@@ -323,6 +323,11 @@ impl Default for Store {
     }
 }
 
+/// Opens a backup (or vault) file with a key derived from its password.
+pub fn read_backup(bytes: &[u8], key: &VaultKey) -> Result<(Vec<Group>, Vec<Connection>), String> {
+    parse(&vault::open(key, bytes)?)
+}
+
 pub fn data_dir() -> Option<PathBuf> {
     let base = std::env::var_os("APPDATA").or_else(|| std::env::var_os("HOME"))?;
     Some(PathBuf::from(base).join("rdp-rs"))
@@ -399,6 +404,17 @@ impl Store {
     }
 
     /// A locked store for `--snapshot-ui` (never touches disk).
+    /// Snapshots only: pretend this in-memory store is an open vault.
+    pub fn vault_sample(&mut self) {
+        self.backend = Backend::Vault {
+            path: PathBuf::new(),
+            key: VaultKey {
+                key: zeroize::Zeroizing::new([0; 32]),
+                params: vault::KdfParams::fresh(),
+            },
+        };
+    }
+
     pub fn locked_sample() -> Store {
         Store {
             connections: Vec::new(),
@@ -439,6 +455,66 @@ impl Store {
         self.connections = connections;
         self.backend = Backend::Vault { path, key };
         Ok(())
+    }
+
+    /// The open vault's key (for "remember on this PC" and backups).
+    pub fn vault_key(&self) -> Option<&VaultKey> {
+        match &self.backend {
+            Backend::Vault { key, .. } => Some(key),
+            _ => None,
+        }
+    }
+
+    /// Re-encrypts the vault with a new key (a new master password). The
+    /// file is replaced only after the new one was written and read back.
+    pub fn rekey(&mut self, key: VaultKey) -> Result<(), String> {
+        let Backend::Vault { path, .. } = &self.backend else {
+            return Err("no vault is open".into());
+        };
+        let path = path.clone();
+        let bytes = vault::seal(&key, &self.file_json(true)?);
+        let (groups, back) = parse(&vault::open(&key, &bytes)?)?;
+        if back != self.connections || groups != self.groups {
+            return Err("re-encryption check failed; the vault was not changed".into());
+        }
+        write_atomic(&path, &bytes)?;
+        self.backend = Backend::Vault { path, key };
+        Ok(())
+    }
+
+    /// An encrypted backup of every connection and group (same format as the
+    /// vault, opened with the master password that was current when exported).
+    pub fn export_backup(&self) -> Result<Vec<u8>, String> {
+        let key = self
+            .vault_key()
+            .ok_or("set a master password first: backups are encrypted with it")?;
+        Ok(vault::seal(key, &self.file_json(true)?))
+    }
+
+    /// Adds the groups and connections of a backup; connections that already
+    /// exist (same name, host and group) are skipped. Returns how many were added.
+    pub fn merge(&mut self, groups: Vec<Group>, connections: Vec<Connection>) -> usize {
+        for g in groups {
+            if self.group_index(&g.path).is_none() {
+                self.groups.push(g);
+            }
+        }
+        let mut added = 0;
+        for c in connections {
+            let dup = self
+                .connections
+                .iter()
+                .any(|o| o.name == c.name && o.host == c.host && o.group == c.group);
+            if !dup {
+                if !c.group.is_empty() {
+                    self.ensure_group(&c.group);
+                }
+                self.connections.push(c);
+                added += 1;
+            }
+        }
+        self.groups.sort_by_key(|g| g.path.to_lowercase());
+        added
     }
 
     /// Forgets the key and every connection in memory.
@@ -937,5 +1013,54 @@ mod tests {
         let o: SessionOptions = serde_json::from_str(r#"{"clipboard":true}"#).unwrap();
         assert_eq!(o.quality, Quality::default());
         assert!(o.quality.wallpaper && o.quality.color_depth == 32);
+    }
+
+    #[test]
+    fn backup_round_trip_and_merge_skips_duplicates() {
+        let key = derive(
+            "pw",
+            KdfParams {
+                m_kib: 64,
+                t: 1,
+                p: 1,
+                salt: [9; 16],
+            },
+        )
+        .unwrap();
+        let conn = Connection {
+            name: "pc".into(),
+            host: "h".into(),
+            group: "Work".into(),
+            password: Some("hunter2".into()),
+            ..Default::default()
+        };
+        let mut s = Store::memory(vec![conn.clone()]);
+        s.ensure_group("Work");
+        s.backend = Backend::Vault {
+            path: PathBuf::new(),
+            key: key.clone(),
+        };
+        let backup = s.export_backup().unwrap();
+        assert!(
+            !backup.windows(7).any(|w| w == b"hunter2"),
+            "backup is encrypted"
+        );
+        let (g, c) = read_backup(&backup, &key).unwrap();
+        assert_eq!(c, vec![conn.clone()]);
+        let mut other = Store::memory(vec![conn]);
+        assert_eq!(
+            other.merge(g.clone(), c.clone()),
+            0,
+            "same connection skipped"
+        );
+        let fresh = Connection {
+            name: "new".into(),
+            ..c[0].clone()
+        };
+        assert_eq!(other.merge(g, vec![fresh]), 1);
+        assert!(other.group_index("Work").is_some());
+        let wrong = derive("nope", key.params).unwrap();
+        assert!(read_backup(&backup, &wrong).is_err());
+        s.backend = Backend::Memory;
     }
 }

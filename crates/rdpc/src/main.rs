@@ -27,6 +27,7 @@ mod mic;
 mod picker;
 mod printing;
 mod session;
+mod settings;
 mod smartcard;
 mod store;
 mod text_field;
@@ -355,6 +356,8 @@ fn snapshot_ui(path: &str, scale: f32) -> Result<(), Box<dyn std::error::Error>>
         (22, false, "-form-experience"),
         (23, false, "-form-sharing"),
         (24, false, "-form-advanced"),
+        (30, false, "-settings"),
+        (31, false, "-settings-vault"),
         (8, false, "-cert"),
         (9, false, "-cert-changed"),
         (1, false, "-panel-display"),
@@ -364,6 +367,7 @@ fn snapshot_ui(path: &str, scale: f32) -> Result<(), Box<dyn std::error::Error>>
     ] {
         let mut m = match page {
             8 | 9 => ui::sample_cert(page == 9),
+            30.. => ui::sample_settings(page == 31),
             20.. => ui::sample_form(page - 20),
             _ => ui::sample_panel(page, full),
         };

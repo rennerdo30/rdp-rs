@@ -41,6 +41,9 @@ pub enum UserEvent {
     Retry(u64),
     /// A Windows key combination taken by the keyboard hook: (scancode, extended, down).
     HookKey(u8, bool, bool),
+    /// Export: the chosen file; Import: the chosen backup (asks its password).
+    ExportTo(std::path::PathBuf),
+    ImportFrom(std::path::PathBuf),
     /// The folder picker closed: (session or None for the form, folder).
     Picked(Option<u64>, Option<std::path::PathBuf>),
     /// A session waits for the user to trust its server certificate.
@@ -57,6 +60,10 @@ const RETRY_DELAYS_S: [u64; 5] = [1, 2, 4, 8, 15];
 pub enum VaultResult {
     Unlocked(Result<crate::vault::VaultKey, String>, bool),
     Created(Result<crate::vault::VaultKey, String>),
+    /// A new master password's key (or why the change failed).
+    Rekeyed(Result<crate::vault::VaultKey, String>),
+    /// The contents of a backup (or why it could not be opened).
+    Imported(Result<(Vec<crate::store::Group>, Vec<crate::store::Connection>), String>),
 }
 
 struct Gfx {
@@ -174,6 +181,9 @@ pub struct App {
     caption_sent: Option<ui::TitleGeometry>,
     /// A newer release offered by the update check.
     update: Option<rdpc_update::Candidate>,
+    settings: crate::settings::AppSettings,
+    /// The last keyboard or mouse input (idle auto-lock).
+    last_input: std::time::Instant,
     pub exit_code: i32,
 }
 
@@ -203,6 +213,8 @@ pub fn run(direct: Option<(String, Config)>) -> i32 {
         quit: false,
         caption_sent: None,
         update: None,
+        settings: crate::settings::AppSettings::load(),
+        last_input: std::time::Instant::now(),
         exit_code: 0,
     };
     if let Err(e) = event_loop.run_app(&mut app) {
@@ -250,6 +262,14 @@ impl App {
         m.shown.clear();
         self.settle();
         self.dirty();
+    }
+
+    /// When the open vault locks itself, if auto-lock is on.
+    fn auto_lock_deadline(&self) -> Option<std::time::Instant> {
+        let min = self.settings.auto_lock_minutes;
+        let m = self.win.as_ref()?;
+        (min > 0 && m.ui.store_is_vault())
+            .then(|| self.last_input + std::time::Duration::from_secs(min as u64 * 60))
     }
 
     /// Full presents for a moment (see `MainWin::settle`).
@@ -666,6 +686,110 @@ impl App {
             }
             Action::WinClose => self.request_quit(),
             Action::Quit => self.quit = true,
+            Action::SetAutoLock(min) => {
+                self.settings.auto_lock_minutes = min;
+                let _ = self.settings.save();
+                if let Some(m) = &mut self.win {
+                    m.ui.auto_lock = min;
+                }
+                self.dirty();
+            }
+            Action::SetCheckUpdates(on) => {
+                self.settings.check_updates = on;
+                let _ = self.settings.save();
+                if let Some(m) = &mut self.win {
+                    m.ui.check_updates = on;
+                }
+                self.dirty();
+            }
+            Action::SetRemember(on) => {
+                if let Some(m) = &mut self.win {
+                    let path = m.ui.store_mut().remembered_key_path();
+                    let blob =
+                        m.ui.store_mut()
+                            .vault_key()
+                            .and_then(crate::vault::protect_key);
+                    let r = match (on, path) {
+                        (true, Some(p)) => blob
+                            .ok_or("Windows could not protect the key".to_string())
+                            .and_then(|b| std::fs::write(&p, b).map_err(|e| e.to_string())),
+                        (false, Some(p)) => match std::fs::remove_file(&p) {
+                            Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                                Err(e.to_string())
+                            }
+                            _ => Ok(()),
+                        },
+                        _ => Err("no vault".into()),
+                    };
+                    match r {
+                        Ok(()) => m.ui.remembered = on,
+                        Err(e) => m.ui.settings_done(false, e),
+                    }
+                }
+                self.dirty();
+            }
+            Action::ChangeMaster { current, new } => {
+                let Some(m) = &mut self.win else { return };
+                let store = m.ui.store_mut();
+                let (Some(old), Some(bytes)) = (store.vault_key().cloned(), store.vault_bytes())
+                else {
+                    return;
+                };
+                let proxy = self.proxy.clone();
+                // Two Argon2id runs: never on the UI thread.
+                std::thread::spawn(move || {
+                    let r = crate::vault::read_params(&bytes)
+                        .and_then(|p| crate::vault::derive(&current, p))
+                        .and_then(|k| {
+                            if *k.key == *old.key {
+                                Ok(())
+                            } else {
+                                Err("The current master password is wrong.".to_string())
+                            }
+                        })
+                        .and_then(|()| {
+                            crate::vault::derive(&new, crate::vault::KdfParams::fresh())
+                        });
+                    let _ = proxy.send_event(UserEvent::Vault(VaultResult::Rekeyed(r)));
+                });
+            }
+            Action::Export => {
+                let proxy = std::sync::Mutex::new(self.proxy.clone());
+                crate::picker::pick_with(
+                    crate::picker::Pick::SaveBackup,
+                    self.hwnd(),
+                    move |path| {
+                        if let (Some(path), Ok(p)) = (path, proxy.lock()) {
+                            let _ = p.send_event(UserEvent::ExportTo(path));
+                        }
+                    },
+                );
+            }
+            Action::PickImport => {
+                let proxy = std::sync::Mutex::new(self.proxy.clone());
+                crate::picker::pick_with(
+                    crate::picker::Pick::OpenBackup,
+                    self.hwnd(),
+                    move |path| {
+                        if let (Some(path), Ok(p)) = (path, proxy.lock()) {
+                            let _ = p.send_event(UserEvent::ImportFrom(path));
+                        }
+                    },
+                );
+            }
+            Action::Import { path, password } => {
+                let proxy = self.proxy.clone();
+                std::thread::spawn(move || {
+                    let r = std::fs::read(&path)
+                        .map_err(|e| format!("Cannot read {}: {e}", path.display()))
+                        .and_then(|bytes| {
+                            let key = crate::vault::read_params(&bytes)
+                                .and_then(|p| crate::vault::derive(&password, p))?;
+                            crate::store::read_backup(&bytes, &key)
+                        });
+                    let _ = proxy.send_event(UserEvent::Vault(VaultResult::Imported(r)));
+                });
+            }
             Action::Unlock { master, remember } => {
                 let params = self
                     .win
@@ -982,6 +1106,40 @@ impl App {
                 Err(e) => ui.vault_failed(e),
             },
             VaultResult::Unlocked(Err(e), _) | VaultResult::Created(Err(e)) => ui.vault_failed(e),
+            VaultResult::Rekeyed(Ok(key)) => {
+                let remember = ui.store_mut().remembered_key_path().filter(|p| p.exists());
+                match ui.store_mut().rekey(key) {
+                    Ok(()) => {
+                        // A remembered key must follow the new password.
+                        if let (Some(path), Some(blob)) = (
+                            remember,
+                            ui.store_mut()
+                                .vault_key()
+                                .and_then(crate::vault::protect_key),
+                        ) {
+                            let _ = std::fs::write(path, blob);
+                        }
+                        ui.settings_done(true, "Master password changed.".into());
+                    }
+                    Err(e) => ui.settings_done(false, e),
+                }
+            }
+            VaultResult::Rekeyed(Err(e)) => ui.settings_done(false, e),
+            VaultResult::Imported(Ok((groups, connections))) => {
+                let added = ui.store_mut().merge(groups, connections);
+                match ui.store_mut().save() {
+                    Ok(()) => ui.settings_done(
+                        true,
+                        format!(
+                            "Imported {added} connection{}.",
+                            if added == 1 { "" } else { "s" }
+                        ),
+                    ),
+                    Err(e) => ui.settings_done(false, e),
+                }
+                ui.refresh_selection();
+            }
+            VaultResult::Imported(Err(e)) => ui.settings_done(false, e),
         }
     }
 
@@ -1131,8 +1289,23 @@ fn blit(
 impl ApplicationHandler<UserEvent> for App {
     /// After a resize or move settles, present the whole window once more.
     fn about_to_wait(&mut self, el: &ActiveEventLoop) {
-        let Some(t) = self.win.as_ref().and_then(|m| m.settle) else {
-            el.set_control_flow(ControlFlow::Wait);
+        // Idle auto-lock of the vault.
+        let lock_at = self.auto_lock_deadline();
+        if lock_at.is_some_and(|t| std::time::Instant::now() >= t) {
+            if let Some(m) = &mut self.win {
+                m.ui.store_mut().lock();
+                m.ui.vault_locked();
+                m.ui.set_message("Locked after being idle.", theme::TEXT_2);
+            }
+            self.dirty();
+        }
+        let lock_at = self.auto_lock_deadline();
+        let settle = self.win.as_ref().and_then(|m| m.settle);
+        let Some(t) = settle else {
+            match lock_at {
+                Some(t) => el.set_control_flow(ControlFlow::WaitUntil(t)),
+                None => el.set_control_flow(ControlFlow::Wait),
+            }
             return;
         };
         if std::time::Instant::now() >= t {
@@ -1196,7 +1369,12 @@ impl ApplicationHandler<UserEvent> for App {
                             ui.mics = crate::mic::input_devices();
                             // Loads the folder picker's shell components early.
                             crate::picker::prewarm();
-                            check_for_update(self.proxy.clone());
+                            ui.auto_lock = self.settings.auto_lock_minutes;
+                            ui.check_updates = self.settings.check_updates;
+                            ui.remembered = remembered_exists(&mut ui);
+                            if self.settings.check_updates {
+                                check_for_update(self.proxy.clone());
+                            }
                             ui.custom_frame = framed;
                             ui
                         },
@@ -1279,6 +1457,29 @@ impl ApplicationHandler<UserEvent> for App {
                 return self.dirty();
             }
             UserEvent::Picked(_, None) => return,
+            UserEvent::ExportTo(path) => {
+                if let Some(m) = &mut self.win {
+                    let r =
+                        m.ui.store_mut()
+                            .export_backup()
+                            .and_then(|b| std::fs::write(&path, b).map_err(|e| e.to_string()));
+                    match r {
+                        Ok(()) => {
+                            m.ui.settings_done(true, format!("Exported to {}.", path.display()))
+                        }
+                        Err(e) => m.ui.settings_done(false, e),
+                    }
+                }
+                return self.dirty();
+            }
+            UserEvent::ImportFrom(path) => {
+                if let Some(m) = &mut self.win {
+                    m.ui.import_file = Some(path);
+                    m.ui.settings_note = None;
+                    m.ui.focus_import();
+                }
+                return self.dirty();
+            }
             UserEvent::Certificate(id, prompt, reply) => {
                 match self.sessions.get_mut(&id) {
                     Some(s) => s.cert_reply = Some(reply),
@@ -1541,6 +1742,7 @@ impl App {
                 }
             }
             WindowEvent::MouseInput { state, button, .. } => {
+                self.last_input = std::time::Instant::now();
                 let (x, y) = self.win.as_ref().unwrap().cursor;
                 let down = state == ElementState::Pressed;
                 let target = self.mouse_to_session(x, y);
@@ -1576,6 +1778,7 @@ impl App {
                 }
             }
             WindowEvent::MouseWheel { delta, .. } => {
+                self.last_input = std::time::Instant::now();
                 let (x, y) = self.win.as_ref().unwrap().cursor;
                 if let Some((id, fx, fy)) = self.mouse_to_session(x, y) {
                     self.send(id, session::wheel(delta, (fx, fy)).into_iter().collect());
@@ -1590,7 +1793,10 @@ impl App {
                 }
             }
             WindowEvent::ModifiersChanged(mods) => self.mods = mods.state(),
-            WindowEvent::KeyboardInput { event, .. } => self.keyboard(event),
+            WindowEvent::KeyboardInput { event, .. } => {
+                self.last_input = std::time::Instant::now();
+                self.keyboard(event)
+            }
             _ => {}
         }
     }
@@ -1679,4 +1885,11 @@ fn certificate_check(proxy: EventLoopProxy<UserEvent>, id: u64) -> rdp::Certific
         }
         trusted
     }))
+}
+
+/// Whether a "remember on this PC" key is stored.
+fn remembered_exists(ui: &mut Ui) -> bool {
+    ui.store_mut()
+        .remembered_key_path()
+        .is_some_and(|p| p.exists())
 }

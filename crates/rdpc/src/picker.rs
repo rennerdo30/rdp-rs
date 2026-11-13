@@ -13,7 +13,19 @@ use std::sync::mpsc::{Sender, channel};
 
 type Done = Box<dyn FnOnce(Option<PathBuf>) + Send>;
 
+/// What the dialog picks.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Pick {
+    /// A folder to share.
+    Folder,
+    /// Where to write a connections backup.
+    SaveBackup,
+    /// A connections backup to read.
+    OpenBackup,
+}
+
 struct Request {
+    kind: Pick,
     owner: isize,
     done: Done,
 }
@@ -33,7 +45,7 @@ pub fn prewarm() {
             #[cfg(windows)]
             warm();
             for req in rx {
-                (req.done)(pick(req.owner));
+                (req.done)(pick(req.kind, req.owner));
             }
         });
     if spawned.is_ok() {
@@ -44,9 +56,15 @@ pub fn prewarm() {
 /// Opens the folder picker over `owner` (an HWND) and calls `done` with the
 /// chosen folder, or None when it was cancelled.
 pub fn pick_folder(owner: isize, done: impl FnOnce(Option<PathBuf>) + Send + 'static) {
+    pick_with(Pick::Folder, owner, done);
+}
+
+/// Opens the dialog for `kind` over `owner` and calls `done` with the result.
+pub fn pick_with(kind: Pick, owner: isize, done: impl FnOnce(Option<PathBuf>) + Send + 'static) {
     prewarm();
     let slot = PICKER.lock().unwrap_or_else(|p| p.into_inner());
     let req = Request {
+        kind,
         owner,
         done: Box::new(done),
     };
@@ -57,18 +75,29 @@ pub fn pick_folder(owner: isize, done: impl FnOnce(Option<PathBuf>) + Send + 'st
     }
 }
 
-fn pick(owner: isize) -> Option<PathBuf> {
+fn pick(kind: Pick, owner: isize) -> Option<PathBuf> {
     #[cfg(windows)]
     {
-        let mut dialog = rfd::FileDialog::new().set_title("Share a folder");
+        let mut dialog = rfd::FileDialog::new();
         if let Some(parent) = Owner::new(owner) {
             dialog = dialog.set_parent(&parent);
         }
-        dialog.pick_folder()
+        match kind {
+            Pick::Folder => dialog.set_title("Share a folder").pick_folder(),
+            Pick::SaveBackup => dialog
+                .set_title("Export connections")
+                .set_file_name("rdpc-connections.rdpbackup")
+                .add_filter("rdpc backup", &["rdpbackup"])
+                .save_file(),
+            Pick::OpenBackup => dialog
+                .set_title("Import connections")
+                .add_filter("rdpc backup", &["rdpbackup", "bin"])
+                .pick_file(),
+        }
     }
     #[cfg(not(windows))]
     {
-        let _ = owner;
+        let _ = (kind, owner);
         None
     }
 }
