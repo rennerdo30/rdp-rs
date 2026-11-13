@@ -107,6 +107,8 @@ pub enum Hit {
     GroupRow(usize),
     GroupToggle(usize),
     NewGroup,
+    /// Status bar: install the offered update.
+    Update,
     /// New connection inside the open group.
     NewInGroup,
     /// Connection/group form: inherit chip (credentials, display, sharing).
@@ -225,6 +227,8 @@ pub enum Action {
     Lock,
     /// Several actions at once ("Connect all" of a group).
     Batch(Vec<Action>),
+    /// Download, verify and start the setup of the offered update.
+    InstallUpdate,
 }
 
 pub enum Key {
@@ -298,6 +302,12 @@ pub struct Ui {
     title_controls: Vec<(i32, i32)>,
     caption: Rect,
     title_height: i32,
+    /// Version of a newer release, if the update check found one.
+    pub update: Option<String>,
+    /// The update is downloading or its setup is starting.
+    pub update_busy: bool,
+    /// Asked once to confirm an update that closes open sessions.
+    update_confirm: bool,
 }
 
 /// Title-row geometry in physical pixels for the frame hook.
@@ -345,6 +355,9 @@ impl Ui {
             title_controls: Vec::new(),
             caption: Rect::default(),
             title_height: 0,
+            update: None,
+            update_busy: false,
+            update_confirm: false,
         };
         m.fields[Field::Password as usize] = TextField::secret();
         m.fields[Field::Master as usize] = TextField::secret();
@@ -1010,6 +1023,30 @@ impl Ui {
                     }
                 }
             }
+            Hit::Update => {
+                if self.update_busy || self.update.is_none() {
+                    return None;
+                }
+                let open = self
+                    .tabs
+                    .iter()
+                    .filter(|t| {
+                        matches!(t.state, TabState::Connected { .. } | TabState::Connecting)
+                    })
+                    .count();
+                if open > 0 && !self.update_confirm {
+                    self.update_confirm = true;
+                    self.set_message(
+                        format!(
+                            "Installing restarts rdpc and closes {open} open session{}. Click Update again to go ahead.",
+                            if open == 1 { "" } else { "s" }
+                        ),
+                        WARN,
+                    );
+                    return None;
+                }
+                return Some(Action::InstallUpdate);
+            }
             Hit::NewGroup => {
                 self.new_group();
                 self.active = None;
@@ -1359,12 +1396,32 @@ impl Ui {
         cv.fill(bar, BG_BAR);
         cv.fill(Rect::new(0, body_h, w, 1), BORDER_SOFT);
         let right = format!("{} renderer · damage-only presents", self.renderer);
-        let rw = te.measure(f.ui, 12.0 * s, &right) as i32;
+        let text_w = te.measure(f.ui, 12.0 * s, &right) as i32;
+        let mut rw = text_w;
+        if let Some(v) = self.update.clone() {
+            let text = if self.update_busy {
+                format!("Updating to {v}…")
+            } else {
+                format!("Update to {v}")
+            };
+            let bw = te.measure(f.ui, 12.0 * s, &text) as i32 + p(20.0);
+            let r = Rect::new(w - rw - p(28.0) - bw, body_h + p(3.0), bw, bar_h - p(6.0));
+            let hover = self.hover == Some(Hit::Update) && !self.update_busy;
+            cv.round_border(
+                r,
+                5.0 * s,
+                ACCENT_BORDER,
+                if hover { CONTROL_HOVER } else { BG_CHOSEN },
+            );
+            centered(cv, te, f.ui, 12.0 * s, r, &text, TEXT);
+            self.hits.push((r, Hit::Update));
+            rw += bw + p(14.0);
+        }
         te.draw_in(
             cv,
             f.ui,
             12.0 * s,
-            Rect::new(w - rw - p(14.0), body_h, rw + p(14.0), bar_h),
+            Rect::new(w - text_w - p(14.0), body_h, text_w + p(14.0), bar_h),
             0.0,
             &right,
             TEXT_4,
@@ -3055,6 +3112,8 @@ pub fn sample_group() -> Ui {
     if let Some(i) = m.store.group_index("Work") {
         m.select_group(i);
     }
+    // Also shows the status-bar update button.
+    m.update = Some("0.2.0".into());
     m
 }
 

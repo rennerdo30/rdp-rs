@@ -1432,6 +1432,7 @@ dependencies = [
  "ffwd-render",
  "png",
  "rdp",
+ "rdpc-update",
  "rpassword",
  "serde",
  "serde_json",

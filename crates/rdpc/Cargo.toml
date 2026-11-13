@@ -7,6 +7,7 @@ license.workspace = true
 
 [dependencies]
 rdp = { path = "../rdp" }
+rdpc-update = { path = "../rdpc-update" }
 # CPU canvas and text from ffwd (https://github.com/rennerdo30/ffwd, its
 # decision 0001), pinned to a published commit.
 ffwd-render = { git = "https://github.com/rennerdo30/ffwd", rev = "c79ee208e0763bb639ffde4ee69422a04eaef615" }

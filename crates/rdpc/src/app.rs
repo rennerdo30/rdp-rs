@@ -39,6 +39,10 @@ pub enum UserEvent {
     Vault(VaultResult),
     /// Time for the next automatic reconnect attempt of a dropped session.
     Retry(u64),
+    /// The update check found a newer release.
+    UpdateAvailable(rdpc_update::Candidate),
+    /// Installing an update: the setup started (rdpc closes), or it failed.
+    UpdateStarted(Result<(), String>),
 }
 
 /// Automatic reconnect attempts after a network drop, and the wait before each.
@@ -156,6 +160,8 @@ pub struct App {
     quit: bool,
     /// Title-row geometry last given to the frame hook.
     caption_sent: Option<ui::TitleGeometry>,
+    /// A newer release offered by the update check.
+    update: Option<rdpc_update::Candidate>,
     pub exit_code: i32,
 }
 
@@ -184,6 +190,7 @@ pub fn run(direct: Option<(String, Config)>) -> i32 {
         mods: ModifiersState::empty(),
         quit: false,
         caption_sent: None,
+        update: None,
         exit_code: 0,
     };
     if let Err(e) = event_loop.run_app(&mut app) {
@@ -366,6 +373,23 @@ impl App {
                     cfg.height = h.clamp(200, 8192) as u16;
                 }
                 self.start_session(name, *cfg, fit, opts);
+            }
+            Action::InstallUpdate => {
+                let Some(c) = self.update.clone() else {
+                    return;
+                };
+                if let Some(m) = &mut self.win {
+                    m.ui.update_busy = true;
+                }
+                self.message(format!("Downloading rdpc {}…", c.version), theme::TEXT_2);
+                let proxy = self.proxy.clone();
+                std::thread::spawn(move || {
+                    let r = rdpc_update::download_verified(&c)
+                        .and_then(|setup| rdpc_update::launch_setup(&setup, &c.version))
+                        .map(|_| ())
+                        .map_err(|e| e.to_string());
+                    let _ = proxy.send_event(UserEvent::UpdateStarted(r));
+                });
             }
             Action::Batch(actions) => {
                 for a in actions {
@@ -986,6 +1010,7 @@ impl ApplicationHandler<UserEvent> for App {
                         ui: {
                             let mut ui = Ui::new(Store::load(), scale);
                             remembered_unlock(&mut ui);
+                            check_for_update(self.proxy.clone());
                             ui.custom_frame = framed;
                             ui
                         },
@@ -1017,6 +1042,24 @@ impl ApplicationHandler<UserEvent> for App {
             UserEvent::Vault(r) => {
                 self.vault_result(r);
                 return self.dirty();
+            }
+            UserEvent::UpdateAvailable(c) => {
+                rdp::trace!("ui: update {} available", c.version);
+                if let Some(m) = &mut self.win {
+                    m.ui.update = Some(c.version.to_string());
+                }
+                self.update = Some(c);
+                return self.dirty();
+            }
+            UserEvent::UpdateStarted(Ok(())) => {
+                // The setup waits for rdpc to exit, installs and starts it again.
+                return self.close_all(el);
+            }
+            UserEvent::UpdateStarted(Err(e)) => {
+                if let Some(m) = &mut self.win {
+                    m.ui.update_busy = false;
+                }
+                return self.message(format!("Update failed: {e}"), theme::ERR);
             }
             UserEvent::Retry(id) => {
                 if let Some(s) = self.sessions.get_mut(&id)
@@ -1334,4 +1377,32 @@ fn remembered_unlock(ui: &mut Ui) {
     if store.unlock(key).is_ok() {
         ui.vault_opened();
     }
+}
+
+/// Once a day, an installed copy asks GitHub for a newer release (off the UI
+/// thread). Portable copies and development builds never check.
+fn check_for_update(proxy: EventLoopProxy<UserEvent>) {
+    if !rdpc_update::is_installed_copy() {
+        return;
+    }
+    let Some(stamp) = rdpc_update::stamp_path() else {
+        return;
+    };
+    let now = std::time::SystemTime::now();
+    if !rdpc_update::due(&stamp, now) {
+        return;
+    }
+    std::thread::spawn(move || {
+        // A failed check also waits a day.
+        let _ = rdpc_update::write_stamp(&stamp, now);
+        let found = rdpc_update::current_version()
+            .and_then(|v| rdpc_update::check(&v, rdpc_update::Channel::for_version(&v)));
+        match found {
+            Ok(Some(c)) => {
+                let _ = proxy.send_event(UserEvent::UpdateAvailable(c));
+            }
+            Ok(None) => rdp::trace!("ui: no update"),
+            Err(e) => rdp::trace!("ui: update check failed: {e}"),
+        }
+    });
 }
