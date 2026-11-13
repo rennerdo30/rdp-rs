@@ -221,7 +221,8 @@ fn negotiation_keeps_supported_pcm_in_server_order_and_sends_quality_mode() {
         sample_rate: 44_100,
         bits: 16,
     };
-    // 8-bit and inconsistent-avg variants must be refused.
+    // 8-bit, inconsistent-avg and non-PCM (same layout, A-law tag)
+    // variants must be refused.
     let pcm8 = pcm_entry(PcmFormat {
         channels: 2,
         sample_rate: 48_000,
@@ -229,11 +230,14 @@ fn negotiation_keeps_supported_pcm_in_server_order_and_sends_quality_mode() {
     });
     let mut bad_avg = pcm_entry(STEREO_48K);
     bad_avg[8] ^= 1;
+    let mut alaw = pcm_entry(STEREO_48K);
+    alaw[0] = 0x06;
     let entries = vec![
         pcm_22k.to_vec(),
         pcm_entry(mono_44),
         pcm8,
         bad_avg,
+        alaw,
         pcm_entry(STEREO_48K),
     ];
     let out = r.feed(&server_formats_pdu(8, &entries)).unwrap();

@@ -250,15 +250,9 @@ pub fn parse_server_formats(body: &[u8]) -> Result<ServerFormats> {
     let last_block_confirmed = r.u8()?;
     let version = r.u16()?;
     r.skip(1)?;
-    // Each AUDIO_FORMAT is at least 18 bytes: bound the count by the data
-    // before allocating.
-    if usize::from(count) * 18 > r.remaining() {
-        return proto(format!(
-            "rdpsnd: {count} formats announced, {} bytes left",
-            r.remaining()
-        ));
-    }
-    let mut formats = Vec::with_capacity(count.into());
+    // A count beyond the data fails in the loop; the preallocation is capped
+    // so a bogus count costs nothing.
+    let mut formats = Vec::with_capacity(usize::from(count).min(32));
     for _ in 0..count {
         formats.push(AudioFormat::parse(&mut r)?);
     }
