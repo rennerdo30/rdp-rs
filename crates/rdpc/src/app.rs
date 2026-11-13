@@ -27,7 +27,7 @@ use winit::window::{CursorIcon, CustomCursor, Window, WindowId};
 
 use crate::controls::Controls;
 use crate::session::{self, Worker};
-use crate::store::Store;
+use crate::store::{SessionOptions, Store};
 use crate::theme;
 use crate::ui::{self, Action, Fonts, Key, SharedDrive, TabState, Ui};
 
@@ -204,9 +204,9 @@ impl App {
         (worker, controls)
     }
 
-    fn start_session(&mut self, name: String, mut cfg: Config, fit: bool) {
-        // New tabs start on Auto scale: the remote matches this PC's scaling.
-        cfg.scale = self.auto_scale();
+    fn start_session(&mut self, name: String, mut cfg: Config, fit: bool, opts: SessionOptions) {
+        // Auto scale follows this PC's Windows scaling.
+        cfg.scale = opts.scale.unwrap_or_else(|| self.auto_scale());
         let id = self.next_id;
         self.next_id += 1;
         let (worker, controls) = self.spawn_worker(id, cfg.clone());
@@ -225,13 +225,81 @@ impl App {
                 cursors: Vec::new(),
             },
         );
+        self.apply_options(id, &opts);
         self.dirty();
+    }
+
+    /// Applies a connection's session settings to a new session: the scale,
+    /// and sharing switched on before logon (folders and printers are there
+    /// when the desktop appears). The drawer shows the same state.
+    fn apply_options(&mut self, id: u64, opts: &SessionOptions) {
+        let scale = opts.scale.unwrap_or_else(|| self.auto_scale());
+        let Some(s) = self.sessions.get(&id) else {
+            return;
+        };
+        let c = &s.controls;
+        c.set_scale(scale);
+        let mut warn = Vec::new();
+        let mut on = |r: Result<(), String>, what: &str| match r {
+            Ok(()) => true,
+            Err(e) => {
+                warn.push(format!("{what}: {e}"));
+                false
+            }
+        };
+        let clipboard = opts.clipboard && on(c.set_clipboard(true), "Clipboard");
+        let sound = opts.sound && on(c.set_sound(true), "Sound");
+        let printers = opts.printers && on(c.set_printers(true), "Printers");
+        let smart_cards = opts.smart_cards && on(c.set_smart_cards(true), "Smart cards");
+        let mut drives = Vec::new();
+        for path in &opts.drives {
+            let name = drive_name(path);
+            match c.add_drive(&name, path) {
+                Ok(device_id) => drives.push(SharedDrive {
+                    device_id,
+                    name,
+                    path: path.clone(),
+                }),
+                Err(e) => warn.push(e),
+            }
+        }
+        if let Some(t) = self.win.as_mut().and_then(|w| w.ui.tab_mut(id)) {
+            t.scale = opts.scale;
+            t.clipboard = clipboard;
+            t.sound = sound;
+            t.printers = printers;
+            t.smart_cards = smart_cards;
+            t.drives = drives;
+        }
+        if !warn.is_empty() {
+            self.message(warn.join(" · "), theme::WARN);
+        }
+    }
+
+    /// The tab's current settings, to carry them over a reconnect.
+    fn tab_options(&self, id: u64) -> SessionOptions {
+        let Some(t) = self
+            .win
+            .as_ref()
+            .and_then(|w| w.ui.tabs.iter().find(|t| t.id == id))
+        else {
+            return SessionOptions::default();
+        };
+        SessionOptions {
+            scale: t.scale,
+            clipboard: t.clipboard,
+            sound: t.sound,
+            printers: t.printers,
+            smart_cards: t.smart_cards,
+            drives: t.drives.iter().map(|d| d.path.clone()).collect(),
+        }
     }
 
     fn reconnect(&mut self, id: u64) {
         let Some(mut cfg) = self.sessions.get(&id).map(|s| s.cfg.clone()) else {
             return;
         };
+        let opts = self.tab_options(id);
         cfg.scale = self.tab_scale(id);
         if let Some(mut old) = self.sessions.get_mut(&id).and_then(|s| s.worker.take()) {
             old.close();
@@ -246,12 +314,9 @@ impl App {
         }
         if let Some(t) = self.win.as_mut().and_then(|w| w.ui.tab_mut(id)) {
             t.state = TabState::Connecting;
-            t.drives.clear();
-            t.clipboard = false;
-            t.printers = false;
-            t.smart_cards = false;
-            t.sound = false;
         }
+        // The new session gets the settings the tab had.
+        self.apply_options(id, &opts);
         self.dirty();
     }
 
@@ -270,14 +335,19 @@ impl App {
 
     fn handle_action(&mut self, action: Action) {
         match action {
-            Action::Connect { name, mut cfg, fit } => {
+            Action::Connect {
+                name,
+                mut cfg,
+                fit,
+                opts,
+            } => {
                 if fit && let Some(m) = &self.win {
                     let (w, h) = m.ui.session_size_for(m.size.0 as i32, m.size.1 as i32);
                     // Desktop widths must be even; sizes between 200 and 8192.
                     cfg.width = ((w.clamp(200, 8192) as u16) & !1).max(200);
                     cfg.height = h.clamp(200, 8192) as u16;
                 }
-                self.start_session(name, *cfg, fit);
+                self.start_session(name, *cfg, fit, opts);
             }
             Action::Disconnect(id) => {
                 if let Some(w) = self.sessions.get_mut(&id).and_then(|s| s.worker.as_mut()) {
@@ -351,10 +421,7 @@ impl App {
                 self.dirty();
             }
             Action::AddDrive(id, path) => {
-                let name = std::path::Path::new(&path)
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| path.trim_end_matches(['\\', '/', ':']).to_string());
+                let name = drive_name(&path);
                 let r = self
                     .sessions
                     .get(&id)
@@ -804,7 +871,7 @@ impl ApplicationHandler<UserEvent> for App {
             }
         }
         if let Some((name, cfg)) = self.direct.take() {
-            self.start_session(name, cfg, false);
+            self.start_session(name, cfg, false, SessionOptions::default());
         }
     }
 
@@ -1087,4 +1154,12 @@ impl App {
             _ => {}
         }
     }
+}
+
+/// The display name of a shared folder: its last path component.
+fn drive_name(path: &str) -> String {
+    std::path::Path::new(path)
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.trim_end_matches(['\\', '/', ':']).to_string())
 }

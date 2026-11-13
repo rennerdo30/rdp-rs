@@ -9,7 +9,7 @@
 
 use ffwd_render::{Canvas, FontId, Rect, TextEngine};
 
-use crate::store::{Connection, Store};
+use crate::store::{Connection, SessionOptions, Store};
 use crate::text_field::TextField;
 use crate::theme::*;
 
@@ -74,6 +74,8 @@ pub enum Field {
     User,
     Password,
     DrivePath,
+    /// Shared-folder path in the connection form.
+    FormDrive,
 }
 
 const FORM: [Field; 5] = [
@@ -106,6 +108,11 @@ pub enum Hit {
     Fit(u64),
     /// Scale choice: 0 = Auto, else an index into SCALES + 1.
     Scale(u64, usize),
+    /// Connection form: scale choice, sharing chip, folder remove/add.
+    FormScale(usize),
+    FormShare(u8),
+    FormRemoveDrive(usize),
+    FormAddDrive,
     AddDrive(u64),
     RemoveDrive(u64, usize),
     CtrlAltDel(u64),
@@ -162,6 +169,7 @@ pub enum Action {
         name: String,
         cfg: Box<rdp::Config>,
         fit: bool,
+        opts: SessionOptions,
     },
     Disconnect(u64),
     Reconnect(u64),
@@ -204,7 +212,9 @@ pub enum Key {
 pub struct Ui {
     store: Store,
     selected: Option<usize>,
-    fields: [TextField; 7],
+    /// Session settings of the connection being edited.
+    opts: SessionOptions,
+    fields: [TextField; 8],
     size: usize,
     focus: Option<Field>,
     pub tabs: Vec<Tab>,
@@ -250,6 +260,7 @@ impl Ui {
         let mut m = Ui {
             store,
             selected: None,
+            opts: SessionOptions::default(),
             fields: Default::default(),
             size: 0,
             focus: None,
@@ -363,6 +374,7 @@ impl Ui {
             .iter()
             .position(|&s| s == (c.width, c.height))
             .map_or(0, |i| i + 1);
+        self.opts = c.options.clone();
         self.focus = Some(Field::Password);
     }
 
@@ -373,6 +385,7 @@ impl Ui {
         }
         self.field_mut(Field::Port).set("3389");
         self.size = 0;
+        self.opts = SessionOptions::default();
         self.focus = Some(Field::Host);
     }
 
@@ -407,6 +420,7 @@ impl Ui {
             user,
             width,
             height,
+            options: self.opts.clone(),
         })
     }
 
@@ -464,6 +478,7 @@ impl Ui {
             name: c.name,
             cfg: Box::new(cfg),
             fit,
+            opts: c.options,
         })
     }
 
@@ -588,6 +603,25 @@ impl Ui {
                 t.clipboard = !t.clipboard;
                 return Some(Action::SetClipboard(id, t.clipboard));
             }
+            Hit::FormScale(i) => {
+                self.opts.scale = if i == 0 { None } else { Some(SCALES[i - 1]) };
+            }
+            Hit::FormShare(i) => {
+                let o = &mut self.opts;
+                let flag = match i {
+                    0 => &mut o.clipboard,
+                    1 => &mut o.sound,
+                    2 => &mut o.printers,
+                    _ => &mut o.smart_cards,
+                };
+                *flag = !*flag;
+            }
+            Hit::FormRemoveDrive(i) => {
+                if i < self.opts.drives.len() {
+                    self.opts.drives.remove(i);
+                }
+            }
+            Hit::FormAddDrive => self.form_add_drive(),
             Hit::Scale(id, i) => {
                 let t = self.tab_mut(id)?;
                 t.scale = if i == 0 { None } else { Some(SCALES[i - 1]) };
@@ -606,6 +640,26 @@ impl Ui {
             Hit::WinClose => return Some(Action::WinClose),
         }
         None
+    }
+
+    fn form_add_drive(&mut self) {
+        let path = self
+            .field(Field::FormDrive)
+            .text
+            .trim()
+            .trim_matches('"')
+            .to_string();
+        if path.is_empty() {
+            self.focus = Some(Field::FormDrive);
+            return self.set_message("Type the folder to share, then press Add.", TEXT_2);
+        }
+        if !std::path::Path::new(&path).is_dir() {
+            return self.set_message(format!("{path} is not a folder."), ERR);
+        }
+        if !self.opts.drives.contains(&path) {
+            self.opts.drives.push(path);
+        }
+        self.field_mut(Field::FormDrive).set("");
     }
 
     fn add_drive(&mut self, id: u64) -> Option<Action> {
@@ -633,6 +687,7 @@ impl Ui {
             Key::Enter if self.focus == Some(Field::DrivePath) => {
                 return self.active.and_then(|id| self.add_drive(id));
             }
+            Key::Enter if self.focus == Some(Field::FormDrive) => self.form_add_drive(),
             Key::Enter if self.active.is_none() => return self.connect(),
             Key::Enter => {}
             Key::Esc => self.focus = None,
@@ -1080,6 +1135,37 @@ impl Ui {
         }
     }
 
+    /// A selectable chip at (x, y); returns its width.
+    #[allow(clippy::too_many_arguments)]
+    fn chip(
+        &mut self,
+        cv: &mut Canvas,
+        te: &mut TextEngine,
+        f: &Fonts,
+        x: i32,
+        y: i32,
+        h: i32,
+        text: &str,
+        chosen: bool,
+        hit: Hit,
+    ) -> i32 {
+        let s = self.scale;
+        let p = |v: f32| (v * s).round() as i32;
+        let w = te.measure(f.ui, 12.5 * s, text) as i32 + p(24.0);
+        let r = Rect::new(x, y + p(2.0), w, h - p(4.0));
+        let (border, fill, color) = if chosen {
+            (ACCENT_BORDER, BG_CHOSEN, TEXT)
+        } else if self.hover == Some(hit) {
+            (BORDER_HOVER, CONTROL_HOVER, TEXT_2)
+        } else {
+            (BORDER, BG, TEXT_3)
+        };
+        cv.round_border(r, 6.0 * s, border, fill);
+        centered(cv, te, f.ui, 12.5 * s, r, text, color);
+        self.hits.push((r, hit));
+        w
+    }
+
     fn tab_shape(&self, cv: &mut Canvas, r: Rect, active: bool, hover: bool) {
         let s = self.scale;
         if active {
@@ -1239,7 +1325,81 @@ impl Ui {
             TEXT_4,
             fw as f32,
         );
-        y += p(30.0);
+        y += p(34.0);
+
+        // Scale
+        label(cv, te, y, "Scale");
+        let auto = format!("Auto ({} %)", (self.scale * 100.0).round() as u32);
+        let mut cx = fx;
+        for (i, text) in std::iter::once(auto)
+            .chain(SCALES.iter().map(|v| format!("{v} %")))
+            .enumerate()
+        {
+            let chosen = match (i, self.opts.scale) {
+                (0, None) => true,
+                (i, Some(v)) if i > 0 => SCALES[i - 1] == v,
+                _ => false,
+            };
+            cx += self.chip(cv, te, f, cx, y, fh, &text, chosen, Hit::FormScale(i)) + p(6.0);
+        }
+        y += row;
+
+        // Sharing
+        label(cv, te, y, "Sharing");
+        let o = self.opts.clone();
+        let mut cx = fx;
+        for (i, (text, on)) in [
+            ("Clipboard", o.clipboard),
+            ("Sound", o.sound),
+            ("Printers", o.printers),
+            ("Smart cards", o.smart_cards),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let text = if on {
+                format!("✓ {text}")
+            } else {
+                text.to_string()
+            };
+            cx += self.chip(cv, te, f, cx, y, fh, &text, on, Hit::FormShare(i as u8)) + p(6.0);
+        }
+        y += row;
+
+        // Shared folders
+        label(cv, te, y, "Folders");
+        let mut cx = fx;
+        for (i, path) in o.drives.iter().enumerate() {
+            let text = format!("{path}  ×");
+            let w = self.chip(cv, te, f, cx, y, fh, &text, true, Hit::FormRemoveDrive(i));
+            cx += w + p(6.0);
+            if cx > fx + fw - p(120.0) {
+                cx = fx;
+                y += p(36.0);
+            }
+        }
+        if !o.drives.is_empty() {
+            y += p(38.0);
+        }
+        let add_w = p(64.0);
+        self.text_input(
+            cv,
+            te,
+            f,
+            Rect::new(fx, y, fw - add_w - p(8.0), fh),
+            Field::FormDrive,
+            r"Folder to share, e.g. C:\Share",
+        );
+        self.button(
+            cv,
+            te,
+            f,
+            Rect::new(fx + fw - add_w, y, add_w, fh),
+            "Add",
+            Style::Secondary,
+            Hit::FormAddDrive,
+        );
+        y += row + p(8.0);
 
         let bh = p(34.0);
         self.button(
@@ -1940,6 +2100,7 @@ pub fn sample(session_tab: bool) -> Ui {
             user: r"CORP\alex".into(),
             width: 0,
             height: 0,
+            options: SessionOptions::default(),
         },
         Connection {
             name: "Build server".into(),
@@ -1948,6 +2109,7 @@ pub fn sample(session_tab: bool) -> Ui {
             user: r"LAB\builder".into(),
             width: 1920,
             height: 1080,
+            options: SessionOptions::default(),
         },
         Connection {
             name: "Test VM (Windows 11)".into(),
@@ -1956,6 +2118,7 @@ pub fn sample(session_tab: bool) -> Ui {
             user: "tester".into(),
             width: 1600,
             height: 900,
+            options: SessionOptions::default(),
         },
     ]);
     let mut m = Ui::new(store, 1.0);
