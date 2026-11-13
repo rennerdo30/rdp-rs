@@ -87,6 +87,9 @@ pub struct Config {
     /// H.264 decoder for AVC420 with [`crate::Graphics::Gfx`]; without one
     /// (or if it returns `None`) the client advertises AVC as disabled.
     pub h264: Option<crate::H264Factory>,
+    /// Security package for NLA (MS-CSSP), for example Kerberos through the
+    /// platform; None uses the crate's own NTLMv2.
+    pub auth: Option<crate::AuthFactory>,
 }
 
 impl Config {
@@ -112,6 +115,7 @@ impl Config {
             compression: Compression::Off,
             graphics: crate::Graphics::Bitmap,
             h264: None,
+            auth: None,
         }
     }
 }
@@ -403,15 +407,14 @@ impl Client {
         }
         if protocol & (x224::PROTOCOL_HYBRID | x224::PROTOCOL_HYBRID_EX) != 0 {
             let public_key = der::subject_public_key(&cert)?;
-            credssp::authenticate(
-                &mut f,
-                &public_key,
-                &user,
-                &domain,
-                &cfg.password,
-                &cfg.client_name,
-                deadline,
-            )?;
+            let params = credssp::AuthParams {
+                host: &cfg.host,
+                user: &user,
+                domain: &domain,
+                password: &cfg.password,
+                workstation: &cfg.client_name,
+            };
+            credssp::authenticate(&mut f, &public_key, &params, cfg.auth.as_ref(), deadline)?;
             if protocol == x224::PROTOCOL_HYBRID_EX {
                 let result = f.read_exact(4, deadline)?;
                 let code = u32::from_le_bytes(result[..4].try_into().unwrap());
