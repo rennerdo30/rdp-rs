@@ -12,6 +12,7 @@
 use std::collections::HashMap;
 use std::num::NonZeroU32;
 use std::rc::Rc;
+use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use ffwd_render::{Canvas, Rect, TextEngine};
@@ -22,7 +23,7 @@ use winit::dpi::LogicalSize;
 use winit::event::{ElementState, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::keyboard::{Key as WKey, ModifiersState, NamedKey};
-use winit::window::{CursorIcon, Window, WindowId};
+use winit::window::{CursorIcon, CustomCursor, Window, WindowId};
 
 use crate::controls::Controls;
 use crate::session::{self, Worker};
@@ -88,6 +89,25 @@ struct Session {
     mouse: (u16, u16),
     /// The size last requested for fit-to-window.
     fit_requested: Option<(u32, u32)>,
+    /// The remote cursor to show over this session's picture.
+    cursor: RemoteCursor,
+    /// Native cursors made from the server's shapes, by shape identity. The
+    /// Arc is kept so a freed shape's address cannot be reused for another.
+    cursors: Vec<(Arc<rdp::PointerShape>, CustomCursor)>,
+}
+
+#[derive(Clone, PartialEq)]
+enum RemoteCursor {
+    Default,
+    Hidden,
+    Custom(CustomCursor),
+}
+
+/// What the window shows right now, so the cursor is only set on a change.
+#[derive(Clone, PartialEq)]
+enum Shown {
+    Icon(CursorIcon),
+    Remote(RemoteCursor),
 }
 
 struct MainWin {
@@ -99,7 +119,7 @@ struct MainWin {
     scratch: Vec<u32>,
     size: (usize, usize),
     cursor: (i32, i32),
-    text_cursor: bool,
+    shown_cursor: Shown,
     chrome_dirty: bool,
     /// The session a mouse button went down in (gets the release too).
     pressed_in: Option<u64>,
@@ -181,6 +201,8 @@ impl App {
                 controls,
                 mouse: (0, 0),
                 fit_requested: None,
+                cursor: RemoteCursor::Default,
+                cursors: Vec::new(),
             },
         );
         self.dirty();
@@ -198,6 +220,8 @@ impl App {
             s.worker = Some(worker);
             s.controls = controls;
             s.fit_requested = None;
+            s.cursor = RemoteCursor::Default;
+            s.cursors.clear();
         }
         if let Some(t) = self.win.as_mut().and_then(|w| w.ui.tab_mut(id)) {
             t.state = TabState::Connecting;
@@ -563,6 +587,45 @@ impl App {
         self.dirty();
     }
 
+    /// Shows the remote cursor while the pointer is over a session picture,
+    /// otherwise the app's own (I-beam over fields, arrow elsewhere).
+    fn apply_cursor(&mut self) {
+        let Some(m) = &self.win else { return };
+        let (x, y) = m.cursor;
+        let want = match m.ui.session_area {
+            Some((id, area)) if area.contains(x, y) => {
+                let c = self
+                    .sessions
+                    .get(&id)
+                    .map_or(RemoteCursor::Default, |s| s.cursor.clone());
+                Shown::Remote(c)
+            }
+            _ if m.ui.cursor_is_text() => Shown::Icon(CursorIcon::Text),
+            _ => Shown::Icon(CursorIcon::Default),
+        };
+        let Some(m) = &mut self.win else { return };
+        if want == m.shown_cursor {
+            return;
+        }
+        let w = &m.gfx.window;
+        match &want {
+            Shown::Icon(icon) => {
+                w.set_cursor_visible(true);
+                w.set_cursor(*icon);
+            }
+            Shown::Remote(RemoteCursor::Default) => {
+                w.set_cursor_visible(true);
+                w.set_cursor(CursorIcon::Default);
+            }
+            Shown::Remote(RemoteCursor::Hidden) => w.set_cursor_visible(false),
+            Shown::Remote(RemoteCursor::Custom(c)) => {
+                w.set_cursor_visible(true);
+                w.set_cursor(c.clone());
+            }
+        }
+        m.shown_cursor = want;
+    }
+
     fn mouse_to_session(&self, x: i32, y: i32) -> Option<(u64, u16, u16)> {
         let m = self.win.as_ref()?;
         let (id, area) = m.ui.session_area?;
@@ -651,7 +714,7 @@ impl ApplicationHandler<UserEvent> for App {
                         scratch: Vec::new(),
                         size: (sz.width as usize, sz.height as usize),
                         cursor: (-1, -1),
-                        text_cursor: false,
+                        shown_cursor: Shown::Icon(CursorIcon::Default),
                         chrome_dirty: true,
                         pressed_in: None,
                     });
@@ -669,7 +732,7 @@ impl ApplicationHandler<UserEvent> for App {
         }
     }
 
-    fn user_event(&mut self, _el: &ActiveEventLoop, event: UserEvent) {
+    fn user_event(&mut self, el: &ActiveEventLoop, event: UserEvent) {
         let UserEvent::Session(id, ev) = event;
         let active = self.win.as_ref().and_then(|w| w.ui.active) == Some(id);
         match ev {
@@ -690,6 +753,41 @@ impl ApplicationHandler<UserEvent> for App {
                     ),
                     theme::TEXT_2,
                 );
+            }
+            session::Event::Pointer(p) => {
+                let Some(s) = self.sessions.get_mut(&id) else {
+                    return;
+                };
+                s.cursor = match p {
+                    rdp::PointerUpdate::Default => RemoteCursor::Default,
+                    rdp::PointerUpdate::Hidden => RemoteCursor::Hidden,
+                    rdp::PointerUpdate::Shape(shape) => {
+                        if let Some((_, c)) = s.cursors.iter().find(|(k, _)| Arc::ptr_eq(k, &shape))
+                        {
+                            RemoteCursor::Custom(c.clone())
+                        } else {
+                            match CustomCursor::from_rgba(
+                                shape.rgba.clone(),
+                                shape.width,
+                                shape.height,
+                                shape.hotspot_x,
+                                shape.hotspot_y,
+                            ) {
+                                Ok(src) => {
+                                    let c = el.create_custom_cursor(src);
+                                    // Bounded: the server cache has 32 slots; keep a little history.
+                                    if s.cursors.len() >= 64 {
+                                        s.cursors.remove(0);
+                                    }
+                                    s.cursors.push((shape, c.clone()));
+                                    RemoteCursor::Custom(c)
+                                }
+                                Err(_) => RemoteCursor::Default,
+                            }
+                        }
+                    }
+                };
+                self.apply_cursor();
             }
             session::Event::Frame => {
                 if active {
@@ -746,6 +844,8 @@ impl ApplicationHandler<UserEvent> for App {
                 if self.win.as_ref().unwrap().chrome_dirty {
                     self.render_chrome();
                     self.fit_active();
+                    // Tabs and the drawer move the session area: re-pick the cursor.
+                    self.apply_cursor();
                 } else {
                     self.render_session_damage();
                 }
@@ -762,16 +862,7 @@ impl ApplicationHandler<UserEvent> for App {
                 if m.ui.mouse_move(x, y) {
                     self.dirty();
                 }
-                let m = self.win.as_mut().unwrap();
-                let text = m.ui.cursor_is_text();
-                if text != m.text_cursor {
-                    m.gfx.window.set_cursor(if text {
-                        CursorIcon::Text
-                    } else {
-                        CursorIcon::Default
-                    });
-                    m.text_cursor = text;
-                }
+                self.apply_cursor();
                 if let Some((id, fx, fy)) = self.mouse_to_session(x, y)
                     && let Some(s) = self.sessions.get_mut(&id)
                     && s.mouse != (fx, fy)

@@ -224,6 +224,7 @@ const CAPSTYPE_GLYPHCACHE: u16 = 16;
 const CAPSTYPE_OFFSCREENCACHE: u16 = 17;
 const CAPSTYPE_VIRTUALCHANNEL: u16 = 20;
 const CAPSTYPE_MULTIFRAGMENTUPDATE: u16 = 26;
+const CAPSTYPE_LARGE_POINTER: u16 = 27;
 
 fn cap(out: &mut Vec<u8>, count: &mut u16, ty: u16, body: &[u8]) {
     out.put_u16(ty);
@@ -299,8 +300,8 @@ fn capabilities(width: u16, height: u16, keyboard_layout: u32) -> (u16, Vec<u8>)
 
     let mut b = Vec::new();
     b.put_u16(1); // colorPointerFlag
-    b.put_u16(20);
-    b.put_u16(20);
+    b.put_u16(crate::pointer::CACHE_SIZE as u16); // colorPointerCacheSize
+    b.put_u16(crate::pointer::CACHE_SIZE as u16); // pointerCacheSize (enables New Pointer, any bpp)
     cap(&mut out, &mut n, CAPSTYPE_POINTER, &b);
 
     let mut b = Vec::new();
@@ -358,6 +359,9 @@ fn capabilities(width: u16, height: u16, keyboard_layout: u32) -> (u16, Vec<u8>)
     cap(&mut out, &mut n, CAPSTYPE_ACTIVATION, &[0; 8]);
     cap(&mut out, &mut n, CAPSTYPE_SHARE, &[0; 4]);
     cap(&mut out, &mut n, CAPSTYPE_FONT, &[1, 0, 0, 0]);
+
+    // Large Pointer (2.2.7.2.7): cursors up to 384 x 384 for high-DPI sessions.
+    cap(&mut out, &mut n, CAPSTYPE_LARGE_POINTER, &[0x03, 0x00]);
 
     let mut b = Vec::new();
     b.put_u32(8 * 1024 * 1024);

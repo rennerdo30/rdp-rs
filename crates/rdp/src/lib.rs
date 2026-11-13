@@ -32,6 +32,7 @@ pub mod log;
 pub mod mcs;
 pub mod ntlm;
 pub mod pdu;
+pub mod pointer;
 pub mod rdpdr;
 pub mod transport;
 pub mod x224;
@@ -45,6 +46,7 @@ pub use error::{Error, Result};
 pub use framebuffer::{Damage, Framebuffer};
 pub use input::InputEvent;
 pub use log::set_verbose;
+pub use pointer::{PointerShape, PointerUpdate};
 pub use rdpdr::{
     Device, Drive, IoCompletion, IoRequest, PrintBackend, PrintFormat, Printer, PrinterInfo, Rdpdr,
     RdpdrHandle, rdpdr, share_printers,

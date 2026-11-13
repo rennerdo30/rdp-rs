@@ -15,6 +15,8 @@ pub enum Event {
     /// New damage is waiting in `Shared`.
     Frame,
     Closed(String),
+    /// The remote cursor changed shape (or was hidden / reset).
+    Pointer(rdp::PointerUpdate),
     Failed(String),
 }
 
@@ -140,6 +142,9 @@ fn run(
             if !notified.swap(true, Ordering::AcqRel) {
                 emit(Event::Frame);
             }
+        }
+        if let Some(p) = out.pointer {
+            emit(Event::Pointer(p));
         }
         if let Some(reason) = out.closed {
             return emit(Event::Closed(reason));

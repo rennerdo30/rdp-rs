@@ -15,6 +15,7 @@ use crate::gcc;
 use crate::input::{InputEvent, fastpath_input};
 use crate::mcs::{self, DomainPdu};
 use crate::pdu::{self, DemandActive};
+use crate::pointer::{PointerCache, PointerUpdate};
 use crate::trace;
 use crate::transport::{Frame, Framer};
 use crate::x224;
@@ -71,6 +72,8 @@ pub struct PollOutcome {
     pub resized: bool,
     /// The server ended the session.
     pub closed: Option<String>,
+    /// The latest cursor change during this poll.
+    pub pointer: Option<PointerUpdate>,
 }
 
 pub struct Client {
@@ -85,6 +88,7 @@ pub struct Client {
     active: bool,
     last_error_info: u32,
     channels: Vec<Slot>,
+    pointers: PointerCache,
 }
 
 /// Sends one complete virtual channel message, chunked.
@@ -312,6 +316,7 @@ impl Client {
             active: false,
             last_error_info: 0,
             channels: slots,
+            pointers: PointerCache::default(),
         };
         // 7. Finalization; the Font Map reply is handled by the session loop.
         client.activate(&demand)?;
@@ -459,6 +464,11 @@ impl Client {
                 codec::draw_bitmap_update(payload, &mut self.fb, &mut out.damage)?;
                 out.updated |= !out.damage.is_empty();
             }
+            pdu::PDUTYPE2_POINTER => match self.pointers.slow_path(payload) {
+                Ok(Some(p)) => out.pointer = Some(p),
+                Ok(None) => {}
+                Err(e) => trace!("pointer PDU ignored: {e}"),
+            },
             pdu::PDUTYPE2_FONTMAP => {
                 trace!("connection finalized");
                 self.active = true;
@@ -485,6 +495,12 @@ impl Client {
                     out.updated |= !out.damage.is_empty();
                 }
                 fastpath::UPDATETYPE_ORDERS => trace!("drawing orders ignored (not negotiated)"),
+                0x5..=0xC => match self.pointers.fast_path(code, &data) {
+                    Ok(Some(p)) => out.pointer = Some(p),
+                    Ok(None) => {}
+                    // A bad cursor shape must never end the session.
+                    Err(e) => trace!("pointer update {code:#x} ignored: {e}"),
+                },
                 _ => {} // pointer, palette, synchronize
             }
         }
