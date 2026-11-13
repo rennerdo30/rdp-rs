@@ -87,7 +87,8 @@ mod tests {
 
     #[test]
     fn connections_saved_before_session_options_still_load() {
-        let old = r#"[{"name":"pc","host":"10.0.0.1","port":3389,"user":"u","width":0,"height":0}]"#;
+        let old =
+            r#"[{"name":"pc","host":"10.0.0.1","port":3389,"user":"u","width":0,"height":0}]"#;
         let list: Vec<Connection> = serde_json::from_str(old).unwrap();
         assert_eq!(list[0].options, SessionOptions::default());
     }

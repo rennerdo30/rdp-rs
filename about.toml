@@ -1,0 +1,21 @@
+# cargo-about: THIRD-PARTY-NOTICES.txt for release packages (release.yml).
+# Only permissive licences; a dependency under any other licence fails the
+# release build.
+accepted = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "Zlib",
+    "ISC",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+]
+# Only rdpc for Windows is packaged today (docs/RELEASING.md).
+targets = ["x86_64-pc-windows-msvc"]
+ignore-build-dependencies = true
+ignore-dev-dependencies = true
+# Unpublished crates are not skipped: ffwd-render (MIT, a git dependency
+# with `publish = false`) needs its notice. rdp-rs's own crates (rdp, rdpc,
+# rdpc-update) are listed too; LICENSE.txt covers them as well.

@@ -1,6 +1,8 @@
 /target/
 # Machine-local Cargo config (template: .cargo/config.example.toml)
 /.cargo/config.toml
+# Packages from scripts/package.ps1
+/artifacts/
 /*.png
 # Agent worktrees
 /.claude/

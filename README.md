@@ -16,6 +16,13 @@ MD4, MD5, HMAC-MD5, RC4 and the ASN.1 DER/BER/PER encodings. Only TLS
 
 ![Session tab with the live control panel (sample data)](docs/images/session-tab.png)
 
+## Install
+
+Windows: download the setup or the portable zip from
+[Releases](https://github.com/rennerdo30/rdp-rs/releases); details in
+[docs/INSTALL.md](docs/INSTALL.md). Releases are prepared as described in
+[docs/RELEASING.md](docs/RELEASING.md).
+
 ## Features
 
 - **Connection:** X.224 negotiation (TLS, NLA, NLA with early user authorization), TLS upgrade, CredSSP v6 with NTLMv2 (MIC, key exchange, sealing, public key binding), MCS/GCC, licensing ("valid client"), capability exchange, finalization, reactivation.
@@ -38,6 +45,7 @@ auto-reconnect, RDS licensing (LICENSE_REQUEST), legacy RDP security.
 |---|---|
 | [`crates/rdp`](crates/rdp) | Protocol library: connection sequence, session loop, codecs, virtual channels (`cliprdr`, `rdpdr`, `drdynvc`, Display Control). No UI. |
 | [`crates/rdpc`](crates/rdpc) | Windows client: connection manager and session tabs, headless PNG screenshot. |
+| [`crates/rdpc-update`](crates/rdpc-update) | Update checks: GitHub release discovery, version order, checksums, bounded HTTPS downloads. |
 
 ## Build and run
 
