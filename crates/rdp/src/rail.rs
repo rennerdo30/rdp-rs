@@ -1005,6 +1005,29 @@ impl RailHandle {
         self.send(cloak(window_id, cloaked));
     }
 
+    /// Starts another program in the running session: a further Client
+    /// Execute PDU (2.2.2.3.1; a client may send several). Queued until the
+    /// handshake is done; the answer arrives as [`RailEvent::ExecResult`].
+    pub fn exec(&self, app: &RemoteApp) -> Result<()> {
+        let pdu = exec(app)?;
+        self.send(pdu);
+        Ok(())
+    }
+
+    /// Tells the server this PC's work area (the primary monitor without the
+    /// taskbar) and the taskbar's position, so maximized windows leave the
+    /// local taskbar free (SPI_SETWORKAREA, RAIL_SPI_TASKBARPOS, 2.2.2.4.1).
+    pub fn set_work_area(&self, work_area: [u16; 4], taskbar: [u16; 4]) {
+        let rect = |r: [u16; 4]| Rect16 {
+            left: r[0],
+            top: r[1],
+            right: r[2],
+            bottom: r[3],
+        };
+        self.send(sysparam(SPI_SETWORKAREA, &rect_body(rect(work_area))));
+        self.send(sysparam(RAIL_SPI_TASKBARPOS, &rect_body(rect(taskbar))));
+    }
+
     pub(crate) fn apply_orders(&self, orders: Vec<WindowOrder>) {
         let mut s = self.lock();
         for o in orders {
