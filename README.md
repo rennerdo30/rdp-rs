@@ -1,3 +1,5 @@
+<p align="center"><img src="assets/logo.svg" width="96" height="96" alt="rdp-rs logo"></p>
+
 # rdp-rs
 
 A Remote Desktop Protocol client written from scratch in Rust, from the
