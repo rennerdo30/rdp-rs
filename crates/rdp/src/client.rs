@@ -18,6 +18,7 @@ use crate::input::{InputEvent, fastpath_input};
 use crate::mcs::{self, DomainPdu};
 use crate::pdu::{self, AutoReconnectCookie, DemandActive, SaveSessionInfo};
 use crate::pointer::{PointerCache, PointerUpdate};
+use crate::redirect::{self, Redirection};
 use crate::trace;
 use crate::transport::{Frame, Framer};
 use crate::x224;
@@ -87,6 +88,12 @@ pub struct Config {
     /// H.264 decoder for AVC420 with [`crate::Graphics::Gfx`]; without one
     /// (or if it returns `None`) the client advertises AVC as disabled.
     pub h264: Option<crate::H264Factory>,
+    /// Connect as told by a Server Redirection PDU (MS-RDPBCGR 3.2.5.13):
+    /// its target, routing token, credentials and session id. Set by
+    /// [`Client::connect_with`] between hops; set it yourself from
+    /// [`Client::redirection`] to follow a redirection after activation, or
+    /// to reconnect with an LB_NOREDIRECT routing token.
+    pub redirection: Option<Redirection>,
 }
 
 impl Config {
@@ -112,6 +119,7 @@ impl Config {
             compression: Compression::Off,
             graphics: crate::Graphics::Bitmap,
             h264: None,
+            redirection: None,
         }
     }
 }
@@ -226,6 +234,60 @@ pub struct Client {
     arc_cookie: Option<AutoReconnectCookie>,
     /// Graphics pipeline output, when [`Config::graphics`] asks for it.
     gfx: Option<crate::gfx::GfxHandle>,
+    /// The last Server Redirection PDU that was not followed here.
+    redirection: Option<Redirection>,
+}
+
+/// One connection attempt's end: a session, or a redirection to follow
+/// with the channel handlers, which have not seen any traffic yet.
+enum Hop {
+    Done(Box<Client>),
+    /// The redirection, the host that sent it, and the handlers.
+    Redirect(Box<Redirection>, String, Vec<Box<dyn StaticChannel>>),
+}
+
+/// Opens TCP (or the gateway tunnel) to the first reachable host: the
+/// redirection's targets, else `cfg.host`. Returns the host it reached.
+fn open(cfg: &Config, deadline: Instant) -> Result<(Framer, Option<[u8; 32]>, String)> {
+    let mut hosts = cfg
+        .redirection
+        .as_ref()
+        .map(Redirection::targets)
+        .unwrap_or_default();
+    if hosts.is_empty() {
+        hosts.push(cfg.host.clone());
+    }
+    if let Some(gw) = &cfg.gateway {
+        // The gateway resolves and reaches the host itself.
+        let host = hosts.swap_remove(0);
+        let verify = cfg.verify_certificate.as_ref();
+        let t = gateway::connect(gw, &host, cfg.port, &cfg.client_name, deadline, verify)?;
+        let cert = t.certificate.as_deref().map(sha256);
+        let f = Framer::over(Box::new(t.stream), Box::new(t.reader));
+        return Ok((f, cert, host));
+    }
+    let mut last = None;
+    for host in hosts {
+        let attempt = (host.as_str(), cfg.port)
+            .to_socket_addrs()
+            .map_err(Error::from)
+            .and_then(|mut a| {
+                a.next()
+                    .ok_or_else(|| Error::Protocol(format!("cannot resolve {host}")))
+            })
+            .and_then(|addr| Ok(TcpStream::connect_timeout(&addr, cfg.timeout)?));
+        match attempt {
+            Ok(sock) => {
+                sock.set_nodelay(true)?;
+                return Ok((Framer::new(sock), None, host));
+            }
+            Err(e) => {
+                trace!("cannot reach {host}:{}: {e}", cfg.port);
+                last = Some(e);
+            }
+        }
+    }
+    Err(last.unwrap_or_else(|| Error::Protocol("no host to connect to".into())))
 }
 
 /// Adds the graphics channel to the `drdynvc` handler, or adds a `drdynvc`
@@ -327,12 +389,17 @@ fn read_io(
 }
 
 fn split_user(cfg: &Config) -> (String, String) {
-    if cfg.domain.is_empty()
-        && let Some((d, u)) = cfg.username.split_once('\\')
-    {
-        return (u.to_string(), d.to_string());
+    let (mut user, mut domain) = match cfg.username.split_once('\\') {
+        Some((d, u)) if cfg.domain.is_empty() => (u.to_string(), d.to_string()),
+        _ => (cfg.username.clone(), cfg.domain.clone()),
+    };
+    // A redirection's UserName and Domain replace the configured ones
+    // (LB_DONTSTOREUSERNAME requires the UserName, 2.2.13.1).
+    if let Some(r) = cfg.redirection.as_ref().filter(|r| !r.no_redirect()) {
+        user = r.username.clone().unwrap_or(user);
+        domain = r.domain.clone().unwrap_or(domain);
     }
-    (cfg.username.clone(), cfg.domain.clone())
+    (user, domain)
 }
 
 impl Client {
@@ -341,42 +408,57 @@ impl Client {
         Self::connect_with(cfg, Vec::new())
     }
 
-    /// Connects and opens the given static virtual channels.
+    /// Connects and opens the given static virtual channels. A Server
+    /// Redirection PDU during the connection sequence (MS-RDPBCGR 3.2.5.13)
+    /// is followed here, up to [`redirect::MAX_REDIRECTS`] hops, with the
+    /// same handlers: they have seen no traffic before activation.
     pub fn connect_with(cfg: &Config, mut handlers: Vec<Box<dyn StaticChannel>>) -> Result<Client> {
         let gfx =
             (cfg.graphics == crate::Graphics::Gfx).then(|| add_gfx_channel(cfg, &mut handlers));
+        let mut cfg = cfg.clone();
+        for hop in 1.. {
+            let (to, from, back) = match Self::connect_hop(&cfg, handlers, gfx.clone())? {
+                Hop::Done(client) => return Ok(*client),
+                Hop::Redirect(to, from, back) => (to, from, back),
+            };
+            if hop > redirect::MAX_REDIRECTS {
+                return Err(Error::Protocol(format!(
+                    "more than {} server redirections",
+                    redirect::MAX_REDIRECTS
+                )));
+            }
+            trace!("{}", to.hop_trace(hop));
+            // A redirection without a target goes back to its sender (1.3.8).
+            cfg.host = from;
+            cfg.redirection = Some(*to);
+            handlers = back;
+        }
+        unreachable!("the hop loop returns")
+    }
+
+    fn connect_hop(
+        cfg: &Config,
+        handlers: Vec<Box<dyn StaticChannel>>,
+        gfx: Option<crate::gfx::GfxHandle>,
+    ) -> Result<Hop> {
         let mut deadline = Instant::now() + cfg.timeout;
         let (user, domain) = split_user(cfg);
+        let redirection = cfg.redirection.as_ref();
 
-        let (mut f, gateway_certificate_sha256) = match &cfg.gateway {
-            None => {
-                let addr = (cfg.host.as_str(), cfg.port)
-                    .to_socket_addrs()?
-                    .next()
-                    .ok_or_else(|| Error::Protocol(format!("cannot resolve {}", cfg.host)))?;
-                let sock = TcpStream::connect_timeout(&addr, cfg.timeout)?;
-                sock.set_nodelay(true)?;
-                (Framer::new(sock), None)
-            }
-            Some(gw) => {
-                let t = gateway::connect(
-                    gw,
-                    &cfg.host,
-                    cfg.port,
-                    &cfg.client_name,
-                    deadline,
-                    cfg.verify_certificate.as_ref(),
-                )?;
-                let cert = t.certificate.as_deref().map(sha256);
-                (Framer::over(Box::new(t.stream), Box::new(t.reader)), cert)
-            }
-        };
+        let (mut f, gateway_certificate_sha256, host) = open(cfg, deadline)?;
         f.set_read_timeout(Duration::from_millis(100))?;
 
-        // 1. X.224 negotiation
+        // 1. X.224 negotiation; a routing token replaces the cookie (3.2.5.3.1)
         let cookie: String = user.chars().take(9).collect();
-        let requested = x224::PROTOCOL_SSL | x224::PROTOCOL_HYBRID | x224::PROTOCOL_HYBRID_EX;
-        f.write(&x224::connection_request(&cookie, requested))?;
+        let mut requested = x224::PROTOCOL_SSL | x224::PROTOCOL_HYBRID | x224::PROTOCOL_HYBRID_EX;
+        let rdstls = redirection.filter(|r| !r.no_redirect() && r.wants_rdstls());
+        if rdstls.is_some() {
+            requested |= x224::PROTOCOL_RDSTLS;
+        }
+        match redirection.and_then(Redirection::routing_token) {
+            Some(token) => f.write(&x224::connection_request_routed(&token, requested)?)?,
+            None => f.write(&x224::connection_request(&cookie, requested))?,
+        }
         let protocol = x224::parse_connection_confirm(&read_x224(&mut f, deadline)?)?;
         trace!("negotiated protocol {protocol:#x}");
         if protocol & requested == 0 {
@@ -386,11 +468,18 @@ impl Client {
         }
 
         // 2. TLS, then NLA
-        let cert = f.upgrade_tls(&cfg.host, deadline)?;
+        let cert = f.upgrade_tls(&host, deadline)?;
         let certificate_sha256 = sha256(&cert);
+        // The target must present the certificate the redirector named (5.4.5.3.1).
+        let pinned = redirection.and_then(|r| r.target_certificate.as_ref());
+        if pinned.is_some_and(|p| *p != cert) {
+            return Err(Error::Auth(
+                "the redirection target's certificate differs from the one the broker named".into(),
+            ));
+        }
         if let Some(check) = &cfg.verify_certificate {
             let server = ServerCertificate {
-                host: cfg.host.clone(),
+                host: host.clone(),
                 port: cfg.port,
                 der: cert.clone(),
                 sha256: certificate_sha256,
@@ -401,7 +490,17 @@ impl Client {
             // The check may have waited for the user.
             deadline = Instant::now() + cfg.timeout;
         }
-        if protocol & (x224::PROTOCOL_HYBRID | x224::PROTOCOL_HYBRID_EX) != 0 {
+        if let Some(r) = rdstls.filter(|_| protocol == x224::PROTOCOL_RDSTLS) {
+            // RDSTLS logon with the redirected credentials (5.4.5.3.1).
+            let caps = f.read_exact(redirect::RDSTLS_CAPABILITIES_LEN, deadline)?;
+            redirect::parse_rdstls_capabilities(&caps)?;
+            f.write(&redirect::rdstls_auth_request(r)?)?;
+            let rsp = f.read_exact(redirect::RDSTLS_RESPONSE_LEN, deadline)?;
+            let code = redirect::parse_rdstls_response(&rsp)?;
+            if code != 0 {
+                return Err(Error::Auth(format!("RDSTLS logon refused ({code:#x})")));
+            }
+        } else if protocol & (x224::PROTOCOL_HYBRID | x224::PROTOCOL_HYBRID_EX) != 0 {
             let public_key = der::subject_public_key(&cert)?;
             credssp::authenticate(
                 &mut f,
@@ -440,6 +539,8 @@ impl Client {
             connection_type: cfg.connection_type,
             channels: &def_refs,
             gfx: gfx.is_some(),
+            redirected_session_id: redirection.map(|r| r.session_id),
+            redirected_smartcard: redirection.is_some_and(Redirection::smartcard_logon),
         };
         f.write(&x224::data(&mcs::connect_initial(
             &gcc::conference_create_request(&settings),
@@ -461,24 +562,10 @@ impl Client {
             trace!("joined channel {joined}");
         }
         let io = server.io_channel;
-        // The server assigns channel ids in the order the client listed them.
-        let slots: Vec<Slot> = handlers
-            .into_iter()
-            .zip(server.channel_ids.iter().copied())
-            .map(|(handler, id)| {
-                trace!("virtual channel {} on MCS channel {id}", handler.name());
-                Slot {
-                    id,
-                    handler,
-                    defrag: Default::default(),
-                    failed: false,
-                }
-            })
-            .collect();
 
         // 5. Client info and licensing
         let mut early = Vec::new();
-        let info_pdu = pdu::client_info(&pdu::ClientInfo {
+        let info = pdu::ClientInfo {
             domain: &domain,
             user: &user,
             password: &cfg.password,
@@ -490,7 +577,19 @@ impl Client {
                 .map(|c| c.client_packet(&pdu::ENHANCED_SECURITY_CLIENT_RANDOM)),
             performance_flags: cfg.experience.performance_flags(),
             compression: cfg.compression.type_code(),
-        });
+        };
+        // A redirection's password blob goes to the target unchanged; after
+        // an RDSTLS logon the Client Info carries no password.
+        let info_pdu = match redirection.and_then(Redirection::client_info_password) {
+            Some(blob) => pdu::client_info_redirected(&info, blob),
+            None if rdstls.is_some() && protocol == x224::PROTOCOL_RDSTLS => {
+                pdu::client_info(&pdu::ClientInfo {
+                    password: "",
+                    ..info
+                })
+            }
+            None => pdu::client_info(&info),
+        };
         trace!(
             "experience: {:?}, {} bpp, {:?} (performance flags {:#x})",
             cfg.experience,
@@ -505,25 +604,55 @@ impl Client {
         // With TLS the server answers with one "valid client" licensing PDU.
         let mut pending = None;
         let data = read_io(&mut f, io, deadline, &mut early)?;
-        if pdu::looks_like_share_control(&data) {
+        if pdu::looks_like_share_control(&data) || redirect::is_enhanced(&data) {
             pending = Some(data); // server skipped licensing
+        } else if redirect::is_standard_security(&data) {
+            return Err(Error::Unsupported(
+                "Standard Security Server Redirection PDU (needs Standard RDP Security)".into(),
+            ));
         } else {
             pdu::process_license(&data)?;
         }
 
-        // 6. Capability exchange
+        // 6. Capability exchange; a Server Redirection PDU may come instead (3.2.5.13.1)
+        let mut informational = None;
         let demand = loop {
             let data = match pending.take() {
                 Some(d) => d,
                 None => read_io(&mut f, io, deadline, &mut early)?,
             };
             let parts = pdu::split_share_control(&data)?;
+            if let Some((_, body)) = parts
+                .iter()
+                .find(|(t, _)| *t == redirect::PDUTYPE_SERVER_REDIR_PKT)
+            {
+                let to = Redirection::parse_enhanced(body)?;
+                if !to.no_redirect() {
+                    return Ok(Hop::Redirect(Box::new(to), host, handlers));
+                }
+                trace!("server redirection info (LB_NOREDIRECT), kept for a reconnect");
+                informational = Some(to);
+            }
             if let Some((_, body)) = parts.iter().find(|(t, _)| *t == pdu::PDUTYPE_DEMANDACTIVE) {
                 break pdu::parse_demand_active(body)?;
             }
             trace!("ignoring PDU while waiting for Demand Active");
         };
         trace!("demand active: {demand:?}");
+        // The server assigns channel ids in the order the client listed them.
+        let slots: Vec<Slot> = handlers
+            .into_iter()
+            .zip(server.channel_ids.iter().copied())
+            .map(|(handler, id)| {
+                trace!("virtual channel {} on MCS channel {id}", handler.name());
+                Slot {
+                    id,
+                    handler,
+                    defrag: Default::default(),
+                    failed: false,
+                }
+            })
+            .collect();
 
         let mut client = Client {
             f,
@@ -554,6 +683,7 @@ impl Client {
             // sends the new one in the Save Session Info PDU.
             arc_cookie: None,
             gfx,
+            redirection: informational,
         };
         // 7. Finalization; the Font Map reply is handled by the session loop.
         client.activate(&demand)?;
@@ -561,7 +691,15 @@ impl Client {
             client.channel_data(channel, &data)?;
         }
         client.f.set_read_timeout(Duration::from_millis(2))?;
-        Ok(client)
+        Ok(Hop::Done(Box::new(client)))
+    }
+
+    /// The last Server Redirection PDU this connection did not follow: an
+    /// informational one (LB_NOREDIRECT) or one that ended the session after
+    /// activation (the channel handlers have state by then, so the caller
+    /// reconnects with new ones). Put it in [`Config::redirection`].
+    pub fn redirection(&self) -> Option<&Redirection> {
+        self.redirection.as_ref()
     }
 
     fn send_data(&mut self, pdu_type2: u8, body: &[u8]) -> Result<()> {
@@ -759,6 +897,19 @@ impl Client {
                     self.active = false;
                 }
                 pdu::PDUTYPE_DATA => self.handle_data(body, out)?,
+                redirect::PDUTYPE_SERVER_REDIR_PKT => match Redirection::parse_enhanced(body) {
+                    Ok(to) => {
+                        let follow = !to.no_redirect();
+                        trace!("{}", to.hop_trace(1));
+                        self.redirection = Some(to);
+                        if follow {
+                            let text = "the server redirected the session to another server";
+                            let cause = CloseCause::Ultimatum(text);
+                            out.closed = Some(close_reason(cause, self.last_error_info));
+                        }
+                    }
+                    Err(e) => trace!("server redirection PDU ignored: {e}"),
+                },
                 _ => {}
             }
         }

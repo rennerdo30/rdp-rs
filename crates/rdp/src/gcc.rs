@@ -43,6 +43,10 @@ pub struct ClientSettings<'a> {
     pub channels: &'a [(&'a str, u32)],
     /// Offer the graphics pipeline (MS-RDPEGFX) in earlyCapabilityFlags.
     pub gfx: bool,
+    /// RedirectedSessionID from a Server Redirection PDU (2.2.1.3.5).
+    pub redirected_session_id: Option<u32>,
+    /// REDIRECTED_SMARTCARD: the redirection said LB_SMARTCARD_LOGON.
+    pub redirected_smartcard: bool,
 }
 
 fn block(out: &mut Vec<u8>, ty: u16, body: &[u8]) {
@@ -133,12 +137,29 @@ pub fn client_data_blocks(s: &ClientSettings) -> Vec<u8> {
     }
     block(&mut out, CS_NET, &net);
 
-    let mut cluster = Vec::new();
-    cluster.put_u32(0x0000_000D); // REDIRECTION_SUPPORTED | REDIRECTION_VERSION4
-    cluster.put_u32(0);
-    block(&mut out, CS_CLUSTER, &cluster);
+    block(&mut out, CS_CLUSTER, &cluster_data(s));
 
     out
+}
+
+/// TS_UD_CS_CLUSTER body (2.2.1.3.5): redirection version 4, plus the
+/// session a Server Redirection PDU named.
+fn cluster_data(s: &ClientSettings) -> Vec<u8> {
+    const REDIRECTION_SUPPORTED: u32 = 0x01;
+    const REDIRECTED_SESSIONID_FIELD_VALID: u32 = 0x02;
+    const REDIRECTION_VERSION4: u32 = 0x03 << 2;
+    const REDIRECTED_SMARTCARD: u32 = 0x40;
+    let mut flags = REDIRECTION_SUPPORTED | REDIRECTION_VERSION4;
+    if s.redirected_session_id.is_some() {
+        flags |= REDIRECTED_SESSIONID_FIELD_VALID;
+    }
+    if s.redirected_smartcard {
+        flags |= REDIRECTED_SMARTCARD;
+    }
+    let mut cluster = Vec::new();
+    cluster.put_u32(flags);
+    cluster.put_u32(s.redirected_session_id.unwrap_or(0));
+    cluster
 }
 
 /// GCC Conference Create Request wrapped in T.124 ConnectData.
@@ -224,6 +245,8 @@ mod tests {
             connection_type: crate::ConnectionType::Lan,
             channels: &[],
             gfx: false,
+            redirected_session_id: None,
+            redirected_smartcard: false,
         };
         let b = client_data_blocks(&s);
         assert_eq!(u16::from_le_bytes([b[0], b[1]]), CS_CORE);
@@ -235,5 +258,30 @@ mod tests {
         assert_eq!(u16::from_le_bytes([b[144], b[145]]), 0x042B);
         let gfx = client_data_blocks(&ClientSettings { gfx: true, ..s });
         assert_eq!(u16::from_le_bytes([gfx[144], gfx[145]]), 0x052B);
+
+        // Client Cluster Data is the last block (2.2.1.3.5): header, Flags,
+        // RedirectedSessionID.
+        let cluster = |s: &ClientSettings| {
+            let b = client_data_blocks(s);
+            let c = b[b.len() - 12..].to_vec();
+            assert_eq!(&c[..4], &[0x04, 0xC0, 12, 0]);
+            (
+                u32::from_le_bytes(c[4..8].try_into().unwrap()),
+                u32::from_le_bytes(c[8..12].try_into().unwrap()),
+            )
+        };
+        // REDIRECTION_SUPPORTED | REDIRECTION_VERSION4, no session.
+        assert_eq!(cluster(&s), (0x0D, 0));
+        let redirected = ClientSettings {
+            redirected_session_id: Some(2),
+            ..s
+        };
+        // + REDIRECTED_SESSIONID_FIELD_VALID.
+        assert_eq!(cluster(&redirected), (0x0F, 2));
+        let smartcard = ClientSettings {
+            redirected_smartcard: true,
+            ..redirected
+        };
+        assert_eq!(cluster(&smartcard), (0x4F, 2));
     }
 }

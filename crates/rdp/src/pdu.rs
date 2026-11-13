@@ -1,7 +1,7 @@
 //! Slow-path PDUs: client info, licensing, share control/data headers,
 //! capability exchange and connection finalization (MS-RDPBCGR 2.2.1.11-2.2.1.22).
 
-use crate::cursor::{Put, Reader, le16, utf16le, utf16le_z};
+use crate::cursor::{Put, Reader, le16, utf16le_z};
 use crate::error::{Error, Result, proto};
 
 pub const PDUTYPE_DEMANDACTIVE: u16 = 0x1;
@@ -69,6 +69,22 @@ pub struct ClientInfo<'a> {
 
 /// Client Info PDU (TS_INFO_PACKET with extended info), preceded by the basic security header.
 pub fn client_info(ci: &ClientInfo) -> Vec<u8> {
+    client_info_with(ci, &utf16le_z(ci.password))
+}
+
+/// Client Info PDU whose Password field is the password blob of a Server
+/// Redirection Packet, passed to the target unchanged (2.2.13.1); `ci.password`
+/// is ignored. cbPassword excludes the null terminator (2.2.1.11.1.1).
+pub fn client_info_redirected(ci: &ClientInfo, password_blob: &[u8]) -> Vec<u8> {
+    let mut password = password_blob.to_vec();
+    if !password.ends_with(&[0, 0]) {
+        password.extend_from_slice(&[0, 0]);
+    }
+    client_info_with(ci, &password)
+}
+
+/// `password`: UTF-16LE with its null terminator.
+fn client_info_with(ci: &ClientInfo, password: &[u8]) -> Vec<u8> {
     const INFO_MOUSE: u32 = 0x0001;
     const INFO_DISABLECTRLALTDEL: u32 = 0x0002;
     const INFO_AUTOLOGON: u32 = 0x0008;
@@ -96,12 +112,18 @@ pub fn client_info(ci: &ClientInfo) -> Vec<u8> {
                 INFO_COMPRESSION | (u32::from(t & 0x0F) << COMPRESSION_TYPE_SHIFT)
             }),
     );
-    let fields = [ci.domain, ci.user, ci.password, "", ""];
-    for f in fields {
-        out.put_u16(utf16le(f).len() as u16);
+    let fields = [
+        utf16le_z(ci.domain),
+        utf16le_z(ci.user),
+        password.to_vec(),
+        utf16le_z(""),
+        utf16le_z(""),
+    ];
+    for f in &fields {
+        out.put_u16(f.len().saturating_sub(2) as u16); // without the terminator
     }
-    for f in fields {
-        out.put_bytes(&utf16le_z(f));
+    for f in &fields {
+        out.put_bytes(f);
     }
 
     // TS_EXTENDED_INFO_PACKET

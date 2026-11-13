@@ -14,6 +14,7 @@
 //! - [`gfx`]: the graphics pipeline (MS-RDPEGFX), opt-in through [`Graphics::Gfx`]
 //! - [`cliprdr`]: clipboard redirection on the `cliprdr` channel (MS-RDPECLIP)
 //! - [`client`]: the connection sequence and the session loop
+//! - [`redirect`]: server redirection (session broker, load balancing) and RDSTLS
 //! - [`rdpsnd`]: audio output on the `rdpsnd` channel (MS-RDPEA)
 //! - [`audin`]: microphone redirection on the `AUDIO_INPUT` dynamic channel (MS-RDPEAI)
 //! - [`rdpdr`]: device redirection (MS-RDPEFS) with shared drives, printers (MS-RDPEPC) and smart cards (MS-RDPESC)
@@ -45,6 +46,7 @@ pub mod pdu;
 pub mod pointer;
 pub mod rdpdr;
 pub mod rdpsnd;
+pub mod redirect;
 pub mod transport;
 pub mod x224;
 
@@ -72,3 +74,4 @@ pub use rdpdr::{
     RdpdrHandle, SmartCardBackend, rdpdr, share_printers, smart_card_device,
 };
 pub use rdpsnd::{AudioBackend, AudioHandle, PcmFormat, Rdpsnd, rdpsnd};
+pub use redirect::Redirection;
