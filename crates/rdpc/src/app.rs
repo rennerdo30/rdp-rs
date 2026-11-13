@@ -143,6 +143,10 @@ struct MainWin {
     cursor: (i32, i32),
     shown_cursor: Shown,
     chrome_dirty: bool,
+    /// Until then every chrome render presents the whole window: while the
+    /// window resizes or moves, Windows may change screen pixels behind our
+    /// back, so presenting only changed tiles could leave stale ones.
+    settle: Option<std::time::Instant>,
     /// The session a mouse button went down in (gets the release too).
     pressed_in: Option<u64>,
 }
@@ -201,6 +205,13 @@ pub fn run(direct: Option<(String, Config)>) -> i32 {
 }
 
 impl App {
+    /// Full presents for a moment (see `MainWin::settle`).
+    fn settle(&mut self) {
+        if let Some(m) = &mut self.win {
+            m.settle = Some(std::time::Instant::now() + std::time::Duration::from_millis(250));
+        }
+    }
+
     fn dirty(&mut self) {
         if let Some(w) = &mut self.win {
             w.chrome_dirty = true;
@@ -577,7 +588,8 @@ impl App {
         let Ok(mut buf) = m.gfx.surface.buffer_mut() else {
             return;
         };
-        let full = buf.age() == 0 || m.shown.len() != m.scratch.len();
+        let settling = m.settle.is_some_and(|t| std::time::Instant::now() < t);
+        let full = buf.age() == 0 || m.shown.len() != m.scratch.len() || settling;
         let rects: Vec<softbuffer::Rect> = if full {
             to_sb(0, 0, w, h).into_iter().collect()
         } else {
@@ -971,6 +983,24 @@ fn blit(
 }
 
 impl ApplicationHandler<UserEvent> for App {
+    /// After a resize or move settles, present the whole window once more.
+    fn about_to_wait(&mut self, el: &ActiveEventLoop) {
+        let Some(t) = self.win.as_ref().and_then(|m| m.settle) else {
+            el.set_control_flow(ControlFlow::Wait);
+            return;
+        };
+        if std::time::Instant::now() >= t {
+            if let Some(m) = &mut self.win {
+                m.settle = None;
+                m.shown.clear();
+            }
+            self.dirty();
+            el.set_control_flow(ControlFlow::Wait);
+        } else {
+            el.set_control_flow(ControlFlow::WaitUntil(t));
+        }
+    }
+
     fn resumed(&mut self, el: &ActiveEventLoop) {
         if self.win.is_none() {
             let attrs = Window::default_attributes()
@@ -1020,6 +1050,7 @@ impl ApplicationHandler<UserEvent> for App {
                         cursor: (-1, -1),
                         shown_cursor: Shown::Icon(CursorIcon::Default),
                         chrome_dirty: true,
+                        settle: None,
                         pressed_in: None,
                     });
                 }
@@ -1241,9 +1272,15 @@ impl App {
                     let _ = m.gfx.surface.resize(w, h);
                 }
                 m.shown.clear();
+                self.settle();
+                self.dirty();
+            }
+            WindowEvent::Moved(_) => {
+                self.settle();
                 self.dirty();
             }
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
+                self.settle();
                 self.win.as_mut().unwrap().ui.scale = scale_factor as f32;
                 // Tabs on Auto follow the monitor the window moved to.
                 let auto: Vec<u64> = self

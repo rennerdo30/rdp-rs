@@ -926,6 +926,13 @@ impl Ui {
 
     /// Tab order of the visible form fields.
     fn form_order(&self) -> Vec<Field> {
+        // The vault panels replace the form: only their own fields.
+        if self.store.is_locked() {
+            return vec![Field::Master];
+        }
+        if self.vault_setup {
+            return vec![Field::Master, Field::MasterConfirm];
+        }
         let mut v = vec![Field::Name];
         if self.group_edit.is_none() {
             v.extend([Field::Host, Field::Port]);
@@ -3191,4 +3198,39 @@ pub fn sample(session_tab: bool) -> Ui {
     m.active = if session_tab { Some(1) } else { None };
     m.set_message("Connected to 10.0.0.15.", TEXT_2);
     m
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tab_stays_in_the_master_password_panel() {
+        let mut m = sample(false);
+        m.activate(Hit::SavePassword); // no vault yet: opens the set-master panel
+        assert!(m.vault_setup);
+        assert_eq!(m.focus, Some(Field::Master));
+        m.key(Key::Tab);
+        assert_eq!(m.focus, Some(Field::MasterConfirm));
+        m.key(Key::Tab);
+        assert_eq!(m.focus, Some(Field::Master));
+        m.key(Key::BackTab);
+        assert_eq!(m.focus, Some(Field::MasterConfirm));
+
+        let mut locked = Ui::new(Store::locked_sample(), 1.0);
+        locked.key(Key::Tab);
+        assert_eq!(locked.focus, Some(Field::Master));
+    }
+
+    #[test]
+    fn tab_skips_hidden_fields_of_a_group_form() {
+        let mut m = sample_group();
+        m.focus = Some(Field::Name);
+        m.key(Key::Tab);
+        assert_eq!(
+            m.focus,
+            Some(Field::GroupPath),
+            "groups have no host or port"
+        );
+    }
 }

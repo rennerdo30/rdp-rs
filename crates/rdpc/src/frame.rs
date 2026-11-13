@@ -25,7 +25,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     NCCALCSIZE_PARAMS, SM_CXPADDEDBORDER, SM_CYFRAME, SW_MAXIMIZE, SW_RESTORE, SWP_FRAMECHANGED,
     SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOREDRAW, SWP_NOSIZE, SWP_NOZORDER,
     SetWindowPos, ShowWindow, WM_NCCALCSIZE, WM_NCHITTEST, WM_NCLBUTTONDBLCLK, WM_NCLBUTTONDOWN,
-    WM_NCLBUTTONUP, WM_NCMOUSELEAVE, WM_NCMOUSEMOVE,
+    WM_NCLBUTTONUP, WM_NCMOUSELEAVE, WM_NCMOUSEMOVE, WVR_VALIDRECTS,
 };
 
 /// Title-row geometry in physical client pixels, set by the UI on layout.
@@ -175,7 +175,19 @@ unsafe extern "system" fn subclass_proc(
                 if ZOOMED.swap(zoomed as i32, Ordering::Relaxed) != zoomed as i32 {
                     repaint();
                 }
-                0
+                // Keep Windows from copying the old client pixels to a new
+                // spot on resize (from the top or left edge they would land
+                // shifted until rdpc repaints): the valid source and
+                // destination are the same single pixel, so nothing moves.
+                let one = RECT {
+                    left: rect.left,
+                    top: rect.top,
+                    right: rect.left + 1,
+                    bottom: rect.top + 1,
+                };
+                (*params).rgrc[1] = one;
+                (*params).rgrc[2] = one;
+                WVR_VALIDRECTS as LRESULT
             }
             WM_NCHITTEST => {
                 let hit = DefSubclassProc(hwnd, msg, wparam, lparam);
