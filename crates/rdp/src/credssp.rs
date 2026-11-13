@@ -1,6 +1,12 @@
-//! CredSSP (MS-CSSP) client: NTLM inside TSRequest, public key binding, then
-//! delegation of the password credentials.
+//! CredSSP (MS-CSSP) client: a security package's tokens inside TSRequest,
+//! public key binding, then delegation of the password credentials.
+//!
+//! The package is the crate's own NTLMv2 ([`crate::ntlm`]) unless the caller
+//! supplies another through [`AuthFactory`] (rdpc: Windows SSPI "Negotiate",
+//! which is Kerberos with NTLM fallback). MS-CSSP 3.1.5 treats the package's
+//! tokens and its encryption as opaque; CredSSP only needs [`AuthPackage`].
 
+use std::sync::Arc;
 use std::time::Instant;
 
 use crate::crypto::{random, sha256};
@@ -113,36 +119,142 @@ fn ts_credentials(domain: &str, user: &str, password: &str) -> Vec<u8> {
     seq(&c)
 }
 
-/// Runs NLA over the established TLS session.
+/// The result of one [`AuthPackage::step`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Step {
+    /// Token for the server; may be empty only when `done`.
+    pub token: Vec<u8>,
+    /// The security context is established: wrap and unwrap are usable.
+    pub done: bool,
+}
+
+/// A security package that CredSSP runs inside TSRequest negoTokens
+/// (MS-CSSP 3.1.5 step 2): SPNEGO, Kerberos or NTLM, opaque to CredSSP.
+pub trait AuthPackage: Send {
+    /// The next token: `None` on the first call, then the server's last
+    /// negoToken.
+    fn step(&mut self, input: Option<&[u8]>) -> Result<Step>;
+    /// Encrypts with the package's confidentiality service into one blob
+    /// (SSPI EncryptMessage: the token buffer followed by the data buffer).
+    fn wrap(&mut self, data: &[u8]) -> Result<Vec<u8>>;
+    /// Decrypts a blob made by the server's wrap.
+    fn unwrap(&mut self, data: &[u8]) -> Result<Vec<u8>>;
+}
+
+/// What a package factory gets to build the package for one connection.
+#[derive(Debug, Clone, Copy)]
+pub struct AuthParams<'a> {
+    /// The server host name (the Kerberos service is `TERMSRV/<host>`).
+    pub host: &'a str,
+    pub user: &'a str,
+    pub domain: &'a str,
+    pub password: &'a str,
+    pub workstation: &'a str,
+}
+
+/// Builds the security package for a connection; see [`crate::Config::auth`].
+pub type AuthFactory = Arc<dyn Fn(&AuthParams<'_>) -> Result<Box<dyn AuthPackage>> + Send + Sync>;
+
+/// The crate's own NTLMv2 as an [`AuthPackage`]: NEGOTIATE, then
+/// AUTHENTICATE in answer to the CHALLENGE, then sealing (MS-NLMP 3.4.3).
+pub struct NtlmPackage {
+    ntlm: Ntlm,
+    round: u8,
+}
+
+impl NtlmPackage {
+    pub fn new(p: &AuthParams<'_>) -> Self {
+        Self {
+            ntlm: Ntlm::new(p.user, p.domain, p.password, p.workstation),
+            round: 0,
+        }
+    }
+}
+
+impl AuthPackage for NtlmPackage {
+    fn step(&mut self, input: Option<&[u8]>) -> Result<Step> {
+        self.round = self.round.saturating_add(1);
+        match (self.round, input) {
+            (1, None) => Ok(Step {
+                token: self.ntlm.negotiate(),
+                done: false,
+            }),
+            (2, Some(challenge)) => Ok(Step {
+                token: self.ntlm.authenticate(challenge)?,
+                done: true,
+            }),
+            _ => proto("NTLM: unexpected CredSSP round"),
+        }
+    }
+
+    fn wrap(&mut self, data: &[u8]) -> Result<Vec<u8>> {
+        self.ntlm.encrypt(data)
+    }
+
+    fn unwrap(&mut self, data: &[u8]) -> Result<Vec<u8>> {
+        self.ntlm.decrypt(data)
+    }
+}
+
+/// Bound on negoToken round trips (Kerberos needs one or two, NTLM one).
+const MAX_ROUNDS: usize = 16;
+
+/// Runs NLA over the established TLS session with the package `factory`
+/// builds, or with the crate's NTLM when it is `None`.
 pub fn authenticate(
     f: &mut Framer,
     server_public_key: &[u8],
-    user: &str,
-    domain: &str,
-    password: &str,
-    workstation: &str,
+    params: &AuthParams<'_>,
+    factory: Option<&AuthFactory>,
     deadline: Instant,
 ) -> Result<()> {
-    let mut ntlm = Ntlm::new(user, domain, password, workstation);
-
-    let negotiate = TsRequest {
-        version: CLIENT_VERSION,
-        nego_token: Some(ntlm.negotiate()),
-        ..Default::default()
+    let mut pkg: Box<dyn AuthPackage> = match factory {
+        Some(make) => make(params)?,
+        None => Box::new(NtlmPackage::new(params)),
     };
-    f.write(&negotiate.encode())?;
+    authenticate_with(f, server_public_key, pkg.as_mut(), params, deadline)
+}
 
-    let challenge = read_request(f, deadline)?;
-    let version = challenge.version.min(CLIENT_VERSION);
-    trace!(
-        "CredSSP: server version {}, using {version}",
-        challenge.version
-    );
-    let token = challenge
-        .nego_token
-        .ok_or_else(|| Error::Protocol("CredSSP challenge without negoToken".into()))?;
-    let authenticate = ntlm.authenticate(&token)?;
+/// MS-CSSP 3.1.5 steps 2 to 5 with any security package.
+pub fn authenticate_with(
+    f: &mut Framer,
+    server_public_key: &[u8],
+    pkg: &mut dyn AuthPackage,
+    params: &AuthParams<'_>,
+    deadline: Instant,
+) -> Result<()> {
+    // Step 2: negoTokens until the package's context is established. Until
+    // the server has answered, assume it speaks our version: a package that
+    // is done in one step (no mutual authentication) sends pubKeyAuth at once.
+    let mut version = CLIENT_VERSION;
+    let mut step = pkg.step(None)?;
+    let mut rounds = 0;
+    while !step.done {
+        rounds += 1;
+        if step.token.is_empty() || rounds > MAX_ROUNDS {
+            return proto("CredSSP: the security package made no progress");
+        }
+        let msg = TsRequest {
+            version: CLIENT_VERSION,
+            nego_token: Some(std::mem::take(&mut step.token)),
+            ..Default::default()
+        };
+        f.write(&msg.encode())?;
+        let reply = read_request(f, deadline)?;
+        version = reply.version.min(CLIENT_VERSION);
+        if rounds == 1 {
+            trace!("CredSSP: server version {}, using {version}", reply.version);
+        }
+        let token = reply
+            .nego_token
+            .ok_or_else(|| Error::Protocol("CredSSP challenge without negoToken".into()))?;
+        step = pkg.step(Some(&token))?;
+    }
 
+    // Step 3: the last token, if the package has one, together with the
+    // encrypted public key binding. Versions 5 and 6 hash a client nonce in;
+    // the nonce travels in the clear and the package (NTLM or Kerberos alike)
+    // only encrypts the hash, so nothing here depends on the package.
     let nonce: [u8; 32] = random();
     let binding = if version >= 5 {
         sha256(&[CLIENT_SERVER_MAGIC, &nonce, server_public_key].concat()).to_vec()
@@ -151,18 +263,23 @@ pub fn authenticate(
     };
     let msg = TsRequest {
         version: CLIENT_VERSION,
-        nego_token: Some(authenticate),
-        pub_key_auth: Some(ntlm.encrypt(&binding)?),
+        nego_token: (!step.token.is_empty()).then_some(step.token),
+        pub_key_auth: Some(pkg.wrap(&binding)?),
         client_nonce: (version >= 5).then(|| nonce.to_vec()),
         ..Default::default()
     };
     f.write(&msg.encode())?;
 
+    // Steps 4 and 5: the server's binding, encrypted by its side of the package.
     let reply = read_request(f, deadline)?;
+    if reply.nego_token.is_some() {
+        // Step 4 omits negoTokens; our context is already complete.
+        trace!("CredSSP: ignoring a negoToken next to the server's pubKeyAuth");
+    }
     let sealed = reply
         .pub_key_auth
         .ok_or_else(|| Error::Auth("server did not confirm the public key".into()))?;
-    let plain = ntlm.decrypt(&sealed)?;
+    let plain = pkg.unwrap(&sealed)?;
     let expected = if version >= 5 {
         sha256(&[SERVER_CLIENT_MAGIC, &nonce, server_public_key].concat()).to_vec()
     } else {
@@ -176,7 +293,7 @@ pub fn authenticate(
 
     let creds = TsRequest {
         version: CLIENT_VERSION,
-        auth_info: Some(ntlm.encrypt(&ts_credentials(domain, user, password))?),
+        auth_info: Some(pkg.wrap(&ts_credentials(params.domain, params.user, params.password))?),
         ..Default::default()
     };
     f.write(&creds.encode())?;
@@ -212,3 +329,7 @@ mod tests {
         assert_eq!(req.error_code, Some(0xC000_006D));
     }
 }
+
+#[cfg(test)]
+#[path = "credssp_tests.rs"]
+mod package_tests;

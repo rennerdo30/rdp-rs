@@ -2,7 +2,7 @@
 //!
 //!   rdpc                                     connection manager
 //!   rdpc <host[:port]> -u <[DOMAIN\]user> [-d domain] [--size WxH] [-v]
-//!        [--compression off|rdp4|rdp5|rdp6|rdp61] [--gfx] [--multimon]
+//!        [--compression off|rdp4|rdp5|rdp6|rdp61] [--gfx] [--multimon] [--kerberos]
 //!                                            one session window
 //!   rdpc <host> -u <user> --screenshot out.png [--wait SECONDS]
 //!                                            headless: save the desktop as PNG
@@ -32,6 +32,8 @@ mod recorder;
 mod session;
 mod settings;
 mod smartcard;
+#[cfg(windows)]
+mod sspi;
 mod store;
 mod text_field;
 mod theme;
@@ -69,6 +71,8 @@ struct Args {
     gfx: bool,
     /// `--multimon`: span the session over all local monitors.
     multimon: bool,
+    /// `--kerberos`: NLA through Windows SSPI Negotiate (Kerberos, NTLM fallback).
+    kerberos: bool,
 }
 
 fn usage() -> ! {
@@ -79,6 +83,8 @@ fn usage() -> ! {
          \x20           [--compression off|rdp4|rdp5|rdp6|rdp61]\n\
          \x20           [--gfx]   (graphics pipeline, MS-RDPEGFX)\n\
          \x20           [--multimon]   (all local monitors, MS-RDPBCGR 2.2.1.3.6)\n\
+         \x20           [--kerberos]   (Windows Negotiate: Kerberos, NTLM fallback;\n\
+         \x20                           without -u: single sign-on as the logged-on user)\n\
          \x20      rdpc <host> -u <user> --screenshot out.png [--wait SECONDS]\n\
          \x20      rdpc <host> -u <user> --record out.mp4 [--wait SECONDS]\n\
          \x20      rdpc ... --microphone [INDEX]   (microphone on; see --list-microphones)\n\
@@ -144,6 +150,7 @@ fn parse_args() -> Args {
             "--list-microphones" => a.list_microphones = true,
             "--gfx" => a.gfx = true,
             "--multimon" => a.multimon = true,
+            "--kerberos" => a.kerberos = true,
             "-h" | "--help" => usage(),
             s if s.starts_with('-') => usage(),
             s => {
@@ -159,7 +166,8 @@ fn parse_args() -> Args {
     // cmd.exe passes single quotes through literally: 'DOMAIN\user' keeps its quotes.
     a.user = strip_quotes(&a.user);
     a.domain = strip_quotes(&a.domain);
-    if !a.host.is_empty() && a.user.is_empty()
+    // --kerberos without -u signs on as the logged-on Windows user.
+    if !a.host.is_empty() && a.user.is_empty() && !a.kerberos
         || (a.screenshot.is_some() || a.record.is_some()) && a.host.is_empty()
     {
         usage();
@@ -238,6 +246,8 @@ fn main() {
 
     let password = match std::env::var("RDP_PASSWORD") {
         Ok(p) => p,
+        // Single sign-on: SSPI takes the logged-on user's credentials.
+        Err(_) if args.kerberos && args.user.is_empty() => String::new(),
         Err(_) => rpassword::prompt_password(format!("Password for {}: ", args.user))
             .unwrap_or_else(|e| {
                 eprintln!("cannot read password: {e}");
@@ -254,6 +264,17 @@ fn main() {
         cfg.gateway = Some(gw);
     }
     cfg.compression = args.compression;
+    if args.kerberos {
+        #[cfg(windows)]
+        {
+            cfg.auth = Some(sspi::factory());
+        }
+        #[cfg(not(windows))]
+        {
+            eprintln!("--kerberos needs Windows SSPI");
+            std::process::exit(2);
+        }
+    }
     if let Some((w, h)) = args.size {
         cfg.width = w;
         cfg.height = h;

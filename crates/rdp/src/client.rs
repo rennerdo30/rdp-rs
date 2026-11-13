@@ -91,6 +91,9 @@ pub struct Config {
     /// `width` x `height`. When set, the desktop is their bounding box and
     /// `width`/`height` are not used.
     pub monitors: Vec<crate::Monitor>,
+    /// Security package for NLA (MS-CSSP), for example Kerberos through the
+    /// platform; None uses the crate's own NTLMv2.
+    pub auth: Option<crate::AuthFactory>,
 }
 
 impl Config {
@@ -117,6 +120,7 @@ impl Config {
             graphics: crate::Graphics::Bitmap,
             h264: None,
             monitors: Vec::new(),
+            auth: None,
         }
     }
 }
@@ -419,15 +423,14 @@ impl Client {
         }
         if protocol & (x224::PROTOCOL_HYBRID | x224::PROTOCOL_HYBRID_EX) != 0 {
             let public_key = der::subject_public_key(&cert)?;
-            credssp::authenticate(
-                &mut f,
-                &public_key,
-                &user,
-                &domain,
-                &cfg.password,
-                &cfg.client_name,
-                deadline,
-            )?;
+            let params = credssp::AuthParams {
+                host: &cfg.host,
+                user: &user,
+                domain: &domain,
+                password: &cfg.password,
+                workstation: &cfg.client_name,
+            };
+            credssp::authenticate(&mut f, &public_key, &params, cfg.auth.as_ref(), deadline)?;
             if protocol == x224::PROTOCOL_HYBRID_EX {
                 let result = f.read_exact(4, deadline)?;
                 let code = u32::from_le_bytes(result[..4].try_into().unwrap());
