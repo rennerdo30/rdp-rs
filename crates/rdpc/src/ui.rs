@@ -159,6 +159,8 @@ pub enum Hit {
     FormCompression(usize),
     /// Enter or leave full screen.
     FullScreen,
+    /// Full screen: keep the bar, or let it hide.
+    PinBar,
     /// Quit confirmation: quit, stay, and the dimmed rest of the window.
     ExitConfirm,
     ExitCancel,
@@ -342,6 +344,8 @@ pub enum Action {
     SetFullscreen(bool),
     /// Quit now (confirmed).
     Quit,
+    /// The session area changed size (fit may resize the remote desktop).
+    Relayout,
     /// Settings.
     SetAutoLock(u32),
     SetCheckUpdates(bool),
@@ -422,6 +426,13 @@ pub struct Ui {
     drawer_area: Rect,
     /// The window is full screen (the app sets it): only the session and its bar.
     pub fullscreen: bool,
+    /// Full screen: the bar stays (pinned), or hides and shows when the
+    /// pointer touches the top edge.
+    pub bar_pinned: bool,
+    bar_revealed: bool,
+    /// The part of the session area the picture may be drawn in (chrome
+    /// such as the revealed full-screen bar covers the rest).
+    pub session_clip: Option<Rect>,
     /// Local sound output devices (the app fills it in).
     pub speakers: Vec<String>,
     /// Local microphones (the app fills it in).
@@ -509,6 +520,9 @@ impl Ui {
             drawer_content: 0,
             drawer_area: Rect::default(),
             fullscreen: false,
+            bar_pinned: false,
+            bar_revealed: false,
+            session_clip: None,
             speakers: Vec::new(),
             mics: Vec::new(),
             form_page: 0,
@@ -576,7 +590,9 @@ impl Ui {
     /// pixels: the same layout as `paint` (sidebar, tab strip, toolbar, drawer).
     pub fn session_size_for(&self, w: i32, h: i32) -> (i32, i32) {
         let p = |v: f32| (v * self.scale).round() as i32;
-        let (mut aw, ah) = if self.fullscreen {
+        let (mut aw, ah) = if self.fullscreen && !self.bar_pinned {
+            (w, h)
+        } else if self.fullscreen {
             (w, h - p(40.0))
         } else {
             let side_w = p(260.0).min(w / 3);
@@ -1173,6 +1189,20 @@ impl Ui {
 
     /// Returns true when the hover target changed (needs a repaint).
     pub fn mouse_move(&mut self, x: i32, y: i32) -> bool {
+        // Full screen with a hiding bar: the top edge shows it, leaving hides it.
+        if self.fullscreen && !self.bar_pinned && self.active.is_some() {
+            let bar = (40.0 * self.scale) as i32;
+            let want = if self.bar_revealed {
+                y >= 0 && y < bar + (12.0 * self.scale) as i32
+            } else {
+                (0..=2).contains(&y)
+            };
+            if want != self.bar_revealed {
+                self.bar_revealed = want;
+                self.hover = self.hit_at(x, y);
+                return true;
+            }
+        }
         let h = self.hit_at(x, y);
         let changed = h != self.hover
             && !matches!(
@@ -1343,6 +1373,11 @@ impl Ui {
                 self.drawer_scroll = 0;
             }
             Hit::FullScreen => return Some(Action::SetFullscreen(!self.fullscreen)),
+            Hit::PinBar => {
+                self.bar_pinned = !self.bar_pinned;
+                self.bar_revealed = self.bar_pinned;
+                return Some(Action::Relayout);
+            }
             Hit::ExitConfirm => return Some(Action::Quit),
             Hit::ExitCancel => self.confirm_exit = None,
             Hit::Modal => {}
@@ -3809,80 +3844,17 @@ impl Ui {
         };
         let (host, state, name) = (tab.host.clone(), tab.state.clone(), tab.name.clone());
 
-        // Toolbar
+        // Toolbar: above the session, or in full screen with a hiding bar,
+        // over its top edge while revealed (drawn after the session area).
+        let overlay = self.fullscreen && !self.bar_pinned;
         let tb = Rect::new(content.x, content.y, content.w, p(40.0));
-        cv.fill(Rect::new(tb.x, tb.bottom() - 1, tb.w, 1), BORDER_SOFT);
-        cv.fill_circle(
-            (tb.x + p(18.0)) as f32,
-            (tb.y + tb.h / 2) as f32,
-            4.0 * s,
-            state.color(),
-        );
-        let info = match &state {
-            TabState::Connecting => format!("{host} · connecting…"),
-            TabState::Connected { width, height, bpp } if self.fullscreen => {
-                format!("{name} · {host} · {width} × {height} · {bpp}-bit")
-            }
-            TabState::Connected { width, height, bpp } => {
-                format!("{host} · {width} × {height} · {bpp} bpp")
-            }
-            TabState::Ended(why) => format!("{host} · ended: {why}"),
-            TabState::Failed(why) => format!("{host} · failed: {why}"),
-        };
-        let mut bx = tb.right() - p(8.0);
-        let mut buttons: Vec<(&str, Hit, Style)> = vec![
-            (
-                if self.fullscreen {
-                    "Exit full screen"
-                } else {
-                    "Full screen"
-                },
-                Hit::FullScreen,
-                Style::Secondary,
-            ),
-            (
-                if self.drawer { "Hide panel" } else { "Panel" },
-                Hit::Drawer,
-                Style::Secondary,
-            ),
-        ];
-        match state {
-            TabState::Connected { .. } | TabState::Connecting => {
-                buttons.insert(0, ("Disconnect", Hit::Disconnect(id), Style::Secondary))
-            }
-            _ => buttons.insert(0, ("Reconnect", Hit::Reconnect(id), Style::Primary)),
+        if !overlay {
+            self.paint_toolbar(cv, te, f, tb, id, &host, &state, &name);
         }
-        for (text, hit, style) in buttons.iter().rev() {
-            let bw = te.measure(f.ui, 13.0 * s, text) as i32 + p(26.0);
-            bx -= bw;
-            self.button(
-                cv,
-                te,
-                f,
-                Rect::new(bx, tb.y + p(6.0), bw, tb.h - p(12.0)),
-                text,
-                *style,
-                *hit,
-            );
-            bx -= p(6.0);
-        }
-        te.draw_in(
-            cv,
-            f.ui,
-            12.5 * s,
-            Rect::new(tb.x + p(30.0), tb.y, bx - tb.x - p(36.0), tb.h),
-            0.0,
-            &info,
-            TEXT_2,
-        );
 
         // Session area and drawer
-        let mut area = Rect::new(
-            content.x,
-            tb.bottom(),
-            content.w,
-            content.bottom() - tb.bottom(),
-        );
+        let area_top = if overlay { content.y } else { tb.bottom() };
+        let mut area = Rect::new(content.x, area_top, content.w, content.bottom() - area_top);
         if self.drawer {
             let dw = p(320.0).min(area.w / 2);
             let drawer = Rect::new(area.right() - dw, area.y, dw, area.h);
@@ -3891,10 +3863,16 @@ impl Ui {
             self.paint_drawer(cv, te, f, drawer, id);
         }
         cv.fill(area, BG_SIDEBAR);
-        match state {
+        self.session_clip = None;
+        if overlay && self.bar_revealed {
+            let bar = Rect::new(area.x, area.y, area.w, tb.h);
+            self.session_clip = Some(Rect::new(area.x, bar.bottom(), area.w, area.h - bar.h));
+        }
+        match state.clone() {
             TabState::Connected { .. } => {
                 self.session_area = Some((id, area));
-                self.hits.push((area, Hit::Session(id)));
+                self.hits
+                    .push((self.session_clip.unwrap_or(area), Hit::Session(id)));
             }
             TabState::Connecting => {
                 let cert = self
@@ -3964,6 +3942,100 @@ impl Ui {
                 );
             }
         }
+        if overlay && self.bar_revealed {
+            let bar = Rect::new(area.x, area.y, area.w, tb.h);
+            cv.fill(bar, BG);
+            self.paint_toolbar(cv, te, f, bar, id, &host, &state, &name);
+        }
+    }
+
+    /// The session toolbar: state, and Disconnect/Reconnect, full screen and panel.
+    #[allow(clippy::too_many_arguments)]
+    fn paint_toolbar(
+        &mut self,
+        cv: &mut Canvas,
+        te: &mut TextEngine,
+        f: &Fonts,
+        tb: Rect,
+        id: u64,
+        host: &str,
+        state: &TabState,
+        name: &str,
+    ) {
+        let s = self.scale;
+        let p = |v: f32| (v * s).round() as i32;
+        cv.fill(Rect::new(tb.x, tb.bottom() - 1, tb.w, 1), BORDER_SOFT);
+        cv.fill_circle(
+            (tb.x + p(18.0)) as f32,
+            (tb.y + tb.h / 2) as f32,
+            4.0 * s,
+            state.color(),
+        );
+        let info = match &state {
+            TabState::Connecting => format!("{host} · connecting…"),
+            TabState::Connected { width, height, bpp } if self.fullscreen => {
+                format!("{name} · {host} · {width} × {height} · {bpp}-bit")
+            }
+            TabState::Connected { width, height, bpp } => {
+                format!("{host} · {width} × {height} · {bpp} bpp")
+            }
+            TabState::Ended(why) => format!("{host} · ended: {why}"),
+            TabState::Failed(why) => format!("{host} · failed: {why}"),
+        };
+        let mut bx = tb.right() - p(8.0);
+        let mut buttons: Vec<(&str, Hit, Style)> = vec![
+            (
+                if self.fullscreen {
+                    "Exit full screen"
+                } else {
+                    "Full screen"
+                },
+                Hit::FullScreen,
+                Style::Secondary,
+            ),
+            (
+                if self.drawer { "Hide panel" } else { "Panel" },
+                Hit::Drawer,
+                Style::Secondary,
+            ),
+        ];
+        if self.fullscreen {
+            let pin = if self.bar_pinned {
+                "Auto-hide bar"
+            } else {
+                "Pin bar"
+            };
+            buttons.insert(0, (pin, Hit::PinBar, Style::Ghost));
+        }
+        match state {
+            TabState::Connected { .. } | TabState::Connecting => {
+                buttons.insert(0, ("Disconnect", Hit::Disconnect(id), Style::Secondary))
+            }
+            _ => buttons.insert(0, ("Reconnect", Hit::Reconnect(id), Style::Primary)),
+        }
+        for (text, hit, style) in buttons.iter().rev() {
+            let bw = te.measure(f.ui, 13.0 * s, text) as i32 + p(26.0);
+            bx -= bw;
+            self.button(
+                cv,
+                te,
+                f,
+                Rect::new(bx, tb.y + p(6.0), bw, tb.h - p(12.0)),
+                text,
+                *style,
+                *hit,
+            );
+            bx -= p(6.0);
+        }
+        te.draw_in(
+            cv,
+            f.ui,
+            12.5 * s,
+            Rect::new(tb.x + p(30.0), tb.y, bx - tb.x - p(36.0), tb.h),
+            0.0,
+            &info,
+            TEXT_2,
+        );
     }
 
     /// Asks whether to trust the server certificate (first connection, or a
@@ -5501,5 +5573,38 @@ mod tests {
             m.key(Key::Esc).is_none() && m.confirm_exit.is_none(),
             "Esc stays"
         );
+    }
+
+    #[test]
+    fn full_screen_bar_hides_and_shows_at_the_top_edge() {
+        let mut te = TextEngine::new();
+        let Some(fonts) = load_fonts(&mut te) else {
+            return;
+        };
+        let mut m = sample_panel(0, true);
+        m.drawer = false;
+        let (w, h) = (1000usize, 700usize);
+        let mut px = vec![0u32; w * h];
+        m.paint(&mut Canvas::new(&mut px, w, h), &mut te, &fonts);
+        let (_, area) = m.session_area.unwrap();
+        assert_eq!(
+            (area.y, area.h),
+            (0, h as i32),
+            "the session gets the whole screen"
+        );
+        assert_eq!(m.session_size_for(w as i32, h as i32), (w as i32, h as i32));
+        assert!(m.session_clip.is_none());
+        assert!(m.mouse_move(500, 1), "the top edge reveals the bar");
+        m.paint(&mut Canvas::new(&mut px, w, h), &mut te, &fonts);
+        let clip = m.session_clip.expect("bar covers the top");
+        assert!(clip.y >= 40 && m.hits.iter().any(|(_, h)| *h == Hit::FullScreen));
+        assert_eq!(
+            m.session_area.unwrap().1,
+            area,
+            "the remote size does not change"
+        );
+        assert!(m.mouse_move(500, 300), "leaving the bar hides it");
+        m.paint(&mut Canvas::new(&mut px, w, h), &mut te, &fonts);
+        assert!(m.session_clip.is_none());
     }
 }

@@ -686,6 +686,12 @@ impl App {
             }
             Action::WinClose => self.request_quit(),
             Action::Quit => self.quit = true,
+            Action::Relayout => {
+                if let Some(m) = &mut self.win {
+                    m.shown.clear();
+                }
+                self.dirty();
+            }
             Action::SetAutoLock(min) => {
                 self.settings.auto_lock_minutes = min;
                 let _ = self.settings.save();
@@ -839,7 +845,8 @@ impl App {
         {
             let mut sh = worker.shared.lock().unwrap();
             worker.notified.store(false, Ordering::Release);
-            blit(&sh.fb, &mut m.scratch, w, area, None);
+            let clip = m.ui.session_clip.unwrap_or(area);
+            blit(&sh.fb, &mut m.scratch, w, area, clip, None);
             sh.damage.clear();
             sh.full = false;
         }
@@ -896,9 +903,10 @@ impl App {
             return self.render_chrome();
         }
         let damage = std::mem::take(&mut sh.damage);
+        let clip = m.ui.session_clip.unwrap_or(area);
         let mut rects = Vec::new();
         for d in &damage {
-            if let Some(r) = blit(&sh.fb, &mut m.shown, w, area, Some(*d)) {
+            if let Some(r) = blit(&sh.fb, &mut m.shown, w, area, clip, Some(*d)) {
                 rects.extend(to_sb(
                     r.x as usize,
                     r.y as usize,
@@ -1249,7 +1257,8 @@ impl App {
             .lock()
             .ok()
             .map(|sh| (sh.fb.width, sh.fb.height))?;
-        let in_area = area.contains(x, y) || m.pressed_in == Some(id);
+        let visible = m.ui.session_clip.unwrap_or(area);
+        let in_area = visible.contains(x, y) || m.pressed_in == Some(id);
         if !in_area || fb.0 == 0 {
             return None;
         }
@@ -1261,18 +1270,23 @@ impl App {
 
 /// Copies the session framebuffer (or one damaged rectangle of it) into the
 /// window frame at `area`, clipped. Returns the window rectangle written.
+/// Copies the session picture (all of it, or one damaged rectangle) into
+/// `frame` at `area`, drawing only inside `clip` (chrome may cover part of it).
 fn blit(
     fb: &rdp::Framebuffer,
     frame: &mut [u32],
     frame_w: usize,
     area: Rect,
+    clip: Rect,
     only: Option<rdp::Damage>,
 ) -> Option<Rect> {
     let (sx, sy, sw, sh) = match only {
         Some(d) => (d.x as i32, d.y as i32, d.w as i32, d.h as i32),
         None => (0, 0, fb.width as i32, fb.height as i32),
     };
-    let dst = Rect::new(area.x + sx, area.y + sy, sw, sh).intersect(area);
+    let dst = Rect::new(area.x + sx, area.y + sy, sw, sh)
+        .intersect(area)
+        .intersect(clip);
     if dst.is_empty() {
         return None;
     }
@@ -1369,6 +1383,9 @@ impl ApplicationHandler<UserEvent> for App {
                             ui.mics = crate::mic::input_devices();
                             // Loads the folder picker's shell components early.
                             crate::picker::prewarm();
+                            std::thread::spawn(|| {
+                                clean_clipboard_files(&std::env::temp_dir().join("rdpc-clip"))
+                            });
                             ui.auto_lock = self.settings.auto_lock_minutes;
                             ui.check_updates = self.settings.check_updates;
                             ui.remembered = remembered_exists(&mut ui);
@@ -1892,4 +1909,24 @@ fn remembered_exists(ui: &mut Ui) -> bool {
     ui.store_mut()
         .remembered_key_path()
         .is_some_and(|p| p.exists())
+}
+
+/// Removes files copied from sessions more than a day ago: the clipboard
+/// pointed at them, so they stay until then (`%TEMP%dpc-clip\<transfer>`).
+fn clean_clipboard_files(root: &std::path::Path) {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return;
+    };
+    let day = std::time::Duration::from_secs(24 * 60 * 60);
+    for e in entries.flatten() {
+        let old = e
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.elapsed().ok())
+            .is_some_and(|age| age > day);
+        if old && e.path().is_dir() {
+            let _ = std::fs::remove_dir_all(e.path());
+        }
+    }
 }
