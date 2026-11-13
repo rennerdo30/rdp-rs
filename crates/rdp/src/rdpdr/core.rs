@@ -217,14 +217,20 @@ impl Rdpdr {
         self.logged_on || (self.confirmed && (dev.announce_before_logon() || self.minor < 0x0006))
     }
 
-    fn announce_ready(&mut self, out: &mut ChannelOut) {
+    /// Announces every device that may be announced and was not yet.
+    /// `always` sends the list even when it is empty: the answer to Server
+    /// User Logged On (MS-RDPEFS 3.2.5.1.7). Windows completes its device
+    /// redirection setup on it, and the user-mode channels (`rdpsnd`,
+    /// `cliprdr`) are only started after that, so it must not be skipped
+    /// when nothing is shared (`mstsc` sends it with zero devices too).
+    fn announce_ready(&mut self, out: &mut ChannelOut, always: bool) {
         let ready: Vec<usize> = (0..self.devices.len())
             .filter(|&i| {
                 let s = &self.devices[i];
                 !s.announced && self.may_announce(s.dev.as_ref())
             })
             .collect();
-        if ready.is_empty() {
+        if ready.is_empty() && !always {
             return;
         }
         let list: Vec<(u32, &dyn Device)> = ready
@@ -262,7 +268,7 @@ impl Rdpdr {
                 }
             }
         }
-        self.announce_ready(out);
+        self.announce_ready(out, false);
     }
 
     fn device_io(&mut self, req: &IoRequest<'_>, out: &mut ChannelOut) {
@@ -343,13 +349,13 @@ impl StaticChannel for Rdpdr {
                 let _minor = r.u16()?;
                 self.client_id = r.u32()?;
                 self.confirmed = true;
-                self.announce_ready(out);
+                self.announce_ready(out, false);
             }
             PAKID_CORE_USER_LOGGEDON => {
                 // Server User Logged On (2.2.2.5).
                 self.confirmed = true;
                 self.logged_on = true;
-                self.announce_ready(out);
+                self.announce_ready(out, true);
             }
             PAKID_CORE_DEVICE_REPLY => {
                 // Server Device Announce Response (2.2.2.1).

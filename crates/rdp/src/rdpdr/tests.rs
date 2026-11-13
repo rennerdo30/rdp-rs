@@ -177,7 +177,7 @@ fn live_add_and_remove_after_logon() {
 }
 
 #[test]
-fn remove_before_logon_sends_nothing() {
+fn remove_before_logon_announces_an_empty_list() {
     let dir = TempDir::new();
     let (mut ch, h) = rdpdr("x");
     let a = h.add_drive("A", dir.path().into(), false);
@@ -185,7 +185,11 @@ fn remove_before_logon_sends_nothing() {
     h.remove(a);
     assert!(tick(&mut ch).is_empty());
     handshake(&mut ch);
-    assert!(feed(&mut ch, &hex(USER_LOGGED_ON)).is_empty());
+    // User Logged On is always answered with a Client Device List Announce
+    // (MS-RDPEFS 3.2.5.1.7), here with zero devices: Windows starts rdpsnd
+    // and cliprdr only after it. No remove PDU for the never-announced drive.
+    let out = feed(&mut ch, &hex(USER_LOGGED_ON));
+    assert_eq!(out, vec![hex("72444144 00000000")]);
 }
 
 #[test]
