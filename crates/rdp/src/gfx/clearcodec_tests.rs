@@ -310,6 +310,10 @@ fn cursors_wrap_and_reset() {
     );
     decode(&mut cc, &stream(0, None, &[], &bands, &[]), 1, 1).unwrap();
     assert_eq!(cc.cursors(), (1, 1));
+    // The V-Bar cursor counts on past the Short V-Bar storage size.
+    cc.set_cursors(SHORT_VBAR_SLOTS - 1, 0);
+    decode(&mut cc, &stream(0, None, &[], &bands, &[]), 1, 1).unwrap();
+    assert_eq!(cc.cursors(), (SHORT_VBAR_SLOTS, 1));
     // CLEARCODEC_FLAG_CACHE_RESET zeroes both cursors before decoding.
     cc.set_cursors(70, 50);
     decode(
