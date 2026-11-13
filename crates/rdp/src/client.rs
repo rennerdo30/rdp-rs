@@ -9,7 +9,7 @@ use crate::crypto::sha256;
 use crate::der;
 use crate::error::{Error, Result, proto};
 use crate::fastpath::{self, Reassembler};
-use crate::framebuffer::Framebuffer;
+use crate::framebuffer::{Damage, Framebuffer};
 use crate::gcc;
 use crate::input::{InputEvent, fastpath_input};
 use crate::mcs::{self, DomainPdu};
@@ -64,6 +64,8 @@ pub struct ConnectionInfo {
 pub struct PollOutcome {
     /// At least one bitmap was drawn.
     pub updated: bool,
+    /// Framebuffer rectangles changed during this poll.
+    pub damage: Vec<Damage>,
     /// The desktop size changed (reactivation); the framebuffer was reallocated.
     pub resized: bool,
     /// The server ended the session.
@@ -87,7 +89,10 @@ fn send_io(f: &mut Framer, user_id: u16, io: u16, data: &[u8]) -> Result<()> {
     if crate::log::verbose() {
         // The Client Info PDU (SEC_INFO_PKT) carries the password: never dump it.
         if data.starts_with(&[0x40, 0x00]) {
-            trace!("send {} bytes on channel {io}: [client info, redacted]", data.len());
+            trace!(
+                "send {} bytes on channel {io}: [client info, redacted]",
+                data.len()
+            );
         } else {
             let hex: String = data.iter().map(|b| format!("{b:02x}")).collect();
             trace!("send {} bytes on channel {io}: {hex}", data.len());
@@ -404,9 +409,8 @@ impl Client {
         let (ty, payload) = pdu::parse_share_data(body)?;
         match ty {
             pdu::PDUTYPE2_UPDATE => {
-                if codec::draw_bitmap_update(payload, &mut self.fb)? > 0 {
-                    out.updated = true;
-                }
+                codec::draw_bitmap_update(payload, &mut self.fb, &mut out.damage)?;
+                out.updated |= !out.damage.is_empty();
             }
             pdu::PDUTYPE2_FONTMAP => {
                 trace!("connection finalized");
@@ -430,9 +434,8 @@ impl Client {
         for (code, data) in self.fastpath.feed(frame)? {
             match code {
                 fastpath::UPDATETYPE_BITMAP => {
-                    if codec::draw_bitmap_update(&data, &mut self.fb)? > 0 {
-                        out.updated = true;
-                    }
+                    codec::draw_bitmap_update(&data, &mut self.fb, &mut out.damage)?;
+                    out.updated |= !out.damage.is_empty();
                 }
                 fastpath::UPDATETYPE_ORDERS => trace!("drawing orders ignored (not negotiated)"),
                 _ => {} // pointer, palette, synchronize

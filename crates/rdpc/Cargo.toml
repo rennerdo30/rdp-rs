@@ -1,12 +1,25 @@
 [package]
 name = "rdpc"
-description = "Prototype RDP client built on the rdp crate"
+description = "Prototype RDP client: connection manager and session windows on the rdp crate"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [dependencies]
 rdp = { path = "../rdp" }
-minifb = "0.28"
-png = "0.18"
+# CPU canvas and text, shared with ffwd (decision ffwd 0001). Path dependency
+# for now; RDP-2 tracks moving it into a crate both projects use.
+ffwd-render = { path = "../../../ffwd/crates/ffwd-render" }
+winit = "0.30.13"
+softbuffer = "0.4.8"
+png = "0.18.1"
 rpassword = "7"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = [
+    "Win32_Foundation",
+    "Win32_System_DataExchange",
+    "Win32_System_Memory",
+] }

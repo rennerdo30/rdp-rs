@@ -1,3 +1,12 @@
+/// A rectangle of the framebuffer that changed, in desktop pixels.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Damage {
+    pub x: usize,
+    pub y: usize,
+    pub w: usize,
+    pub h: usize,
+}
+
 /// Client-side copy of the remote desktop, 0x00RRGGBB per pixel, top-down.
 pub struct Framebuffer {
     pub width: usize,
@@ -19,9 +28,17 @@ impl Framebuffer {
     }
 
     /// Copies a `w` x `h` block from `src` (row stride `src_stride`) to (x, y), clipped.
-    pub fn blit(&mut self, x: usize, y: usize, w: usize, h: usize, src: &[u32], src_stride: usize) {
+    pub fn blit(
+        &mut self,
+        x: usize,
+        y: usize,
+        w: usize,
+        h: usize,
+        src: &[u32],
+        src_stride: usize,
+    ) -> Option<Damage> {
         if x >= self.width || y >= self.height {
-            return;
+            return None;
         }
         let w = w.min(self.width - x);
         let h = h.min(self.height - y);
@@ -30,6 +47,7 @@ impl Framebuffer {
             let d = (y + row) * self.width + x;
             self.pixels[d..d + w].copy_from_slice(s);
         }
+        (w > 0 && h > 0).then_some(Damage { x, y, w, h })
     }
 
     /// Packed RGB bytes, for image export.

@@ -30,6 +30,6 @@ pub mod x224;
 
 pub use client::{Client, Config, ConnectionInfo, PollOutcome};
 pub use error::{Error, Result};
-pub use framebuffer::Framebuffer;
+pub use framebuffer::{Damage, Framebuffer};
 pub use input::InputEvent;
 pub use log::set_verbose;

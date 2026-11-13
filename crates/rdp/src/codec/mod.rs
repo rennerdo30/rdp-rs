@@ -5,7 +5,7 @@ pub mod planar;
 
 use crate::cursor::Reader;
 use crate::error::{Error, Result};
-use crate::framebuffer::Framebuffer;
+use crate::framebuffer::{Damage, Framebuffer};
 use crate::trace;
 
 const BITMAP_COMPRESSION: u16 = 0x0001;
@@ -68,14 +68,17 @@ fn uncompressed(data: &[u8], w: usize, h: usize, bpp: u16) -> Result<Vec<u32>> {
     Ok(to_rgb_top_down(&raw, w, h, bpp))
 }
 
-/// Draws every rectangle of a TS_UPDATE_BITMAP_DATA. Returns the number drawn.
-pub fn draw_bitmap_update(data: &[u8], fb: &mut Framebuffer) -> Result<usize> {
+/// Draws every rectangle of a TS_UPDATE_BITMAP_DATA and records what changed.
+pub fn draw_bitmap_update(
+    data: &[u8],
+    fb: &mut Framebuffer,
+    damage: &mut Vec<Damage>,
+) -> Result<()> {
     let mut r = Reader::new(data);
     if r.u16()? != 1 {
-        return Ok(0);
+        return Ok(());
     }
     let count = r.u16()?;
-    let mut drawn = 0;
     for _ in 0..count {
         let left = r.u16()? as usize;
         let top = r.u16()? as usize;
@@ -105,12 +108,11 @@ pub fn draw_bitmap_update(data: &[u8], fb: &mut Framebuffer) -> Result<usize> {
             Ok(px) => {
                 let dw = (right + 1).saturating_sub(left).min(w);
                 let dh = (bottom + 1).saturating_sub(top).min(h);
-                fb.blit(left, top, dw, dh, &px, w);
-                drawn += 1;
+                damage.extend(fb.blit(left, top, dw, dh, &px, w));
             }
             // One undecodable rectangle should not end the session.
             Err(e) => trace!("bitmap {w}x{h}@{bpp} flags {flags:#x} skipped: {e}"),
         }
     }
-    Ok(drawn)
+    Ok(())
 }
