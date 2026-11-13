@@ -211,6 +211,29 @@ fn run(
     }
 }
 
+/// Unicode keyboard events (MS-RDPBCGR 2.2.8.1.2.2.2) for a key press that
+/// carries text but no scancode: one press and release per UTF-16 unit.
+pub fn unicode_events(ev: &winit::event::KeyEvent) -> Vec<InputEvent> {
+    if !ev.state.is_pressed() {
+        return Vec::new();
+    }
+    let Some(text) = ev.text.as_ref() else {
+        return Vec::new();
+    };
+    unicode_for(text)
+}
+
+fn unicode_for(text: &str) -> Vec<InputEvent> {
+    text.encode_utf16()
+        .flat_map(|code| {
+            [
+                InputEvent::Unicode { code, down: true },
+                InputEvent::Unicode { code, down: false },
+            ]
+        })
+        .collect()
+}
+
 pub fn key_event(ev: &winit::event::KeyEvent) -> Option<InputEvent> {
     use winit::platform::scancode::PhysicalKeyExtScancode;
     let code = ev.physical_key.to_scancode()?;
@@ -291,4 +314,44 @@ pub fn wheel(delta: winit::event::MouseScrollDelta, pos: (u16, u16)) -> Option<I
     }
     let units = (notches * 120.0).round().clamp(-255.0, 255.0) as i16;
     Some(InputEvent::wheel(units, pos.0, pos.1))
+}
+
+#[cfg(test)]
+mod unicode_tests {
+    use super::*;
+
+    #[test]
+    fn text_becomes_utf16_press_and_release() {
+        let e = unicode_for("a😀");
+        // 'a' is one unit; the emoji is a surrogate pair: 3 units, 6 events.
+        assert_eq!(e.len(), 6);
+        assert!(matches!(
+            e[0],
+            InputEvent::Unicode {
+                code: 0x61,
+                down: true
+            }
+        ));
+        assert!(matches!(
+            e[1],
+            InputEvent::Unicode {
+                code: 0x61,
+                down: false
+            }
+        ));
+        assert!(matches!(
+            e[2],
+            InputEvent::Unicode {
+                code: 0xD83D,
+                down: true
+            }
+        ));
+        assert!(matches!(
+            e[4],
+            InputEvent::Unicode {
+                code: 0xDE00,
+                down: true
+            }
+        ));
+    }
 }

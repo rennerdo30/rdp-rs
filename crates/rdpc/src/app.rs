@@ -1152,6 +1152,13 @@ impl App {
                 self.dirty();
             } else if let Some(e) = session::key_event(&ev) {
                 self.send(id, vec![e]);
+            } else {
+                // No scancode (touch keyboard, emoji panel, injected text):
+                // the characters go as Unicode input.
+                let u = session::unicode_events(&ev);
+                if !u.is_empty() {
+                    self.send(id, u);
+                }
             }
             return;
         }
