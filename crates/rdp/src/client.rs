@@ -131,16 +131,27 @@ fn read_mcs(f: &mut Framer, deadline: Instant) -> Result<Vec<u8>> {
 }
 
 /// Reads the next I/O channel PDU during the connection sequence. Virtual
-/// channel traffic this early is dropped (servers start it after activation).
-fn read_io(f: &mut Framer, io: u16, deadline: Instant) -> Result<Vec<u8>> {
+/// channel traffic that arrives this early (for example the device
+/// redirection or clipboard handshake) is kept in `early` and delivered to
+/// its channel once the session exists.
+fn read_io(
+    f: &mut Framer,
+    io: u16,
+    deadline: Instant,
+    early: &mut Vec<(u16, Vec<u8>)>,
+) -> Result<Vec<u8>> {
     loop {
         let payload = read_mcs(f, deadline)?;
         match mcs::parse_domain_pdu(&payload)? {
             DomainPdu::SendDataIndication { channel, data } if channel == io => {
                 return Ok(data.to_vec());
             }
-            DomainPdu::SendDataIndication { channel, .. } => {
-                trace!("channel {channel} data before activation dropped");
+            DomainPdu::SendDataIndication { channel, data } => {
+                trace!(
+                    "channel {channel}: {} bytes before activation, queued",
+                    data.len()
+                );
+                early.push((channel, data.to_vec()));
             }
             DomainPdu::DisconnectProviderUltimatum { reason } => {
                 return Err(Error::Disconnected(format!(
@@ -268,6 +279,7 @@ impl Client {
             .collect();
 
         // 5. Client info and licensing
+        let mut early = Vec::new();
         let info_pdu = pdu::client_info(&pdu::ClientInfo {
             domain: &domain,
             user: &user,
@@ -276,7 +288,7 @@ impl Client {
         send_io(&mut f, user_id, io, &info_pdu)?;
         // With TLS the server answers with one "valid client" licensing PDU.
         let mut pending = None;
-        let data = read_io(&mut f, io, deadline)?;
+        let data = read_io(&mut f, io, deadline, &mut early)?;
         if pdu::looks_like_share_control(&data) {
             pending = Some(data); // server skipped licensing
         } else {
@@ -287,7 +299,7 @@ impl Client {
         let demand = loop {
             let data = match pending.take() {
                 Some(d) => d,
-                None => read_io(&mut f, io, deadline)?,
+                None => read_io(&mut f, io, deadline, &mut early)?,
             };
             let parts = pdu::split_share_control(&data)?;
             if let Some((_, body)) = parts.iter().find(|(t, _)| *t == pdu::PDUTYPE_DEMANDACTIVE) {
@@ -320,6 +332,9 @@ impl Client {
         };
         // 7. Finalization; the Font Map reply is handled by the session loop.
         client.activate(&demand)?;
+        for (channel, data) in early {
+            client.channel_data(channel, &data)?;
+        }
         client.f.set_read_timeout(Duration::from_millis(2))?;
         Ok(client)
     }

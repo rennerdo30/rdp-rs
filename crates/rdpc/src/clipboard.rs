@@ -23,8 +23,16 @@ pub fn read_text() -> Option<String> {
 /// Clipboard backend for the `cliprdr` channel on Windows. Runs on the
 /// session worker thread: a busy clipboard is retried at most 3 times
 /// without sleeping, then the call gives up for this tick.
+///
+/// `owner` is the app's main window (HWND as an integer). Windows needs an
+/// owner window to *set* clipboard data: after OpenClipboard(NULL),
+/// EmptyClipboard leaves the clipboard without owner and SetClipboardData
+/// fails. The owner must be a window whose thread pumps messages (the UI
+/// thread does), because other programs send it WM_DESTROYCLIPBOARD.
 #[derive(Default)]
-pub struct WindowsClipboard;
+pub struct WindowsClipboard {
+    pub owner: isize,
+}
 
 #[cfg(windows)]
 impl rdp::cliprdr::ClipboardBackend for WindowsClipboard {
@@ -35,7 +43,7 @@ impl rdp::cliprdr::ClipboardBackend for WindowsClipboard {
 
     fn read_text(&mut self) -> Option<String> {
         use windows_sys::Win32::System::DataExchange::CloseClipboard;
-        if !win::open() {
+        if !win::open(self.owner) {
             return None;
         }
         // SAFETY: the clipboard is open on this thread until CloseClipboard.
@@ -48,7 +56,7 @@ impl rdp::cliprdr::ClipboardBackend for WindowsClipboard {
 
     fn write_text(&mut self, text: &str) -> bool {
         use windows_sys::Win32::System::DataExchange::CloseClipboard;
-        if !win::open() {
+        if !win::open(self.owner) {
             return false;
         }
         // SAFETY: the clipboard is open on this thread until CloseClipboard.
@@ -73,8 +81,6 @@ impl rdp::cliprdr::ClipboardBackend for WindowsClipboard {
     }
 }
 
-// wired in by RDP-3 integration
-#[allow(dead_code)]
 #[cfg(windows)]
 mod win {
     use windows_sys::Win32::Foundation::GlobalFree;
@@ -91,10 +97,10 @@ mod win {
     /// Opens the clipboard without an owner window (the worker thread has no
     /// message pump). Another process holding it open is retried with a
     /// yield, never a sleep, so the session poll stays within its budget.
-    pub fn open() -> bool {
+    pub fn open(owner: isize) -> bool {
         for attempt in 0..OPEN_ATTEMPTS {
-            // SAFETY: no pointers passed; a null owner is allowed.
-            if unsafe { OpenClipboard(std::ptr::null_mut()) } != 0 {
+            // SAFETY: `owner` is the app's live main window (or 0 = none).
+            if unsafe { OpenClipboard(owner as _) } != 0 {
                 return true;
             }
             if attempt + 1 < OPEN_ATTEMPTS {

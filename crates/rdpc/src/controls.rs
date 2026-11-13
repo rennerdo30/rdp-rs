@@ -24,9 +24,10 @@ pub struct Controls {
 
 impl Controls {
     /// The channel handlers for a new session, and the handles to steer them.
-    pub fn build(client_name: &str) -> (Vec<Box<dyn StaticChannel>>, Controls) {
+    /// `owner`: the main window's HWND, needed to set the local clipboard.
+    pub fn build(client_name: &str, owner: isize) -> (Vec<Box<dyn StaticChannel>>, Controls) {
         let (display_channel, display) = rdp::display_control();
-        let (cliprdr, clipboard) = rdp::cliprdr(Box::new(WindowsClipboard));
+        let (cliprdr, clipboard) = rdp::cliprdr(Box::new(WindowsClipboard { owner }));
         let (rdpdr, devices) = rdp::rdpdr(client_name);
         let channels: Vec<Box<dyn StaticChannel>> = vec![
             Box::new(Drdynvc::new(vec![Box::new(display_channel)])),

@@ -177,9 +177,19 @@ impl App {
         }
     }
 
+    /// The main window's native handle (Windows HWND), 0 when unavailable.
+    fn hwnd(&self) -> isize {
+        use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+        let Some(w) = &self.win else { return 0 };
+        match w.gfx.window.window_handle().map(|h| h.as_raw()) {
+            Ok(RawWindowHandle::Win32(h)) => h.hwnd.get(),
+            _ => 0,
+        }
+    }
+
     fn spawn_worker(&self, id: u64, cfg: Config) -> (Worker, Controls) {
         let proxy = self.proxy.clone();
-        let (channels, controls) = Controls::build(&cfg.client_name);
+        let (channels, controls) = Controls::build(&cfg.client_name, self.hwnd());
         let worker = session::spawn(cfg, channels, move |ev| {
             let _ = proxy.send_event(UserEvent::Session(id, ev));
         });
