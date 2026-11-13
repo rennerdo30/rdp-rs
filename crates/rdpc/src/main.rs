@@ -12,6 +12,7 @@
 mod app;
 mod clipboard;
 mod controls;
+mod printing;
 mod session;
 mod store;
 mod text_field;

@@ -13,6 +13,8 @@
 //! - [`core`] (private): the core PDUs (2.2.2.x) and the channel state machine
 //! - [`drive`]: the file system device ([`Drive`], 2.2.3 / 3.2.5.2)
 //! - [`path`]: the path checks that keep every server path inside a drive root
+//! - [`printer`]: the printer device ([`Printer`], MS-RDPEPC) and its
+//!   [`PrintBackend`]
 //! - [`fscc`]: NTSTATUS values, FILETIME conversion and MS-FSCC structures
 //!
 //! # Devices
@@ -42,6 +44,7 @@ mod core;
 pub mod drive;
 pub mod fscc;
 pub mod path;
+pub mod printer;
 
 #[cfg(test)]
 mod tests;
@@ -52,6 +55,9 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 pub use self::core::Rdpdr;
 pub use self::drive::Drive;
+pub use self::printer::{
+    PrintBackend, PrintFormat, Printer, PrinterInfo, SharedBackend, share_printers,
+};
 
 /// DeviceType values (MS-RDPEFS 2.2.1.3).
 pub const RDPDR_DTYP_SERIAL: u32 = 0x0000_0001;
