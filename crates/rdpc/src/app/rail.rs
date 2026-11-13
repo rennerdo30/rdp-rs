@@ -167,8 +167,29 @@ impl App {
         let Some(rs) = self.sessions.get(&id).and_then(|s| s.rail.as_ref()) else {
             return;
         };
-        let windows = match state {
-            Some(st) => remoteapp::plan(st)
+        let running = rs.tracker.running();
+        let Some(st) = state else {
+            // No new window list (timers, launches): only the app states,
+            // without copying the windows' icons on every wake.
+            let mut changed = false;
+            if let Some(v) = self
+                .win
+                .as_mut()
+                .and_then(|m| m.ui.tab_mut(id))
+                .and_then(|t| t.remote_app.as_mut())
+                && (v.running != running || v.starting != starting)
+            {
+                v.running = running;
+                v.starting = starting;
+                changed = true;
+            }
+            if changed {
+                self.dirty();
+            }
+            return;
+        };
+        let windows = {
+            remoteapp::plan(st)
                 .into_iter()
                 .filter(|p| p.taskbar && p.show != Show::Hidden)
                 .map(|p| AppWindowItem {
@@ -182,19 +203,12 @@ impl App {
                     title: p.title,
                     minimized: p.show == Show::Minimized,
                 })
-                .collect(),
-            None => self
-                .win
-                .as_ref()
-                .and_then(|m| m.ui.tabs.iter().find(|t| t.id == id))
-                .and_then(|t| t.remote_app.as_ref())
-                .map(|v| v.windows.clone())
-                .unwrap_or_default(),
+                .collect()
         };
         let view = RemoteAppView {
             apps: rs.apps.clone(),
             windows,
-            running: rs.tracker.running(),
+            running,
             starting,
         };
         if let Some(t) = self.win.as_mut().and_then(|m| m.ui.tab_mut(id))
