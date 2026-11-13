@@ -48,7 +48,7 @@ impl Stream {
         let mut tmp = [0u8; 16 * 1024];
         match self {
             Stream::Tcp(s) => match s.read(&mut tmp) {
-                Ok(0) => Err(Error::Disconnected("connection closed by server".into())),
+                Ok(0) => Err(Error::ConnectionLost("connection closed by server".into())),
                 Ok(n) => {
                     out.extend_from_slice(&tmp[..n]);
                     Ok(n)
@@ -61,7 +61,9 @@ impl Stream {
                 loop {
                     match conn.reader().read(&mut tmp) {
                         Ok(0) => {
-                            return Err(Error::Disconnected("TLS session closed by server".into()));
+                            return Err(Error::ConnectionLost(
+                                "TLS session closed by server".into(),
+                            ));
                         }
                         Ok(n) => {
                             out.extend_from_slice(&tmp[..n]);
@@ -72,7 +74,9 @@ impl Stream {
                     }
                     match conn.read_tls(sock) {
                         Ok(0) => {
-                            return Err(Error::Disconnected("connection closed by server".into()));
+                            return Err(Error::ConnectionLost(
+                                "connection closed by server".into(),
+                            ));
                         }
                         Ok(_) => {
                             conn.process_new_packets()?;
@@ -156,7 +160,7 @@ impl Framer {
             let mut tmp = std::mem::take(&mut self.buf);
             let got = self.stream().read_some(&mut tmp).map_err(|e| match e {
                 Error::Io(io) if is_reset(&io) => {
-                    Error::Disconnected("connection reset by server".into())
+                    Error::ConnectionLost("connection reset by server".into())
                 }
                 other => other,
             });

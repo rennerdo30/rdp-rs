@@ -14,7 +14,7 @@ use crate::framebuffer::{Damage, Framebuffer};
 use crate::gcc;
 use crate::input::{InputEvent, fastpath_input};
 use crate::mcs::{self, DomainPdu};
-use crate::pdu::{self, DemandActive};
+use crate::pdu::{self, AutoReconnectCookie, DemandActive, SaveSessionInfo};
 use crate::pointer::{PointerCache, PointerUpdate};
 use crate::trace;
 use crate::transport::{Frame, Framer};
@@ -35,6 +35,11 @@ pub struct Config {
     pub scale: u32,
     /// Bound on every step of the connection sequence.
     pub timeout: Duration,
+    /// Resume a disconnected session with this cookie (MS-RDPBCGR 5.5) instead
+    /// of a new logon. Take it from [`Client::auto_reconnect_cookie`] of the
+    /// session that dropped. The credentials are still sent: the server falls
+    /// back to them if it rejects the cookie (3.3.5.3.11).
+    pub auto_reconnect: Option<AutoReconnectCookie>,
 }
 
 impl Config {
@@ -51,6 +56,7 @@ impl Config {
             keyboard_layout: 0x0409,
             scale: 100,
             timeout: Duration::from_secs(20),
+            auto_reconnect: None,
         }
     }
 }
@@ -73,10 +79,61 @@ pub struct PollOutcome {
     pub damage: Vec<Damage>,
     /// The desktop size changed (reactivation); the framebuffer was reallocated.
     pub resized: bool,
-    /// The server ended the session.
-    pub closed: Option<String>,
+    /// The session ended.
+    pub closed: Option<CloseReason>,
     /// The latest cursor change during this poll.
     pub pointer: Option<PointerUpdate>,
+}
+
+/// Why a session ended, and whether an auto-reconnect (MS-RDPBCGR 5.5) fits.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CloseReason {
+    /// Human-readable cause, including the server's error info if any.
+    pub text: String,
+    /// True for a network drop: the transport ended (TCP reset, EOF, TLS
+    /// close) and the server sent no Set Error Info code (2.2.5.1.1). False
+    /// when the server ended the session itself: an MCS Disconnect Provider
+    /// Ultimatum, or any nonzero error info (logoff, admin disconnect, idle
+    /// timeout, another connection took the session, shutdown, licensing or
+    /// protocol errors). Every defined code describes a deliberate end or a
+    /// server-side failure that a reconnect cannot cure.
+    pub reconnectable: bool,
+    /// The last Set Error Info code (0 = none).
+    pub error_info: u32,
+}
+
+impl std::fmt::Display for CloseReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.text)
+    }
+}
+
+/// How the connection ended, before the error info is weighed.
+enum CloseCause<'a> {
+    /// Transport EOF or reset without an RDP-level goodbye.
+    Transport(&'a str),
+    /// MCS Disconnect Provider Ultimatum from the server.
+    Ultimatum(&'a str),
+}
+
+fn close_reason(cause: CloseCause, error_info: u32) -> CloseReason {
+    let (base, transport) = match cause {
+        CloseCause::Transport(m) => (m, true),
+        CloseCause::Ultimatum(m) => (m, false),
+    };
+    let text = if error_info != 0 {
+        format!(
+            "{base} (error info {error_info:#x}: {})",
+            pdu::error_info_name(error_info)
+        )
+    } else {
+        base.to_string()
+    };
+    CloseReason {
+        text,
+        reconnectable: transport && error_info == 0,
+        error_info,
+    }
 }
 
 pub struct Client {
@@ -92,6 +149,7 @@ pub struct Client {
     last_error_info: u32,
     channels: Vec<Slot>,
     pointers: PointerCache,
+    arc_cookie: Option<AutoReconnectCookie>,
 }
 
 /// Sends one complete virtual channel message, chunked.
@@ -288,7 +346,16 @@ impl Client {
             domain: &domain,
             user: &user,
             password: &cfg.password,
+            // Enhanced RDP Security only (legacy security is refused above),
+            // so the verifier uses the all-zero client random of 5.5 step 4.
+            auto_reconnect: cfg
+                .auto_reconnect
+                .as_ref()
+                .map(|c| c.client_packet(&pdu::ENHANCED_SECURITY_CLIENT_RANDOM)),
         });
+        if cfg.auto_reconnect.is_some() {
+            trace!("client info carries an auto-reconnect cookie");
+        }
         send_io(&mut f, user_id, io, &info_pdu)?;
         // With TLS the server answers with one "valid client" licensing PDU.
         let mut pending = None;
@@ -333,6 +400,9 @@ impl Client {
             last_error_info: 0,
             channels: slots,
             pointers: PointerCache::default(),
+            // The server regenerates the cookie on every connect (5.5) and
+            // sends the new one in the Save Session Info PDU.
+            arc_cookie: None,
         };
         // 7. Finalization; the Font Map reply is handled by the session loop.
         client.activate(&demand)?;
@@ -392,8 +462,18 @@ impl Client {
                 Ok(Some(Frame::X224(v))) => self.handle_x224(&v, &mut out)?,
                 Ok(Some(Frame::FastPath(v))) => self.handle_fastpath(&v, &mut out)?,
                 Ok(None) => {}
+                Err(Error::ConnectionLost(m)) => {
+                    out.closed = Some(close_reason(
+                        CloseCause::Transport(&m),
+                        self.last_error_info,
+                    ));
+                    return Ok(out);
+                }
                 Err(Error::Disconnected(m)) => {
-                    out.closed = Some(self.close_reason(&m));
+                    out.closed = Some(close_reason(
+                        CloseCause::Ultimatum(&m),
+                        self.last_error_info,
+                    ));
                     return Ok(out);
                 }
                 Err(e) => return Err(e),
@@ -407,16 +487,32 @@ impl Client {
         }
     }
 
-    fn close_reason(&self, transport: &str) -> String {
-        if self.last_error_info != 0 {
-            format!(
-                "{} (error info {:#x}: {})",
-                transport,
-                self.last_error_info,
-                pdu::error_info_name(self.last_error_info)
-            )
-        } else {
-            transport.to_string()
+    /// The latest auto-reconnect cookie from the server (MS-RDPBCGR 2.2.4.2),
+    /// for [`Config::auto_reconnect`] after a network drop. The server
+    /// replaces it at least hourly (5.5); always use the newest one.
+    pub fn auto_reconnect_cookie(&self) -> Option<AutoReconnectCookie> {
+        self.arc_cookie.clone()
+    }
+
+    /// Handles a Save Session Info PDU (2.2.10.1). A malformed one is traced
+    /// and dropped; it never ends the session.
+    fn save_session_info(&mut self, payload: &[u8]) {
+        match pdu::parse_save_session_info(payload) {
+            Ok(SaveSessionInfo::Extended { cookie, errors }) => {
+                if let Some(c) = cookie {
+                    // Logs the session id only, never the random bits.
+                    trace!("auto-reconnect cookie for logon id {}", c.logon_id);
+                    self.arc_cookie = Some(c);
+                }
+                if let Some(e) = errors {
+                    trace!(
+                        "logon notification {:#x}, data {:#x}",
+                        e.notification_type, e.notification_data
+                    );
+                }
+            }
+            Ok(info) => trace!("logon notification: {info:?}"),
+            Err(e) => trace!("save session info ignored: {e}"),
         }
     }
 
@@ -432,8 +528,11 @@ impl Client {
                 self.channel_data(channel, &data)
             }
             DomainPdu::DisconnectProviderUltimatum { reason } => {
-                out.closed =
-                    Some(self.close_reason(&format!("server disconnected (MCS reason {reason})")));
+                let text = format!("server disconnected (MCS reason {reason})");
+                out.closed = Some(close_reason(
+                    CloseCause::Ultimatum(&text),
+                    self.last_error_info,
+                ));
                 Ok(())
             }
             DomainPdu::Other(_) => Ok(()),
@@ -499,7 +598,10 @@ impl Client {
                     self.last_error_info = code;
                 }
             }
-            pdu::PDUTYPE2_SAVE_SESSION_INFO => trace!("logon notification"),
+            pdu::PDUTYPE2_SAVE_SESSION_INFO => self.save_session_info(payload),
+            // 2.2.4.1.1: the server did not accept our cookie and falls back to
+            // the Client Info credentials (3.3.5.3.11).
+            pdu::PDUTYPE2_ARC_STATUS_PDU => trace!("server rejected the auto-reconnect cookie"),
             pdu::PDUTYPE2_SHUTDOWN_DENIED => trace!("shutdown denied"),
             _ => {}
         }
@@ -621,3 +723,7 @@ impl Client {
             .write(&x224::data(&mcs::disconnect_provider_ultimatum()));
     }
 }
+
+#[cfg(test)]
+#[path = "client_tests.rs"]
+mod tests;

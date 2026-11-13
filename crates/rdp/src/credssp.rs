@@ -89,7 +89,7 @@ fn ntstatus_name(code: u32) -> &'static str {
 
 fn read_request(f: &mut Framer, deadline: Instant) -> Result<TsRequest> {
     let raw = f.read_der(deadline).map_err(|e| match e {
-        Error::Disconnected(_) => {
+        Error::Disconnected(_) | Error::ConnectionLost(_) => {
             Error::Auth("server closed the connection during NLA (wrong credentials?)".into())
         }
         other => other,
