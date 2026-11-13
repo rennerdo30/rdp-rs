@@ -26,6 +26,7 @@ fn session() -> (Client, TcpStream) {
         info: ConnectionInfo {
             protocol: x224::PROTOCOL_HYBRID,
             certificate_sha256: [0; 32],
+            gateway_certificate_sha256: None,
             server_rdp_version: 0x0008_0004,
             width: 4,
             height: 4,

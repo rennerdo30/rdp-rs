@@ -2,6 +2,7 @@
 //!
 //! Layering (bottom to top), each in its own module:
 //! - [`transport`]: TCP, TLS upgrade (rustls) and PDU framing (TPKT / fast-path / DER)
+//! - [`gateway`]: RD Gateway tunnel (MS-TSGU HTTP transport over a WebSocket)
 //! - [`x224`]: TPKT + X.224 connection request/confirm with RDP negotiation (MS-RDPBCGR 2.2.1.1/2)
 //! - [`credssp`] + [`ntlm`]: network level authentication (MS-CSSP, MS-NLMP NTLMv2)
 //! - [`mcs`] + [`gcc`]: T.125 MCS domain and T.124 GCC conference data (MS-RDPBCGR 2.2.1.3-2.2.1.9)
@@ -28,6 +29,7 @@ pub mod error;
 pub mod experience;
 pub mod fastpath;
 pub mod framebuffer;
+pub mod gateway;
 pub mod gcc;
 pub mod input;
 pub mod log;
@@ -48,6 +50,7 @@ pub use dvc::{Drdynvc, DvcOut, DynamicChannel, StaticOverDvc};
 pub use error::{Error, Result};
 pub use experience::{ConnectionType, Experience};
 pub use framebuffer::{Damage, Framebuffer};
+pub use gateway::GatewayConfig;
 pub use input::InputEvent;
 pub use log::set_verbose;
 pub use pdu::AutoReconnectCookie;

@@ -11,6 +11,7 @@ use crate::der;
 use crate::error::{Error, Result, proto};
 use crate::fastpath::{self, Reassembler};
 use crate::framebuffer::{Damage, Framebuffer};
+use crate::gateway;
 use crate::gcc;
 use crate::input::{InputEvent, fastpath_input};
 use crate::mcs::{self, DomainPdu};
@@ -46,6 +47,8 @@ pub struct Config {
     pub connection_type: crate::ConnectionType,
     /// Desktop features (wallpaper, font smoothing, …); fixed at logon.
     pub experience: crate::Experience,
+    /// Connect through this RD Gateway (MS-TSGU); None connects directly.
+    pub gateway: Option<crate::gateway::GatewayConfig>,
 }
 
 impl Config {
@@ -66,6 +69,7 @@ impl Config {
             color_depth: 32,
             connection_type: crate::ConnectionType::Lan,
             experience: crate::Experience::default(),
+            gateway: None,
         }
     }
 }
@@ -74,6 +78,8 @@ impl Config {
 pub struct ConnectionInfo {
     pub protocol: u32,
     pub certificate_sha256: [u8; 32],
+    /// SHA-256 of the RD Gateway's TLS certificate, when connected through one.
+    pub gateway_certificate_sha256: Option<[u8; 32]>,
     pub server_rdp_version: u32,
     pub width: u16,
     pub height: u16,
@@ -254,13 +260,22 @@ impl Client {
         let deadline = Instant::now() + cfg.timeout;
         let (user, domain) = split_user(cfg);
 
-        let addr = (cfg.host.as_str(), cfg.port)
-            .to_socket_addrs()?
-            .next()
-            .ok_or_else(|| Error::Protocol(format!("cannot resolve {}", cfg.host)))?;
-        let sock = TcpStream::connect_timeout(&addr, cfg.timeout)?;
-        sock.set_nodelay(true)?;
-        let mut f = Framer::new(sock);
+        let (mut f, gateway_certificate_sha256) = match &cfg.gateway {
+            None => {
+                let addr = (cfg.host.as_str(), cfg.port)
+                    .to_socket_addrs()?
+                    .next()
+                    .ok_or_else(|| Error::Protocol(format!("cannot resolve {}", cfg.host)))?;
+                let sock = TcpStream::connect_timeout(&addr, cfg.timeout)?;
+                sock.set_nodelay(true)?;
+                (Framer::new(sock), None)
+            }
+            Some(gw) => {
+                let t = gateway::connect(gw, &cfg.host, cfg.port, &cfg.client_name, deadline)?;
+                let cert = t.certificate.as_deref().map(sha256);
+                (Framer::over(Box::new(t.stream), Box::new(t.reader)), cert)
+            }
+        };
         f.set_read_timeout(Duration::from_millis(100))?;
 
         // 1. X.224 negotiation
@@ -412,6 +427,7 @@ impl Client {
             info: ConnectionInfo {
                 protocol,
                 certificate_sha256,
+                gateway_certificate_sha256,
                 server_rdp_version: server.version,
                 width: demand.width,
                 height: demand.height,
