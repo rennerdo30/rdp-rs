@@ -45,6 +45,10 @@ pub const PIXEL_FORMAT_ARGB_8888: u8 = 0x21;
 pub const CAPVERSION_8: u32 = 0x0008_0004;
 pub const CAPVERSION_81: u32 = 0x0008_0105;
 pub const CAPVERSION_10: u32 = 0x000A_0002;
+pub const CAPVERSION_102: u32 = 0x000A_0200;
+pub const CAPVERSION_104: u32 = 0x000A_0400;
+pub const CAPVERSION_105: u32 = 0x000A_0502;
+pub const CAPVERSION_106: u32 = 0x000A_0600;
 pub const CAPVERSION_107: u32 = 0x000A_0701;
 
 /// Capability flags (2.2.3.1 - 2.2.3.10).
@@ -442,5 +446,50 @@ pub fn parse_avc420(data: &[u8]) -> Result<Avc420<'_>> {
         regions,
         quality,
         bitstream: r.rest(),
+    })
+}
+
+/// RFX_AVC444_BITMAP_STREAM (2.2.4.5) and RFX_AVC444V2_BITMAP_STREAM
+/// (2.2.4.6), which share one layout, by the LC field of
+/// avc420EncodedBitstreamInfo.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Avc444<'a> {
+    /// LC 0: a YUV420 (luma) and a Chroma420 subframe.
+    Both {
+        luma: Avc420<'a>,
+        chroma: Avc420<'a>,
+    },
+    /// LC 1: a YUV420 subframe only.
+    Luma(Avc420<'a>),
+    /// LC 2: a Chroma420 subframe only, combined with the decoded stream
+    /// of previous frames.
+    Chroma(Avc420<'a>),
+}
+
+/// Parses an RFX_AVC444_BITMAP_STREAM or RFX_AVC444V2_BITMAP_STREAM.
+/// avc420EncodedBitstreamInfo holds cbAvc420EncodedBitstream1 in its low
+/// 30 bits and LC in the top two.
+pub fn parse_avc444(data: &[u8]) -> Result<Avc444<'_>> {
+    let mut r = Reader::new(data);
+    let info = r.u32()?;
+    let cb = (info & 0x3FFF_FFFF) as usize;
+    let rest = r.rest();
+    if cb > rest.len() {
+        return proto(format!(
+            "gfx: AVC444 first subframe of {cb} bytes in {}",
+            rest.len()
+        ));
+    }
+    let (first, second) = rest.split_at(cb);
+    Ok(match info >> 30 {
+        0 => Avc444::Both {
+            luma: parse_avc420(first)?,
+            chroma: parse_avc420(second)?,
+        },
+        1 => Avc444::Luma(parse_avc420(first)?),
+        // No YUV420 frame, so cbAvc420EncodedBitstream1 is zero and the
+        // Chroma420 subframe fills the field.
+        2 => Avc444::Chroma(parse_avc420(if cb == 0 { second } else { first })?),
+        _ => return proto("gfx: AVC444 with LC 3"),
     })
 }
