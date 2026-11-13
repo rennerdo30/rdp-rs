@@ -10,8 +10,8 @@
 use ffwd_render::{Canvas, FontId, Rect, TextEngine};
 
 use crate::store::{
-    COMPRESSION, Connection, Group, Inherit, PRESETS, Quality, SessionOptions, Store, WinKeys,
-    normalize_path, parent_of, preset_name,
+    AppEntry, COMPRESSION, Connection, Group, Inherit, Opens, PRESETS, Quality, SessionOptions,
+    Store, WinKeys, default_app_name, normalize_path, parent_of, preset_name,
 };
 use crate::text_field::TextField;
 use crate::theme::*;
@@ -97,10 +97,15 @@ pub enum Field {
     /// in MasterConfirm), and the password of a backup to import.
     NewMaster,
     ImportPass,
+    /// Apps card: a new app's program, name, arguments and working folder.
+    AppProgram,
+    AppName,
+    AppArgs,
+    AppDir,
 }
 
 /// Fields cleared for a new connection or group.
-const FORM: [Field; 7] = [
+const FORM: [Field; 11] = [
     Field::Name,
     Field::Host,
     Field::Port,
@@ -108,13 +113,19 @@ const FORM: [Field; 7] = [
     Field::Password,
     Field::GroupPath,
     Field::Gateway,
+    Field::AppProgram,
+    Field::AppName,
+    Field::AppArgs,
+    Field::AppDir,
 ];
 
-/// One sidebar row: a group or a connection, with its tree depth.
+/// One sidebar row: a group, a connection, or one of an Apps connection's
+/// apps (connection, app), with its tree depth.
 #[derive(Clone, Copy)]
 enum Row {
     Group(usize, usize),
     Conn(usize, usize),
+    App(usize, usize, usize),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -235,6 +246,36 @@ pub enum Hit {
     Session(u64),
     WinMinimize,
     WinClose,
+    /// Editor: Opens Desktop (0) or Apps (1); remove an app; add the typed one.
+    FormOpens(u8),
+    FormRemoveApp(usize),
+    FormAddApp,
+    /// Sidebar: an app of a connection (connection, app): launches it.
+    AppRow(usize, usize),
+    /// RemoteApp tab: launch one of its apps; focus or close a remote window.
+    TabLaunch(u64, usize),
+    RailFocus(u64, u32),
+    RailClose(u64, u32),
+}
+
+/// A RemoteApp session tab: the connection's apps and the open windows.
+#[derive(Clone, Default, PartialEq)]
+pub struct RemoteAppView {
+    pub apps: Vec<AppEntry>,
+    pub windows: Vec<AppWindowItem>,
+    /// Programs with windows open, and launched ones still starting.
+    pub running: Vec<String>,
+    pub starting: Vec<String>,
+}
+
+/// One remote window in the session tab's list.
+#[derive(Clone, PartialEq)]
+pub struct AppWindowItem {
+    pub id: u32,
+    pub title: String,
+    /// Small icon: width, height, straight RGBA.
+    pub icon: Option<(u16, u16, Vec<u8>)>,
+    pub minimized: bool,
 }
 
 #[derive(Clone, PartialEq)]
@@ -293,6 +334,8 @@ pub struct Tab {
     pub recording: bool,
     /// Shown on chosen monitors in their own windows, not in this tab.
     pub spanned: bool,
+    /// A RemoteApp session: apps in their own windows, no desktop picture.
+    pub remote_app: Option<RemoteAppView>,
 }
 
 /// A server certificate to trust or refuse.
@@ -327,12 +370,20 @@ struct TabView {
 
 pub enum Action {
     /// `fit`: size the desktop to the tab (the app fills in the size) and follow resizes.
+    /// With `cfg.remote_app` set, a RemoteApp session; `apps` are the
+    /// connection's apps (for names and the session tab).
     Connect {
         name: String,
         cfg: Box<rdp::Config>,
         fit: bool,
         opts: SessionOptions,
+        apps: Vec<AppEntry>,
     },
+    /// Start an app in a RemoteApp session that is up or connecting.
+    ExecApp(u64, AppEntry),
+    /// A remote window: bring it to the front, or ask it to close.
+    RailFocus(u64, u32),
+    RailClose(u64, u32),
     Disconnect(u64),
     Reconnect(u64),
     CloseTab(u64),
@@ -435,6 +486,9 @@ pub struct Ui {
     collapsed: std::collections::HashSet<String>,
     /// Session settings of the connection being edited.
     opts: SessionOptions,
+    /// What the edited connection opens, and its apps.
+    opens: Opens,
+    apps: Vec<AppEntry>,
     /// The edited connection keeps (or gets) a saved password.
     save_password: bool,
     /// Showing the "set a master password" panel.
@@ -443,7 +497,7 @@ pub struct Ui {
     /// Key derivation running.
     pub unlocking: bool,
     vault_error: Option<String>,
-    fields: [TextField; 14],
+    fields: [TextField; 18],
     size: usize,
     focus: Option<Field>,
     pub tabs: Vec<Tab>,
@@ -540,6 +594,8 @@ impl Ui {
             kerberos: false,
             collapsed: Default::default(),
             opts: SessionOptions::default(),
+            opens: Opens::Desktop,
+            apps: Vec::new(),
             save_password: false,
             vault_setup: false,
             remember: false,
@@ -674,6 +730,7 @@ impl Ui {
             mic: None,
             recording: false,
             spanned: false,
+            remote_app: None,
         });
         self.active = Some(id);
         self.session_focus = false;
@@ -710,6 +767,16 @@ impl Ui {
         self.kerberos = c.kerberos;
         self.size = size_index(c.width, c.height);
         self.opts = c.options.clone();
+        self.opens = c.opens;
+        self.apps = c.apps.clone();
+        for f in [
+            Field::AppProgram,
+            Field::AppName,
+            Field::AppArgs,
+            Field::AppDir,
+        ] {
+            self.field_mut(f).set("");
+        }
         self.save_password = c.password.is_some();
         self.inherit = c.inherit;
         self.focus = Some(Field::Password);
@@ -765,6 +832,8 @@ impl Ui {
         self.field_mut(Field::GroupPath).set(group);
         self.size = 0;
         self.opts = SessionOptions::default();
+        self.opens = Opens::Desktop;
+        self.apps.clear();
         self.save_password = false;
         self.inherit = if group.is_empty() {
             Inherit::default()
@@ -862,6 +931,12 @@ impl Ui {
             "" => host.clone(),
             n => n.to_string(),
         };
+        if self.opens == Opens::Apps && self.apps.is_empty() {
+            return Err(
+                "Add at least one app below (type its program and press Add), or choose Desktop."
+                    .into(),
+            );
+        }
         let (width, height) = self.form_size();
         Ok(Connection {
             name,
@@ -876,7 +951,145 @@ impl Ui {
             gateway: self.field(Field::Gateway).text.trim().to_string(),
             kerberos: self.kerberos,
             inherit,
+            opens: self.opens,
+            apps: self.apps.clone(),
         })
+    }
+
+    /// Adds the app typed in the Apps card; the reason in plain words when
+    /// it cannot be added.
+    fn form_add_app(&mut self) -> Result<(), String> {
+        let text = |f: Field| self.field(f).text.trim().to_string();
+        let program = text(Field::AppProgram).trim_matches('"').to_string();
+        let (args, dir, typed_name) = (
+            text(Field::AppArgs),
+            text(Field::AppDir),
+            text(Field::AppName),
+        );
+        if program.is_empty() {
+            self.focus = Some(Field::AppProgram);
+            return Err(
+                r"Type the program first: a published name like ||Excel, or a path like C:\Tools\app.exe."
+                    .into(),
+            );
+        }
+        // Client Execute PDU limits (MS-RDPERP 2.2.2.3.1), in UTF-16 units.
+        let units = |s: &str| s.encode_utf16().count();
+        if units(&program) > 260 {
+            return Err("The program is too long: 260 characters at most.".into());
+        }
+        if units(&dir) > 260 {
+            return Err("The working folder is too long: 260 characters at most.".into());
+        }
+        if units(&args) > 8000 {
+            return Err("The arguments are too long: 8,000 characters at most.".into());
+        }
+        let name = match typed_name {
+            n if n.is_empty() => default_app_name(&program),
+            n => n,
+        };
+        if name.is_empty() {
+            return Err("Give the app a name.".into());
+        }
+        if self.apps.iter().any(|a| a.name.eq_ignore_ascii_case(&name)) {
+            self.focus = Some(Field::AppName);
+            return Err(format!(
+                "There is already an app called {name}; give this one another name."
+            ));
+        }
+        self.apps.push(AppEntry {
+            name,
+            program,
+            args,
+            working_dir: dir,
+        });
+        for f in [
+            Field::AppProgram,
+            Field::AppName,
+            Field::AppArgs,
+            Field::AppDir,
+        ] {
+            self.field_mut(f).set("");
+        }
+        self.focus = Some(Field::AppProgram);
+        Ok(())
+    }
+
+    fn add_app_clicked(&mut self) {
+        match self.form_add_app() {
+            Ok(()) => {
+                let n = self.apps.last().map(|a| a.name.clone()).unwrap_or_default();
+                self.set_message(format!("Added {n}. Save keeps it."), TEXT_2);
+            }
+            Err(e) => self.set_message(e, ERR),
+        }
+    }
+
+    /// The tabs as the launcher sees them.
+    fn launch_target(&self, name: &str, host: &str) -> Option<u64> {
+        crate::remoteapp::launch_target(
+            self.tabs.iter().map(|t| crate::remoteapp::Candidate {
+                id: t.id,
+                name: &t.name,
+                host: &t.host,
+                remote_app: t.remote_app.is_some(),
+                connected: matches!(t.state, TabState::Connected { .. }),
+                connecting: t.state == TabState::Connecting,
+            }),
+            name,
+            host,
+        )
+    }
+
+    /// A click on an app in the sidebar: start it in the running session
+    /// of its connection, or connect one for it.
+    fn launch_app(&mut self, ci: usize, ai: usize) -> Option<Action> {
+        let c = self.store.connections.get(ci)?.clone();
+        let app = c.apps.get(ai)?.clone();
+        if let Some(id) = self.launch_target(&c.name, &c.host) {
+            self.set_message(format!("Starting {}…", app.name), TEXT_2);
+            return Some(Action::ExecApp(id, app));
+        }
+        let r = self.store.resolve(&c);
+        // A password typed into this connection's open form counts too.
+        let typed = (self.selected == Some(ci) && self.group_edit.is_none())
+            .then(|| self.field(Field::Password).text.clone())
+            .filter(|t| !t.is_empty());
+        let password = typed.or_else(|| r.password.clone());
+        if (r.user.is_empty() || password.is_none()) && !r.kerberos {
+            self.select(ci);
+            self.active = None;
+            self.settings_open = false;
+            self.form_page = 0;
+            self.focus = Some(if r.user.is_empty() {
+                Field::User
+            } else {
+                Field::Password
+            });
+            self.set_message(
+                format!(
+                    "Type the {} for {}, then click {} again.",
+                    if r.user.is_empty() {
+                        "user name"
+                    } else {
+                        "password"
+                    },
+                    c.name,
+                    app.name
+                ),
+                WARN,
+            );
+            return None;
+        }
+        self.set_message(
+            format!("Connecting to {} for {}…", r.host, app.name),
+            TEXT_2,
+        );
+        Some(session_action(
+            &r,
+            &password.unwrap_or_default(),
+            Some(&app),
+        ))
     }
 
     fn group_form(&self) -> Result<Group, String> {
@@ -1032,6 +1245,14 @@ impl Ui {
             }
         }
         let r = self.store.resolve(&c);
+        // Apps: Connect starts the first app (in a running session if any).
+        let first = r.apps.first().filter(|_| r.opens == Opens::Apps).cloned();
+        if let Some(app) = &first
+            && let Some(id) = self.launch_target(&r.name, &r.host)
+        {
+            self.set_message(format!("Starting {}…", app.name), TEXT_2);
+            return Some(Action::ExecApp(id, app.clone()));
+        }
         if r.user.is_empty() && !r.kerberos {
             self.set_message("No user name: enter one here or in the group.", ERR);
             return None;
@@ -1043,7 +1264,7 @@ impl Ui {
             typed
         };
         self.set_message(format!("Connecting to {}…", r.host), TEXT_2);
-        Some(session_action(&r, &password))
+        Some(session_action(&r, &password, first.as_ref()))
     }
 
     /// Opens every connection in a group (and its sub-groups) that has a
@@ -1059,7 +1280,10 @@ impl Ui {
                 .clone()
                 .or_else(|| (!typed.is_empty()).then(|| typed.clone()));
             match pw {
-                Some(pw) if !r.user.is_empty() => acts.push(session_action(&r, &pw)),
+                Some(pw) if !r.user.is_empty() => {
+                    let first = r.apps.first().filter(|_| r.opens == Opens::Apps);
+                    acts.push(session_action(&r, &pw, first))
+                }
                 _ => skipped += 1,
             }
         }
@@ -1082,19 +1306,30 @@ impl Ui {
     fn rows(&self) -> Vec<Row> {
         let q = self.field(Field::Filter).text.to_lowercase();
         if !q.is_empty() {
-            return (0..self.store.connections.len())
-                .filter(|&i| {
-                    let c = &self.store.connections[i];
-                    [&c.name, &c.host, &c.user, &c.group]
-                        .iter()
-                        .any(|s| s.to_lowercase().contains(&q))
-                })
-                .map(|i| Row::Conn(i, 0))
-                .collect();
+            let mut out = Vec::new();
+            for (i, c) in self.store.connections.iter().enumerate() {
+                let hit = [&c.name, &c.host, &c.user, &c.group]
+                    .iter()
+                    .any(|s| s.to_lowercase().contains(&q))
+                    || c.apps.iter().any(|a| a.name.to_lowercase().contains(&q));
+                if hit {
+                    self.push_conn(i, 0, &mut out);
+                }
+            }
+            return out;
         }
         let mut out = Vec::new();
         self.tree_rows("", 0, &mut out);
         out
+    }
+
+    /// A connection's row, and its apps' rows under it for an Apps connection.
+    fn push_conn(&self, i: usize, depth: usize, out: &mut Vec<Row>) {
+        out.push(Row::Conn(i, depth));
+        let c = &self.store.connections[i];
+        if c.opens == Opens::Apps {
+            out.extend((0..c.apps.len()).map(|a| Row::App(i, a, depth)));
+        }
     }
 
     fn tree_rows(&self, path: &str, depth: usize, out: &mut Vec<Row>) {
@@ -1108,7 +1343,7 @@ impl Ui {
         }
         for (i, c) in self.store.connections.iter().enumerate() {
             if c.group == path {
-                out.push(Row::Conn(i, depth));
+                self.push_conn(i, depth, out);
             }
         }
     }
@@ -1119,7 +1354,7 @@ impl Ui {
             .into_iter()
             .filter_map(|r| match r {
                 Row::Conn(i, _) => Some(i),
-                Row::Group(..) => None,
+                Row::Group(..) | Row::App(..) => None,
             })
             .collect()
     }
@@ -1214,6 +1449,14 @@ impl Ui {
             v.extend([Field::Host, Field::Port]);
         }
         v.push(Field::GroupPath);
+        if self.group_edit.is_none() && self.opens == Opens::Apps {
+            v.extend([
+                Field::AppProgram,
+                Field::AppName,
+                Field::AppArgs,
+                Field::AppDir,
+            ]);
+        }
         let own = !self.form_inherit().credentials;
         if own {
             v.push(Field::User);
@@ -1621,6 +1864,35 @@ impl Ui {
             Hit::Session(_) => {}
             Hit::WinMinimize => return Some(Action::WinMinimize),
             Hit::WinClose => return Some(Action::WinClose),
+            Hit::FormOpens(i) => {
+                self.opens = if i == 1 { Opens::Apps } else { Opens::Desktop };
+                if self.opens == Opens::Apps && self.apps.is_empty() {
+                    self.focus = Some(Field::AppProgram);
+                }
+            }
+            Hit::FormRemoveApp(i) => {
+                if i < self.apps.len() {
+                    let gone = self.apps.remove(i);
+                    self.set_message(format!("Removed {}. Save keeps it.", gone.name), TEXT_2);
+                }
+            }
+            Hit::FormAddApp => self.add_app_clicked(),
+            Hit::AppRow(ci, ai) => return self.launch_app(ci, ai),
+            Hit::TabLaunch(id, i) => {
+                let app = self
+                    .tabs
+                    .iter()
+                    .find(|t| t.id == id)?
+                    .remote_app
+                    .as_ref()?
+                    .apps
+                    .get(i)?
+                    .clone();
+                self.set_message(format!("Starting {}…", app.name), TEXT_2);
+                return Some(Action::ExecApp(id, app));
+            }
+            Hit::RailFocus(id, w) => return Some(Action::RailFocus(id, w)),
+            Hit::RailClose(id, w) => return Some(Action::RailClose(id, w)),
         }
         None
     }
@@ -1777,6 +2049,14 @@ impl Ui {
                 return self.active.and_then(|id| self.add_drive(id));
             }
             Key::Enter if self.focus == Some(Field::FormDrive) => self.form_add_drive(),
+            Key::Enter
+                if matches!(
+                    self.focus,
+                    Some(Field::AppProgram | Field::AppName | Field::AppArgs | Field::AppDir)
+                ) =>
+            {
+                self.add_app_clicked()
+            }
             Key::Enter if self.store.is_locked() => return self.unlock(),
             Key::Enter
                 if self.settings_open && self.active.is_none() && self.import_file.is_some() =>
@@ -2225,9 +2505,76 @@ impl Ui {
                     y += row_h + p(2.0);
                     self.paint_connection_row(cv, te, f, r, list, i, home);
                 }
+                Row::App(ci, ai, depth) => {
+                    let indent = depth as i32 * p(16.0) + p(18.0);
+                    let r = Rect::new(p(8.0) + indent, y, area.w - p(16.0) - indent, p(32.0));
+                    y += r.h + p(2.0);
+                    self.paint_app_row(cv, te, f, r, list, ci, ai);
+                }
             }
         }
         cv.set_clip(old);
+    }
+
+    /// An app under its connection: a click launches it.
+    #[allow(clippy::too_many_arguments)]
+    fn paint_app_row(
+        &mut self,
+        cv: &mut Canvas,
+        te: &mut TextEngine,
+        f: &Fonts,
+        r: Rect,
+        list: Rect,
+        ci: usize,
+        ai: usize,
+    ) {
+        let s = self.scale;
+        let p = |v: f32| (v * s).round() as i32;
+        let hit = Hit::AppRow(ci, ai);
+        if self.hover == Some(hit) {
+            cv.fill_round(r, 6.0 * s, BG_HOVER);
+        }
+        let c = &self.store.connections[ci];
+        let (name, program) = (c.apps[ai].name.clone(), c.apps[ai].program.clone());
+        let dot = self.app_dot(&c.name, &c.host, &program);
+        let mid = r.y + r.h / 2;
+        app_glyph(cv, s, r.x + p(14.0), mid - p(7.0), TEXT_3);
+        let text_w = r.w - p(44.0) - if dot.is_some() { p(16.0) } else { 0 };
+        te.draw(
+            cv,
+            f.ui,
+            13.0 * s,
+            (r.x + p(36.0)) as f32,
+            (mid + p(5.0)) as f32,
+            &name,
+            TEXT_2,
+            text_w as f32,
+        );
+        if let Some(color) = dot {
+            cv.fill_circle((r.right() - p(16.0)) as f32, mid as f32, 4.0 * s, color);
+        }
+        self.hits.push((r.intersect(list), hit));
+    }
+
+    /// Green while the app has windows open, amber while it starts.
+    fn app_dot(&self, name: &str, host: &str, program: &str) -> Option<u32> {
+        let same = |l: &[String]| l.iter().any(|p| crate::remoteapp::same_program(p, program));
+        let mut out = None;
+        for t in self
+            .tabs
+            .iter()
+            .filter(|t| t.name == name && t.host == host)
+        {
+            let Some(v) = &t.remote_app else { continue };
+            let live = matches!(t.state, TabState::Connected { .. } | TabState::Connecting);
+            if live && same(&v.running) {
+                return Some(OK);
+            }
+            if live && same(&v.starting) {
+                out = Some(WARN);
+            }
+        }
+        out
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -3208,6 +3555,8 @@ impl Ui {
         };
         let hint = if group_mode {
             "Connect all opens every member with a saved password, or the one typed here."
+        } else if self.opens == Opens::Apps {
+            "Connect starts the first app · click an app in the sidebar to start it · Ctrl+S saves"
         } else {
             "Enter connects · Ctrl+S saves · Ctrl+N new connection"
         };
@@ -3409,6 +3758,9 @@ impl Ui {
             y += 3 * rh;
         }
         y += p(20.0);
+        if !group_mode {
+            y = self.form_opens(cv, te, f, x, y, w);
+        }
 
         self.caption(cv, te, f, x, y, w, "SIGN-IN");
         y += p(24.0);
@@ -3490,6 +3842,172 @@ impl Ui {
             "None (direct), or rdg.example.com",
         );
         y + 3 * rh + 2 * p(58.0)
+    }
+
+    /// "Opens: Desktop | Apps", and in Apps mode the connection's apps with
+    /// their remove buttons and the row that adds one.
+    #[allow(clippy::too_many_arguments)]
+    fn form_opens(
+        &mut self,
+        cv: &mut Canvas,
+        te: &mut TextEngine,
+        f: &Fonts,
+        x: i32,
+        mut y: i32,
+        w: i32,
+    ) -> i32 {
+        let s = self.scale;
+        let p = |v: f32| (v * s).round() as i32;
+        let apps_mode = self.opens == Opens::Apps;
+        self.caption(cv, te, f, x, y, w, "OPENS");
+        y += p(24.0);
+        let items = [
+            ("Desktop".to_string(), !apps_mode, Hit::FormOpens(0)),
+            ("Apps".to_string(), apps_mode, Hit::FormOpens(1)),
+        ];
+        self.segmented(cv, te, f, Rect::new(x, y, w, p(36.0)), &items);
+        y += p(36.0) + p(20.0);
+        self.hint(
+            cv,
+            te,
+            f,
+            x + p(4.0),
+            y - p(4.0),
+            w,
+            if apps_mode {
+                "Each app opens in its own window on this PC, as if it ran here (RemoteApp)."
+            } else {
+                "The whole remote desktop, in a tab, full screen or on chosen monitors."
+            },
+        );
+        y += p(20.0);
+        if !apps_mode {
+            return y;
+        }
+        self.caption(cv, te, f, x, y, w, "APPS");
+        y += p(24.0);
+        let apps = self.apps.clone();
+        let mut heights = vec![p(52.0); apps.len().max(1)];
+        heights.extend([p(52.0), p(52.0)]);
+        let cells = self.card(cv, x, y, w, &heights);
+        if apps.is_empty() {
+            let r = cells[0];
+            te.draw(
+                cv,
+                f.ui,
+                13.0 * s,
+                (r.x + p(16.0)) as f32,
+                (r.y + r.h / 2 + p(5.0)) as f32,
+                "No apps yet: type a program below and press Add.",
+                TEXT_3,
+                (r.w - p(32.0)) as f32,
+            );
+        }
+        for (i, (r, app)) in cells.iter().zip(&apps).enumerate() {
+            app_glyph(cv, s, r.x + p(16.0), r.y + r.h / 2 - p(7.0), ACCENT);
+            let close = Rect::new(r.right() - p(40.0), r.y + p(14.0), p(24.0), p(24.0));
+            let tw = (close.x - r.x - p(56.0)) as f32;
+            te.draw(
+                cv,
+                f.semi,
+                13.5 * s,
+                (r.x + p(42.0)) as f32,
+                (r.y + p(22.0)) as f32,
+                &app.name,
+                TEXT,
+                tw,
+            );
+            let mut sub = app.program.clone();
+            if !app.args.is_empty() {
+                sub = format!("{sub} {}", app.args);
+            }
+            if !app.working_dir.is_empty() {
+                sub = format!("{sub} · in {}", app.working_dir);
+            }
+            te.draw(
+                cv,
+                f.ui,
+                12.0 * s,
+                (r.x + p(42.0)) as f32,
+                (r.y + p(40.0)) as f32,
+                &sub,
+                TEXT_3,
+                tw,
+            );
+            let hit = Hit::FormRemoveApp(i);
+            if self.hover == Some(hit) {
+                cv.fill_round(close, 5.0 * s, CONTROL_HOVER);
+            }
+            let (cx, cy, dd) = (
+                (close.x + close.w / 2) as f32,
+                (close.y + close.h / 2) as f32,
+                4.0 * s,
+            );
+            cv.stroke(&[(cx - dd, cy - dd), (cx + dd, cy + dd)], 1.4 * s, TEXT_2);
+            cv.stroke(&[(cx - dd, cy + dd), (cx + dd, cy - dd)], 1.4 * s, TEXT_2);
+            self.hits.push((close, hit));
+        }
+        // The add rows: program and name; arguments, folder and Add.
+        let n = heights.len();
+        let (r1, r2) = (cells[n - 2], cells[n - 1]);
+        let gap = p(8.0);
+        let i1 = Rect::new(
+            r1.x + p(12.0),
+            r1.y + p(9.0),
+            r1.w - p(24.0),
+            r1.h - p(18.0),
+        );
+        let pw = (i1.w - gap) * 3 / 5;
+        self.text_input(
+            cv,
+            te,
+            f,
+            Rect::new(i1.x, i1.y, pw, i1.h),
+            Field::AppProgram,
+            r"Program: ||Excel or C:\Tools\app.exe",
+        );
+        self.text_input(
+            cv,
+            te,
+            f,
+            Rect::new(i1.x + pw + gap, i1.y, i1.w - pw - gap, i1.h),
+            Field::AppName,
+            "Name (optional)",
+        );
+        let i2 = Rect::new(
+            r2.x + p(12.0),
+            r2.y + p(9.0),
+            r2.w - p(24.0),
+            r2.h - p(18.0),
+        );
+        let aw = p(64.0);
+        let fw = (i2.w - aw - 2 * gap) / 2;
+        self.text_input(
+            cv,
+            te,
+            f,
+            Rect::new(i2.x, i2.y, fw, i2.h),
+            Field::AppArgs,
+            "Arguments (optional)",
+        );
+        self.text_input(
+            cv,
+            te,
+            f,
+            Rect::new(i2.x + fw + gap, i2.y, fw, i2.h),
+            Field::AppDir,
+            "Working folder (optional)",
+        );
+        self.button(
+            cv,
+            te,
+            f,
+            Rect::new(i2.right() - aw, i2.y, aw, i2.h),
+            "Add",
+            Style::Secondary,
+            Hit::FormAddApp,
+        );
+        y + heights.iter().sum::<i32>() + p(20.0)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -4110,6 +4628,14 @@ impl Ui {
                     Hit::Unspan(id),
                 );
             }
+            TabState::Connected { .. }
+                if self
+                    .tabs
+                    .iter()
+                    .any(|t| t.id == id && t.remote_app.is_some()) =>
+            {
+                self.paint_apps_tab(cv, te, f, area, id);
+            }
             TabState::Connected { .. } => {
                 self.session_area = Some((id, area));
                 self.hits
@@ -4190,6 +4716,215 @@ impl Ui {
         }
     }
 
+    /// A RemoteApp session tab: its open windows (Focus, Close) and its
+    /// apps to launch. The windows themselves are on this PC's desktop.
+    fn paint_apps_tab(
+        &mut self,
+        cv: &mut Canvas,
+        te: &mut TextEngine,
+        f: &Fonts,
+        area: Rect,
+        id: u64,
+    ) {
+        let s = self.scale;
+        let p = |v: f32| (v * s).round() as i32;
+        let Some(t) = self.tabs.iter().find(|t| t.id == id) else {
+            return;
+        };
+        let (host, name) = (t.host.clone(), t.name.clone());
+        let view = t.remote_app.clone().unwrap_or_default();
+        let old = cv.set_clip(area);
+        let first_hit = self.hits.len();
+        let x = area.x + p(40.0);
+        let w = p(620.0).min(area.w - p(80.0)).max(p(300.0));
+        let mut y = area.y + p(30.0);
+        te.draw(
+            cv,
+            f.semi,
+            20.0 * s,
+            x as f32,
+            (y + p(18.0)) as f32,
+            &format!("Apps on {host}"),
+            TEXT,
+            w as f32,
+        );
+        let n = view.windows.len();
+        let sub = match n {
+            0 => format!("{name} · no app window open"),
+            1 => format!("{name} · 1 window open on this PC"),
+            n => format!("{name} · {n} windows open on this PC"),
+        };
+        te.draw(
+            cv,
+            f.ui,
+            12.5 * s,
+            x as f32,
+            (y + p(40.0)) as f32,
+            &sub,
+            TEXT_3,
+            w as f32,
+        );
+        y += p(70.0);
+
+        self.caption(cv, te, f, x, y, w, "OPEN WINDOWS");
+        y += p(24.0);
+        let rh = p(52.0);
+        let cells = self.card(cv, x, y, w, &vec![rh; n.max(1)]);
+        if n == 0 {
+            let r = cells[0];
+            let text = if view.starting.is_empty() {
+                "Start an app below; its windows appear on this PC's desktop."
+            } else {
+                "Starting…"
+            };
+            te.draw(
+                cv,
+                f.ui,
+                13.0 * s,
+                (r.x + p(16.0)) as f32,
+                (r.y + r.h / 2 + p(5.0)) as f32,
+                text,
+                TEXT_3,
+                (r.w - p(32.0)) as f32,
+            );
+        }
+        for (r, win) in cells.iter().zip(&view.windows) {
+            let isz = p(20.0);
+            let ir = Rect::new(r.x + p(16.0), r.y + (r.h - isz) / 2, isz, isz);
+            match &win.icon {
+                Some((iw, ih, rgba)) if rgba.len() == *iw as usize * *ih as usize * 4 => {
+                    cv.draw_rgba_scaled(ir, *iw as usize, *ih as usize, rgba)
+                }
+                _ => app_glyph(cv, s, ir.x + p(3.0), ir.y + p(3.0), TEXT_3),
+            }
+            let (cw, fw) = (p(70.0), p(70.0));
+            let close = Rect::new(r.right() - p(12.0) - cw, r.y + p(10.0), cw, r.h - p(20.0));
+            let focus = Rect::new(close.x - p(8.0) - fw, close.y, fw, close.h);
+            let tw = (focus.x - r.x - p(60.0)) as f32;
+            let title = if win.title.is_empty() {
+                "(untitled)"
+            } else {
+                &win.title
+            };
+            let ty = if win.minimized {
+                p(22.0)
+            } else {
+                r.h / 2 + p(5.0)
+            };
+            te.draw(
+                cv,
+                f.ui,
+                13.5 * s,
+                (r.x + p(48.0)) as f32,
+                (r.y + ty) as f32,
+                title,
+                TEXT,
+                tw,
+            );
+            if win.minimized {
+                te.draw(
+                    cv,
+                    f.ui,
+                    12.0 * s,
+                    (r.x + p(48.0)) as f32,
+                    (r.y + p(40.0)) as f32,
+                    "Minimized",
+                    TEXT_3,
+                    tw,
+                );
+            }
+            self.button(
+                cv,
+                te,
+                f,
+                focus,
+                "Focus",
+                Style::Secondary,
+                Hit::RailFocus(id, win.id),
+            );
+            self.button(
+                cv,
+                te,
+                f,
+                close,
+                "Close",
+                Style::Danger,
+                Hit::RailClose(id, win.id),
+            );
+        }
+        y += rh * n.max(1) as i32 + p(20.0);
+
+        self.caption(cv, te, f, x, y, w, "LAUNCH");
+        y += p(24.0);
+        let cells = self.card(cv, x, y, w, &vec![rh; view.apps.len().max(1)]);
+        if view.apps.is_empty() {
+            te.draw(
+                cv,
+                f.ui,
+                13.0 * s,
+                (cells[0].x + p(16.0)) as f32,
+                (cells[0].y + rh / 2 + p(5.0)) as f32,
+                "This connection has no apps; add them in its editor.",
+                TEXT_3,
+                (w - p(32.0)) as f32,
+            );
+        }
+        let same =
+            |l: &[String], prog: &str| l.iter().any(|p| crate::remoteapp::same_program(p, prog));
+        for (i, (r, app)) in cells.iter().zip(&view.apps).enumerate() {
+            let hit = Hit::TabLaunch(id, i);
+            if self.hover == Some(hit) {
+                cv.fill_round(
+                    Rect::new(r.x + p(3.0), r.y + p(3.0), r.w - p(6.0), r.h - p(6.0)),
+                    6.0 * s,
+                    BG_HOVER,
+                );
+            }
+            app_glyph(cv, s, r.x + p(16.0), r.y + r.h / 2 - p(7.0), ACCENT);
+            let (state, color) = if same(&view.running, &app.program) {
+                ("Running · start another", OK)
+            } else if same(&view.starting, &app.program) {
+                ("Starting…", WARN)
+            } else {
+                ("Start", ACCENT)
+            };
+            let sw = te.measure(f.ui, 12.5 * s, state) as i32;
+            te.draw(
+                cv,
+                f.semi,
+                13.5 * s,
+                (r.x + p(42.0)) as f32,
+                (r.y + p(22.0)) as f32,
+                &app.name,
+                TEXT,
+                (r.w - p(80.0) - sw) as f32,
+            );
+            te.draw(
+                cv,
+                f.ui,
+                12.0 * s,
+                (r.x + p(42.0)) as f32,
+                (r.y + p(40.0)) as f32,
+                &app.program,
+                TEXT_3,
+                (r.w - p(80.0) - sw) as f32,
+            );
+            te.draw(
+                cv,
+                f.ui,
+                12.5 * s,
+                (r.right() - p(18.0) - sw) as f32,
+                (r.y + r.h / 2 + p(5.0)) as f32,
+                state,
+                color,
+                (sw + p(2.0)) as f32,
+            );
+            self.hits.push((*r, hit));
+        }
+        self.clip_hits(first_hit, area);
+        cv.set_clip(old);
+    }
+
     /// The session toolbar: state, and Disconnect/Reconnect, full screen and panel.
     #[allow(clippy::too_many_arguments)]
     fn paint_toolbar(
@@ -4212,8 +4947,16 @@ impl Ui {
             4.0 * s,
             state.color(),
         );
+        // RemoteApp: no picture here, so no full screen and no recording.
+        let apps = self
+            .tabs
+            .iter()
+            .any(|t| t.id == id && t.remote_app.is_some());
         let info = match &state {
             TabState::Connecting => format!("{host} · connecting…"),
+            TabState::Connected { width, height, .. } if apps => {
+                format!("{host} · apps on this PC's desktop · {width} × {height}")
+            }
             TabState::Connected { width, height, bpp } if self.fullscreen => {
                 format!("{name} · {host} · {width} × {height} · {bpp}-bit")
             }
@@ -4240,8 +4983,11 @@ impl Ui {
                 Style::Secondary,
             ),
         ];
+        if apps {
+            buttons.remove(0);
+        }
         let recording = self.tabs.iter().any(|t| t.id == id && t.recording);
-        if matches!(state, TabState::Connected { .. }) {
+        if matches!(state, TabState::Connected { .. }) && !apps {
             let (text, style) = if recording {
                 ("Stop recording", Style::Danger)
             } else {
@@ -5490,6 +6236,18 @@ impl Ui {
     }
 }
 
+/// A small app glyph: four tiles in a 14 px square (at scale 1).
+fn app_glyph(cv: &mut Canvas, s: f32, x: i32, y: i32, color: u32) {
+    let p = |v: f32| (v * s).round() as i32;
+    for (dx, dy) in [(0.0, 0.0), (8.0, 0.0), (0.0, 8.0), (8.0, 8.0)] {
+        cv.fill_round(
+            Rect::new(x + p(dx), y + p(dy), p(6.0), p(6.0)),
+            1.5 * s,
+            color,
+        );
+    }
+}
+
 /// Draws `text` centred in `r` without a width cap (labels are sized to fit),
 /// so glyph rounding can never turn a short label into an ellipsis.
 fn centered(
@@ -5543,10 +6301,12 @@ fn size_index(w: u16, h: u16) -> usize {
     SIZES.iter().position(|&s| s == (w, h)).map_or(0, |i| i + 1)
 }
 
-/// The Connect action for a resolved connection.
-fn session_action(r: &Connection, password: &str) -> Action {
+/// The Connect action for a resolved connection; with `app`, a RemoteApp
+/// session that starts it (the app sizes the desktop to the monitors).
+fn session_action(r: &Connection, password: &str, app: Option<&AppEntry>) -> Action {
     let mut cfg = rdp::Config::new(&r.host, &r.user, password);
     cfg.port = r.port;
+    cfg.remote_app = app.map(AppEntry::remote_app);
     #[cfg(windows)]
     if r.kerberos {
         cfg.auth = Some(crate::sspi::factory());
@@ -5557,8 +6317,8 @@ fn session_action(r: &Connection, password: &str) -> Action {
         g.port = gw.1;
         cfg.gateway = Some(g);
     }
-    let fit = r.width == 0;
-    if !fit {
+    let fit = r.width == 0 && app.is_none();
+    if r.width != 0 {
         cfg.width = r.width;
         cfg.height = r.height;
     }
@@ -5567,6 +6327,11 @@ fn session_action(r: &Connection, password: &str) -> Action {
         cfg: Box::new(cfg),
         fit,
         opts: r.options.clone(),
+        apps: if app.is_some() {
+            r.apps.clone()
+        } else {
+            Vec::new()
+        },
     }
 }
 
@@ -5649,6 +6414,75 @@ pub fn sample_panel(page: u8, fullscreen: bool) -> Ui {
     m
 }
 
+/// A running RemoteApp tab for the sample's "Office apps" connection: Excel
+/// open with a dialog, Word starting.
+fn sample_apps_session(m: &mut Ui, active: bool) {
+    let apps = m.store.connections[3].apps.clone();
+    let before = m.active;
+    m.open_tab(3, "Office apps".into(), "apps.corp.example".into(), false);
+    let icon = |rgb: u32| {
+        let mut px = Vec::new();
+        for y in 0..16u32 {
+            for x in 0..16u32 {
+                let edge = x == 0 || y == 0 || x == 15 || y == 15;
+                let c = if edge { 0xFFFFFF } else { rgb };
+                px.extend([(c >> 16) as u8, (c >> 8) as u8, c as u8, 255]);
+            }
+        }
+        Some((16, 16, px))
+    };
+    if let Some(t) = m.tab_mut(3) {
+        t.state = TabState::Connected {
+            width: 4480,
+            height: 1440,
+            bpp: 32,
+        };
+        t.remote_app = Some(RemoteAppView {
+            apps,
+            windows: vec![
+                AppWindowItem {
+                    id: 0x2001,
+                    title: "Budget 2027.xlsx - Excel".into(),
+                    icon: icon(0x1D7044),
+                    minimized: false,
+                },
+                AppWindowItem {
+                    id: 0x2002,
+                    title: "Q3 forecast.xlsx - Excel".into(),
+                    icon: icon(0x1D7044),
+                    minimized: true,
+                },
+            ],
+            running: vec!["||Excel".into()],
+            starting: vec!["||Word".into()],
+        });
+    }
+    if !active {
+        m.active = before;
+    }
+}
+
+/// The editor of the "Office apps" connection (Opens: Apps), with its
+/// session running so the sidebar shows the app dots.
+pub fn sample_apps_form() -> Ui {
+    let mut m = sample(false);
+    sample_apps_session(&mut m, false);
+    m.select(3);
+    m.focus = None;
+    m.field_mut(Field::AppProgram)
+        .set(r"\\fs01\tools\timesheet.exe");
+    m.set_message("Added Expense report. Save keeps it.", TEXT_2);
+    m
+}
+
+/// The RemoteApp session tab.
+pub fn sample_apps_tab() -> Ui {
+    let mut m = sample(false);
+    sample_apps_session(&mut m, true);
+    m.set_message("Connected: apps.corp.example (4480×1440).", TEXT_2);
+    m
+}
+
 /// The sample with the "Work" group open (snapshot of the group form).
 pub fn sample_group() -> Ui {
     let mut m = sample(false);
@@ -5676,6 +6510,7 @@ pub fn sample(session_tab: bool) -> Ui {
             kerberos: false,
             group: "Work".into(),
             inherit: Inherit::ALL,
+            ..Default::default()
         },
         Connection {
             name: "Build server".into(),
@@ -5693,6 +6528,7 @@ pub fn sample(session_tab: bool) -> Ui {
                 credentials: true,
                 ..Default::default()
             },
+            ..Default::default()
         },
         Connection {
             name: "Test VM (Windows 11)".into(),
@@ -5707,6 +6543,35 @@ pub fn sample(session_tab: bool) -> Ui {
             kerberos: false,
             group: String::new(),
             inherit: Inherit::default(),
+            opens: Opens::Desktop,
+            apps: Vec::new(),
+        },
+        Connection {
+            name: "Office apps".into(),
+            host: "apps.corp.example".into(),
+            port: 3389,
+            user: r"CORP\alex".into(),
+            password: Some("sample".into()),
+            opens: Opens::Apps,
+            apps: vec![
+                AppEntry {
+                    name: "Excel".into(),
+                    program: "||Excel".into(),
+                    ..Default::default()
+                },
+                AppEntry {
+                    name: "Word".into(),
+                    program: "||Word".into(),
+                    ..Default::default()
+                },
+                AppEntry {
+                    name: "Expense report".into(),
+                    program: r"C:\Tools\expenses.exe".into(),
+                    args: "/user %USERNAME%".into(),
+                    working_dir: r"C:\Tools".into(),
+                },
+            ],
+            ..Default::default()
         },
     ]);
     store.adopt_groups();
@@ -5885,5 +6750,165 @@ mod tests {
         assert!(m.mouse_move(500, 300), "leaving the bar hides it");
         m.paint(&mut Canvas::new(&mut px, w, h), &mut te, &fonts);
         assert!(m.session_clip.is_none());
+    }
+
+    /// Clicks the centre of the first hit rectangle for `hit`.
+    fn click(m: &mut Ui, te: &mut TextEngine, fonts: &Fonts, hit: Hit) -> Option<Action> {
+        let (w, h) = (1320usize, 860usize);
+        let mut px = vec![0u32; w * h];
+        m.paint(&mut Canvas::new(&mut px, w, h), te, fonts);
+        let r = m
+            .hits
+            .iter()
+            .rev()
+            .find(|(_, x)| *x == hit)
+            .map(|(r, _)| *r)
+            .unwrap_or_else(|| panic!("{hit:?} not painted"));
+        let (x, y) = (r.x + r.w / 2, r.y + r.h / 2);
+        m.mouse_move(x, y);
+        m.mouse_down(x, y, te, fonts);
+        m.mouse_up(x, y)
+    }
+
+    #[test]
+    fn a_click_on_an_app_row_launches_it() {
+        let mut te = TextEngine::new();
+        let Some(fonts) = load_fonts(&mut te) else {
+            return; // no UI font on this machine (headless CI)
+        };
+        let mut m = sample(false);
+        // No session yet: a RemoteApp connection for Word, saved password.
+        let Some(Action::Connect { cfg, apps, fit, .. }) =
+            click(&mut m, &mut te, &fonts, Hit::AppRow(3, 1))
+        else {
+            panic!("expected Connect");
+        };
+        assert_eq!(cfg.remote_app.as_ref().unwrap().program, "||Word");
+        assert_eq!(cfg.password, "sample");
+        assert_eq!(apps.len(), 3);
+        assert!(!fit);
+        // With its session up (or connecting), the same click starts the
+        // app in it: no new logon.
+        sample_apps_session(&mut m, false);
+        match click(&mut m, &mut te, &fonts, Hit::AppRow(3, 2)) {
+            Some(Action::ExecApp(3, app)) => assert_eq!(app.name, "Expense report"),
+            _ => panic!("expected ExecApp"),
+        }
+        m.tab_mut(3).unwrap().state = TabState::Connecting;
+        assert!(matches!(
+            click(&mut m, &mut te, &fonts, Hit::AppRow(3, 0)),
+            Some(Action::ExecApp(3, _))
+        ));
+        // Ended: a new session again.
+        m.tab_mut(3).unwrap().state = TabState::Ended("x".into());
+        assert!(matches!(
+            click(&mut m, &mut te, &fonts, Hit::AppRow(3, 0)),
+            Some(Action::Connect { .. })
+        ));
+        // The connection row still opens the editor.
+        assert!(click(&mut m, &mut te, &fonts, Hit::Row(3)).is_none());
+        assert_eq!((m.selected, m.active), (Some(3), None));
+        // The session tab launches too.
+        m.tab_mut(3).unwrap().state = TabState::Connected {
+            width: 1,
+            height: 1,
+            bpp: 32,
+        };
+        m.active = Some(3);
+        assert!(matches!(
+            click(&mut m, &mut te, &fonts, Hit::TabLaunch(3, 1)),
+            Some(Action::ExecApp(3, a)) if a.program == "||Word"
+        ));
+        assert!(matches!(
+            click(&mut m, &mut te, &fonts, Hit::RailClose(3, 0x2002)),
+            Some(Action::RailClose(3, 0x2002))
+        ));
+    }
+
+    #[test]
+    fn an_app_without_a_password_asks_for_it() {
+        let mut m = sample(false);
+        m.store.connections[3].password = None;
+        assert!(m.launch_app(3, 0).is_none());
+        assert_eq!(m.selected, Some(3));
+        assert_eq!(m.focus, Some(Field::Password));
+        let msg = m.message.clone().unwrap().0;
+        assert_eq!(
+            msg,
+            "Type the password for Office apps, then click Excel again."
+        );
+        // Typed into its form: the next click connects with it.
+        m.field_mut(Field::Password).set("typed");
+        match m.launch_app(3, 0) {
+            Some(Action::Connect { cfg, .. }) => assert_eq!(cfg.password, "typed"),
+            _ => panic!("expected Connect"),
+        }
+    }
+
+    #[test]
+    fn apps_are_added_and_removed_in_the_editor() {
+        let mut te = TextEngine::new();
+        let Some(fonts) = load_fonts(&mut te) else {
+            return;
+        };
+        let mut m = sample(false);
+        m.select(2);
+        // Desktop: no apps card, no app fields in the tab order.
+        assert!(!m.form_order().contains(&Field::AppProgram));
+        click(&mut m, &mut te, &fonts, Hit::FormOpens(1));
+        assert_eq!(m.opens, Opens::Apps);
+        assert!(m.form_order().contains(&Field::AppProgram));
+        // Saving Apps without an app says what to do.
+        assert!(m.form().unwrap_err().contains("Add at least one app"));
+        click(&mut m, &mut te, &fonts, Hit::FormAddApp);
+        assert!(m.apps.is_empty());
+        assert!(
+            m.message
+                .clone()
+                .unwrap()
+                .0
+                .starts_with("Type the program first")
+        );
+        m.field_mut(Field::AppProgram)
+            .set(r"C:\Windows\notepad.exe");
+        click(&mut m, &mut te, &fonts, Hit::FormAddApp);
+        m.field_mut(Field::AppProgram).set("||calc");
+        m.field_mut(Field::AppName).set("Calculator");
+        m.field_mut(Field::AppArgs).set("/x");
+        assert!(m.key(Key::Enter).is_none(), "Enter in the add row adds");
+        let names: Vec<&str> = m.apps.iter().map(|a| a.name.as_str()).collect();
+        assert_eq!(names, ["Notepad", "Calculator"]);
+        assert_eq!(m.apps[1].args, "/x");
+        assert!(m.field(Field::AppProgram).text.is_empty(), "the row clears");
+        // The same name twice is refused in plain words.
+        m.field_mut(Field::AppProgram).set("notepad.exe");
+        click(&mut m, &mut te, &fonts, Hit::FormAddApp);
+        assert_eq!(m.apps.len(), 2);
+        assert!(
+            m.message
+                .clone()
+                .unwrap()
+                .0
+                .contains("already an app called Notepad")
+        );
+        m.field_mut(Field::AppProgram).set(&"x".repeat(261));
+        m.field_mut(Field::AppName).set("Long");
+        assert!(m.form_add_app().unwrap_err().contains("260 characters"));
+        // Remove, then save: the store keeps the change.
+        click(&mut m, &mut te, &fonts, Hit::FormRemoveApp(0));
+        assert_eq!(m.apps.len(), 1);
+        let c = m.form().unwrap();
+        assert_eq!(
+            (c.opens, c.apps[0].program.as_str()),
+            (Opens::Apps, "||calc")
+        );
+        // Back to Desktop keeps the list for later, but connects a desktop.
+        click(&mut m, &mut te, &fonts, Hit::FormOpens(0));
+        assert_eq!(m.opens, Opens::Desktop);
+        m.field_mut(Field::Password).set("pw");
+        match m.connect() {
+            Some(Action::Connect { cfg, .. }) => assert!(cfg.remote_app.is_none()),
+            _ => panic!("expected Connect"),
+        }
     }
 }

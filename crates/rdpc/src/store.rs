@@ -43,6 +43,71 @@ pub struct Connection {
     /// Sections taken from the group instead of this connection.
     #[serde(default)]
     pub inherit: Inherit,
+    /// The desktop, or single programs in their own windows (RemoteApp).
+    /// Per connection, never inherited; missing in older files: Desktop.
+    #[serde(default, skip_serializing_if = "Opens::is_desktop")]
+    pub opens: Opens,
+    /// The programs an Apps connection offers (its own, not inherited).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub apps: Vec<AppEntry>,
+}
+
+/// What a connection opens.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Opens {
+    #[default]
+    Desktop,
+    /// RemoteApp: each program in its own window on this PC's desktop.
+    Apps,
+}
+
+impl Opens {
+    fn is_desktop(&self) -> bool {
+        *self == Opens::Desktop
+    }
+}
+
+/// A program an Apps connection starts (MS-RDPERP Client Execute PDU).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AppEntry {
+    /// Shown in the sidebar and the session tab.
+    pub name: String,
+    /// A published alias such as `||Excel`, or a path on the server.
+    pub program: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub args: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub working_dir: String,
+}
+
+impl AppEntry {
+    pub fn remote_app(&self) -> rdp::RemoteApp {
+        rdp::RemoteApp {
+            program: self.program.clone(),
+            args: self.args.clone(),
+            working_dir: self.working_dir.clone(),
+        }
+    }
+}
+
+/// The name an app gets when none is typed: the alias or file name without
+/// its extension, first letter capitalised (`||excel` -> Excel,
+/// `C:\Windows\notepad.exe` -> Notepad).
+pub fn default_app_name(program: &str) -> String {
+    let p = program.trim().trim_matches('"');
+    let p = p.strip_prefix("||").unwrap_or(p);
+    let file = p.rsplit(['\\', '/']).next().unwrap_or(p);
+    let stem = match file.rsplit_once('.') {
+        Some((s, _)) if !s.is_empty() => s,
+        _ => file,
+    };
+    let mut c = stem.chars();
+    match c.next() {
+        Some(f) => f.to_uppercase().chain(c).collect(),
+        None => String::new(),
+    }
 }
 
 /// Which settings come from the enclosing group (or, for a group, its parent).
@@ -778,6 +843,59 @@ mod tests {
         let list: Vec<Connection> = serde_json::from_str(old).unwrap();
         assert_eq!(list[0].options, SessionOptions::default());
         assert_eq!(list[0].password, None);
+        assert_eq!(list[0].opens, Opens::Desktop);
+        assert!(list[0].apps.is_empty());
+    }
+
+    #[test]
+    fn apps_round_trip_and_desktop_files_stay_unchanged() {
+        let c = Connection {
+            name: "office".into(),
+            opens: Opens::Apps,
+            apps: vec![
+                AppEntry {
+                    name: "Excel".into(),
+                    program: "||Excel".into(),
+                    ..Default::default()
+                },
+                AppEntry {
+                    name: "Report".into(),
+                    program: r"C:\Tools\report.exe".into(),
+                    args: "/q %USERNAME%".into(),
+                    working_dir: r"C:\Tools".into(),
+                },
+            ],
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&c).unwrap();
+        assert!(json.contains(r#""opens":"apps""#), "{json}");
+        let back: Connection = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, c);
+        // Through the store file, and through inheritance: apps are the
+        // connection's own, whatever the group says.
+        let mut s = store_with(vec![], vec![c.clone()]);
+        s.ensure_group("Work");
+        s.connections[0].group = "Work".into();
+        s.connections[0].inherit = Inherit::ALL;
+        let (_, c2) = parse(&s.file_json(false).unwrap()).unwrap();
+        assert_eq!(c2[0].apps, c.apps);
+        let r = s.resolve(&s.connections[0]);
+        assert_eq!((r.opens, r.apps.len()), (Opens::Apps, 2));
+        // A desktop connection writes neither field.
+        let plain = serde_json::to_string(&Connection::default()).unwrap();
+        assert!(
+            !plain.contains("opens") && !plain.contains("apps"),
+            "{plain}"
+        );
+    }
+
+    #[test]
+    fn default_app_names() {
+        assert_eq!(default_app_name("||excel"), "Excel");
+        assert_eq!(default_app_name(r#""C:\Windows\notepad.exe""#), "Notepad");
+        assert_eq!(default_app_name("/opt/app/tool"), "Tool");
+        assert_eq!(default_app_name(".hidden"), ".hidden");
+        assert_eq!(default_app_name("  "), "");
     }
 
     #[test]

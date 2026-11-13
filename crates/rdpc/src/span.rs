@@ -6,6 +6,10 @@
 //! window shows the rectangle at its monitor's offset in it and maps its
 //! pointer back into it. The first window carries the session bar, which
 //! hides and shows at the top edge.
+//!
+//! RemoteApp windows (see `remoteapp`) are the same kind of window without
+//! the bar: each shows its remote window's rectangle, which may start left
+//! of or above the framebuffer (a window partly off the desktop).
 
 use std::num::NonZeroU32;
 use std::rc::Rc;
@@ -23,7 +27,7 @@ pub struct SpanSpec {
     /// The monitor on this PC's desktop: x, y, width, height (physical pixels).
     pub rect: (i32, i32, i32, i32),
     /// Where that monitor's picture starts in the session framebuffer.
-    pub fb: (usize, usize),
+    pub fb: (i32, i32),
     /// The first window shows the session bar.
     pub first: bool,
     pub title: String,
@@ -39,7 +43,7 @@ pub struct SpanWin {
     pub window: Rc<Window>,
     surface: Surface<Rc<Window>, Rc<Window>>,
     pub session: u64,
-    pub fb: (usize, usize),
+    pub fb: (i32, i32),
     pub size: (usize, usize),
     first: bool,
     title: String,
@@ -61,17 +65,59 @@ fn sb(x: usize, y: usize, w: usize, h: usize) -> Option<softbuffer::Rect> {
 }
 
 /// The part of a damaged rectangle `d` (framebuffer coordinates) that falls
-/// on a monitor at `fb` of size `size`, in that monitor's coordinates.
+/// on a window showing the framebuffer from `fb` (may be negative) at size
+/// `size`, in that window's coordinates.
 pub fn clip_damage(
     d: (usize, usize, usize, usize),
-    fb: (usize, usize),
+    fb: (i32, i32),
     size: (usize, usize),
 ) -> Option<(usize, usize, usize, usize)> {
-    let x0 = d.0.max(fb.0);
-    let y0 = d.1.max(fb.1);
-    let x1 = (d.0 + d.2).min(fb.0 + size.0);
-    let y1 = (d.1 + d.3).min(fb.1 + size.1);
-    (x0 < x1 && y0 < y1).then(|| (x0 - fb.0, y0 - fb.1, x1 - x0, y1 - y0))
+    let (ox, oy) = (fb.0 as i64, fb.1 as i64);
+    let x0 = (d.0 as i64).max(ox);
+    let y0 = (d.1 as i64).max(oy);
+    let x1 = (d.0 as i64 + d.2 as i64).min(ox + size.0 as i64);
+    let y1 = (d.1 as i64 + d.3 as i64).min(oy + size.1 as i64);
+    (x0 < x1 && y0 < y1).then(|| {
+        (
+            (x0 - ox) as usize,
+            (y0 - oy) as usize,
+            (x1 - x0) as usize,
+            (y1 - y0) as usize,
+        )
+    })
+}
+
+/// Copies the framebuffer rectangle at `origin + (x0, y0)` of `cw` x `ch`
+/// into `px` (a `w` pixels wide window picture) at (x0, y0); parts outside
+/// the framebuffer become black.
+#[allow(clippy::too_many_arguments)]
+pub fn copy_from_fb(
+    px: &mut [u32],
+    w: usize,
+    fb: &rdp::Framebuffer,
+    origin: (i32, i32),
+    x0: usize,
+    y0: usize,
+    cw: usize,
+    ch: usize,
+) {
+    for row in 0..ch {
+        let dst = (y0 + row) * w + x0;
+        let line = &mut px[dst..dst + cw];
+        let sy = origin.1 as i64 + (y0 + row) as i64;
+        let sx = origin.0 as i64 + x0 as i64;
+        // Source columns that exist: [a, b) of the line.
+        let a = (-sx).clamp(0, cw as i64) as usize;
+        let b = (fb.width as i64 - sx).clamp(0, cw as i64) as usize;
+        if sy < 0 || sy >= fb.height as i64 || a >= b {
+            line.fill(0);
+            continue;
+        }
+        let s = sy as usize * fb.width + (sx + a as i64) as usize;
+        line[..a].fill(0);
+        line[a..b].copy_from_slice(&fb.pixels[s..s + (b - a)]);
+        line[b..].fill(0);
+    }
 }
 
 impl SpanWin {
@@ -151,8 +197,8 @@ impl SpanWin {
 
     /// The framebuffer position of a point in this window.
     pub fn to_session(&self, x: i32, y: i32, fb_size: (usize, usize)) -> (u16, u16) {
-        let fx = (self.fb.0 as i32 + x).clamp(0, fb_size.0.saturating_sub(1) as i32);
-        let fy = (self.fb.1 as i32 + y).clamp(0, fb_size.1.saturating_sub(1) as i32);
+        let fx = (self.fb.0 + x).clamp(0, fb_size.0.saturating_sub(1) as i32);
+        let fy = (self.fb.1 + y).clamp(0, fb_size.1.saturating_sub(1) as i32);
         (fx as u16, fy as u16)
     }
 
@@ -181,18 +227,7 @@ impl SpanWin {
         };
         let full = full || buf.age() == 0;
         let copy = |px: &mut [u32], x0: usize, y0: usize, cw: usize, ch: usize| {
-            for row in 0..ch {
-                let dst = (y0 + row) * w + x0;
-                let (sy, sx) = (fy + y0 + row, fx + x0);
-                if sy < fb.height && sx < fb.width {
-                    let n = cw.min(fb.width - sx);
-                    let s = sy * fb.width + sx;
-                    px[dst..dst + n].copy_from_slice(&fb.pixels[s..s + n]);
-                    px[dst + n..dst + cw].fill(0);
-                } else {
-                    px[dst..dst + cw].fill(0);
-                }
-            }
+            copy_from_fb(px, w, fb, (fx, fy), x0, y0, cw, ch)
         };
         let mut rects = Vec::new();
         if full {
@@ -291,7 +326,7 @@ fn paint_bar(
 
 #[cfg(test)]
 mod tests {
-    use super::clip_damage;
+    use super::{clip_damage, copy_from_fb};
 
     #[test]
     fn damage_lands_on_the_right_monitor() {
@@ -308,5 +343,38 @@ mod tests {
             clip_damage((2000, 1200, 5, 5), right.0, right.1),
             Some((80, 1200, 5, 5))
         );
+    }
+
+    #[test]
+    fn damage_on_a_window_partly_off_the_desktop() {
+        // A RemoteApp window 100 x 50 whose picture starts at (-30, -10).
+        let (o, size) = ((-30, -10), (100, 50));
+        assert_eq!(clip_damage((0, 0, 10, 10), o, size), Some((30, 10, 10, 10)));
+        assert_eq!(
+            clip_damage((60, 30, 50, 50), o, size),
+            Some((90, 40, 10, 10))
+        );
+        assert_eq!(clip_damage((70, 0, 5, 5), o, size), None, "right of it");
+        assert_eq!(clip_damage((0, 40, 5, 5), o, size), None, "below it");
+    }
+
+    #[test]
+    fn copy_fills_what_the_framebuffer_lacks_with_black() {
+        let mut fb = rdp::Framebuffer::new(4, 2);
+        for (i, p) in fb.pixels.iter_mut().enumerate() {
+            *p = i as u32 + 1;
+        }
+        // A 3 x 2 window starting one pixel left of and above the framebuffer.
+        let mut px = vec![9u32; 6];
+        copy_from_fb(&mut px, 3, &fb, (-1, -1), 0, 0, 3, 2);
+        assert_eq!(px, [0, 0, 0, 0, 1, 2]);
+        // Off the right edge.
+        let mut px = vec![9u32; 6];
+        copy_from_fb(&mut px, 3, &fb, (2, 0), 0, 0, 3, 2);
+        assert_eq!(px, [3, 4, 0, 7, 8, 0]);
+        // Only a damaged part is written.
+        let mut px = vec![9u32; 6];
+        copy_from_fb(&mut px, 3, &fb, (0, 0), 1, 1, 1, 1);
+        assert_eq!(px, [9, 9, 9, 9, 6, 9]);
     }
 }

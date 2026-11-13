@@ -31,6 +31,8 @@ use crate::store::{SessionOptions, Store, WinKeys};
 use crate::theme;
 use crate::ui::{self, Action, Fonts, Key, SharedDrive, TabState, Ui};
 
+mod rail;
+
 pub enum UserEvent {
     Session(u64, session::Event),
     /// The frame hook saw the maximise button or window state change.
@@ -137,6 +139,8 @@ struct Session {
     cert_reply: Option<std::sync::mpsc::Sender<bool>>,
     /// Shown in its own windows on chosen monitors (see `span`).
     spanned: bool,
+    /// RemoteApp: its apps' windows on this PC's desktop (see `remoteapp`).
+    rail: Option<crate::remoteapp::RailSession>,
 }
 
 #[derive(Clone, PartialEq)]
@@ -192,6 +196,8 @@ pub struct App {
     spans: Vec<crate::span::SpanWin>,
     pending_spans: Vec<crate::span::SpanSpec>,
     span_focus: Option<u64>,
+    /// The RemoteApp session whose app window has the keyboard.
+    app_focus: Option<u64>,
     settings: crate::settings::AppSettings,
     /// The last keyboard or mouse input (idle auto-lock).
     last_input: std::time::Instant,
@@ -227,6 +233,7 @@ pub fn run(direct: Option<(String, Config)>) -> i32 {
         spans: Vec::new(),
         pending_spans: Vec::new(),
         span_focus: None,
+        app_focus: None,
         settings: crate::settings::AppSettings::load(),
         last_input: std::time::Instant::now(),
         exit_code: 0,
@@ -350,7 +357,16 @@ impl App {
                     .any(|t| t.id == id && t.win_keys != WinKeys::Local)
             })
         });
+        // App windows are never full screen: only "Remote" sends the keys.
+        let app = self.app_focus.is_some_and(|id| {
+            self.win.as_ref().is_some_and(|m| {
+                m.ui.tabs
+                    .iter()
+                    .any(|t| t.id == id && t.win_keys == WinKeys::Remote)
+            })
+        });
         let on = span
+            || app
             || self.win.as_ref().is_some_and(|m| {
                 let ui = &m.ui;
                 ui.window_active
@@ -391,26 +407,41 @@ impl App {
         (worker, controls)
     }
 
-    fn start_session(&mut self, name: String, mut cfg: Config, fit: bool, opts: SessionOptions) {
+    fn start_session(
+        &mut self,
+        name: String,
+        mut cfg: Config,
+        fit: bool,
+        opts: SessionOptions,
+        apps: Vec<crate::store::AppEntry>,
+    ) {
         // Auto scale follows this PC's Windows scaling.
         cfg.scale = opts.scale.unwrap_or_else(|| self.auto_scale());
         cfg.verify_certificate = Some(certificate_check(self.proxy.clone(), self.next_id));
         cfg.keyboard_layout = crate::keyhook::local_layout();
         // Picture quality is fixed at logon; reconnects keep this config.
         opts.quality.apply(&mut cfg);
+        // RemoteApp: the desktop is all monitors; apps get their own windows.
+        let rail = cfg
+            .remote_app
+            .is_some()
+            .then(|| Self::rail_prepare(&mut cfg, apps));
         // Chosen monitors: the session spans them, full screen.
-        let chosen = if opts.monitors.is_empty() {
+        let chosen = if opts.monitors.is_empty() || rail.is_some() {
             Vec::new()
         } else {
             crate::monitors::chosen(&crate::monitors::list(), &opts.monitors)
         };
-        if !opts.monitors.is_empty() && chosen.is_empty() {
+        if !opts.monitors.is_empty() && chosen.is_empty() && rail.is_none() {
             self.message(
                 "The chosen monitors are not connected; using this window.",
                 theme::WARN,
             );
         }
-        cfg.monitors = chosen.iter().map(|m| m.monitor.clone()).collect();
+        if rail.is_none() {
+            cfg.monitors = chosen.iter().map(|m| m.monitor.clone()).collect();
+        }
+        let fit = fit && rail.is_none();
         // One window per chosen monitor, each showing its part of the desktop.
         let span: Vec<crate::span::SpanSpec> = match crate::monitors::bounds(&chosen) {
             None => Vec::new(),
@@ -420,10 +451,7 @@ impl App {
                 .map(|(i, m)| crate::span::SpanSpec {
                     session: 0,
                     rect: (m.monitor.left, m.monitor.top, m.width(), m.height()),
-                    fb: (
-                        (m.monitor.left - bx) as usize,
-                        (m.monitor.top - by) as usize,
-                    ),
+                    fb: (m.monitor.left - bx, m.monitor.top - by),
                     first: i == 0,
                     title: name.clone(),
                 })
@@ -436,6 +464,7 @@ impl App {
         if let Some(w) = &mut self.win {
             w.ui.open_tab(id, name, cfg.host.clone(), fit);
         }
+        let remote_app = rail.is_some();
         self.sessions.insert(
             id,
             Session {
@@ -450,8 +479,12 @@ impl App {
                 retry_pending: false,
                 cert_reply: None,
                 spanned: false,
+                rail,
             },
         );
+        if remote_app {
+            self.rail_ended(id); // the tab's view, empty until the session is up
+        }
         self.apply_options(id, &opts);
         if !span.is_empty() {
             if let Some(s) = self.sessions.get_mut(&id) {
@@ -564,6 +597,7 @@ impl App {
             s.cursor = RemoteCursor::Default;
             s.cursors.clear();
         }
+        self.rail_reset(id);
         if let Some(t) = self.win.as_mut().and_then(|w| w.ui.tab_mut(id)) {
             t.state = TabState::Connecting;
         }
@@ -587,11 +621,15 @@ impl App {
 
     fn handle_action(&mut self, action: Action) {
         match action {
+            Action::ExecApp(id, app) => self.rail_exec(id, app),
+            Action::RailFocus(id, w) => self.rail_focus(id, w),
+            Action::RailClose(id, w) => self.rail_close(id, w),
             Action::Connect {
                 name,
                 mut cfg,
                 fit,
                 opts,
+                apps,
             } => {
                 if fit && let Some(m) = &self.win {
                     let (w, h) = m.ui.session_size_for(m.size.0 as i32, m.size.1 as i32);
@@ -599,7 +637,7 @@ impl App {
                     cfg.width = ((w.clamp(200, 8192) as u16) & !1).max(200);
                     cfg.height = h.clamp(200, 8192) as u16;
                 }
-                self.start_session(name, *cfg, fit, opts);
+                self.start_session(name, *cfg, fit, opts, apps);
             }
             Action::SetQuality(id, q) => {
                 // Used by the next logon of this session.
@@ -1398,6 +1436,7 @@ impl App {
                 t.spanned = false;
             }
         }
+        self.rail_ended(id);
         // The worker's recorder finishes its file when the worker goes.
         if let Some(t) = self.win.as_mut().and_then(|w| w.ui.tab_mut(id)) {
             t.recording = false;
@@ -1523,13 +1562,19 @@ impl ApplicationHandler<UserEvent> for App {
             }
             self.dirty();
         }
-        let lock_at = self.auto_lock_deadline();
+        // RemoteApp sessions whose apps all closed end after a while.
+        let rail_at = self.rail_timers();
+        let lock_at = [self.auto_lock_deadline(), rail_at]
+            .into_iter()
+            .flatten()
+            .min();
+        let wait = |t: Option<std::time::Instant>| match t {
+            Some(t) => ControlFlow::WaitUntil(t),
+            None => ControlFlow::Wait,
+        };
         let settle = self.win.as_ref().and_then(|m| m.settle);
         let Some(t) = settle else {
-            match lock_at {
-                Some(t) => el.set_control_flow(ControlFlow::WaitUntil(t)),
-                None => el.set_control_flow(ControlFlow::Wait),
-            }
+            el.set_control_flow(wait(lock_at));
             return;
         };
         if std::time::Instant::now() >= t {
@@ -1538,9 +1583,9 @@ impl ApplicationHandler<UserEvent> for App {
                 m.shown.clear();
             }
             self.dirty();
-            el.set_control_flow(ControlFlow::Wait);
+            el.set_control_flow(wait(lock_at));
         } else {
-            el.set_control_flow(ControlFlow::WaitUntil(t));
+            el.set_control_flow(wait(Some(lock_at.map_or(t, |l| l.min(t)))));
         }
     }
 
@@ -1630,7 +1675,7 @@ impl ApplicationHandler<UserEvent> for App {
             }
         }
         if let Some((name, cfg)) = self.direct.take() {
-            self.start_session(name, cfg, false, SessionOptions::default());
+            self.start_session(name, cfg, false, SessionOptions::default(), Vec::new());
         }
     }
 
@@ -1681,12 +1726,12 @@ impl ApplicationHandler<UserEvent> for App {
                 return self.message(format!("Update failed: {e}"), theme::ERR);
             }
             UserEvent::HookKey(scancode, extended, down) => {
-                if let Some(id) = self
+                let main = self
                     .win
                     .as_ref()
                     .filter(|m| m.ui.session_focus)
-                    .and_then(|m| m.ui.session_area.map(|(id, _)| id))
-                {
+                    .and_then(|m| m.ui.session_area.map(|(id, _)| id));
+                if let Some(id) = self.app_focus.or(main) {
                     self.send(
                         id,
                         vec![InputEvent::Key {
@@ -1843,6 +1888,12 @@ impl ApplicationHandler<UserEvent> for App {
                 };
                 self.apply_cursor();
                 self.apply_span_cursor(id);
+                self.apply_rail_cursor(id);
+            }
+            session::Event::RailReady(handle) => self.rail_ready(id, handle),
+            session::Event::Rail(events) => self.rail_events(el, id, events),
+            session::Event::Frame if self.sessions.get(&id).is_some_and(|s| s.rail.is_some()) => {
+                self.render_rail(id);
             }
             session::Event::Frame if self.sessions.get(&id).is_some_and(|s| s.spanned) => {
                 self.render_spans(id);
@@ -1938,6 +1989,9 @@ impl App {
     fn window_event_inner(&mut self, _el: &ActiveEventLoop, wid: WindowId, event: WindowEvent) {
         if let Some(i) = self.spans.iter().position(|s| s.window.id() == wid) {
             return self.span_event(i, event);
+        }
+        if let Some((id, i)) = self.rail_window(wid) {
+            return self.rail_window_event(id, i, event);
         }
         if self.win.is_none() {
             return;

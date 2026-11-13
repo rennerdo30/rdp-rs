@@ -25,6 +25,10 @@ pub enum Event {
     },
     /// The remote cursor changed shape (or was hidden / reset).
     Pointer(rdp::PointerUpdate),
+    /// RemoteApp: the window model and actions, right after `Connected`.
+    RailReady(rdp::RailHandle),
+    /// RemoteApp window and channel events, in order.
+    Rail(Vec<rdp::RailEvent>),
     Failed(String),
 }
 
@@ -147,6 +151,9 @@ fn run(
         s.full = true;
     }
     emit(Event::Connected(client.info().clone()));
+    if let Some(rail) = client.rail() {
+        emit(Event::RailReady(rail));
+    }
 
     loop {
         loop {
@@ -198,6 +205,9 @@ fn run(
         }
         if let Some(p) = out.pointer {
             emit(Event::Pointer(p));
+        }
+        if !out.rail.is_empty() {
+            emit(Event::Rail(out.rail));
         }
         if let Some(reason) = out.closed {
             if reason.reconnectable {
