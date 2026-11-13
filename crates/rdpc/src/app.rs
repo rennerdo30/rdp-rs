@@ -356,6 +356,11 @@ impl App {
                 }
                 self.start_session(name, *cfg, fit, opts);
             }
+            Action::Batch(actions) => {
+                for a in actions {
+                    self.handle_action(a);
+                }
+            }
             Action::Disconnect(id) => {
                 if let Some(w) = self.sessions.get_mut(&id).and_then(|s| s.worker.as_mut()) {
                     w.close();

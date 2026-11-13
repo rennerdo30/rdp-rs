@@ -9,7 +9,7 @@
 
 use ffwd_render::{Canvas, FontId, Rect, TextEngine};
 
-use crate::store::{Connection, SessionOptions, Store};
+use crate::store::{Connection, Group, Inherit, SessionOptions, Store, normalize_path, parent_of};
 use crate::text_field::TextField;
 use crate::theme::*;
 
@@ -79,19 +79,38 @@ pub enum Field {
     /// Master password (unlock or create), and its confirmation.
     Master,
     MasterConfirm,
+    /// Group path of a connection, or the parent path of a group.
+    GroupPath,
 }
 
-const FORM: [Field; 5] = [
+/// Fields cleared for a new connection or group.
+const FORM: [Field; 6] = [
     Field::Name,
     Field::Host,
     Field::Port,
     Field::User,
     Field::Password,
+    Field::GroupPath,
 ];
+
+/// One sidebar row: a group or a connection, with its tree depth.
+#[derive(Clone, Copy)]
+enum Row {
+    Group(usize, usize),
+    Conn(usize, usize),
+}
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Hit {
     Row(usize),
+    /// Sidebar group row (opens the group form) and its expand arrow.
+    GroupRow(usize),
+    GroupToggle(usize),
+    NewGroup,
+    /// New connection inside the open group.
+    NewInGroup,
+    /// Connection/group form: inherit chip (credentials, display, sharing).
+    FormInherit(u8),
     New,
     Field(Field),
     Size(usize),
@@ -204,6 +223,8 @@ pub enum Action {
         master: zeroize::Zeroizing<String>,
     },
     Lock,
+    /// Several actions at once ("Connect all" of a group).
+    Batch(Vec<Action>),
 }
 
 pub enum Key {
@@ -231,6 +252,12 @@ pub enum Key {
 pub struct Ui {
     store: Store,
     selected: Option<usize>,
+    /// Editing a group instead of a connection: Some(None) is a new group.
+    group_edit: Option<Option<String>>,
+    /// Inherit choices of the edited connection or group.
+    inherit: Inherit,
+    /// Collapsed group paths in the sidebar.
+    collapsed: std::collections::HashSet<String>,
     /// Session settings of the connection being edited.
     opts: SessionOptions,
     /// The edited connection keeps (or gets) a saved password.
@@ -241,7 +268,7 @@ pub struct Ui {
     /// Key derivation running.
     pub unlocking: bool,
     vault_error: Option<String>,
-    fields: [TextField; 10],
+    fields: [TextField; 11],
     size: usize,
     focus: Option<Field>,
     pub tabs: Vec<Tab>,
@@ -287,6 +314,9 @@ impl Ui {
         let mut m = Ui {
             store,
             selected: None,
+            group_edit: None,
+            inherit: Inherit::default(),
+            collapsed: Default::default(),
             opts: SessionOptions::default(),
             save_password: false,
             vault_setup: false,
@@ -319,6 +349,7 @@ impl Ui {
         m.fields[Field::Password as usize] = TextField::secret();
         m.fields[Field::Master as usize] = TextField::secret();
         m.fields[Field::MasterConfirm as usize] = TextField::secret();
+        m.store.adopt_groups();
         if m.store.connections.is_empty() {
             m.new_connection();
         } else {
@@ -402,30 +433,142 @@ impl Ui {
             return;
         };
         self.selected = Some(i);
+        self.group_edit = None;
         self.field_mut(Field::Name).set(&c.name);
         self.field_mut(Field::Host).set(&c.host);
         self.field_mut(Field::Port).set(&c.port.to_string());
         self.field_mut(Field::User).set(&c.user);
         self.field_mut(Field::Password).set("");
-        self.size = SIZES
-            .iter()
-            .position(|&s| s == (c.width, c.height))
-            .map_or(0, |i| i + 1);
+        self.field_mut(Field::GroupPath).set(&c.group);
+        self.size = size_index(c.width, c.height);
         self.opts = c.options.clone();
         self.save_password = c.password.is_some();
+        self.inherit = c.inherit;
         self.focus = Some(Field::Password);
     }
 
-    fn new_connection(&mut self) {
+    fn select_group(&mut self, gi: usize) {
+        let Some(g) = self.store.groups.get(gi).cloned() else {
+            return;
+        };
         self.selected = None;
+        self.group_edit = Some(Some(g.path.clone()));
+        for f in FORM {
+            self.field_mut(f).set("");
+        }
+        self.field_mut(Field::Name).set(g.name());
+        self.field_mut(Field::GroupPath).set(g.parent());
+        self.field_mut(Field::User).set(&g.user);
+        self.size = size_index(g.width, g.height);
+        self.opts = g.options.clone();
+        self.save_password = g.password.is_some();
+        self.inherit = g.inherit;
+        self.focus = None;
+    }
+
+    /// The group a new connection or group goes into: the open group, or
+    /// the group of the selected connection.
+    fn context_group(&self) -> String {
+        match &self.group_edit {
+            Some(Some(path)) => path.clone(),
+            Some(None) => normalize_path(&self.field(Field::GroupPath).text),
+            None => self
+                .selected
+                .and_then(|i| self.store.connections.get(i))
+                .map(|c| c.group.clone())
+                .unwrap_or_default(),
+        }
+    }
+
+    fn new_connection(&mut self) {
+        self.new_connection_in("");
+    }
+
+    /// A new connection; inside a group it inherits everything to start with.
+    fn new_connection_in(&mut self, group: &str) {
+        self.selected = None;
+        self.group_edit = None;
         for f in FORM {
             self.field_mut(f).set("");
         }
         self.field_mut(Field::Port).set("3389");
+        self.field_mut(Field::GroupPath).set(group);
         self.size = 0;
         self.opts = SessionOptions::default();
         self.save_password = false;
+        self.inherit = if group.is_empty() {
+            Inherit::default()
+        } else {
+            Inherit::ALL
+        };
         self.focus = Some(Field::Host);
+    }
+
+    fn new_group(&mut self) {
+        let parent = self.context_group();
+        self.selected = None;
+        self.group_edit = Some(None);
+        for f in FORM {
+            self.field_mut(f).set("");
+        }
+        self.field_mut(Field::GroupPath).set(&parent);
+        self.size = 0;
+        self.opts = SessionOptions::default();
+        self.save_password = false;
+        self.inherit = if parent.is_empty() {
+            Inherit::default()
+        } else {
+            Inherit::ALL
+        };
+        self.focus = Some(Field::Name);
+    }
+
+    /// The saved password of the edited connection or group.
+    fn own_password(&self) -> Option<&String> {
+        match &self.group_edit {
+            Some(Some(path)) => self
+                .store
+                .group_index(path)
+                .and_then(|i| self.store.groups[i].password.as_ref()),
+            Some(None) => None,
+            None => self
+                .selected
+                .and_then(|i| self.store.connections.get(i))
+                .and_then(|c| c.password.as_ref()),
+        }
+    }
+
+    /// The password to store: what was typed, else the saved one (vault only).
+    fn form_password(&self, inherited: bool) -> Option<String> {
+        if inherited {
+            return self.own_password().cloned();
+        }
+        if !(self.save_password && self.store.is_vault()) {
+            return None;
+        }
+        let typed = &self.field(Field::Password).text;
+        if typed.is_empty() {
+            self.own_password().cloned()
+        } else {
+            Some(typed.clone())
+        }
+    }
+
+    /// Inherit choices for the typed group path (nothing at the top level).
+    fn form_inherit(&self) -> Inherit {
+        if normalize_path(&self.field(Field::GroupPath).text).is_empty() {
+            Inherit::default()
+        } else {
+            self.inherit
+        }
+    }
+
+    fn form_size(&self) -> (u16, u16) {
+        if self.size == 0 {
+            (0, 0)
+        } else {
+            SIZES[self.size - 1]
+        }
     }
 
     fn form(&self) -> Result<Connection, String> {
@@ -439,19 +582,16 @@ impl Ui {
                 .parse::<u16>()
                 .map_err(|_| format!("Port {p:?} is not a number from 1 to 65535."))?,
         };
+        let inherit = self.form_inherit();
         let user = self.field(Field::User).text.trim().to_string();
-        if user.is_empty() {
+        if user.is_empty() && !inherit.credentials {
             return Err("Enter a user name.".into());
         }
         let name = match self.field(Field::Name).text.trim() {
             "" => host.clone(),
             n => n.to_string(),
         };
-        let (width, height) = if self.size == 0 {
-            (0, 0)
-        } else {
-            SIZES[self.size - 1]
-        };
+        let (width, height) = self.form_size();
         Ok(Connection {
             name,
             host,
@@ -460,26 +600,57 @@ impl Ui {
             width,
             height,
             options: self.opts.clone(),
-            password: if self.save_password && self.store.is_vault() {
-                let typed = &self.field(Field::Password).text;
-                if typed.is_empty() {
-                    self.selected
-                        .and_then(|i| self.store.connections[i].password.clone())
-                } else {
-                    Some(typed.clone())
-                }
-            } else {
-                None
-            },
+            password: self.form_password(inherit.credentials),
+            group: normalize_path(&self.field(Field::GroupPath).text),
+            inherit,
+        })
+    }
+
+    fn group_form(&self) -> Result<Group, String> {
+        let name = self.field(Field::Name).text.trim().to_string();
+        if name.is_empty() {
+            return Err("Enter a group name.".into());
+        }
+        if name.contains(['/', '\\']) {
+            return Err(r"A group name cannot contain / or \.".into());
+        }
+        let parent = normalize_path(&self.field(Field::GroupPath).text);
+        let path = if parent.is_empty() {
+            name
+        } else {
+            format!("{parent}/{name}")
+        };
+        if let Some(Some(old)) = &self.group_edit
+            && path.starts_with(&format!("{old}/"))
+        {
+            return Err("A group cannot move into itself.".into());
+        }
+        let inherit = self.form_inherit();
+        let (width, height) = self.form_size();
+        Ok(Group {
+            path,
+            user: self.field(Field::User).text.trim().to_string(),
+            password: self.form_password(inherit.credentials),
+            width,
+            height,
+            options: self.opts.clone(),
+            inherit,
         })
     }
 
     fn save(&mut self) {
+        if self.group_edit.is_some() {
+            return self.save_group();
+        }
         let c = match self.form() {
             Ok(c) => c,
             Err(e) => return self.set_message(e, ERR),
         };
         let name = c.name.clone();
+        let group = c.group.clone();
+        if !group.is_empty() {
+            self.store.ensure_group(&group);
+        }
         match self.selected {
             Some(i) => self.store.connections[i] = c,
             None => {
@@ -488,13 +659,60 @@ impl Ui {
             }
         }
         self.field_mut(Field::Name).set(&name);
+        self.field_mut(Field::GroupPath).set(&group);
         match self.store.save() {
             Ok(()) => self.set_message(format!("Saved {name}."), TEXT_2),
             Err(e) => self.set_message(e, ERR),
         }
     }
 
+    fn save_group(&mut self) {
+        let g = match self.group_form() {
+            Ok(g) => g,
+            Err(e) => return self.set_message(e, ERR),
+        };
+        let old = self.group_edit.clone().flatten();
+        if old.as_deref() != Some(g.path.as_str()) && self.store.group_index(&g.path).is_some() {
+            return self.set_message(format!("A group {} already exists.", g.path), ERR);
+        }
+        match &old {
+            Some(old) => self.store.rename_group(old, &g.path),
+            None => self.store.ensure_group(&g.path),
+        }
+        let path = g.path.clone();
+        let Some(i) = self.store.group_index(&path) else {
+            return;
+        };
+        self.store.groups[i] = g;
+        self.group_edit = Some(Some(path.clone()));
+        self.field_mut(Field::GroupPath).set(parent_of(&path));
+        match self.store.save() {
+            Ok(()) => self.set_message(format!("Saved group {path}."), TEXT_2),
+            Err(e) => self.set_message(e, ERR),
+        }
+    }
+
     fn delete(&mut self) {
+        match self.group_edit.clone() {
+            Some(Some(path)) => {
+                self.store.delete_group(&path);
+                if let Err(e) = self.store.save() {
+                    return self.set_message(e, ERR);
+                }
+                self.set_message(
+                    format!("Deleted group {path}; its connections moved up."),
+                    TEXT_2,
+                );
+                if self.store.connections.is_empty() {
+                    self.new_connection();
+                } else {
+                    self.select(0);
+                }
+                return;
+            }
+            Some(None) => return self.new_connection(),
+            None => {}
+        }
         let Some(i) = self.selected else { return };
         let gone = self.store.connections.remove(i);
         if let Err(e) = self.store.save() {
@@ -509,6 +727,14 @@ impl Ui {
     }
 
     fn connect(&mut self) -> Option<Action> {
+        match self.group_edit.clone() {
+            Some(Some(path)) => return self.connect_all(&path),
+            Some(None) => {
+                self.set_message("Save the group first.", ERR);
+                return None;
+            }
+            None => {}
+        }
         let c = match self.form() {
             Ok(c) => c,
             Err(e) => {
@@ -516,14 +742,11 @@ impl Ui {
                 return None;
             }
         };
-        // A typed password wins; otherwise the saved one (vault only).
-        let password = c
-            .password
-            .clone()
-            .unwrap_or_else(|| self.field(Field::Password).text.clone());
-        if self.save_password
+        let typed = self.field(Field::Password).text.clone();
+        if !c.inherit.credentials
+            && self.save_password
             && self.store.is_vault()
-            && !self.field(Field::Password).text.is_empty()
+            && !typed.is_empty()
         {
             // Connecting with "Save password" on remembers what was typed.
             if let Some(i) = self.selected {
@@ -533,33 +756,173 @@ impl Ui {
                 }
             }
         }
-        let mut cfg = rdp::Config::new(&c.host, &c.user, &password);
-        cfg.port = c.port;
-        let fit = c.width == 0;
-        if !fit {
-            cfg.width = c.width;
-            cfg.height = c.height;
+        let r = self.store.resolve(&c);
+        if r.user.is_empty() {
+            self.set_message("No user name: enter one here or in the group.", ERR);
+            return None;
         }
-        self.set_message(format!("Connecting to {}…", c.host), TEXT_2);
-        Some(Action::Connect {
-            name: c.name,
-            cfg: Box::new(cfg),
-            fit,
-            opts: c.options,
-        })
+        // A typed password wins; otherwise the saved one (vault only).
+        let password = if typed.is_empty() {
+            r.password.clone().unwrap_or_default()
+        } else {
+            typed
+        };
+        self.set_message(format!("Connecting to {}…", r.host), TEXT_2);
+        Some(session_action(&r, &password))
     }
 
-    fn visible(&self) -> Vec<usize> {
+    /// Opens every connection in a group (and its sub-groups) that has a
+    /// user and a password: saved, or typed in the group form.
+    fn connect_all(&mut self, path: &str) -> Option<Action> {
+        let typed = self.field(Field::Password).text.clone();
+        let mut acts = Vec::new();
+        let mut skipped = 0;
+        for c in self.store.members(path) {
+            let r = self.store.resolve(c);
+            let pw = r
+                .password
+                .clone()
+                .or_else(|| (!typed.is_empty()).then(|| typed.clone()));
+            match pw {
+                Some(pw) if !r.user.is_empty() => acts.push(session_action(&r, &pw)),
+                _ => skipped += 1,
+            }
+        }
+        let n = acts.len();
+        let msg = match (n, skipped) {
+            (0, 0) => "This group has no connections yet.".to_string(),
+            (0, _) => "No member has a saved password; type one here to use it for all of them."
+                .to_string(),
+            (n, 0) => format!(
+                "Connecting {n} connection{}…",
+                if n == 1 { "" } else { "s" }
+            ),
+            (n, k) => format!("Connecting {n}; {k} skipped (no saved password or user)."),
+        };
+        self.set_message(msg, if n == 0 { ERR } else { TEXT_2 });
+        (n > 0).then_some(Action::Batch(acts))
+    }
+
+    /// Sidebar rows: the group tree, or a flat list of matches while filtering.
+    fn rows(&self) -> Vec<Row> {
         let q = self.field(Field::Filter).text.to_lowercase();
-        (0..self.store.connections.len())
-            .filter(|&i| {
-                let c = &self.store.connections[i];
-                q.is_empty()
-                    || [&c.name, &c.host, &c.user]
+        if !q.is_empty() {
+            return (0..self.store.connections.len())
+                .filter(|&i| {
+                    let c = &self.store.connections[i];
+                    [&c.name, &c.host, &c.user, &c.group]
                         .iter()
                         .any(|s| s.to_lowercase().contains(&q))
+                })
+                .map(|i| Row::Conn(i, 0))
+                .collect();
+        }
+        let mut out = Vec::new();
+        self.tree_rows("", 0, &mut out);
+        out
+    }
+
+    fn tree_rows(&self, path: &str, depth: usize, out: &mut Vec<Row>) {
+        for (gi, g) in self.store.groups.iter().enumerate() {
+            if g.parent() == path {
+                out.push(Row::Group(gi, depth));
+                if !self.collapsed.contains(&g.path) {
+                    self.tree_rows(&g.path, depth + 1, out);
+                }
+            }
+        }
+        for (i, c) in self.store.connections.iter().enumerate() {
+            if c.group == path {
+                out.push(Row::Conn(i, depth));
+            }
+        }
+    }
+
+    /// Connections in sidebar order (keyboard Up/Down).
+    fn visible(&self) -> Vec<usize> {
+        self.rows()
+            .into_iter()
+            .filter_map(|r| match r {
+                Row::Conn(i, _) => Some(i),
+                Row::Group(..) => None,
             })
             .collect()
+    }
+
+    /// One line describing an inherited section: where it comes from and what it is.
+    fn inherited_text(&self, parent: &str, section: u8) -> String {
+        let pick: fn(&Inherit) -> bool = match section {
+            0 => |i| i.credentials,
+            1 => |i| i.display,
+            _ => |i| i.sharing,
+        };
+        let Some(g) = self.store.source_of(parent, &Inherit::ALL, pick) else {
+            return "Inherited, but no group above sets it yet.".into();
+        };
+        let what = match section {
+            0 => {
+                let user = if g.user.is_empty() {
+                    "no user set"
+                } else {
+                    g.user.as_str()
+                };
+                if g.password.is_some() {
+                    format!("{user} · password saved")
+                } else {
+                    user.to_string()
+                }
+            }
+            1 => {
+                let size = if g.width == 0 {
+                    "Fit window".to_string()
+                } else {
+                    format!("{} × {}", g.width, g.height)
+                };
+                let scale = g
+                    .options
+                    .scale
+                    .map_or("Auto scale".to_string(), |v| format!("{v} %"));
+                format!("{size} · {scale}")
+            }
+            _ => {
+                let o = &g.options;
+                let on: Vec<&str> = [
+                    ("Clipboard", o.clipboard),
+                    ("Sound", o.sound),
+                    ("Printers", o.printers),
+                    ("Smart cards", o.smart_cards),
+                ]
+                .iter()
+                .filter(|x| x.1)
+                .map(|x| x.0)
+                .collect();
+                let mut t = if on.is_empty() {
+                    "Nothing shared".to_string()
+                } else {
+                    on.join(", ")
+                };
+                let n = o.drives.len();
+                if n > 0 {
+                    t += &format!(" · {n} folder{}", if n == 1 { "" } else { "s" });
+                }
+                t
+            }
+        };
+        format!("From {}: {what}", g.path)
+    }
+
+    /// Tab order of the visible form fields.
+    fn form_order(&self) -> Vec<Field> {
+        let mut v = vec![Field::Name];
+        if self.group_edit.is_none() {
+            v.extend([Field::Host, Field::Port]);
+        }
+        v.push(Field::GroupPath);
+        if !self.form_inherit().credentials {
+            v.push(Field::User);
+        }
+        v.push(Field::Password);
+        v
     }
 
     fn hit_at(&self, x: i32, y: i32) -> Option<Hit> {
@@ -635,8 +998,38 @@ impl Ui {
                 self.select(i);
                 self.active = None;
             }
+            Hit::GroupRow(gi) => {
+                self.select_group(gi);
+                self.active = None;
+            }
+            Hit::GroupToggle(gi) => {
+                if let Some(g) = self.store.groups.get(gi) {
+                    let path = g.path.clone();
+                    if !self.collapsed.remove(&path) {
+                        self.collapsed.insert(path);
+                    }
+                }
+            }
+            Hit::NewGroup => {
+                self.new_group();
+                self.active = None;
+            }
+            Hit::NewInGroup => {
+                let g = self.context_group();
+                self.new_connection_in(&g);
+            }
+            Hit::FormInherit(i) => {
+                let h = &mut self.inherit;
+                let flag = match i {
+                    0 => &mut h.credentials,
+                    1 => &mut h.display,
+                    _ => &mut h.sharing,
+                };
+                *flag = !*flag;
+            }
             Hit::New => {
-                self.new_connection();
+                let g = self.context_group();
+                self.new_connection_in(&g);
                 self.active = None;
             }
             Hit::Field(f) => self.focus = Some(f),
@@ -771,6 +1164,7 @@ impl Ui {
     }
 
     pub fn vault_opened(&mut self) {
+        self.store.adopt_groups();
         self.unlocking = false;
         self.vault_error = None;
         if self.vault_setup {
@@ -852,7 +1246,8 @@ impl Ui {
             Key::Enter => {}
             Key::Esc => self.focus = None,
             Key::New => {
-                self.new_connection();
+                let g = self.context_group();
+                self.new_connection_in(&g);
                 self.active = None;
             }
             Key::Save if self.active.is_none() => self.save(),
@@ -873,16 +1268,17 @@ impl Ui {
             }
             Key::Tab | Key::BackTab if self.active.is_none() => {
                 let back = matches!(k, Key::BackTab);
-                let i = self.focus.and_then(|f| FORM.iter().position(|&x| x == f));
-                let n = FORM.len();
+                let order = self.form_order();
+                let i = self.focus.and_then(|f| order.iter().position(|&x| x == f));
+                let n = order.len();
                 let next = match (i, back) {
                     (Some(i), false) => (i + 1) % n,
                     (Some(i), true) => (i + n - 1) % n,
                     (None, false) => 0,
                     (None, true) => n - 1,
                 };
-                self.focus = Some(FORM[next]);
-                self.field_mut(FORM[next]).select_all();
+                self.focus = Some(order[next]);
+                self.field_mut(order[next]).select_all();
             }
             Key::Up | Key::Down if self.focus.is_none() || self.focus == Some(Field::Filter) => {
                 let vis = self.visible();
@@ -1021,19 +1417,36 @@ impl Ui {
             self.button(cv, te, f, lr, "Lock", Style::Ghost, Hit::Lock);
             self.title_controls.push((lr.x, lr.right()));
         }
+        let gw = if self.store.is_locked() { 0 } else { p(72.0) };
         self.text_input(
             cv,
             te,
             f,
-            Rect::new(pad, p(44.0), area.w - 2 * pad, p(30.0)),
+            Rect::new(
+                pad,
+                p(44.0),
+                area.w - 2 * pad - if gw > 0 { gw + p(6.0) } else { 0 },
+                p(30.0),
+            ),
             Field::Filter,
             "Filter",
         );
+        if gw > 0 {
+            self.button(
+                cv,
+                te,
+                f,
+                Rect::new(area.w - pad - gw, p(44.0), gw, p(30.0)),
+                "+ Group",
+                Style::Ghost,
+                Hit::NewGroup,
+            );
+        }
 
         let list = Rect::new(0, p(86.0), area.w, area.h - p(86.0));
         let old = cv.set_clip(list);
-        let vis = self.visible();
-        if self.store.connections.is_empty() {
+        let rows = self.rows();
+        if self.store.connections.is_empty() && self.store.groups.is_empty() {
             te.draw_in(
                 cv,
                 f.ui,
@@ -1060,7 +1473,7 @@ impl Ui {
                 },
                 TEXT_4,
             );
-        } else if vis.is_empty() {
+        } else if rows.is_empty() {
             te.draw_in(
                 cv,
                 f.ui,
@@ -1072,67 +1485,143 @@ impl Ui {
             );
         }
         let row_h = p(52.0);
+        let group_h = p(34.0);
         let home = self.active.is_none();
-        for (n, &i) in vis.iter().enumerate() {
-            let r = Rect::new(
-                p(8.0),
-                list.y + n as i32 * (row_h + p(2.0)),
-                area.w - p(16.0),
-                row_h,
-            );
-            if r.y > list.bottom() {
+        let open_group = self.group_edit.clone().flatten();
+        let mut y = list.y;
+        for row in rows {
+            if y > list.bottom() {
                 break;
             }
-            let hit = Hit::Row(i);
-            if home && self.selected == Some(i) {
-                cv.fill_round(r, 6.0 * s, BG_SELECT);
-                cv.fill_round(
-                    Rect::new(r.x, r.y + p(12.0), p(3.0), r.h - p(24.0)),
-                    1.5 * s,
-                    ACCENT,
-                );
-            } else if self.hover == Some(hit) {
-                cv.fill_round(r, 6.0 * s, BG_HOVER);
+            match row {
+                Row::Group(gi, depth) => {
+                    let indent = depth as i32 * p(16.0);
+                    let r = Rect::new(p(8.0), y, area.w - p(16.0), group_h);
+                    y += group_h + p(2.0);
+                    let g = &self.store.groups[gi];
+                    let (path, name) = (g.path.clone(), g.name().to_string());
+                    let count = self.store.members(&path).count().to_string();
+                    let hovered = matches!(self.hover, Some(Hit::GroupRow(h) | Hit::GroupToggle(h)) if h == gi);
+                    if home && open_group.as_deref() == Some(path.as_str()) {
+                        cv.fill_round(r, 6.0 * s, BG_SELECT);
+                        cv.fill_round(
+                            Rect::new(r.x, r.y + p(9.0), p(3.0), r.h - p(18.0)),
+                            1.5 * s,
+                            ACCENT,
+                        );
+                    } else if hovered {
+                        cv.fill_round(r, 6.0 * s, BG_HOVER);
+                    }
+                    let open = !self.collapsed.contains(&path);
+                    te.draw(
+                        cv,
+                        f.ui,
+                        9.0 * s,
+                        (r.x + indent + p(12.0)) as f32,
+                        (r.y + p(21.0)) as f32,
+                        if open { "▼" } else { "►" },
+                        TEXT_3,
+                        p(14.0) as f32,
+                    );
+                    let cw = te.measure(f.ui, 12.0 * s, &count) as i32;
+                    te.draw(
+                        cv,
+                        f.semi,
+                        13.0 * s,
+                        (r.x + indent + p(28.0)) as f32,
+                        (r.y + p(22.0)) as f32,
+                        &name,
+                        TEXT_2,
+                        (r.w - indent - p(48.0) - cw) as f32,
+                    );
+                    te.draw(
+                        cv,
+                        f.ui,
+                        12.0 * s,
+                        (r.right() - p(14.0) - cw) as f32,
+                        (r.y + p(22.0)) as f32,
+                        &count,
+                        TEXT_4,
+                        (cw + p(2.0)) as f32,
+                    );
+                    self.hits.push((r.intersect(list), Hit::GroupRow(gi)));
+                    self.hits.push((
+                        Rect::new(r.x, r.y, indent + p(28.0), r.h).intersect(list),
+                        Hit::GroupToggle(gi),
+                    ));
+                }
+                Row::Conn(i, depth) => {
+                    let indent = depth as i32 * p(16.0);
+                    let r = Rect::new(p(8.0) + indent, y, area.w - p(16.0) - indent, row_h);
+                    y += row_h + p(2.0);
+                    self.paint_connection_row(cv, te, f, r, list, i, home);
+                }
             }
-            let c = &self.store.connections[i];
-            let dot = self.connection_dot(c);
-            let text_w = r.w - p(24.0) - if dot.is_some() { p(16.0) } else { 0 };
-            te.draw(
-                cv,
-                f.semi,
-                13.5 * s,
-                (r.x + p(14.0)) as f32,
-                (r.y + p(22.0)) as f32,
-                &c.name,
-                TEXT,
-                text_w as f32,
-            );
-            let sub = if c.port == 3389 {
-                format!("{} · {}", c.host, c.user)
-            } else {
-                format!("{}:{} · {}", c.host, c.port, c.user)
-            };
-            te.draw(
-                cv,
-                f.ui,
-                12.0 * s,
-                (r.x + p(14.0)) as f32,
-                (r.y + p(40.0)) as f32,
-                &sub,
-                TEXT_3,
-                text_w as f32,
-            );
-            if let Some(color) = dot {
-                cv.fill_circle(
-                    (r.right() - p(16.0)) as f32,
-                    (r.y + r.h / 2) as f32,
-                    4.0 * s,
-                    color,
-                );
-            }
-            self.hits.push((r.intersect(list), hit));
         }
         cv.set_clip(old);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn paint_connection_row(
+        &mut self,
+        cv: &mut Canvas,
+        te: &mut TextEngine,
+        f: &Fonts,
+        r: Rect,
+        list: Rect,
+        i: usize,
+        home: bool,
+    ) {
+        let s = self.scale;
+        let p = |v: f32| (v * s).round() as i32;
+        let hit = Hit::Row(i);
+        if home && self.selected == Some(i) && self.group_edit.is_none() {
+            cv.fill_round(r, 6.0 * s, BG_SELECT);
+            cv.fill_round(
+                Rect::new(r.x, r.y + p(12.0), p(3.0), r.h - p(24.0)),
+                1.5 * s,
+                ACCENT,
+            );
+        } else if self.hover == Some(hit) {
+            cv.fill_round(r, 6.0 * s, BG_HOVER);
+        }
+        let c = self.store.resolve(&self.store.connections[i]);
+        let dot = self.connection_dot(&c);
+        let text_w = r.w - p(24.0) - if dot.is_some() { p(16.0) } else { 0 };
+        te.draw(
+            cv,
+            f.semi,
+            13.5 * s,
+            (r.x + p(14.0)) as f32,
+            (r.y + p(22.0)) as f32,
+            &c.name,
+            TEXT,
+            text_w as f32,
+        );
+        let sub = if c.port == 3389 {
+            format!("{} · {}", c.host, c.user)
+        } else {
+            format!("{}:{} · {}", c.host, c.port, c.user)
+        };
+        te.draw(
+            cv,
+            f.ui,
+            12.0 * s,
+            (r.x + p(14.0)) as f32,
+            (r.y + p(40.0)) as f32,
+            &sub,
+            TEXT_3,
+            text_w as f32,
+        );
+        if let Some(color) = dot {
+            cv.fill_circle(
+                (r.right() - p(16.0)) as f32,
+                (r.y + r.h / 2) as f32,
+                4.0 * s,
+                color,
+            );
+        }
+        self.hits.push((r.intersect(list), hit));
     }
 
     fn connection_dot(&self, c: &Connection) -> Option<u32> {
@@ -1506,10 +1995,14 @@ impl Ui {
         let fx = x0 + label_w;
         let fw = p(440.0).min(area.right() - p(32.0) - fx).max(p(160.0));
         let form_w = label_w + fw;
+        let group_mode = self.group_edit.is_some();
+        let open_group = self.group_edit.clone().flatten();
 
-        let title = match self.selected {
-            Some(i) => self.store.connections[i].name.clone(),
-            None => "New connection".into(),
+        let title = match (&open_group, self.selected) {
+            (Some(path), _) => path.rsplit('/').next().unwrap_or(path).to_string(),
+            (None, _) if group_mode => "New group".into(),
+            (None, Some(i)) => self.store.connections[i].name.clone(),
+            (None, None) => "New connection".into(),
         };
         te.draw(
             cv,
@@ -1521,9 +2014,28 @@ impl Ui {
             TEXT,
             form_w as f32,
         );
-        let sub = match self.selected {
-            Some(_) => "Saved connection. The password is never stored.",
-            None => "Not saved yet. The password is never stored.",
+        let sub = if let Some(path) = &open_group {
+            let n = self.store.members(path).count();
+            format!(
+                "Group with {n} connection{}. Members take the sections they inherit from here.",
+                if n == 1 { "" } else { "s" }
+            )
+        } else if group_mode {
+            "Not saved yet. Connections in a group can inherit its settings.".to_string()
+        } else {
+            format!(
+                "{} {}",
+                if self.selected.is_some() {
+                    "Saved connection."
+                } else {
+                    "Not saved yet."
+                },
+                if self.store.is_vault() {
+                    "Saved passwords stay in the encrypted vault."
+                } else {
+                    "Passwords are only saved once you set a master password."
+                }
+            )
         };
         te.draw(
             cv,
@@ -1531,7 +2043,7 @@ impl Ui {
             12.5 * s,
             x0 as f32,
             (area.y + p(64.0)) as f32,
-            sub,
+            &sub,
             TEXT_3,
             form_w as f32,
         );
@@ -1550,6 +2062,18 @@ impl Ui {
                 TEXT_2,
             );
         };
+        let summary = |cv: &mut Canvas, te: &mut TextEngine, y: i32, text: &str| {
+            te.draw(
+                cv,
+                f.ui,
+                13.0 * s,
+                fx as f32,
+                (y + p(21.0)) as f32,
+                text,
+                TEXT_3,
+                fw as f32,
+            );
+        };
         label(cv, te, y, "Name");
         self.text_input(
             cv,
@@ -1557,204 +2081,280 @@ impl Ui {
             f,
             Rect::new(fx, y, fw, fh),
             Field::Name,
-            "Defaults to the host",
+            if group_mode {
+                "Group name"
+            } else {
+                "Defaults to the host"
+            },
         );
         y += row;
-        label(cv, te, y, "Host");
-        let port_w = p(96.0);
-        self.text_input(
-            cv,
-            te,
-            f,
-            Rect::new(fx, y, fw - port_w - p(8.0), fh),
-            Field::Host,
-            "Name or IP address",
-        );
-        self.text_input(
-            cv,
-            te,
-            f,
-            Rect::new(fx + fw - port_w, y, port_w, fh),
-            Field::Port,
-            "Port",
-        );
-        y += row;
-        label(cv, te, y, "User");
+        if !group_mode {
+            label(cv, te, y, "Host");
+            let port_w = p(96.0);
+            self.text_input(
+                cv,
+                te,
+                f,
+                Rect::new(fx, y, fw - port_w - p(8.0), fh),
+                Field::Host,
+                "Name or IP address",
+            );
+            self.text_input(
+                cv,
+                te,
+                f,
+                Rect::new(fx + fw - port_w, y, port_w, fh),
+                Field::Port,
+                "Port",
+            );
+            y += row;
+        }
+        label(cv, te, y, if group_mode { "Parent" } else { "Group" });
         self.text_input(
             cv,
             te,
             f,
             Rect::new(fx, y, fw, fh),
-            Field::User,
-            r"DOMAIN\user or user@domain",
-        );
-        y += row;
-        label(cv, te, y, "Password");
-        let saved = self.save_password
-            && self.selected.is_some_and(|i| {
-                self.store
-                    .connections
-                    .get(i)
-                    .is_some_and(|c| c.password.is_some())
-            });
-        let chip_text = if self.save_password {
-            "✓ Save password"
-        } else {
-            "Save password"
-        };
-        let chip_w = te.measure(f.ui, 12.5 * s, chip_text) as i32 + p(24.0);
-        self.text_input(
-            cv,
-            te,
-            f,
-            Rect::new(fx, y, fw - chip_w - p(8.0), fh),
-            Field::Password,
-            if saved {
-                "Saved (type to change)"
+            Field::GroupPath,
+            if group_mode {
+                "None (top level)"
             } else {
-                "Asked for each connection"
+                "None (top level), e.g. Work/Servers"
             },
         );
-        let save_on = self.save_password;
-        self.chip(
-            cv,
-            te,
-            f,
-            fx + fw - chip_w,
-            y,
-            fh,
-            chip_text,
-            save_on,
-            Hit::SavePassword,
-        );
         y += row;
-        label(cv, te, y, "Display");
-        let mut cx = fx;
-        let choices = std::iter::once("Fit window".to_string())
-            .chain(SIZES.iter().map(|(sw, sh)| format!("{sw} × {sh}")));
-        for (i, text) in choices.enumerate() {
-            let cw = te.measure(f.ui, 12.5 * s, &text) as i32 + p(24.0);
-            let r = Rect::new(cx, y + p(2.0), cw, fh - p(4.0));
-            let hit = Hit::Size(i);
-            let (border, fill, color) = if self.size == i {
-                (ACCENT_BORDER, BG_CHOSEN, TEXT)
-            } else if self.hover == Some(hit) {
-                (BORDER_HOVER, CONTROL_HOVER, TEXT_2)
-            } else {
-                (BORDER, BG, TEXT_3)
-            };
-            cv.round_border(r, 6.0 * s, border, fill);
-            centered(cv, te, f.ui, 12.5 * s, r, &text, color);
-            self.hits.push((r, hit));
-            cx += cw + p(6.0);
-        }
-        y += row - p(4.0);
-        te.draw(
-            cv,
-            f.ui,
-            11.5 * s,
-            fx as f32,
-            (y + p(12.0)) as f32,
-            "Fit window matches the tab and follows resizes; a fixed size stays as chosen.",
-            TEXT_4,
-            fw as f32,
-        );
-        y += p(34.0);
-
-        // Scale
-        label(cv, te, y, "Scale");
-        let auto = format!("Auto ({} %)", (self.scale * 100.0).round() as u32);
-        let mut cx = fx;
-        for (i, text) in std::iter::once(auto)
-            .chain(SCALES.iter().map(|v| format!("{v} %")))
+        let parent = normalize_path(&self.field(Field::GroupPath).text);
+        let inh = self.form_inherit();
+        if !parent.is_empty() {
+            label(cv, te, y, "Inherit");
+            let mut cx = fx;
+            for (k, (text, on)) in [
+                ("Credentials", inh.credentials),
+                ("Display", inh.display),
+                ("Sharing", inh.sharing),
+            ]
+            .into_iter()
             .enumerate()
-        {
-            let chosen = match (i, self.opts.scale) {
-                (0, None) => true,
-                (i, Some(v)) if i > 0 => SCALES[i - 1] == v,
-                _ => false,
-            };
-            cx += self.chip(cv, te, f, cx, y, fh, &text, chosen, Hit::FormScale(i)) + p(6.0);
-        }
-        y += row;
-
-        // Sharing
-        label(cv, te, y, "Sharing");
-        let o = self.opts.clone();
-        let mut cx = fx;
-        for (i, (text, on)) in [
-            ("Clipboard", o.clipboard),
-            ("Sound", o.sound),
-            ("Printers", o.printers),
-            ("Smart cards", o.smart_cards),
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            let text = if on {
-                format!("✓ {text}")
-            } else {
-                text.to_string()
-            };
-            cx += self.chip(cv, te, f, cx, y, fh, &text, on, Hit::FormShare(i as u8)) + p(6.0);
-        }
-        y += row;
-
-        // Shared folders
-        label(cv, te, y, "Folders");
-        let mut cx = fx;
-        for (i, path) in o.drives.iter().enumerate() {
-            let text = format!("{path}  ×");
-            let w = self.chip(cv, te, f, cx, y, fh, &text, true, Hit::FormRemoveDrive(i));
-            cx += w + p(6.0);
-            if cx > fx + fw - p(120.0) {
-                cx = fx;
-                y += p(36.0);
+            {
+                let text = if on {
+                    format!("✓ {text}")
+                } else {
+                    text.to_string()
+                };
+                cx +=
+                    self.chip(cv, te, f, cx, y, fh, &text, on, Hit::FormInherit(k as u8)) + p(6.0);
             }
+            y += row;
         }
-        if !o.drives.is_empty() {
-            y += p(38.0);
+
+        // Credentials
+        if inh.credentials {
+            label(cv, te, y, "User");
+            summary(cv, te, y, &self.inherited_text(&parent, 0));
+            y += row;
+            label(cv, te, y, "Password");
+            let saved_in = self
+                .store
+                .source_of(&parent, &Inherit::ALL, |i| i.credentials)
+                .filter(|g| g.password.is_some())
+                .map(|g| g.path.clone());
+            let hint = match saved_in {
+                Some(g) => format!("Saved in {g} (type to override)"),
+                None => "Asked for each connection".to_string(),
+            };
+            self.text_input(cv, te, f, Rect::new(fx, y, fw, fh), Field::Password, &hint);
+            y += row;
+        } else {
+            label(cv, te, y, "User");
+            self.text_input(
+                cv,
+                te,
+                f,
+                Rect::new(fx, y, fw, fh),
+                Field::User,
+                r"DOMAIN\user or user@domain",
+            );
+            y += row;
+            label(cv, te, y, "Password");
+            let saved = self.save_password && self.own_password().is_some();
+            let chip_text = if self.save_password {
+                "✓ Save password"
+            } else {
+                "Save password"
+            };
+            let chip_w = te.measure(f.ui, 12.5 * s, chip_text) as i32 + p(24.0);
+            self.text_input(
+                cv,
+                te,
+                f,
+                Rect::new(fx, y, fw - chip_w - p(8.0), fh),
+                Field::Password,
+                if saved {
+                    "Saved (type to change)"
+                } else if group_mode {
+                    "Used by members that inherit it"
+                } else {
+                    "Asked for each connection"
+                },
+            );
+            let save_on = self.save_password;
+            self.chip(
+                cv,
+                te,
+                f,
+                fx + fw - chip_w,
+                y,
+                fh,
+                chip_text,
+                save_on,
+                Hit::SavePassword,
+            );
+            y += row;
         }
-        let add_w = p(64.0);
-        self.text_input(
-            cv,
-            te,
-            f,
-            Rect::new(fx, y, fw - add_w - p(8.0), fh),
-            Field::FormDrive,
-            r"Folder to share, e.g. C:\Share",
-        );
-        self.button(
-            cv,
-            te,
-            f,
-            Rect::new(fx + fw - add_w, y, add_w, fh),
-            "Add",
-            Style::Secondary,
-            Hit::FormAddDrive,
-        );
-        y += row + p(8.0);
+
+        // Display and scale
+        if inh.display {
+            label(cv, te, y, "Display");
+            summary(cv, te, y, &self.inherited_text(&parent, 1));
+            y += row;
+        } else {
+            label(cv, te, y, "Display");
+            let mut cx = fx;
+            let choices = std::iter::once("Fit window".to_string())
+                .chain(SIZES.iter().map(|(sw, sh)| format!("{sw} × {sh}")));
+            for (i, text) in choices.enumerate() {
+                cx += self.chip(cv, te, f, cx, y, fh, &text, self.size == i, Hit::Size(i)) + p(6.0);
+            }
+            y += row - p(4.0);
+            te.draw(
+                cv,
+                f.ui,
+                11.5 * s,
+                fx as f32,
+                (y + p(12.0)) as f32,
+                "Fit window matches the tab and follows resizes; a fixed size stays as chosen.",
+                TEXT_4,
+                fw as f32,
+            );
+            y += p(34.0);
+
+            label(cv, te, y, "Scale");
+            let auto = format!("Auto ({} %)", (self.scale * 100.0).round() as u32);
+            let mut cx = fx;
+            for (i, text) in std::iter::once(auto)
+                .chain(SCALES.iter().map(|v| format!("{v} %")))
+                .enumerate()
+            {
+                let chosen = match (i, self.opts.scale) {
+                    (0, None) => true,
+                    (i, Some(v)) if i > 0 => SCALES[i - 1] == v,
+                    _ => false,
+                };
+                cx += self.chip(cv, te, f, cx, y, fh, &text, chosen, Hit::FormScale(i)) + p(6.0);
+            }
+            y += row;
+        }
+
+        // Sharing and shared folders
+        if inh.sharing {
+            label(cv, te, y, "Sharing");
+            summary(cv, te, y, &self.inherited_text(&parent, 2));
+            y += row + p(8.0);
+        } else {
+            label(cv, te, y, "Sharing");
+            let o = self.opts.clone();
+            let mut cx = fx;
+            for (i, (text, on)) in [
+                ("Clipboard", o.clipboard),
+                ("Sound", o.sound),
+                ("Printers", o.printers),
+                ("Smart cards", o.smart_cards),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let text = if on {
+                    format!("✓ {text}")
+                } else {
+                    text.to_string()
+                };
+                cx += self.chip(cv, te, f, cx, y, fh, &text, on, Hit::FormShare(i as u8)) + p(6.0);
+            }
+            y += row;
+
+            label(cv, te, y, "Folders");
+            let mut cx = fx;
+            for (i, path) in o.drives.iter().enumerate() {
+                let text = format!("{path}  ×");
+                let w = self.chip(cv, te, f, cx, y, fh, &text, true, Hit::FormRemoveDrive(i));
+                cx += w + p(6.0);
+                if cx > fx + fw - p(120.0) {
+                    cx = fx;
+                    y += p(36.0);
+                }
+            }
+            if !o.drives.is_empty() {
+                y += p(38.0);
+            }
+            let add_w = p(64.0);
+            self.text_input(
+                cv,
+                te,
+                f,
+                Rect::new(fx, y, fw - add_w - p(8.0), fh),
+                Field::FormDrive,
+                r"Folder to share, e.g. C:\Share",
+            );
+            self.button(
+                cv,
+                te,
+                f,
+                Rect::new(fx + fw - add_w, y, add_w, fh),
+                "Add",
+                Style::Secondary,
+                Hit::FormAddDrive,
+            );
+            y += row + p(8.0);
+        }
 
         let bh = p(34.0);
+        let (connect, cw) = if group_mode {
+            ("Connect all", p(116.0))
+        } else {
+            ("Connect", p(116.0))
+        };
         self.button(
             cv,
             te,
             f,
-            Rect::new(fx, y, p(116.0), bh),
-            "Connect",
+            Rect::new(fx, y, cw, bh),
+            connect,
             Style::Primary,
             Hit::Connect,
         );
+        let mut bx = fx + cw + p(8.0);
         self.button(
             cv,
             te,
             f,
-            Rect::new(fx + p(124.0), y, p(84.0), bh),
+            Rect::new(bx, y, p(84.0), bh),
             "Save",
             Style::Secondary,
             Hit::Save,
         );
-        if self.selected.is_some() {
+        bx += p(92.0);
+        if open_group.is_some() {
+            self.button(
+                cv,
+                te,
+                f,
+                Rect::new(bx, y, p(120.0), bh),
+                "+ Connection",
+                Style::Secondary,
+                Hit::NewInGroup,
+            );
+        }
+        if self.selected.is_some() || open_group.is_some() {
             self.button(
                 cv,
                 te,
@@ -1765,7 +2365,11 @@ impl Ui {
                 Hit::Delete,
             );
         }
-        let hint = "Enter connects · Tab next field · Ctrl+N new · Ctrl+S save";
+        let hint = if group_mode {
+            "Connect all opens members with a saved or typed password."
+        } else {
+            "Enter connects · Tab next field · Ctrl+N new · Ctrl+S save"
+        };
         te.draw(
             cv,
             f.ui,
@@ -2424,9 +3028,39 @@ enum Style {
     Danger,
 }
 
+fn size_index(w: u16, h: u16) -> usize {
+    SIZES.iter().position(|&s| s == (w, h)).map_or(0, |i| i + 1)
+}
+
+/// The Connect action for a resolved connection.
+fn session_action(r: &Connection, password: &str) -> Action {
+    let mut cfg = rdp::Config::new(&r.host, &r.user, password);
+    cfg.port = r.port;
+    let fit = r.width == 0;
+    if !fit {
+        cfg.width = r.width;
+        cfg.height = r.height;
+    }
+    Action::Connect {
+        name: r.name.clone(),
+        cfg: Box::new(cfg),
+        fit,
+        opts: r.options.clone(),
+    }
+}
+
+/// The sample with the "Work" group open (snapshot of the group form).
+pub fn sample_group() -> Ui {
+    let mut m = sample(false);
+    if let Some(i) = m.store.group_index("Work") {
+        m.select_group(i);
+    }
+    m
+}
+
 /// Sample data for `--snapshot-ui`; never the user's saved connections.
 pub fn sample(session_tab: bool) -> Ui {
-    let store = Store::memory(vec![
+    let mut store = Store::memory(vec![
         Connection {
             name: "Office workstation".into(),
             host: "10.0.0.15".into(),
@@ -2436,6 +3070,8 @@ pub fn sample(session_tab: bool) -> Ui {
             height: 0,
             options: SessionOptions::default(),
             password: None,
+            group: "Work".into(),
+            inherit: Inherit::ALL,
         },
         Connection {
             name: "Build server".into(),
@@ -2446,6 +3082,11 @@ pub fn sample(session_tab: bool) -> Ui {
             height: 1080,
             options: SessionOptions::default(),
             password: None,
+            group: "Work/Lab".into(),
+            inherit: Inherit {
+                credentials: true,
+                ..Default::default()
+            },
         },
         Connection {
             name: "Test VM (Windows 11)".into(),
@@ -2456,8 +3097,21 @@ pub fn sample(session_tab: bool) -> Ui {
             height: 900,
             options: SessionOptions::default(),
             password: None,
+            group: String::new(),
+            inherit: Inherit::default(),
         },
     ]);
+    store.adopt_groups();
+    if let Some(i) = store.group_index("Work") {
+        let g = &mut store.groups[i];
+        g.user = r"CORP\alex".into();
+        g.options.clipboard = true;
+        g.options.sound = true;
+        g.options.scale = Some(125);
+    }
+    if let Some(i) = store.group_index("Work/Lab") {
+        store.groups[i].inherit = Inherit::ALL;
+    }
     let mut m = Ui::new(store, 1.0);
     m.open_tab(1, "Office workstation".into(), "10.0.0.15".into(), true);
     m.tabs[0].state = TabState::Connected {

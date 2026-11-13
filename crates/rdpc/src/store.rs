@@ -30,6 +30,95 @@ pub struct Connection {
     /// Saved password; only ever written into the encrypted vault.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub password: Option<String>,
+    /// Group path ("Work/Servers"); empty: top level.
+    #[serde(default)]
+    pub group: String,
+    /// Sections taken from the group instead of this connection.
+    #[serde(default)]
+    pub inherit: Inherit,
+}
+
+/// Which settings come from the enclosing group (or, for a group, its parent).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Inherit {
+    /// User name and saved password.
+    pub credentials: bool,
+    /// Size and scale.
+    pub display: bool,
+    /// Clipboard, sound, printers, smart cards and shared folders.
+    pub sharing: bool,
+}
+
+impl Inherit {
+    pub const ALL: Inherit = Inherit {
+        credentials: true,
+        display: true,
+        sharing: true,
+    };
+}
+
+/// A group of connections ("Work/Servers"): settings its members can inherit.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Group {
+    /// Full path, segments separated by '/'.
+    pub path: String,
+    pub user: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub password: Option<String>,
+    pub width: u16,
+    pub height: u16,
+    pub options: SessionOptions,
+    /// Sections taken from the parent group.
+    pub inherit: Inherit,
+}
+
+impl Group {
+    pub fn name(&self) -> &str {
+        self.path.rsplit('/').next().unwrap_or(&self.path)
+    }
+
+    pub fn parent(&self) -> &str {
+        parent_of(&self.path)
+    }
+}
+
+pub fn parent_of(path: &str) -> &str {
+    path.rsplit_once('/').map_or("", |(p, _)| p)
+}
+
+/// Cleans a typed group path: trims segments, drops empty ones.
+pub fn normalize_path(path: &str) -> String {
+    path.split(['/', '\\'])
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+/// What is written to disk (version 2). Version 1 was a bare list of connections.
+#[derive(Serialize, Deserialize)]
+struct FileV2 {
+    version: u32,
+    #[serde(default)]
+    groups: Vec<Group>,
+    #[serde(default)]
+    connections: Vec<Connection>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum AnyFile {
+    V2(FileV2),
+    V1(Vec<Connection>),
+}
+
+fn parse(bytes: &[u8]) -> Result<(Vec<Group>, Vec<Connection>), String> {
+    match serde_json::from_slice::<AnyFile>(bytes).map_err(|e| e.to_string())? {
+        AnyFile::V2(f) => Ok((f.groups, f.connections)),
+        AnyFile::V1(c) => Ok((Vec::new(), c)),
+    }
 }
 
 /// What a connection shares and how it scales, from the first moment of the
@@ -62,6 +151,7 @@ enum Backend {
 
 pub struct Store {
     pub connections: Vec<Connection>,
+    pub groups: Vec<Group>,
     backend: Backend,
 }
 
@@ -105,20 +195,25 @@ impl Store {
         if vault.exists() {
             return Store {
                 connections: Vec::new(),
+                groups: Vec::new(),
                 backend: Backend::Locked(vault),
             };
         }
         let plain = dir.join("connections.json");
-        let mut connections: Vec<Connection> = std::fs::read(&plain)
+        let (mut groups, mut connections) = std::fs::read(&plain)
             .ok()
-            .and_then(|b| serde_json::from_slice(&b).ok())
+            .and_then(|b| parse(&b).ok())
             .unwrap_or_default();
         // A plain file never carries passwords; drop any that slipped in.
         for c in &mut connections {
             c.password = None;
         }
+        for g in &mut groups {
+            g.password = None;
+        }
         Store {
             connections,
+            groups,
             backend: Backend::Plain(plain),
         }
     }
@@ -127,6 +222,7 @@ impl Store {
     pub fn memory(connections: Vec<Connection>) -> Store {
         Store {
             connections,
+            groups: Vec::new(),
             backend: Backend::Memory,
         }
     }
@@ -144,6 +240,7 @@ impl Store {
     pub fn locked_sample() -> Store {
         Store {
             connections: Vec::new(),
+            groups: Vec::new(),
             backend: Backend::Locked(PathBuf::new()),
         }
     }
@@ -175,8 +272,9 @@ impl Store {
         let bytes =
             std::fs::read(&path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
         let plain = vault::open(&key, &bytes)?;
-        self.connections =
-            serde_json::from_slice(&plain).map_err(|e| format!("vault content: {e}"))?;
+        let (groups, connections) = parse(&plain).map_err(|e| format!("vault content: {e}"))?;
+        self.groups = groups;
+        self.connections = connections;
         self.backend = Backend::Vault { path, key };
         Ok(())
     }
@@ -186,6 +284,7 @@ impl Store {
         if let Backend::Vault { path, .. } = &self.backend {
             let path = path.clone();
             wipe(&mut self.connections);
+            wipe_groups(&mut self.groups);
             self.backend = Backend::Locked(path);
         }
     }
@@ -198,15 +297,11 @@ impl Store {
         };
         let plain = plain.clone();
         let path = plain.with_file_name("vault.bin");
-        let bytes = vault::seal(
-            &key,
-            &serde_json::to_vec(&self.connections).map_err(|e| e.to_string())?,
-        );
+        let bytes = vault::seal(&key, &self.file_json(true)?);
         write_atomic(&path, &bytes)?;
         let check = std::fs::read(&path).map_err(|e| e.to_string())?;
-        let back: Vec<Connection> =
-            serde_json::from_slice(&vault::open(&key, &check)?).map_err(|e| e.to_string())?;
-        if back != self.connections {
+        let (groups, back) = parse(&vault::open(&key, &check)?)?;
+        if back != self.connections || groups != self.groups {
             return Err("vault check failed; connections.json was kept".into());
         }
         let _ = std::fs::remove_file(&plain);
@@ -218,27 +313,200 @@ impl Store {
         match &self.backend {
             Backend::Memory => Ok(()),
             Backend::Locked(_) => Err("the vault is locked".into()),
-            Backend::Plain(path) => {
-                let mut list = self.connections.clone();
-                for c in &mut list {
-                    c.password = None;
-                }
-                let json = serde_json::to_vec_pretty(&list).map_err(|e| e.to_string())?;
-                write_atomic(path, &json)
-            }
+            Backend::Plain(path) => write_atomic(path, &self.file_json(false)?),
             Backend::Vault { path, key } => {
-                let json = zeroize::Zeroizing::new(
-                    serde_json::to_vec(&self.connections).map_err(|e| e.to_string())?,
-                );
+                let json = zeroize::Zeroizing::new(self.file_json(true)?);
                 write_atomic(path, &vault::seal(key, &json))
             }
         }
     }
+
+    /// The file contents; passwords only when they go into the vault.
+    fn file_json(&self, with_passwords: bool) -> Result<Vec<u8>, String> {
+        let mut file = FileV2 {
+            version: 2,
+            groups: self.groups.clone(),
+            connections: self.connections.clone(),
+        };
+        if !with_passwords {
+            for c in &mut file.connections {
+                c.password = None;
+            }
+            for g in &mut file.groups {
+                g.password = None;
+            }
+        }
+        let out = if with_passwords {
+            serde_json::to_vec(&file)
+        } else {
+            serde_json::to_vec_pretty(&file)
+        };
+        wipe(&mut file.connections);
+        wipe_groups(&mut file.groups);
+        out.map_err(|e| e.to_string())
+    }
+
+    /// Creates groups that connections name but that are missing.
+    pub fn adopt_groups(&mut self) {
+        let paths: Vec<String> = self
+            .connections
+            .iter()
+            .filter(|c| !c.group.is_empty())
+            .map(|c| c.group.clone())
+            .collect();
+        for path in paths {
+            self.ensure_group(&path);
+        }
+    }
+
+    /// Connections in a group or any of its sub-groups.
+    pub fn members<'a>(&'a self, path: &'a str) -> impl Iterator<Item = &'a Connection> + 'a {
+        self.connections.iter().filter(move |c| {
+            c.group == path
+                || c.group
+                    .strip_prefix(path)
+                    .is_some_and(|rest| rest.starts_with('/'))
+        })
+    }
+
+    pub fn group_index(&self, path: &str) -> Option<usize> {
+        self.groups.iter().position(|g| g.path == path)
+    }
+
+    /// Creates the group and any missing parents.
+    pub fn ensure_group(&mut self, path: &str) {
+        let mut prefix = String::new();
+        for seg in path.split('/').filter(|s| !s.is_empty()) {
+            if !prefix.is_empty() {
+                prefix.push('/');
+            }
+            prefix.push_str(seg);
+            if self.group_index(&prefix).is_none() {
+                self.groups.push(Group {
+                    path: prefix.clone(),
+                    ..Default::default()
+                });
+            }
+        }
+        self.groups.sort_by_key(|g| g.path.to_lowercase());
+    }
+
+    /// Renames a group path, moving its sub-groups and connections along.
+    pub fn rename_group(&mut self, old: &str, new: &str) {
+        if old == new || old.is_empty() {
+            return;
+        }
+        let moved = |p: &str| -> Option<String> {
+            if p == old {
+                Some(new.to_string())
+            } else {
+                p.strip_prefix(old)
+                    .and_then(|rest| rest.strip_prefix('/'))
+                    .map(|rest| format!("{new}/{rest}"))
+            }
+        };
+        for g in &mut self.groups {
+            if let Some(p) = moved(&g.path) {
+                g.path = p;
+            }
+        }
+        for c in &mut self.connections {
+            if let Some(p) = moved(&c.group) {
+                c.group = p;
+            }
+        }
+        self.ensure_group(new);
+    }
+
+    /// Removes a group; its connections and sub-groups move up to its parent.
+    pub fn delete_group(&mut self, path: &str) {
+        let parent = parent_of(path).to_string();
+        self.groups.retain(|g| g.path != path);
+        let up = |p: &str| -> Option<String> {
+            let rest = p.strip_prefix(path)?.strip_prefix('/')?;
+            Some(if parent.is_empty() {
+                rest.to_string()
+            } else {
+                format!("{parent}/{rest}")
+            })
+        };
+        for g in &mut self.groups {
+            if let Some(p) = up(&g.path) {
+                g.path = p;
+            }
+        }
+        for c in &mut self.connections {
+            if c.group == path {
+                c.group = parent.clone();
+            } else if let Some(p) = up(&c.group) {
+                c.group = p;
+            }
+        }
+        self.groups.sort_by_key(|g| g.path.to_lowercase());
+    }
+
+    /// The group that provides a section for something at `path` (a group
+    /// path): the nearest group up the tree that does not inherit it.
+    fn provider(&self, mut path: &str, pick: fn(&Inherit) -> bool) -> Option<&Group> {
+        while !path.is_empty() {
+            if let Some(g) = self.groups.iter().find(|g| g.path == path)
+                && !pick(&g.inherit)
+            {
+                return Some(g);
+            }
+            path = parent_of(path);
+        }
+        None
+    }
+
+    /// The group a connection's (or group's) section comes from, if inherited.
+    pub fn source_of(
+        &self,
+        group_path: &str,
+        inherit: &Inherit,
+        pick: fn(&Inherit) -> bool,
+    ) -> Option<&Group> {
+        if pick(inherit) {
+            self.provider(group_path, pick)
+        } else {
+            None
+        }
+    }
+
+    /// A connection with every inherited section filled in from its groups.
+    pub fn resolve(&self, c: &Connection) -> Connection {
+        let mut out = c.clone();
+        if let Some(g) = self.source_of(&c.group, &c.inherit, |i| i.credentials) {
+            out.user = g.user.clone();
+            out.password = g.password.clone();
+        }
+        if let Some(g) = self.source_of(&c.group, &c.inherit, |i| i.display) {
+            out.width = g.width;
+            out.height = g.height;
+            out.options.scale = g.options.scale;
+        }
+        if let Some(g) = self.source_of(&c.group, &c.inherit, |i| i.sharing) {
+            let scale = out.options.scale;
+            out.options = g.options.clone();
+            out.options.scale = scale;
+        }
+        out
+    }
+}
+
+fn wipe_groups(groups: &mut Vec<Group>) {
+    for g in groups.iter_mut() {
+        if let Some(p) = g.password.as_mut() {
+            p.zeroize();
+        }
+    }
+    groups.clear();
 }
 
 impl Drop for Store {
     fn drop(&mut self) {
         wipe(&mut self.connections);
+        wipe_groups(&mut self.groups);
     }
 }
 
@@ -289,6 +557,7 @@ mod tests {
                 password: Some("hunter2".into()),
                 ..Default::default()
             }],
+            groups: Vec::new(),
             backend: Backend::Plain(plain.clone()),
         };
         s.save().unwrap();
@@ -321,6 +590,7 @@ mod tests {
         .unwrap();
         let mut s = Store {
             connections: Vec::new(),
+            groups: Vec::new(),
             backend: Backend::Plain(plain.clone()),
         };
         s.connections = serde_json::from_slice(&std::fs::read(&plain).unwrap()).unwrap();
@@ -344,5 +614,113 @@ mod tests {
         s.unlock(key).unwrap();
         assert_eq!(s.connections[0].password.as_deref(), Some("hunter2"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn store_with(groups: Vec<Group>, connections: Vec<Connection>) -> Store {
+        let mut s = Store::memory(connections);
+        s.groups = groups;
+        s
+    }
+
+    #[test]
+    fn inheritance_takes_the_nearest_group_that_defines_a_section() {
+        let work = Group {
+            path: "Work".into(),
+            user: r"CORP\alex".into(),
+            width: 1920,
+            height: 1080,
+            options: SessionOptions {
+                clipboard: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        // Servers inherits credentials from Work but sets its own display.
+        let servers = Group {
+            path: "Work/Servers".into(),
+            user: "ignored".into(),
+            width: 1280,
+            height: 800,
+            inherit: Inherit {
+                credentials: true,
+                display: false,
+                sharing: true,
+            },
+            ..Default::default()
+        };
+        let c = Connection {
+            name: "db".into(),
+            user: "own".into(),
+            group: "Work/Servers".into(),
+            inherit: Inherit {
+                credentials: true,
+                display: true,
+                sharing: true,
+            },
+            ..Default::default()
+        };
+        let s = store_with(vec![work, servers], vec![c.clone()]);
+        let r = s.resolve(&c);
+        assert_eq!(
+            r.user, r"CORP\alex",
+            "credentials from Work (Servers inherits them)"
+        );
+        assert_eq!((r.width, r.height), (1280, 800), "display from Servers");
+        assert!(r.options.clipboard, "sharing from Work");
+        let own = Connection {
+            inherit: Inherit::default(),
+            ..c
+        };
+        assert_eq!(s.resolve(&own).user, "own", "no inheritance: own values");
+    }
+
+    #[test]
+    fn version_1_files_load_and_version_2_round_trips() {
+        let v1 = br#"[{"name":"pc","host":"h","port":3389,"user":"u","width":0,"height":0}]"#;
+        let (g, c) = parse(v1).unwrap();
+        assert!(g.is_empty() && c.len() == 1 && c[0].group.is_empty());
+        let mut s = store_with(vec![], c);
+        s.ensure_group("Work/Servers");
+        s.connections[0].group = "Work/Servers".into();
+        let json = s.file_json(false).unwrap();
+        let (g2, c2) = parse(&json).unwrap();
+        assert_eq!(
+            g2.iter().map(|g| g.path.as_str()).collect::<Vec<_>>(),
+            ["Work", "Work/Servers"]
+        );
+        assert_eq!(c2[0].group, "Work/Servers");
+    }
+
+    #[test]
+    fn rename_and_delete_move_members() {
+        let mut s = store_with(
+            vec![],
+            vec![Connection {
+                group: "A/B".into(),
+                ..Default::default()
+            }],
+        );
+        s.ensure_group("A/B/C");
+        s.rename_group("A/B", "A/X");
+        assert_eq!(s.connections[0].group, "A/X");
+        assert!(s.group_index("A/X/C").is_some() && s.group_index("A/B").is_none());
+        s.delete_group("A/X");
+        assert_eq!(s.connections[0].group, "A", "members move up to the parent");
+        assert!(s.group_index("A/C").is_some(), "sub-groups move up too");
+        assert_eq!(normalize_path(" Work / /Servers/ "), "Work/Servers");
+    }
+
+    #[test]
+    fn plain_file_never_contains_a_group_password() {
+        let s = store_with(
+            vec![Group {
+                path: "W".into(),
+                password: Some("hunter2".into()),
+                ..Default::default()
+            }],
+            vec![],
+        );
+        let json = String::from_utf8(s.file_json(false).unwrap()).unwrap();
+        assert!(!json.contains("hunter2"));
     }
 }
