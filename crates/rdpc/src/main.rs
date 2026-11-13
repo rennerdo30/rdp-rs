@@ -9,7 +9,6 @@
 //!
 //! The password comes from RDP_PASSWORD or an interactive prompt.
 
-#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 mod app;
 mod clipboard;
