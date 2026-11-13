@@ -9,6 +9,7 @@
 //! - [`fastpath`] + [`input`]: fast-path output updates and fast-path input events
 //! - [`codec`]: interleaved RLE and planar bitmap codecs (MS-RDPBCGR 2.2.9.1.1.3.1.2.4, MS-RDPEGDI 2.2.2.5.1)
 //! - [`dvc`] + [`disp`]: dynamic virtual channels (MS-RDPEDYC) and Display Control (MS-RDPEDISP)
+//! - [`gfx`]: the graphics pipeline (MS-RDPEGFX), opt-in through [`Graphics::Gfx`]
 //! - [`cliprdr`]: clipboard redirection on the `cliprdr` channel (MS-RDPECLIP)
 //! - [`client`]: the connection sequence and the session loop
 //! - [`rdpsnd`]: audio output on the `rdpsnd` channel (MS-RDPEA)
@@ -29,6 +30,7 @@ pub mod experience;
 pub mod fastpath;
 pub mod framebuffer;
 pub mod gcc;
+pub mod gfx;
 pub mod input;
 pub mod log;
 pub mod mcs;
@@ -48,6 +50,8 @@ pub use dvc::{Drdynvc, DvcOut, DynamicChannel, StaticOverDvc};
 pub use error::{Error, Result};
 pub use experience::{ConnectionType, Experience};
 pub use framebuffer::{Damage, Framebuffer};
+pub use gfx::Graphics;
+pub use gfx::h264::{H264Decoder, H264Factory, Yuv420Frame};
 pub use input::InputEvent;
 pub use log::set_verbose;
 pub use pdu::AutoReconnectCookie;

@@ -36,6 +36,7 @@ fn session() -> (Client, TcpStream) {
         channels: Vec::new(),
         pointers: PointerCache::default(),
         arc_cookie: None,
+        gfx: None,
     };
     (client, server)
 }
@@ -177,4 +178,65 @@ fn error_is_network_drop() {
 #[test]
 fn config_defaults_to_a_fresh_logon() {
     assert!(Config::new("h", "u", "p").auto_reconnect.is_none());
+}
+
+#[test]
+fn gfx_channel_joins_drdynvc_or_brings_its_own() {
+    let mut cfg = Config::new("h", "u", "p");
+    cfg.graphics = crate::Graphics::Gfx;
+    let create = {
+        let mut v = vec![0x10, 0x05];
+        v.extend_from_slice(crate::gfx::CHANNEL_NAME.as_bytes());
+        v.push(0);
+        v
+    };
+    let opens = |h: &mut Box<dyn StaticChannel>| {
+        let mut out = ChannelOut::default();
+        h.process(&create, &mut out).unwrap();
+        out.take()[0] == [0x10, 0x05, 0, 0, 0, 0]
+    };
+    // Joins an existing drdynvc.
+    let mut handlers: Vec<Box<dyn StaticChannel>> = vec![Box::new(crate::Drdynvc::new(vec![]))];
+    add_gfx_channel(&cfg, &mut handlers);
+    assert_eq!(handlers.len(), 1);
+    assert!(opens(&mut handlers[0]));
+    // Brings its own when there is none.
+    let mut handlers: Vec<Box<dyn StaticChannel>> = Vec::new();
+    add_gfx_channel(&cfg, &mut handlers);
+    assert_eq!(handlers.len(), 1);
+    assert_eq!(handlers[0].name(), "drdynvc");
+    assert!(opens(&mut handlers[0]));
+}
+
+#[test]
+fn gfx_reset_resizes_the_session_framebuffer() {
+    let (mut client, _server) = session();
+    let (mut channel, handle) = crate::gfx::graphics(None);
+    client.gfx = Some(handle);
+    // ResetGraphics to 8x2, a surface filled red, mapped, end of frame.
+    let mut msg = vec![0xE0, 0x04];
+    let mut reset = vec![0x0E, 0, 0, 0, 0x54, 0x01, 0, 0, 8, 0, 0, 0, 2, 0, 0, 0];
+    reset.resize(340, 0);
+    msg.extend(reset);
+    msg.extend([0x09, 0, 0, 0, 15, 0, 0, 0, 1, 0, 8, 0, 2, 0, 0x20]);
+    msg.extend([
+        0x0F, 0, 0, 0, 20, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    ]);
+    msg.extend([
+        0x04, 0, 0, 0, 24, 0, 0, 0, 1, 0, 0, 0, 0xFF, 0, 1, 0, 0, 0, 0, 0, 8, 0, 2, 0,
+    ]);
+    msg.extend([0x0C, 0, 0, 0, 12, 0, 0, 0, 1, 0, 0, 0]);
+    let mut out = crate::DvcOut::default();
+    crate::DynamicChannel::process(&mut channel, &msg, &mut out).unwrap();
+    let mut poll = PollOutcome::default();
+    client.present_gfx(&mut poll);
+    assert!(poll.resized && poll.updated);
+    assert_eq!((client.info.width, client.info.height), (8, 2));
+    let fb = client.framebuffer();
+    assert_eq!((fb.width, fb.height), (8, 2));
+    assert!(fb.pixels.iter().all(|&p| p == 0x00FF_0000));
+    // Nothing new: nothing to present.
+    let mut poll = PollOutcome::default();
+    client.present_gfx(&mut poll);
+    assert!(!poll.resized && !poll.updated && poll.damage.is_empty());
 }

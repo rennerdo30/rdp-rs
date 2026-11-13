@@ -24,6 +24,7 @@ const RNS_UD_CS_SUPPORT_ERRINFO_PDU: u16 = 0x0001;
 const RNS_UD_CS_WANT_32BPP_SESSION: u16 = 0x0002;
 const RNS_UD_CS_STRONG_ASYMMETRIC_KEYS: u16 = 0x0008;
 const RNS_UD_CS_VALID_CONNECTION_TYPE: u16 = 0x0020;
+const RNS_UD_CS_SUPPORT_DYNVC_GFX_PROTOCOL: u16 = 0x0100;
 
 pub struct ClientSettings<'a> {
     pub width: u16,
@@ -38,6 +39,8 @@ pub struct ClientSettings<'a> {
     pub connection_type: crate::ConnectionType,
     /// Static virtual channels: (name, options).
     pub channels: &'a [(&'a str, u32)],
+    /// Offer the graphics pipeline (MS-RDPEGFX) in earlyCapabilityFlags.
+    pub gfx: bool,
 }
 
 fn block(out: &mut Vec<u8>, ty: u16, body: &[u8]) {
@@ -90,7 +93,12 @@ pub fn client_data_blocks(s: &ClientSettings) -> Vec<u8> {
         RNS_UD_CS_SUPPORT_ERRINFO_PDU
             | want32
             | RNS_UD_CS_STRONG_ASYMMETRIC_KEYS
-            | RNS_UD_CS_VALID_CONNECTION_TYPE,
+            | RNS_UD_CS_VALID_CONNECTION_TYPE
+            | if s.gfx {
+                RNS_UD_CS_SUPPORT_DYNVC_GFX_PROTOCOL
+            } else {
+                0
+            },
     );
     core.put_zeros(64); // clientDigProductId
     core.put_u8(s.connection_type as u8); // connectionType (valid per the flag above)
@@ -212,11 +220,17 @@ mod tests {
             color_depth: 32,
             connection_type: crate::ConnectionType::Lan,
             channels: &[],
+            gfx: false,
         };
         let b = client_data_blocks(&s);
         assert_eq!(u16::from_le_bytes([b[0], b[1]]), CS_CORE);
         assert_eq!(u16::from_le_bytes([b[2], b[3]]), 234);
         // Scale fields at the end of the core block: desktop 150, device 140.
         assert_eq!(&b[226..234], &[150, 0, 0, 0, 140, 0, 0, 0]);
+        // earlyCapabilityFlags (offset 144): ERRINFO | WANT_32BPP |
+        // STRONG_ASYMMETRIC_KEYS | VALID_CONNECTION_TYPE, no GFX.
+        assert_eq!(u16::from_le_bytes([b[144], b[145]]), 0x002B);
+        let gfx = client_data_blocks(&ClientSettings { gfx: true, ..s });
+        assert_eq!(u16::from_le_bytes([gfx[144], gfx[145]]), 0x012B);
     }
 }

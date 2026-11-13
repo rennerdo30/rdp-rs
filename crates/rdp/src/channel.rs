@@ -65,6 +65,12 @@ pub trait StaticChannel: Send {
     fn tick(&mut self, _out: &mut ChannelOut) -> Result<()> {
         Ok(())
     }
+
+    /// The dynamic virtual channel host, if this is `drdynvc`; the client
+    /// adds its own dynamic channels (graphics) through it.
+    fn as_drdynvc(&mut self) -> Option<&mut crate::dvc::Drdynvc> {
+        None
+    }
 }
 
 /// Splits one message into CHANNEL_PDU_HEADER-prefixed chunks.

@@ -133,6 +133,15 @@ impl Drdynvc {
         }
     }
 
+    /// Adds a dynamic channel before the connection starts.
+    pub fn add(&mut self, handler: Box<dyn DynamicChannel>) {
+        self.channels.push(Dvc {
+            handler,
+            id: None,
+            reasm: None,
+        });
+    }
+
     /// Negotiated DVC version (0 before the capabilities request).
     pub fn version(&self) -> u16 {
         self.version
@@ -340,6 +349,10 @@ impl StaticChannel for Drdynvc {
             self.finish(i, res, out);
         }
         Ok(())
+    }
+
+    fn as_drdynvc(&mut self) -> Option<&mut Drdynvc> {
+        Some(self)
     }
 }
 
