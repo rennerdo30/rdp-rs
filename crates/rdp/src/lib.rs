@@ -8,10 +8,12 @@
 //! - [`pdu`]: share control/data PDUs, client info, capabilities, finalization
 //! - [`fastpath`] + [`input`]: fast-path output updates and fast-path input events
 //! - [`codec`]: interleaved RLE and planar bitmap codecs (MS-RDPBCGR 2.2.9.1.1.3.1.2.4, MS-RDPEGDI 2.2.2.5.1)
+//! - [`cliprdr`]: clipboard redirection on the `cliprdr` channel (MS-RDPECLIP)
 //! - [`client`]: the connection sequence and the session loop
 
 pub mod channel;
 pub mod client;
+pub mod cliprdr;
 pub mod codec;
 pub mod credssp;
 pub mod crypto;
@@ -31,6 +33,7 @@ pub mod x224;
 
 pub use channel::{ChannelOut, StaticChannel};
 pub use client::{Client, Config, ConnectionInfo, PollOutcome};
+pub use cliprdr::{ClipboardBackend, ClipboardHandle, Cliprdr, cliprdr};
 pub use error::{Error, Result};
 pub use framebuffer::{Damage, Framebuffer};
 pub use input::InputEvent;
