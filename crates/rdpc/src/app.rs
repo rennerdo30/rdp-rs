@@ -1,27 +1,34 @@
-//! The application: one winit event loop owns the manager window and every
-//! session window. No frame loop: the loop waits, and a window is redrawn only
-//! when its content changed. softbuffer presents only damaged rectangles
-//! (on Windows a BitBlt per rectangle), which RDP and VNC encode cheaply.
+//! The application: one window with a connections sidebar and session tabs.
+//!
+//! No frame loop: the event loop waits and redraws only on change. Two
+//! present paths keep remote updates cheap:
+//! - chrome changes (input, tabs, state) repaint the UI offscreen, blit the
+//!   active session into its area, diff against the shown frame in 64 x 16
+//!   tiles and present only the changed tiles;
+//! - session updates copy the damaged rectangles straight into the shown
+//!   frame and present just those rectangles (on Windows a BitBlt each),
+//!   which is what RDP and VNC encode cheaply when rdpc itself runs remotely.
 
 use std::collections::HashMap;
 use std::num::NonZeroU32;
 use std::rc::Rc;
 use std::sync::atomic::Ordering;
 
-use ffwd_render::{Canvas, TextEngine};
-use rdp::Config;
+use ffwd_render::{Canvas, Rect, TextEngine};
+use rdp::{Config, InputEvent};
 use softbuffer::{Context, Surface};
 use winit::application::ApplicationHandler;
-use winit::dpi::{LogicalSize, PhysicalSize};
+use winit::dpi::LogicalSize;
 use winit::event::{ElementState, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::keyboard::{Key as WKey, ModifiersState, NamedKey};
-use winit::window::{CursorIcon, Window, WindowAttributes, WindowId};
+use winit::window::{CursorIcon, Window, WindowId};
 
-use crate::manager::{self, Action, Fonts, Key, Manager, RowState, SessionRow};
+use crate::controls::Controls;
 use crate::session::{self, Worker};
 use crate::store::Store;
 use crate::theme;
+use crate::ui::{self, Action, Fonts, Key, SharedDrive, TabState, Ui};
 
 pub enum UserEvent {
     Session(u64, session::Event),
@@ -30,22 +37,6 @@ pub enum UserEvent {
 struct Gfx {
     window: Rc<Window>,
     surface: Surface<Rc<Window>, Rc<Window>>,
-}
-
-fn make_gfx(el: &ActiveEventLoop, attrs: WindowAttributes) -> Result<Gfx, String> {
-    let window = Rc::new(
-        el.create_window(attrs)
-            .map_err(|e| format!("cannot open a window: {e}"))?,
-    );
-    let ctx = Context::new(window.clone()).map_err(|e| format!("softbuffer: {e}"))?;
-    let surface = Surface::new(&ctx, window.clone()).map_err(|e| format!("softbuffer: {e}"))?;
-    Ok(Gfx { window, surface })
-}
-
-fn resize_surface(gfx: &mut Gfx, w: usize, h: usize) {
-    if let (Some(w), Some(h)) = (NonZeroU32::new(w as u32), NonZeroU32::new(h as u32)) {
-        let _ = gfx.surface.resize(w, h);
-    }
 }
 
 fn to_sb(x: usize, y: usize, w: usize, h: usize) -> Option<softbuffer::Rect> {
@@ -88,34 +79,37 @@ fn diff_tiles(prev: &[u32], cur: &[u32], w: usize, h: usize) -> Vec<softbuffer::
     out
 }
 
-struct ManagerWin {
+/// One session: its worker (None after it ended), what is needed to
+/// reconnect, and its live controls.
+struct Session {
+    worker: Option<Worker>,
+    cfg: Config,
+    controls: Controls,
+    mouse: (u16, u16),
+    /// The size last requested for fit-to-window.
+    fit_requested: Option<(u32, u32)>,
+}
+
+struct MainWin {
     gfx: Gfx,
-    ui: Manager,
-    prev: Vec<u32>,
-    cur: Vec<u32>,
+    ui: Ui,
+    /// What is on screen.
+    shown: Vec<u32>,
+    /// Scratch frame for chrome repaints.
+    scratch: Vec<u32>,
     size: (usize, usize),
     cursor: (i32, i32),
     text_cursor: bool,
-}
-
-struct SessionWin {
-    gfx: Gfx,
-    mouse: (u16, u16),
-    desktop: (usize, usize),
-}
-
-struct Session {
-    worker: Worker,
-    win: Option<SessionWin>,
-    title: String,
+    chrome_dirty: bool,
+    /// The session a mouse button went down in (gets the release too).
+    pressed_in: Option<u64>,
 }
 
 pub struct App {
     proxy: EventLoopProxy<UserEvent>,
     te: TextEngine,
-    fonts: Option<Fonts>,
-    want_manager: bool,
-    manager: Option<ManagerWin>,
+    fonts: Fonts,
+    win: Option<MainWin>,
     sessions: HashMap<u64, Session>,
     next_id: u64,
     direct: Option<(String, Config)>,
@@ -133,22 +127,15 @@ pub fn run(direct: Option<(String, Config)>) -> i32 {
     };
     event_loop.set_control_flow(ControlFlow::Wait);
     let mut te = TextEngine::new();
-    let want_manager = direct.is_none();
-    let fonts = if want_manager {
-        manager::load_fonts(&mut te)
-    } else {
-        None
-    };
-    if want_manager && fonts.is_none() {
+    let Some(fonts) = ui::load_fonts(&mut te) else {
         eprintln!("rdpc: no usable UI font found");
         return 1;
-    }
+    };
     let mut app = App {
         proxy: event_loop.create_proxy(),
         te,
         fonts,
-        want_manager,
-        manager: None,
+        win: None,
         sessions: HashMap::new(),
         next_id: 1,
         direct,
@@ -163,169 +150,299 @@ pub fn run(direct: Option<(String, Config)>) -> i32 {
 }
 
 impl App {
+    fn dirty(&mut self) {
+        if let Some(w) = &mut self.win {
+            w.chrome_dirty = true;
+            w.gfx.window.request_redraw();
+        }
+    }
+
+    fn spawn_worker(&self, id: u64, cfg: Config) -> (Worker, Controls) {
+        let proxy = self.proxy.clone();
+        let (channels, controls) = Controls::build();
+        let worker = session::spawn(cfg, channels, move |ev| {
+            let _ = proxy.send_event(UserEvent::Session(id, ev));
+        });
+        (worker, controls)
+    }
+
     fn start_session(&mut self, name: String, cfg: Config) {
         let id = self.next_id;
         self.next_id += 1;
-        let proxy = self.proxy.clone();
-        let title = format!("{name} — {}", cfg.host);
-        if let Some(m) = &mut self.manager {
-            m.ui.sessions.push(SessionRow {
-                id,
-                name: name.clone(),
-                host: cfg.host.clone(),
-                state: RowState::Connecting,
-            });
-            m.gfx.window.request_redraw();
+        let (worker, controls) = self.spawn_worker(id, cfg.clone());
+        if let Some(w) = &mut self.win {
+            w.ui.open_tab(id, name, cfg.host.clone());
         }
-        let worker = session::spawn(cfg, move |ev| {
-            let _ = proxy.send_event(UserEvent::Session(id, ev));
-        });
         self.sessions.insert(
             id,
             Session {
-                worker,
-                win: None,
-                title,
+                worker: Some(worker),
+                cfg,
+                controls,
+                mouse: (0, 0),
+                fit_requested: None,
             },
         );
+        self.dirty();
     }
 
-    fn set_row(&mut self, id: u64, state: RowState, message: Option<(String, u32)>) {
-        if let Some(m) = &mut self.manager {
-            if let Some(row) = m.ui.sessions.iter_mut().find(|r| r.id == id) {
-                row.state = state;
-            }
-            if let Some((text, color)) = message {
-                m.ui.set_message(text, color);
-            }
-            m.gfx.window.request_redraw();
+    fn reconnect(&mut self, id: u64) {
+        let Some(cfg) = self.sessions.get(&id).map(|s| s.cfg.clone()) else {
+            return;
+        };
+        if let Some(mut old) = self.sessions.get_mut(&id).and_then(|s| s.worker.take()) {
+            old.close();
+        }
+        let (worker, controls) = self.spawn_worker(id, cfg);
+        if let Some(s) = self.sessions.get_mut(&id) {
+            s.worker = Some(worker);
+            s.controls = controls;
+            s.fit_requested = None;
+        }
+        if let Some(t) = self.win.as_mut().and_then(|w| w.ui.tab_mut(id)) {
+            t.state = TabState::Connecting;
+            t.drives.clear();
+            t.clipboard = false;
+        }
+        self.dirty();
+    }
+
+    fn send(&self, id: u64, events: Vec<InputEvent>) {
+        if let Some(w) = self.sessions.get(&id).and_then(|s| s.worker.as_ref()) {
+            w.send(events);
         }
     }
 
-    fn maybe_exit(&self, el: &ActiveEventLoop) {
-        if self.manager.is_none() && self.sessions.values().all(|s| s.win.is_none()) {
-            el.exit();
+    fn message(&mut self, text: impl Into<String>, color: u32) {
+        if let Some(w) = &mut self.win {
+            w.ui.set_message(text, color);
         }
+        self.dirty();
     }
 
     fn handle_action(&mut self, action: Action) {
         match action {
             Action::Connect { name, cfg } => self.start_session(name, *cfg),
-            Action::Show(id) => {
-                if let Some(w) = self.sessions.get(&id).and_then(|s| s.win.as_ref()) {
-                    w.gfx.window.set_minimized(false);
-                    w.gfx.window.focus_window();
+            Action::Disconnect(id) => {
+                if let Some(w) = self.sessions.get_mut(&id).and_then(|s| s.worker.as_mut()) {
+                    w.close();
                 }
             }
-            Action::Close(id) => {
+            Action::Reconnect(id) => self.reconnect(id),
+            Action::CloseTab(id) => {
+                if let Some(mut s) = self.sessions.remove(&id)
+                    && let Some(w) = s.worker.as_mut()
+                {
+                    w.close();
+                }
+                if let Some(w) = &mut self.win {
+                    w.ui.close_tab(id);
+                }
+                self.dirty();
+            }
+            Action::SetClipboard(id, on) => {
+                let r = self.sessions.get(&id).map(|s| s.controls.set_clipboard(on));
+                if let Some(Err(e)) = r {
+                    if let Some(t) = self.win.as_mut().and_then(|w| w.ui.tab_mut(id)) {
+                        t.clipboard = false;
+                    }
+                    self.message(e, theme::WARN);
+                } else {
+                    self.message(
+                        if on {
+                            "Clipboard shared."
+                        } else {
+                            "Clipboard no longer shared."
+                        },
+                        theme::TEXT_2,
+                    );
+                }
+            }
+            Action::SetFit(id, on) => {
                 if let Some(s) = self.sessions.get_mut(&id) {
-                    s.worker.close();
+                    s.fit_requested = None;
+                }
+                if !on {
+                    self.message(
+                        "Fit to window off: the desktop keeps its size.",
+                        theme::TEXT_2,
+                    );
+                }
+                self.dirty();
+            }
+            Action::AddDrive(id, path) => {
+                let name = std::path::Path::new(&path)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| path.trim_end_matches(['\\', '/', ':']).to_string());
+                let r = self
+                    .sessions
+                    .get(&id)
+                    .map(|s| s.controls.add_drive(&name, &path));
+                match r {
+                    Some(Ok(device_id)) => {
+                        if let Some(t) = self.win.as_mut().and_then(|w| w.ui.tab_mut(id)) {
+                            t.drives.push(SharedDrive {
+                                device_id,
+                                name: name.clone(),
+                                path,
+                            });
+                        }
+                        self.message(format!("Sharing {name}."), theme::TEXT_2);
+                    }
+                    Some(Err(e)) => self.message(e, theme::WARN),
+                    None => {}
                 }
             }
+            Action::RemoveDrive(id, i) => {
+                let drive = self
+                    .win
+                    .as_mut()
+                    .and_then(|w| w.ui.tab_mut(id))
+                    .and_then(|t| (i < t.drives.len()).then(|| t.drives.remove(i)));
+                if let (Some(d), Some(s)) = (drive, self.sessions.get(&id)) {
+                    s.controls.remove_drive(d.device_id);
+                    self.message(format!("Stopped sharing {}.", d.name), theme::TEXT_2);
+                }
+            }
+            Action::CtrlAltDel(id) => self.send(id, session::ctrl_alt_del()),
         }
     }
 
-    fn render_manager(&mut self) {
-        let (Some(m), Some(fonts)) = (&mut self.manager, &self.fonts) else {
-            return;
-        };
+    /// Repaints the chrome, blits the active session and presents the changed tiles.
+    fn render_chrome(&mut self) {
+        let Some(m) = &mut self.win else { return };
         let (w, h) = m.size;
         if w == 0 || h == 0 {
             return;
         }
-        m.cur.resize(w * h, 0);
+        m.scratch.resize(w * h, 0);
+        m.ui.paint(
+            &mut Canvas::new(&mut m.scratch, w, h),
+            &mut self.te,
+            &self.fonts,
+        );
+        if let Some((id, area)) = m.ui.session_area
+            && let Some(worker) = self.sessions.get(&id).and_then(|s| s.worker.as_ref())
         {
-            let mut cv = Canvas::new(&mut m.cur, w, h);
-            m.ui.paint(&mut cv, &mut self.te, fonts);
+            let mut sh = worker.shared.lock().unwrap();
+            worker.notified.store(false, Ordering::Release);
+            blit(&sh.fb, &mut m.scratch, w, area, None);
+            sh.damage.clear();
+            sh.full = false;
         }
         let Ok(mut buf) = m.gfx.surface.buffer_mut() else {
             return;
         };
-        let full = buf.age() == 0 || m.prev.len() != m.cur.len();
-        let rects = if full {
+        let full = buf.age() == 0 || m.shown.len() != m.scratch.len();
+        let rects: Vec<softbuffer::Rect> = if full {
             to_sb(0, 0, w, h).into_iter().collect()
         } else {
-            diff_tiles(&m.prev, &m.cur, w, h)
+            diff_tiles(&m.shown, &m.scratch, w, h)
         };
+        m.chrome_dirty = false;
         if rects.is_empty() {
             return;
         }
         if full {
-            buf.copy_from_slice(&m.cur);
+            buf.copy_from_slice(&m.scratch);
         } else {
             for r in &rects {
                 for y in r.y as usize..(r.y + r.height.get()) as usize {
                     let o = y * w + r.x as usize;
                     let n = r.width.get() as usize;
-                    buf[o..o + n].copy_from_slice(&m.cur[o..o + n]);
+                    buf[o..o + n].copy_from_slice(&m.scratch[o..o + n]);
                 }
             }
         }
         if let Err(e) = buf.present_with_damage(&rects) {
             eprintln!("rdpc: present failed: {e}");
         }
-        std::mem::swap(&mut m.prev, &mut m.cur);
+        std::mem::swap(&mut m.shown, &mut m.scratch);
     }
 
-    fn render_session(&mut self, id: u64) {
-        let Some(s) = self.sessions.get_mut(&id) else {
+    /// Copies only the active session's damaged rectangles to the screen.
+    fn render_session_damage(&mut self) {
+        let Some(m) = &mut self.win else { return };
+        let Some((id, area)) = m.ui.session_area else {
             return;
         };
-        let Some(win) = &mut s.win else { return };
-        {
-            let mut sh = s.worker.shared.lock().unwrap();
-            s.worker.notified.store(false, Ordering::Release);
-            let (dw, dh) = (sh.fb.width, sh.fb.height);
-            if (dw, dh) != win.desktop {
-                win.desktop = (dw, dh);
-                let _ = win
-                    .gfx
-                    .window
-                    .request_inner_size(PhysicalSize::new(dw as u32, dh as u32));
-                resize_surface(&mut win.gfx, dw, dh);
-                sh.full = true;
+        let Some(worker) = self.sessions.get(&id).and_then(|s| s.worker.as_ref()) else {
+            return;
+        };
+        let (w, h) = m.size;
+        if m.shown.len() != w * h {
+            m.chrome_dirty = true;
+            return self.render_chrome();
+        }
+        let mut sh = worker.shared.lock().unwrap();
+        worker.notified.store(false, Ordering::Release);
+        if sh.full {
+            drop(sh);
+            m.chrome_dirty = true;
+            return self.render_chrome();
+        }
+        let damage = std::mem::take(&mut sh.damage);
+        let mut rects = Vec::new();
+        for d in &damage {
+            if let Some(r) = blit(&sh.fb, &mut m.shown, w, area, Some(*d)) {
+                rects.extend(to_sb(
+                    r.x as usize,
+                    r.y as usize,
+                    r.w as usize,
+                    r.h as usize,
+                ));
             }
-            let Ok(mut buf) = win.gfx.surface.buffer_mut() else {
-                return;
-            };
-            let full = std::mem::take(&mut sh.full) || buf.age() == 0;
-            let damage = std::mem::take(&mut sh.damage);
-            if buf.len() != sh.fb.pixels.len() {
-                return;
-            }
-            if full {
-                buf.copy_from_slice(&sh.fb.pixels);
-            } else {
-                for d in &damage {
-                    for y in d.y..d.y + d.h {
-                        let o = y * dw + d.x;
-                        buf[o..o + d.w].copy_from_slice(&sh.fb.pixels[o..o + d.w]);
-                    }
+        }
+        drop(sh);
+        if rects.is_empty() {
+            return;
+        }
+        let Ok(mut buf) = m.gfx.surface.buffer_mut() else {
+            return;
+        };
+        if buf.age() == 0 {
+            buf.copy_from_slice(&m.shown);
+            rects = to_sb(0, 0, w, h).into_iter().collect();
+        } else {
+            for r in &rects {
+                for y in r.y as usize..(r.y + r.height.get()) as usize {
+                    let o = y * w + r.x as usize;
+                    let n = r.width.get() as usize;
+                    buf[o..o + n].copy_from_slice(&m.shown[o..o + n]);
                 }
             }
-            let rects: Vec<softbuffer::Rect> = if full {
-                to_sb(0, 0, dw, dh).into_iter().collect()
-            } else {
-                damage
-                    .iter()
-                    .filter_map(|d| to_sb(d.x, d.y, d.w, d.h))
-                    .collect()
-            };
-            if !rects.is_empty()
-                && let Err(e) = buf.present_with_damage(&rects)
-            {
-                eprintln!("rdpc: present failed: {e}");
-            }
+        }
+        if let Err(e) = buf.present_with_damage(&rects) {
+            eprintln!("rdpc: present failed: {e}");
         }
     }
 
-    fn manager_key(&mut self, ev: &winit::event::KeyEvent) -> Option<Key> {
+    /// Requests a server-side resize when fit-to-window is on and the tab size changed.
+    fn fit_active(&mut self) {
+        let Some(m) = &self.win else { return };
+        let Some((id, area)) = m.ui.session_area else {
+            return;
+        };
+        let fit = m.ui.active_tab().is_some_and(|t| t.fit);
+        let Some(s) = self.sessions.get_mut(&id) else {
+            return;
+        };
+        let want = (area.w.max(0) as u32, area.h.max(0) as u32);
+        if fit && s.fit_requested != Some(want) && s.controls.request_resize(want.0, want.1) {
+            s.fit_requested = Some(want);
+        }
+    }
+
+    fn manager_key(&self, ev: &winit::event::KeyEvent) -> Option<Key> {
         if ev.state != ElementState::Pressed {
             return None;
         }
         let ctrl = self.mods.control_key();
         Some(match &ev.logical_key {
             WKey::Named(n) => match n {
+                NamedKey::Tab if ctrl && self.mods.shift_key() => Key::PrevTab,
+                NamedKey::Tab if ctrl => Key::NextTab,
                 NamedKey::Backspace => Key::Backspace,
                 NamedKey::Delete => Key::Delete,
                 NamedKey::ArrowLeft => Key::Left,
@@ -361,29 +478,243 @@ impl App {
         })
     }
 
-    fn manager_event(&mut self, el: &ActiveEventLoop, event: WindowEvent) {
-        let Some(m) = &mut self.manager else { return };
+    fn keyboard(&mut self, ev: winit::event::KeyEvent) {
+        let Some(m) = &mut self.win else { return };
+        let session = if m.ui.session_focus {
+            m.ui.session_area.map(|(id, _)| id)
+        } else {
+            None
+        };
+        if let Some(id) = session {
+            let release = ev.state.is_pressed()
+                && self.mods.control_key()
+                && self.mods.alt_key()
+                && matches!(ev.logical_key, WKey::Named(NamedKey::Home));
+            if release {
+                m.ui.session_focus = false;
+                self.send(id, session::release_modifiers());
+                self.dirty();
+            } else if let Some(e) = session::key_event(&ev) {
+                self.send(id, vec![e]);
+            }
+            return;
+        }
+        if let Some(k) = self.manager_key(&ev) {
+            let action = self.win.as_mut().and_then(|m| m.ui.key(k));
+            self.dirty();
+            if let Some(a) = action {
+                self.handle_action(a);
+            }
+        }
+    }
+
+    /// The worker finished: join it and show why in the tab.
+    fn ended(&mut self, id: u64, state: TabState) {
+        if let Some(s) = self.sessions.get_mut(&id)
+            && let Some(mut w) = s.worker.take()
+            && let Some(t) = w.thread.take()
+        {
+            let _ = t.join();
+        }
+        if let Some(t) = self.win.as_mut().and_then(|w| w.ui.tab_mut(id)) {
+            t.state = state;
+        }
+        self.dirty();
+    }
+
+    fn mouse_to_session(&self, x: i32, y: i32) -> Option<(u64, u16, u16)> {
+        let m = self.win.as_ref()?;
+        let (id, area) = m.ui.session_area?;
+        let s = self.sessions.get(&id)?;
+        let fb = s
+            .worker
+            .as_ref()?
+            .shared
+            .lock()
+            .ok()
+            .map(|sh| (sh.fb.width, sh.fb.height))?;
+        let in_area = area.contains(x, y) || m.pressed_in == Some(id);
+        if !in_area || fb.0 == 0 {
+            return None;
+        }
+        let fx = (x - area.x).clamp(0, fb.0 as i32 - 1) as u16;
+        let fy = (y - area.y).clamp(0, fb.1 as i32 - 1) as u16;
+        Some((id, fx, fy))
+    }
+}
+
+/// Copies the session framebuffer (or one damaged rectangle of it) into the
+/// window frame at `area`, clipped. Returns the window rectangle written.
+fn blit(
+    fb: &rdp::Framebuffer,
+    frame: &mut [u32],
+    frame_w: usize,
+    area: Rect,
+    only: Option<rdp::Damage>,
+) -> Option<Rect> {
+    let (sx, sy, sw, sh) = match only {
+        Some(d) => (d.x as i32, d.y as i32, d.w as i32, d.h as i32),
+        None => (0, 0, fb.width as i32, fb.height as i32),
+    };
+    let dst = Rect::new(area.x + sx, area.y + sy, sw, sh).intersect(area);
+    if dst.is_empty() {
+        return None;
+    }
+    for row in 0..dst.h {
+        let fy = (dst.y - area.y + row) as usize;
+        let fx = (dst.x - area.x) as usize;
+        let src = &fb.pixels[fy * fb.width + fx..fy * fb.width + fx + dst.w as usize];
+        let o = (dst.y + row) as usize * frame_w + dst.x as usize;
+        frame[o..o + dst.w as usize].copy_from_slice(src);
+    }
+    Some(dst)
+}
+
+impl ApplicationHandler<UserEvent> for App {
+    fn resumed(&mut self, el: &ActiveEventLoop) {
+        if self.win.is_none() {
+            let attrs = Window::default_attributes()
+                .with_title("rdpc")
+                .with_inner_size(LogicalSize::new(1320.0, 860.0))
+                .with_min_inner_size(LogicalSize::new(900.0, 560.0));
+            let made = el
+                .create_window(attrs)
+                .map_err(|e| e.to_string())
+                .and_then(|w| {
+                    let window = Rc::new(w);
+                    let ctx = Context::new(window.clone()).map_err(|e| e.to_string())?;
+                    let surface = Surface::new(&ctx, window.clone()).map_err(|e| e.to_string())?;
+                    Ok(Gfx { window, surface })
+                });
+            match made {
+                Ok(mut gfx) => {
+                    let scale = gfx.window.scale_factor() as f32;
+                    let sz = gfx.window.inner_size();
+                    if let (Some(w), Some(h)) =
+                        (NonZeroU32::new(sz.width), NonZeroU32::new(sz.height))
+                    {
+                        let _ = gfx.surface.resize(w, h);
+                    }
+                    gfx.window.request_redraw();
+                    self.win = Some(MainWin {
+                        gfx,
+                        ui: Ui::new(Store::load(), scale),
+                        shown: Vec::new(),
+                        scratch: Vec::new(),
+                        size: (sz.width as usize, sz.height as usize),
+                        cursor: (-1, -1),
+                        text_cursor: false,
+                        chrome_dirty: true,
+                        pressed_in: None,
+                    });
+                }
+                Err(e) => {
+                    eprintln!("rdpc: cannot open a window: {e}");
+                    self.exit_code = 1;
+                    el.exit();
+                    return;
+                }
+            }
+        }
+        if let Some((name, cfg)) = self.direct.take() {
+            self.start_session(name, cfg);
+        }
+    }
+
+    fn user_event(&mut self, _el: &ActiveEventLoop, event: UserEvent) {
+        let UserEvent::Session(id, ev) = event;
+        let active = self.win.as_ref().and_then(|w| w.ui.active) == Some(id);
+        match ev {
+            session::Event::Connected(info) => {
+                if let Some(t) = self.win.as_mut().and_then(|w| w.ui.tab_mut(id)) {
+                    t.state = TabState::Connected {
+                        width: info.width,
+                        height: info.height,
+                        bpp: info.bpp,
+                    };
+                }
+                self.message(
+                    format!(
+                        "Connected: {} ({}×{}).",
+                        self.sessions.get(&id).map_or("", |s| s.cfg.host.as_str()),
+                        info.width,
+                        info.height
+                    ),
+                    theme::TEXT_2,
+                );
+            }
+            session::Event::Frame => {
+                if active {
+                    if let Some(w) = &self.win {
+                        w.gfx.window.request_redraw();
+                    }
+                } else if let Some(worker) = self.sessions.get(&id).and_then(|s| s.worker.as_ref())
+                {
+                    // Hidden tab: drop the damage; switching to it blits the whole picture.
+                    worker.shared.lock().unwrap().damage.clear();
+                    worker.notified.store(false, Ordering::Release);
+                }
+            }
+            session::Event::Closed(why) => {
+                let why = if why == "disconnected" {
+                    "disconnected by you".to_string()
+                } else {
+                    why
+                };
+                self.ended(id, TabState::Ended(why));
+            }
+            session::Event::Failed(why) => self.ended(id, TabState::Failed(why)),
+        }
+    }
+
+    fn window_event(&mut self, el: &ActiveEventLoop, _wid: WindowId, event: WindowEvent) {
+        if self.win.is_none() {
+            return;
+        }
         match event {
             WindowEvent::CloseRequested => {
-                self.manager = None;
-                self.maybe_exit(el);
+                for s in self.sessions.values_mut() {
+                    if let Some(w) = s.worker.as_mut() {
+                        w.close();
+                    }
+                }
+                el.exit();
             }
             WindowEvent::Resized(sz) => {
+                let m = self.win.as_mut().unwrap();
                 m.size = (sz.width as usize, sz.height as usize);
-                resize_surface(&mut m.gfx, m.size.0, m.size.1);
-                m.prev.clear();
-                m.gfx.window.request_redraw();
+                if let (Some(w), Some(h)) = (NonZeroU32::new(sz.width), NonZeroU32::new(sz.height))
+                {
+                    let _ = m.gfx.surface.resize(w, h);
+                }
+                m.shown.clear();
+                self.dirty();
             }
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
-                m.ui.scale = scale_factor as f32;
-                m.gfx.window.request_redraw();
+                self.win.as_mut().unwrap().ui.scale = scale_factor as f32;
+                self.dirty();
             }
-            WindowEvent::RedrawRequested => self.render_manager(),
-            WindowEvent::CursorMoved { position, .. } => {
-                m.cursor = (position.x as i32, position.y as i32);
-                if m.ui.mouse_move(m.cursor.0, m.cursor.1) {
-                    m.gfx.window.request_redraw();
+            WindowEvent::RedrawRequested => {
+                if self.win.as_ref().unwrap().chrome_dirty {
+                    self.render_chrome();
+                    self.fit_active();
+                } else {
+                    self.render_session_damage();
                 }
+            }
+            WindowEvent::Focused(false) => {
+                if let Some((id, _)) = self.win.as_ref().unwrap().ui.session_area {
+                    self.send(id, session::release_modifiers());
+                }
+            }
+            WindowEvent::CursorMoved { position, .. } => {
+                let (x, y) = (position.x as i32, position.y as i32);
+                let m = self.win.as_mut().unwrap();
+                m.cursor = (x, y);
+                if m.ui.mouse_move(x, y) {
+                    self.dirty();
+                }
+                let m = self.win.as_mut().unwrap();
                 let text = m.ui.cursor_is_text();
                 if text != m.text_cursor {
                     m.gfx.window.set_cursor(if text {
@@ -393,225 +724,63 @@ impl App {
                     });
                     m.text_cursor = text;
                 }
+                if let Some((id, fx, fy)) = self.mouse_to_session(x, y)
+                    && let Some(s) = self.sessions.get_mut(&id)
+                    && s.mouse != (fx, fy)
+                {
+                    s.mouse = (fx, fy);
+                    self.send(id, vec![InputEvent::mouse_move(fx, fy)]);
+                }
             }
             WindowEvent::CursorLeft { .. } => {
-                if m.ui.mouse_move(-1, -1) {
-                    m.gfx.window.request_redraw();
+                if self.win.as_mut().unwrap().ui.mouse_move(-1, -1) {
+                    self.dirty();
                 }
             }
-            WindowEvent::MouseInput {
-                state,
-                button: MouseButton::Left,
-                ..
-            } => {
-                let (x, y) = m.cursor;
-                let action = if state == ElementState::Pressed {
-                    if let Some(fonts) = &self.fonts {
-                        m.ui.mouse_down(x, y, &mut self.te, fonts);
-                    }
-                    None
-                } else {
-                    m.ui.mouse_up(x, y)
-                };
-                m.gfx.window.request_redraw();
-                if let Some(a) = action {
-                    self.handle_action(a);
+            WindowEvent::MouseInput { state, button, .. } => {
+                let (x, y) = self.win.as_ref().unwrap().cursor;
+                let down = state == ElementState::Pressed;
+                let target = self.mouse_to_session(x, y);
+                if let Some((id, fx, fy)) = target {
+                    self.send(
+                        id,
+                        session::mouse_button(button, down, (fx, fy))
+                            .into_iter()
+                            .collect(),
+                    );
                 }
-            }
-            WindowEvent::ModifiersChanged(mods) => self.mods = mods.state(),
-            WindowEvent::KeyboardInput { event, .. } => {
-                if let Some(k) = self.manager_key(&event) {
-                    let Some(m) = &mut self.manager else { return };
-                    let action = m.ui.key(k);
-                    m.gfx.window.request_redraw();
+                let m = self.win.as_mut().unwrap();
+                if button == MouseButton::Left {
+                    let action = if down {
+                        let was = m.ui.session_focus;
+                        m.ui.mouse_down(x, y, &mut self.te, &self.fonts);
+                        m.pressed_in = target.map(|t| t.0);
+                        if was != m.ui.session_focus
+                            || m.ui.session_area.is_none_or(|(_, r)| !r.contains(x, y))
+                        {
+                            self.dirty();
+                        }
+                        None
+                    } else {
+                        m.pressed_in = None;
+                        let a = m.ui.mouse_up(x, y);
+                        self.dirty();
+                        a
+                    };
                     if let Some(a) = action {
                         self.handle_action(a);
                     }
                 }
             }
+            WindowEvent::MouseWheel { delta, .. } => {
+                let (x, y) = self.win.as_ref().unwrap().cursor;
+                if let Some((id, fx, fy)) = self.mouse_to_session(x, y) {
+                    self.send(id, session::wheel(delta, (fx, fy)).into_iter().collect());
+                }
+            }
+            WindowEvent::ModifiersChanged(mods) => self.mods = mods.state(),
+            WindowEvent::KeyboardInput { event, .. } => self.keyboard(event),
             _ => {}
-        }
-    }
-
-    fn session_event(&mut self, el: &ActiveEventLoop, id: u64, event: WindowEvent) {
-        let Some(s) = self.sessions.get_mut(&id) else {
-            return;
-        };
-        let Some(win) = &mut s.win else { return };
-        let mut send = Vec::new();
-        match event {
-            WindowEvent::CloseRequested => {
-                s.worker.close();
-                s.win = None;
-                self.maybe_exit(el);
-                return;
-            }
-            WindowEvent::RedrawRequested => return self.render_session(id),
-            WindowEvent::KeyboardInput { event, .. } => send.extend(session::key_event(&event)),
-            WindowEvent::Focused(false) => send.extend(session::release_modifiers()),
-            WindowEvent::CursorMoved { position, .. } => {
-                let x = position.x.clamp(0.0, (win.desktop.0.max(1) - 1) as f64) as u16;
-                let y = position.y.clamp(0.0, (win.desktop.1.max(1) - 1) as f64) as u16;
-                if (x, y) != win.mouse {
-                    win.mouse = (x, y);
-                    send.push(rdp::InputEvent::mouse_move(x, y));
-                }
-            }
-            WindowEvent::MouseInput { state, button, .. } => {
-                send.extend(session::mouse_button(
-                    button,
-                    state == ElementState::Pressed,
-                    win.mouse,
-                ));
-            }
-            WindowEvent::MouseWheel { delta, .. } => send.extend(session::wheel(delta, win.mouse)),
-            _ => {}
-        }
-        s.worker.send(send);
-    }
-
-    fn open_session_window(&mut self, el: &ActiveEventLoop, id: u64, info: &rdp::ConnectionInfo) {
-        let Some(s) = self.sessions.get_mut(&id) else {
-            return;
-        };
-        let (w, h) = (info.width as usize, info.height as usize);
-        let attrs = Window::default_attributes()
-            .with_title(&s.title)
-            .with_inner_size(PhysicalSize::new(w as u32, h as u32))
-            .with_resizable(false);
-        match make_gfx(el, attrs) {
-            Ok(mut gfx) => {
-                resize_surface(&mut gfx, w, h);
-                gfx.window.request_redraw();
-                s.win = Some(SessionWin {
-                    gfx,
-                    mouse: (0, 0),
-                    desktop: (w, h),
-                });
-            }
-            Err(e) => {
-                s.worker.close();
-                eprintln!("rdpc: {e}");
-            }
-        }
-    }
-}
-
-impl ApplicationHandler<UserEvent> for App {
-    fn resumed(&mut self, el: &ActiveEventLoop) {
-        if self.want_manager && self.manager.is_none() {
-            let attrs = Window::default_attributes()
-                .with_title("rdpc — Connections")
-                .with_inner_size(LogicalSize::new(980.0, 640.0))
-                .with_min_inner_size(LogicalSize::new(760.0, 520.0));
-            match make_gfx(el, attrs) {
-                Ok(gfx) => {
-                    let scale = gfx.window.scale_factor() as f32;
-                    let sz = gfx.window.inner_size();
-                    let mut ui = Manager::new(Store::load(), scale);
-                    ui.renderer = "CPU".into();
-                    let mut m = ManagerWin {
-                        gfx,
-                        ui,
-                        prev: Vec::new(),
-                        cur: Vec::new(),
-                        size: (sz.width as usize, sz.height as usize),
-                        cursor: (-1, -1),
-                        text_cursor: false,
-                    };
-                    resize_surface(&mut m.gfx, m.size.0, m.size.1);
-                    m.gfx.window.request_redraw();
-                    self.manager = Some(m);
-                }
-                Err(e) => {
-                    eprintln!("rdpc: {e}");
-                    self.exit_code = 1;
-                    el.exit();
-                }
-            }
-            self.want_manager = false;
-        }
-        if let Some((name, cfg)) = self.direct.take() {
-            eprintln!("connecting to {}:{} ...", cfg.host, cfg.port);
-            self.start_session(name, cfg);
-        }
-    }
-
-    fn user_event(&mut self, el: &ActiveEventLoop, event: UserEvent) {
-        let UserEvent::Session(id, ev) = event;
-        match ev {
-            session::Event::Connected(info) => {
-                if self.manager.is_none() {
-                    eprintln!(
-                        "connected: protocol {:#x}, desktop {}x{} at {} bpp",
-                        info.protocol, info.width, info.height, info.bpp
-                    );
-                }
-                self.open_session_window(el, id, &info);
-                let state = RowState::Connected {
-                    width: info.width,
-                    height: info.height,
-                    bpp: info.bpp,
-                };
-                let host = self
-                    .sessions
-                    .get(&id)
-                    .map(|s| s.title.clone())
-                    .unwrap_or_default();
-                self.set_row(
-                    id,
-                    state,
-                    Some((format!("Connected: {host}."), theme::TEXT_2)),
-                );
-            }
-            session::Event::Frame => {
-                if let Some(w) = self.sessions.get(&id).and_then(|s| s.win.as_ref()) {
-                    w.gfx.window.request_redraw();
-                }
-            }
-            session::Event::Closed(why) | session::Event::Failed(why) if self.manager.is_none() => {
-                eprintln!("session ended: {why}");
-                if let Some(mut s) = self.sessions.remove(&id)
-                    && let Some(t) = s.worker.thread.take()
-                {
-                    let _ = t.join();
-                }
-                self.maybe_exit(el);
-            }
-            session::Event::Closed(why) => {
-                if let Some(mut s) = self.sessions.remove(&id)
-                    && let Some(t) = s.worker.thread.take()
-                {
-                    let _ = t.join();
-                }
-                self.set_row(id, RowState::Ended(why), None);
-            }
-            session::Event::Failed(why) => {
-                if let Some(mut s) = self.sessions.remove(&id)
-                    && let Some(t) = s.worker.thread.take()
-                {
-                    let _ = t.join();
-                }
-                self.set_row(id, RowState::Failed(why.clone()), Some((why, theme::ERR)));
-            }
-        }
-    }
-
-    fn window_event(&mut self, el: &ActiveEventLoop, wid: WindowId, event: WindowEvent) {
-        if self
-            .manager
-            .as_ref()
-            .is_some_and(|m| m.gfx.window.id() == wid)
-        {
-            return self.manager_event(el, event);
-        }
-        let id = self
-            .sessions
-            .iter()
-            .find(|(_, s)| s.win.as_ref().is_some_and(|w| w.gfx.window.id() == wid))
-            .map(|(id, _)| *id);
-        if let Some(id) = id {
-            self.session_event(el, id, event);
         }
     }
 }

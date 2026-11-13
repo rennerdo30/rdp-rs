@@ -2,3 +2,5 @@
 # Machine-local Cargo config (template: .cargo/config.example.toml)
 /.cargo/config.toml
 *.png
+# Agent worktrees
+/.claude/

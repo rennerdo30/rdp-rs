@@ -8,7 +8,7 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use rdp::input::{PTRFLAGS_BUTTON1, PTRFLAGS_BUTTON2, PTRFLAGS_BUTTON3};
-use rdp::{Client, Config, ConnectionInfo, Damage, Framebuffer, InputEvent};
+use rdp::{Client, Config, ConnectionInfo, Damage, Framebuffer, InputEvent, StaticChannel};
 
 pub enum Event {
     Connected(ConnectionInfo),
@@ -51,7 +51,11 @@ impl Worker {
     }
 }
 
-pub fn spawn(cfg: Config, emit: impl Fn(Event) + Send + 'static) -> Worker {
+pub fn spawn(
+    cfg: Config,
+    channels: Vec<Box<dyn StaticChannel>>,
+    emit: impl Fn(Event) + Send + 'static,
+) -> Worker {
     let (tx, rx) = mpsc::channel();
     let shared = Arc::new(Mutex::new(Shared {
         fb: Framebuffer::new(0, 0),
@@ -62,7 +66,7 @@ pub fn spawn(cfg: Config, emit: impl Fn(Event) + Send + 'static) -> Worker {
     let (s, n) = (shared.clone(), notified.clone());
     let thread = std::thread::Builder::new()
         .name("rdp-session".into())
-        .spawn(move || run(cfg, rx, s, n, emit))
+        .spawn(move || run(cfg, channels, rx, s, n, emit))
         .expect("spawn session thread");
     Worker {
         tx,
@@ -81,12 +85,13 @@ fn copy_rect(src: &Framebuffer, dst: &mut Framebuffer, d: Damage) {
 
 fn run(
     cfg: Config,
+    channels: Vec<Box<dyn StaticChannel>>,
     rx: Receiver<Cmd>,
     shared: Arc<Mutex<Shared>>,
     notified: Arc<AtomicBool>,
     emit: impl Fn(Event),
 ) {
-    let mut client = match Client::connect(&cfg) {
+    let mut client = match Client::connect_with(&cfg, channels) {
         Ok(c) => c,
         Err(e) => return emit(Event::Failed(e.to_string())),
     };
@@ -159,6 +164,23 @@ pub fn key_event(ev: &winit::event::KeyEvent) -> Option<InputEvent> {
 }
 
 /// Releases every modifier, so focus changes never leave a key stuck down remotely.
+/// Ctrl+Alt+Del as scancodes (the local OS never sees it, so it is safe to send).
+pub fn ctrl_alt_del() -> Vec<InputEvent> {
+    let k = |scancode, extended, down| InputEvent::Key {
+        scancode,
+        extended,
+        down,
+    };
+    vec![
+        k(0x1D, false, true),
+        k(0x38, false, true),
+        k(0x53, true, true),
+        k(0x53, true, false),
+        k(0x38, false, false),
+        k(0x1D, false, false),
+    ]
+}
+
 pub fn release_modifiers() -> Vec<InputEvent> {
     [
         (0x1D, false),

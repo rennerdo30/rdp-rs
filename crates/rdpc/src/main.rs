@@ -11,11 +11,12 @@
 
 mod app;
 mod clipboard;
-mod manager;
+mod controls;
 mod session;
 mod store;
 mod text_field;
 mod theme;
+mod ui;
 
 use std::time::{Duration, Instant};
 
@@ -198,17 +199,24 @@ fn screenshot(
     Ok(())
 }
 
-/// Renders the manager with sample data offscreen, using the window's paint code.
+/// Renders the window with sample data offscreen, using the window's paint
+/// code: `out.png` shows the Connections tab, `out-session.png` a session tab
+/// with the control drawer (the remote picture area is left empty).
 fn snapshot_ui(path: &str, scale: f32) -> Result<(), Box<dyn std::error::Error>> {
     let mut te = TextEngine::new();
-    let fonts = manager::load_fonts(&mut te).ok_or("no usable UI font")?;
-    let mut m = manager::sample();
-    m.scale = scale;
-    let (w, h) = ((980.0 * scale) as usize, (640.0 * scale) as usize);
-    let mut px = vec![0u32; w * h];
-    m.paint(&mut Canvas::new(&mut px, w, h), &mut te, &fonts);
-    write_png(path, w, h, &px)?;
-    eprintln!("saved {w}x{h} manager snapshot to {path}");
+    let fonts = ui::load_fonts(&mut te).ok_or("no usable UI font")?;
+    let (w, h) = ((1320.0 * scale) as usize, (860.0 * scale) as usize);
+    for (session, out) in [
+        (false, path.to_string()),
+        (true, path.replace(".png", "-session.png")),
+    ] {
+        let mut m = ui::sample(session);
+        m.scale = scale;
+        let mut px = vec![0u32; w * h];
+        m.paint(&mut Canvas::new(&mut px, w, h), &mut te, &fonts);
+        write_png(&out, w, h, &px)?;
+        eprintln!("saved {w}x{h} snapshot to {out}");
+    }
     Ok(())
 }
 

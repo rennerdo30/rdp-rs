@@ -1,9 +1,11 @@
-//! The connection manager: saved connections on the left, the edit form and
-//! running sessions on the right, a status bar at the bottom.
+//! The main window: saved connections on the left, a tab strip with a
+//! Connections tab (edit form) and one tab per session, a session toolbar, a
+//! control drawer for live session settings and a status bar.
 //!
 //! Painting is immediate: every paint lays out the whole window and records
-//! hit rectangles. The window diffs frames to find what changed, so only
-//! changed tiles are presented (cheap for RDP encoders).
+//! hit rectangles. The session picture itself is not painted here: `paint`
+//! reports the session area and the app copies the remote framebuffer into
+//! it, so session updates never repaint the chrome.
 
 use ffwd_render::{Canvas, FontId, Rect, TextEngine};
 
@@ -66,6 +68,7 @@ pub enum Field {
     Port,
     User,
     Password,
+    DrivePath,
 }
 
 const FORM: [Field; 5] = [
@@ -85,29 +88,67 @@ pub enum Hit {
     Connect,
     Save,
     Delete,
-    Show(u64),
-    Close(u64),
-    Dismiss(u64),
+    Home,
+    Tab(u64),
+    CloseTab(u64),
+    Drawer,
+    Reconnect(u64),
+    Disconnect(u64),
+    Clipboard(u64),
+    Fit(u64),
+    AddDrive(u64),
+    RemoveDrive(u64, usize),
+    CtrlAltDel(u64),
+    Session(u64),
 }
 
-pub enum RowState {
+#[derive(Clone, PartialEq)]
+pub enum TabState {
     Connecting,
     Connected { width: u16, height: u16, bpp: u16 },
     Ended(String),
     Failed(String),
 }
 
-pub struct SessionRow {
+impl TabState {
+    fn color(&self) -> u32 {
+        match self {
+            TabState::Connecting => WARN,
+            TabState::Connected { .. } => OK,
+            TabState::Ended(_) => TEXT_4,
+            TabState::Failed(_) => ERR,
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct SharedDrive {
+    pub device_id: u32,
+    pub name: String,
+    pub path: String,
+}
+
+/// One session tab and its live settings.
+pub struct Tab {
     pub id: u64,
     pub name: String,
     pub host: String,
-    pub state: RowState,
+    pub state: TabState,
+    pub clipboard: bool,
+    pub fit: bool,
+    pub drives: Vec<SharedDrive>,
 }
 
 pub enum Action {
     Connect { name: String, cfg: Box<rdp::Config> },
-    Show(u64),
-    Close(u64),
+    Disconnect(u64),
+    Reconnect(u64),
+    CloseTab(u64),
+    SetClipboard(u64, bool),
+    SetFit(u64, bool),
+    AddDrive(u64, String),
+    RemoveDrive(u64, usize),
+    CtrlAltDel(u64),
 }
 
 pub enum Key {
@@ -128,15 +169,24 @@ pub enum Key {
     Paste(String),
     New,
     Save,
+    NextTab,
+    PrevTab,
 }
 
-pub struct Manager {
+pub struct Ui {
     store: Store,
     selected: Option<usize>,
-    fields: [TextField; 6],
+    fields: [TextField; 7],
     size: usize,
     focus: Option<Field>,
-    pub sessions: Vec<SessionRow>,
+    pub tabs: Vec<Tab>,
+    /// None: the Connections tab.
+    pub active: Option<u64>,
+    pub drawer: bool,
+    /// Keyboard goes to the active session (set by clicking into it).
+    pub session_focus: bool,
+    /// Where the active session's picture goes, set by `paint`.
+    pub session_area: Option<(u64, Rect)>,
     hover: Option<Hit>,
     press: Option<Hit>,
     hits: Vec<(Rect, Hit)>,
@@ -146,15 +196,19 @@ pub struct Manager {
     pub renderer: String,
 }
 
-impl Manager {
-    pub fn new(store: Store, scale: f32) -> Manager {
-        let mut m = Manager {
+impl Ui {
+    pub fn new(store: Store, scale: f32) -> Ui {
+        let mut m = Ui {
             store,
             selected: None,
             fields: Default::default(),
             size: 0,
             focus: None,
-            sessions: Vec::new(),
+            tabs: Vec::new(),
+            active: None,
+            drawer: true,
+            session_focus: false,
+            session_area: None,
             hover: None,
             press: None,
             hits: Vec::new(),
@@ -182,6 +236,44 @@ impl Manager {
 
     pub fn set_message(&mut self, text: impl Into<String>, color: u32) {
         self.message = Some((text.into(), color));
+    }
+
+    pub fn tab_mut(&mut self, id: u64) -> Option<&mut Tab> {
+        self.tabs.iter_mut().find(|t| t.id == id)
+    }
+
+    pub fn active_tab(&self) -> Option<&Tab> {
+        self.active
+            .and_then(|id| self.tabs.iter().find(|t| t.id == id))
+    }
+
+    pub fn open_tab(&mut self, id: u64, name: String, host: String) {
+        self.tabs.push(Tab {
+            id,
+            name,
+            host,
+            state: TabState::Connecting,
+            clipboard: false,
+            fit: true,
+            drives: Vec::new(),
+        });
+        self.active = Some(id);
+        self.session_focus = false;
+    }
+
+    pub fn close_tab(&mut self, id: u64) {
+        let Some(i) = self.tabs.iter().position(|t| t.id == id) else {
+            return;
+        };
+        self.tabs.remove(i);
+        if self.active == Some(id) {
+            self.active = if self.tabs.is_empty() {
+                None
+            } else {
+                Some(self.tabs[i.min(self.tabs.len() - 1)].id)
+            };
+            self.session_focus = false;
+        }
     }
 
     fn select(&mut self, i: usize) {
@@ -294,7 +386,6 @@ impl Manager {
         })
     }
 
-    /// Indices of the connections that match the filter.
     fn visible(&self) -> Vec<usize> {
         let q = self.field(Field::Filter).text.to_lowercase();
         (0..self.store.connections.len())
@@ -319,7 +410,11 @@ impl Manager {
     /// Returns true when the hover target changed (needs a repaint).
     pub fn mouse_move(&mut self, x: i32, y: i32) -> bool {
         let h = self.hit_at(x, y);
-        let changed = h != self.hover;
+        let changed = h != self.hover
+            && !matches!(
+                (h, self.hover),
+                (Some(Hit::Session(_)), Some(Hit::Session(_)))
+            );
         self.hover = h;
         changed
     }
@@ -330,6 +425,7 @@ impl Manager {
 
     pub fn mouse_down(&mut self, x: i32, y: i32, te: &mut TextEngine, fonts: &Fonts) {
         self.press = self.hit_at(x, y);
+        self.session_focus = matches!(self.press, Some(Hit::Session(_)));
         match self.press {
             Some(Hit::Field(f)) => {
                 self.focus = Some(f);
@@ -354,6 +450,7 @@ impl Manager {
                     tf.all = false;
                 }
             }
+            Some(Hit::Session(_)) => self.focus = None,
             Some(_) => {}
             None => self.focus = None,
         }
@@ -371,27 +468,92 @@ impl Manager {
 
     fn activate(&mut self, hit: Hit) -> Option<Action> {
         match hit {
-            Hit::Row(i) => self.select(i),
-            Hit::New => self.new_connection(),
+            Hit::Row(i) => {
+                self.select(i);
+                self.active = None;
+            }
+            Hit::New => {
+                self.new_connection();
+                self.active = None;
+            }
             Hit::Field(f) => self.focus = Some(f),
             Hit::Size(i) => self.size = i,
             Hit::Connect => return self.connect(),
             Hit::Save => self.save(),
             Hit::Delete => self.delete(),
-            Hit::Show(id) => return Some(Action::Show(id)),
-            Hit::Close(id) => return Some(Action::Close(id)),
-            Hit::Dismiss(id) => self.sessions.retain(|s| s.id != id),
+            Hit::Home => self.active = None,
+            Hit::Tab(id) => self.active = Some(id),
+            Hit::CloseTab(id) => return Some(Action::CloseTab(id)),
+            Hit::Drawer => self.drawer = !self.drawer,
+            Hit::Reconnect(id) => return Some(Action::Reconnect(id)),
+            Hit::Disconnect(id) => return Some(Action::Disconnect(id)),
+            Hit::Clipboard(id) => {
+                let t = self.tab_mut(id)?;
+                t.clipboard = !t.clipboard;
+                return Some(Action::SetClipboard(id, t.clipboard));
+            }
+            Hit::Fit(id) => {
+                let t = self.tab_mut(id)?;
+                t.fit = !t.fit;
+                return Some(Action::SetFit(id, t.fit));
+            }
+            Hit::AddDrive(id) => return self.add_drive(id),
+            Hit::RemoveDrive(id, i) => return Some(Action::RemoveDrive(id, i)),
+            Hit::CtrlAltDel(id) => return Some(Action::CtrlAltDel(id)),
+            Hit::Session(_) => {}
         }
         None
     }
 
+    fn add_drive(&mut self, id: u64) -> Option<Action> {
+        let path = self
+            .field(Field::DrivePath)
+            .text
+            .trim()
+            .trim_matches('"')
+            .to_string();
+        if path.is_empty() {
+            self.focus = Some(Field::DrivePath);
+            self.set_message("Type the folder to share, then press Add.", TEXT_2);
+            return None;
+        }
+        if !std::path::Path::new(&path).is_dir() {
+            self.set_message(format!("{path} is not a folder."), ERR);
+            return None;
+        }
+        self.field_mut(Field::DrivePath).set("");
+        Some(Action::AddDrive(id, path))
+    }
+
     pub fn key(&mut self, k: Key) -> Option<Action> {
         match k {
-            Key::Enter => return self.connect(),
+            Key::Enter if self.focus == Some(Field::DrivePath) => {
+                return self.active.and_then(|id| self.add_drive(id));
+            }
+            Key::Enter if self.active.is_none() => return self.connect(),
+            Key::Enter => {}
             Key::Esc => self.focus = None,
-            Key::New => self.new_connection(),
-            Key::Save => self.save(),
-            Key::Tab | Key::BackTab => {
+            Key::New => {
+                self.new_connection();
+                self.active = None;
+            }
+            Key::Save if self.active.is_none() => self.save(),
+            Key::Save => {}
+            Key::NextTab | Key::PrevTab => {
+                let ids: Vec<Option<u64>> = std::iter::once(None)
+                    .chain(self.tabs.iter().map(|t| Some(t.id)))
+                    .collect();
+                let pos = ids.iter().position(|&x| x == self.active).unwrap_or(0);
+                let n = ids.len();
+                let next = if matches!(k, Key::NextTab) {
+                    (pos + 1) % n
+                } else {
+                    (pos + n - 1) % n
+                };
+                self.active = ids[next];
+                self.session_focus = false;
+            }
+            Key::Tab | Key::BackTab if self.active.is_none() => {
                 let back = matches!(k, Key::BackTab);
                 let i = self.focus.and_then(|f| FORM.iter().position(|&x| x == f));
                 let n = FORM.len();
@@ -416,6 +578,7 @@ impl Manager {
                     let keep = self.focus;
                     self.select(vis[next]);
                     self.focus = keep;
+                    self.active = None;
                 }
             }
             other => {
@@ -438,7 +601,6 @@ impl Manager {
         None
     }
 
-    /// How far a field's text is scrolled left so the caret stays visible.
     fn field_scroll(&self, f: Field, r: Rect, te: &mut TextEngine, fonts: &Fonts) -> f32 {
         let tf = self.field(f);
         let size = 13.5 * self.scale;
@@ -454,19 +616,26 @@ impl Manager {
     pub fn paint(&mut self, cv: &mut Canvas, te: &mut TextEngine, f: &Fonts) {
         self.hits.clear();
         self.field_rects.clear();
+        self.session_area = None;
         let s = self.scale;
         let p = |v: f32| (v * s).round() as i32;
         let (w, h) = (cv.width() as i32, cv.height() as i32);
         cv.fill(Rect::new(0, 0, w, h), BG);
-        let bar_h = p(30.0);
+        let bar_h = p(28.0);
         let body_h = h - bar_h;
-        let side_w = p(290.0).min(w * 2 / 5);
+        let side_w = p(260.0).min(w / 3);
 
         self.paint_sidebar(cv, te, f, Rect::new(0, 0, side_w, body_h));
         cv.fill(Rect::new(side_w, 0, 1, body_h), BORDER_SOFT);
-        self.paint_main(cv, te, f, Rect::new(side_w + 1, 0, w - side_w - 1, body_h));
+        let main = Rect::new(side_w + 1, 0, w - side_w - 1, body_h);
+        let strip_h = p(38.0);
+        self.paint_tabs(cv, te, f, Rect::new(main.x, 0, main.w, strip_h));
+        let content = Rect::new(main.x, strip_h, main.w, main.h - strip_h);
+        match self.active_tab().map(|t| t.id) {
+            Some(id) => self.paint_session(cv, te, f, content, id),
+            None => self.paint_home(cv, te, f, content),
+        }
 
-        // Status bar
         let bar = Rect::new(0, body_h, w, bar_h);
         cv.fill(bar, BG_BAR);
         cv.fill(Rect::new(0, body_h, w, 1), BORDER_SOFT);
@@ -476,21 +645,27 @@ impl Manager {
             cv,
             f.ui,
             12.0 * s,
-            Rect::new(w - rw - p(16.0), body_h, rw + p(16.0), bar_h),
+            Rect::new(w - rw - p(14.0), body_h, rw + p(14.0), bar_h),
             0.0,
             &right,
             TEXT_4,
         );
-        let (msg, color) = self
-            .message
-            .clone()
-            .unwrap_or_else(|| ("Ready".into(), TEXT_3));
+        let (msg, color) = if self.session_focus && self.active.is_some() {
+            (
+                "Keyboard goes to the remote session · Ctrl+Alt+Home gives it back".to_string(),
+                ACCENT,
+            )
+        } else {
+            self.message
+                .clone()
+                .unwrap_or_else(|| ("Ready".into(), TEXT_3))
+        };
         te.draw_in(
             cv,
             f.ui,
             12.0 * s,
-            Rect::new(0, body_h, w - rw - p(32.0), bar_h),
-            p(16.0) as f32,
+            Rect::new(0, body_h, w - rw - p(28.0), bar_h),
+            p(14.0) as f32,
             &msg,
             color,
         );
@@ -500,18 +675,29 @@ impl Manager {
         let s = self.scale;
         let p = |v: f32| (v * s).round() as i32;
         cv.fill(area, BG_SIDEBAR);
-        let pad = p(16.0);
-
-        let head = Rect::new(pad, p(14.0), area.w - 2 * pad, p(28.0));
+        let pad = p(14.0);
+        let head = Rect::new(pad, p(5.0), area.w - 2 * pad, p(28.0));
         te.draw_in(cv, f.semi, 11.5 * s, head, 0.0, "CONNECTIONS", TEXT_3);
-        let nw = p(66.0);
-        let new_r = Rect::new(head.right() - nw, head.y, nw, head.h);
-        self.button(cv, te, f, new_r, "+ New", Style::Ghost, Hit::New);
+        let nw = p(62.0);
+        self.button(
+            cv,
+            te,
+            f,
+            Rect::new(head.right() - nw, head.y, nw, head.h),
+            "+ New",
+            Style::Ghost,
+            Hit::New,
+        );
+        self.text_input(
+            cv,
+            te,
+            f,
+            Rect::new(pad, p(44.0), area.w - 2 * pad, p(30.0)),
+            Field::Filter,
+            "Filter",
+        );
 
-        let filter_r = Rect::new(pad, p(50.0), area.w - 2 * pad, p(32.0));
-        self.text_input(cv, te, f, filter_r, Field::Filter, "Filter");
-
-        let list = Rect::new(0, p(94.0), area.w, area.h - p(94.0));
+        let list = Rect::new(0, p(86.0), area.w, area.h - p(86.0));
         let old = cv.set_clip(list);
         let vis = self.visible();
         if self.store.connections.is_empty() {
@@ -544,7 +730,8 @@ impl Manager {
                 TEXT_3,
             );
         }
-        let row_h = p(54.0);
+        let row_h = p(52.0);
+        let home = self.active.is_none();
         for (n, &i) in vis.iter().enumerate() {
             let r = Rect::new(
                 p(8.0),
@@ -556,8 +743,7 @@ impl Manager {
                 break;
             }
             let hit = Hit::Row(i);
-            let selected = self.selected == Some(i);
-            if selected {
+            if home && self.selected == Some(i) {
                 cv.fill_round(r, 6.0 * s, BG_SELECT);
                 cv.fill_round(
                     Rect::new(r.x, r.y + p(12.0), p(3.0), r.h - p(24.0)),
@@ -575,7 +761,7 @@ impl Manager {
                 f.semi,
                 13.5 * s,
                 (r.x + p(14.0)) as f32,
-                (r.y + p(23.0)) as f32,
+                (r.y + p(22.0)) as f32,
                 &c.name,
                 TEXT,
                 text_w as f32,
@@ -590,7 +776,7 @@ impl Manager {
                 f.ui,
                 12.0 * s,
                 (r.x + p(14.0)) as f32,
-                (r.y + p(41.0)) as f32,
+                (r.y + p(40.0)) as f32,
                 &sub,
                 TEXT_3,
                 text_w as f32,
@@ -608,24 +794,131 @@ impl Manager {
         cv.set_clip(old);
     }
 
-    /// Green dot while a session of this connection is up, amber while connecting.
     fn connection_dot(&self, c: &Connection) -> Option<u32> {
         let mut out = None;
-        for row in self
-            .sessions
+        for t in self
+            .tabs
             .iter()
-            .filter(|r| r.name == c.name && r.host == c.host)
+            .filter(|t| t.name == c.name && t.host == c.host)
         {
-            match row.state {
-                RowState::Connected { .. } => return Some(OK),
-                RowState::Connecting => out = Some(WARN),
+            match t.state {
+                TabState::Connected { .. } => return Some(OK),
+                TabState::Connecting => out = Some(WARN),
                 _ => {}
             }
         }
         out
     }
 
-    fn paint_main(&mut self, cv: &mut Canvas, te: &mut TextEngine, f: &Fonts, area: Rect) {
+    fn paint_tabs(&mut self, cv: &mut Canvas, te: &mut TextEngine, f: &Fonts, strip: Rect) {
+        let s = self.scale;
+        let p = |v: f32| (v * s).round() as i32;
+        cv.fill(strip, BG_SIDEBAR);
+        cv.fill(
+            Rect::new(strip.x, strip.bottom() - 1, strip.w, 1),
+            BORDER_SOFT,
+        );
+        let mut x = strip.x + p(6.0);
+        let th = strip.h - p(6.0);
+        let y = strip.y + p(6.0);
+
+        // The Connections tab.
+        let label = "Connections";
+        let tw = te.measure(f.ui, 13.0 * s, label) as i32 + p(28.0);
+        let r = Rect::new(x, y, tw, th);
+        self.tab_shape(cv, r, self.active.is_none(), self.hover == Some(Hit::Home));
+        let color = if self.active.is_none() { TEXT } else { TEXT_2 };
+        centered(cv, te, f.ui, 13.0 * s, r, label, color);
+        self.hits.push((r, Hit::Home));
+        x += tw + p(2.0);
+
+        let tabs: Vec<(u64, String, u32)> = self
+            .tabs
+            .iter()
+            .map(|t| (t.id, t.name.clone(), t.state.color()))
+            .collect();
+        let avail = strip.right() - x - p(6.0);
+        let each = if tabs.is_empty() {
+            0
+        } else {
+            (avail / tabs.len() as i32).clamp(p(90.0), p(220.0))
+        };
+        for (id, name, color) in tabs {
+            if x + p(60.0) > strip.right() {
+                break;
+            }
+            let r = Rect::new(x, y, each.min(strip.right() - x), th);
+            let active = self.active == Some(id);
+            self.tab_shape(cv, r, active, self.hover == Some(Hit::Tab(id)));
+            cv.fill_circle(
+                (r.x + p(14.0)) as f32,
+                (r.y + r.h / 2) as f32,
+                3.5 * s,
+                color,
+            );
+            let close = Rect::new(
+                r.right() - p(28.0),
+                r.y + (r.h - p(20.0)) / 2,
+                p(20.0),
+                p(20.0),
+            );
+            let tc = if active { TEXT } else { TEXT_2 };
+            te.draw(
+                cv,
+                f.ui,
+                13.0 * s,
+                (r.x + p(26.0)) as f32,
+                (r.y + r.h / 2 + p(5.0)) as f32,
+                &name,
+                tc,
+                (close.x - r.x - p(30.0)) as f32,
+            );
+            self.hits.push((r, Hit::Tab(id)));
+            let ch = Hit::CloseTab(id);
+            if self.hover == Some(ch) {
+                cv.fill_round(close, 4.0 * s, CONTROL_HOVER);
+            }
+            if active || self.hover == Some(Hit::Tab(id)) || self.hover == Some(ch) {
+                let (cx, cy, d) = (
+                    (close.x + close.w / 2) as f32,
+                    (close.y + close.h / 2) as f32,
+                    4.0 * s,
+                );
+                cv.stroke(&[(cx - d, cy - d), (cx + d, cy + d)], 1.4 * s, TEXT_2);
+                cv.stroke(&[(cx - d, cy + d), (cx + d, cy - d)], 1.4 * s, TEXT_2);
+            }
+            self.hits.push((close, ch));
+            x += r.w + p(2.0);
+        }
+    }
+
+    fn tab_shape(&self, cv: &mut Canvas, r: Rect, active: bool, hover: bool) {
+        let s = self.scale;
+        if active {
+            cv.fill_round(
+                Rect::new(r.x, r.y, r.w, r.h + (8.0 * s) as i32),
+                6.0 * s,
+                BG,
+            );
+            cv.fill(
+                Rect::new(
+                    r.x + (6.0 * s) as i32,
+                    r.y,
+                    r.w - (12.0 * s) as i32,
+                    (2.0 * s).max(1.0) as i32,
+                ),
+                ACCENT,
+            );
+        } else if hover {
+            cv.fill_round(
+                Rect::new(r.x, r.y + (2.0 * s) as i32, r.w, r.h - (6.0 * s) as i32),
+                6.0 * s,
+                BG_HOVER,
+            );
+        }
+    }
+
+    fn paint_home(&mut self, cv: &mut Canvas, te: &mut TextEngine, f: &Fonts, area: Rect) {
         let s = self.scale;
         let p = |v: f32| (v * s).round() as i32;
         let old = cv.set_clip(area);
@@ -644,27 +937,27 @@ impl Manager {
             f.semi,
             20.0 * s,
             x0 as f32,
-            (area.y + p(46.0)) as f32,
+            (area.y + p(42.0)) as f32,
             &title,
             TEXT,
             form_w as f32,
         );
         let sub = match self.selected {
-            Some(_) => "Saved connection. The password is never stored.".to_string(),
-            None => "Not saved yet. The password is never stored.".to_string(),
+            Some(_) => "Saved connection. The password is never stored.",
+            None => "Not saved yet. The password is never stored.",
         };
         te.draw(
             cv,
             f.ui,
             12.5 * s,
             x0 as f32,
-            (area.y + p(68.0)) as f32,
-            &sub,
+            (area.y + p(64.0)) as f32,
+            sub,
             TEXT_3,
             form_w as f32,
         );
 
-        let mut y = area.y + p(92.0);
+        let mut y = area.y + p(88.0);
         let row = p(44.0);
         let fh = p(32.0);
         let label = |cv: &mut Canvas, te: &mut TextEngine, y: i32, text: &str| {
@@ -678,7 +971,6 @@ impl Manager {
                 TEXT_2,
             );
         };
-
         label(cv, te, y, "Name");
         self.text_input(
             cv,
@@ -735,8 +1027,7 @@ impl Manager {
             let cw = te.measure(f.ui, 12.5 * s, &text) as i32 + p(24.0);
             let r = Rect::new(cx, y + p(2.0), cw, fh - p(4.0));
             let hit = Hit::Size(i);
-            let chosen = self.size == i;
-            let (border, fill, color) = if chosen {
+            let (border, fill, color) = if self.size == i {
                 (ACCENT_BORDER, BG_CHOSEN, TEXT)
             } else if self.hover == Some(hit) {
                 (BORDER_HOVER, CONTROL_HOVER, TEXT_2)
@@ -748,7 +1039,18 @@ impl Manager {
             self.hits.push((r, hit));
             cx += cw + p(6.0);
         }
-        y += row + p(10.0);
+        y += row - p(4.0);
+        te.draw(
+            cv,
+            f.ui,
+            11.5 * s,
+            fx as f32,
+            (y + p(12.0)) as f32,
+            "Starting size. Tabs fit the remote desktop to the window once connected.",
+            TEXT_4,
+            fw as f32,
+        );
+        y += p(30.0);
 
         let bh = p(34.0);
         self.button(
@@ -786,125 +1088,393 @@ impl Manager {
             f.ui,
             11.5 * s,
             fx as f32,
-            (y + bh + p(20.0)) as f32,
+            (y + bh + p(22.0)) as f32,
             hint,
             TEXT_4,
             fw as f32,
         );
+        cv.set_clip(old);
+    }
 
-        // Sessions
-        y += bh + p(52.0);
-        cv.fill(Rect::new(x0, y, form_w, 1), BORDER_SOFT);
-        y += p(18.0);
+    fn paint_session(
+        &mut self,
+        cv: &mut Canvas,
+        te: &mut TextEngine,
+        f: &Fonts,
+        content: Rect,
+        id: u64,
+    ) {
+        let s = self.scale;
+        let p = |v: f32| (v * s).round() as i32;
+        let Some(tab) = self.tabs.iter().find(|t| t.id == id) else {
+            return;
+        };
+        let (host, state, name) = (tab.host.clone(), tab.state.clone(), tab.name.clone());
+
+        // Toolbar
+        let tb = Rect::new(content.x, content.y, content.w, p(40.0));
+        cv.fill(Rect::new(tb.x, tb.bottom() - 1, tb.w, 1), BORDER_SOFT);
+        cv.fill_circle(
+            (tb.x + p(18.0)) as f32,
+            (tb.y + tb.h / 2) as f32,
+            4.0 * s,
+            state.color(),
+        );
+        let info = match &state {
+            TabState::Connecting => format!("{host} · connecting…"),
+            TabState::Connected { width, height, bpp } => {
+                format!("{host} · {width} × {height} · {bpp} bpp")
+            }
+            TabState::Ended(why) => format!("{host} · ended: {why}"),
+            TabState::Failed(why) => format!("{host} · failed: {why}"),
+        };
+        let mut bx = tb.right() - p(8.0);
+        let mut buttons: Vec<(&str, Hit, Style)> = vec![(
+            if self.drawer { "Hide panel" } else { "Panel" },
+            Hit::Drawer,
+            Style::Secondary,
+        )];
+        match state {
+            TabState::Connected { .. } | TabState::Connecting => {
+                buttons.insert(0, ("Disconnect", Hit::Disconnect(id), Style::Secondary))
+            }
+            _ => buttons.insert(0, ("Reconnect", Hit::Reconnect(id), Style::Primary)),
+        }
+        for (text, hit, style) in buttons.iter().rev() {
+            let bw = te.measure(f.ui, 13.0 * s, text) as i32 + p(26.0);
+            bx -= bw;
+            self.button(
+                cv,
+                te,
+                f,
+                Rect::new(bx, tb.y + p(6.0), bw, tb.h - p(12.0)),
+                text,
+                *style,
+                *hit,
+            );
+            bx -= p(6.0);
+        }
         te.draw_in(
             cv,
-            f.semi,
-            11.5 * s,
-            Rect::new(x0, y, form_w, p(20.0)),
+            f.ui,
+            12.5 * s,
+            Rect::new(tb.x + p(30.0), tb.y, bx - tb.x - p(36.0), tb.h),
             0.0,
-            "SESSIONS",
-            TEXT_3,
+            &info,
+            TEXT_2,
         );
-        y += p(28.0);
-        if self.sessions.is_empty() {
-            te.draw_in(
-                cv,
-                f.ui,
-                12.5 * s,
-                Rect::new(x0, y, form_w, p(22.0)),
-                0.0,
-                "No sessions. Connect opens the remote desktop in its own window.",
-                TEXT_4,
-            );
+
+        // Session area and drawer
+        let mut area = Rect::new(
+            content.x,
+            tb.bottom(),
+            content.w,
+            content.bottom() - tb.bottom(),
+        );
+        if self.drawer {
+            let dw = p(290.0).min(area.w / 2);
+            let drawer = Rect::new(area.right() - dw, area.y, dw, area.h);
+            area.w -= dw + 1;
+            cv.fill(Rect::new(area.right(), area.y, 1, area.h), BORDER_SOFT);
+            self.paint_drawer(cv, te, f, drawer, id);
         }
-        let srow = p(44.0);
-        type Row = (String, String, u32, Vec<(&'static str, Hit, Style)>);
-        let rows: Vec<Row> = self
-            .sessions
-            .iter()
-            .map(|r| {
-                let (state, color, buttons) = match &r.state {
-                    RowState::Connecting => (
-                        "Connecting…".to_string(),
-                        WARN,
-                        vec![("Cancel", Hit::Close(r.id), Style::Secondary)],
-                    ),
-                    RowState::Connected { width, height, bpp } => (
-                        format!("Connected · {width} × {height} · {bpp} bpp"),
-                        OK,
-                        vec![
-                            ("Show", Hit::Show(r.id), Style::Secondary),
-                            ("Disconnect", Hit::Close(r.id), Style::Secondary),
-                        ],
-                    ),
-                    RowState::Ended(why) => (
-                        format!("Ended: {why}"),
-                        TEXT_4,
-                        vec![("Dismiss", Hit::Dismiss(r.id), Style::Ghost)],
-                    ),
-                    RowState::Failed(why) => (
-                        format!("Failed: {why}"),
-                        ERR,
-                        vec![("Dismiss", Hit::Dismiss(r.id), Style::Ghost)],
-                    ),
-                };
-                (r.name.clone(), state, color, buttons)
-            })
-            .collect();
-        for (name, state, color, buttons) in rows {
-            if y > area.bottom() {
-                break;
+        cv.fill(area, BG_SIDEBAR);
+        match state {
+            TabState::Connected { .. } => {
+                self.session_area = Some((id, area));
+                self.hits.push((area, Hit::Session(id)));
             }
-            let r = Rect::new(x0, y, form_w, srow);
-            cv.round_border(r, 6.0 * s, BORDER_SOFT, BG_BAR);
-            cv.fill_circle(
-                (r.x + p(16.0)) as f32,
-                (r.y + r.h / 2) as f32,
-                4.0 * s,
-                color,
-            );
-            let mut bx = r.right() - p(8.0);
-            for (text, hit, style) in buttons.iter().rev() {
-                let bw = te.measure(f.ui, 12.5 * s, text) as i32 + p(24.0);
-                bx -= bw;
+            TabState::Connecting => {
+                centered(
+                    cv,
+                    te,
+                    f.ui,
+                    14.0 * s,
+                    Rect::new(area.x, area.y, area.w, area.h - p(40.0)),
+                    &format!("Connecting to {name}…"),
+                    TEXT_2,
+                );
+            }
+            TabState::Ended(why) | TabState::Failed(why) => {
+                let failed = matches!(
+                    self.tabs.iter().find(|t| t.id == id).map(|t| &t.state),
+                    Some(TabState::Failed(_))
+                );
+                let mid = area.y + area.h / 2;
+                centered(
+                    cv,
+                    te,
+                    f.semi,
+                    15.0 * s,
+                    Rect::new(area.x, mid - p(60.0), area.w, p(24.0)),
+                    if failed {
+                        "Connection failed"
+                    } else {
+                        "Session ended"
+                    },
+                    TEXT,
+                );
+                centered(
+                    cv,
+                    te,
+                    f.ui,
+                    12.5 * s,
+                    Rect::new(area.x + p(24.0), mid - p(32.0), area.w - p(48.0), p(20.0)),
+                    &why,
+                    if failed { ERR } else { TEXT_3 },
+                );
+                let bw = p(120.0);
                 self.button(
                     cv,
                     te,
                     f,
-                    Rect::new(bx, r.y + p(8.0), bw, r.h - p(16.0)),
-                    text,
-                    *style,
-                    *hit,
+                    Rect::new(area.x + area.w / 2 - bw - p(4.0), mid + p(4.0), bw, p(34.0)),
+                    "Reconnect",
+                    Style::Primary,
+                    Hit::Reconnect(id),
                 );
-                bx -= p(6.0);
+                self.button(
+                    cv,
+                    te,
+                    f,
+                    Rect::new(area.x + area.w / 2 + p(4.0), mid + p(4.0), bw, p(34.0)),
+                    "Close tab",
+                    Style::Secondary,
+                    Hit::CloseTab(id),
+                );
             }
-            let tx = r.x + p(30.0);
-            let name_w = te
-                .measure(f.semi, 13.0 * s, &name)
-                .min((bx - tx) as f32 * 0.45);
+        }
+    }
+
+    fn paint_drawer(&mut self, cv: &mut Canvas, te: &mut TextEngine, f: &Fonts, d: Rect, id: u64) {
+        let s = self.scale;
+        let p = |v: f32| (v * s).round() as i32;
+        cv.fill(d, BG_SIDEBAR);
+        let old = cv.set_clip(d);
+        let Some(tab) = self.tabs.iter().find(|t| t.id == id) else {
+            return;
+        };
+        let (clip_on, fit_on, drives) = (tab.clipboard, tab.fit, tab.drives.clone());
+        let x = d.x + p(18.0);
+        let w = d.w - p(36.0);
+        let mut y = d.y + p(16.0);
+
+        let section = |cv: &mut Canvas, te: &mut TextEngine, y: i32, text: &str| {
             te.draw_in(
                 cv,
                 f.semi,
-                13.0 * s,
-                Rect::new(tx, r.y, name_w as i32 + 1, r.h),
+                11.5 * s,
+                Rect::new(x, y, w, p(18.0)),
                 0.0,
-                &name,
-                TEXT,
+                text,
+                TEXT_3,
             );
-            let state_x = tx + name_w as i32 + p(10.0);
-            let state_color = if color == ERR { ERR } else { TEXT_3 };
+        };
+        section(cv, te, y, "SHARING");
+        y += p(28.0);
+        self.switch_row(
+            cv,
+            te,
+            f,
+            Rect::new(x, y, w, p(30.0)),
+            "Clipboard",
+            "Text, both directions",
+            clip_on,
+            Hit::Clipboard(id),
+        );
+        y += p(48.0);
+
+        te.draw_in(
+            cv,
+            f.ui,
+            13.0 * s,
+            Rect::new(x, y, w, p(20.0)),
+            0.0,
+            "Shared folders",
+            TEXT,
+        );
+        y += p(24.0);
+        if drives.is_empty() {
             te.draw_in(
                 cv,
                 f.ui,
-                12.5 * s,
-                Rect::new(state_x, r.y, bx - state_x - p(8.0), r.h),
+                12.0 * s,
+                Rect::new(x, y, w, p(18.0)),
                 0.0,
-                &state,
-                state_color,
+                "None. They appear in the remote Explorer.",
+                TEXT_4,
             );
-            y += srow + p(6.0);
+            y += p(24.0);
         }
+        for (i, drv) in drives.iter().enumerate() {
+            let r = Rect::new(x, y, w, p(40.0));
+            cv.round_border(r, 6.0 * s, BORDER_SOFT, BG_BAR);
+            let close = Rect::new(r.right() - p(30.0), r.y + p(10.0), p(20.0), p(20.0));
+            te.draw(
+                cv,
+                f.semi,
+                12.5 * s,
+                (r.x + p(10.0)) as f32,
+                (r.y + p(17.0)) as f32,
+                &drv.name,
+                TEXT,
+                (close.x - r.x - p(14.0)) as f32,
+            );
+            te.draw(
+                cv,
+                f.ui,
+                11.5 * s,
+                (r.x + p(10.0)) as f32,
+                (r.y + p(32.0)) as f32,
+                &drv.path,
+                TEXT_3,
+                (close.x - r.x - p(14.0)) as f32,
+            );
+            let hit = Hit::RemoveDrive(id, i);
+            if self.hover == Some(hit) {
+                cv.fill_round(close, 4.0 * s, CONTROL_HOVER);
+            }
+            let (cx, cy, dd) = (
+                (close.x + close.w / 2) as f32,
+                (close.y + close.h / 2) as f32,
+                4.0 * s,
+            );
+            cv.stroke(&[(cx - dd, cy - dd), (cx + dd, cy + dd)], 1.4 * s, TEXT_2);
+            cv.stroke(&[(cx - dd, cy + dd), (cx + dd, cy - dd)], 1.4 * s, TEXT_2);
+            self.hits.push((close, hit));
+            y += p(46.0);
+        }
+        let add_w = p(56.0);
+        self.text_input(
+            cv,
+            te,
+            f,
+            Rect::new(x, y, w - add_w - p(6.0), p(30.0)),
+            Field::DrivePath,
+            r"Folder, e.g. C:\Share",
+        );
+        self.button(
+            cv,
+            te,
+            f,
+            Rect::new(x + w - add_w, y, add_w, p(30.0)),
+            "Add",
+            Style::Secondary,
+            Hit::AddDrive(id),
+        );
+        y += p(52.0);
+
+        section(cv, te, y, "DISPLAY");
+        y += p(28.0);
+        self.switch_row(
+            cv,
+            te,
+            f,
+            Rect::new(x, y, w, p(30.0)),
+            "Fit to window",
+            "Remote resizes with the tab",
+            fit_on,
+            Hit::Fit(id),
+        );
+        y += p(56.0);
+
+        section(cv, te, y, "SESSION");
+        y += p(28.0);
+        self.button(
+            cv,
+            te,
+            f,
+            Rect::new(x, y, w, p(32.0)),
+            "Send Ctrl+Alt+Del",
+            Style::Secondary,
+            Hit::CtrlAltDel(id),
+        );
+        y += p(46.0);
+        te.draw(
+            cv,
+            f.ui,
+            11.5 * s,
+            x as f32,
+            (y + p(4.0)) as f32,
+            "Changes apply live, without reconnecting.",
+            TEXT_4,
+            w as f32,
+        );
+        te.draw(
+            cv,
+            f.ui,
+            11.5 * s,
+            x as f32,
+            (y + p(22.0)) as f32,
+            "Ctrl+Alt+Home gives the keyboard back.",
+            TEXT_4,
+            w as f32,
+        );
         cv.set_clip(old);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn switch_row(
+        &mut self,
+        cv: &mut Canvas,
+        te: &mut TextEngine,
+        f: &Fonts,
+        r: Rect,
+        label: &str,
+        sub: &str,
+        on: bool,
+        hit: Hit,
+    ) {
+        let s = self.scale;
+        let p = |v: f32| (v * s).round() as i32;
+        if self.hover == Some(hit) {
+            cv.fill_round(
+                Rect::new(r.x - p(8.0), r.y - p(4.0), r.w + p(16.0), r.h + p(12.0)),
+                6.0 * s,
+                BG_HOVER,
+            );
+        }
+        te.draw(
+            cv,
+            f.ui,
+            13.0 * s,
+            r.x as f32,
+            (r.y + p(13.0)) as f32,
+            label,
+            TEXT,
+            (r.w - p(50.0)) as f32,
+        );
+        te.draw(
+            cv,
+            f.ui,
+            11.5 * s,
+            r.x as f32,
+            (r.y + p(30.0)) as f32,
+            sub,
+            TEXT_3,
+            (r.w - p(50.0)) as f32,
+        );
+        let sw = Rect::new(r.right() - p(36.0), r.y + p(6.0), p(36.0), p(20.0));
+        cv.fill_round(
+            sw,
+            sw.h as f32 / 2.0,
+            if on { ACCENT } else { BORDER_HOVER },
+        );
+        let knob_x = if on {
+            sw.right() - sw.h / 2
+        } else {
+            sw.x + sw.h / 2
+        };
+        cv.fill_circle(
+            knob_x as f32,
+            (sw.y + sw.h / 2) as f32,
+            sw.h as f32 / 2.0 - 2.5 * s,
+            if on { ACCENT_TEXT } else { TEXT_2 },
+        );
+        self.hits.push((
+            Rect::new(r.x - p(8.0), r.y - p(4.0), r.w + p(16.0), r.h + p(12.0)),
+            hit,
+        ));
     }
 
     fn text_input(
@@ -956,12 +1526,11 @@ impl Manager {
                 );
             }
             if display.is_empty() {
-                let after_caret = x + (5.0 * s).round();
                 te.draw(
                     cv,
                     f.ui,
                     size,
-                    after_caret,
+                    x + (5.0 * s).round(),
                     base.round(),
                     placeholder,
                     TEXT_4,
@@ -1006,7 +1575,7 @@ impl Manager {
         let s = self.scale;
         let hover = self.hover == Some(hit);
         let press = hover && self.press == Some(hit);
-        let (border, fill, color) = match style {
+        let colors = match style {
             Style::Primary => {
                 let fill = if press {
                     ACCENT_PRESS
@@ -1015,9 +1584,9 @@ impl Manager {
                 } else {
                     ACCENT
                 };
-                (fill, fill, ACCENT_TEXT)
+                Some((fill, fill, ACCENT_TEXT))
             }
-            Style::Secondary => (
+            Style::Secondary => Some((
                 if hover { BORDER_HOVER } else { BORDER },
                 if press {
                     BG_PRESS
@@ -1027,19 +1596,11 @@ impl Manager {
                     BG_INPUT
                 },
                 TEXT,
-            ),
-            Style::Ghost => (
-                if hover { BORDER } else { BG_SIDEBAR_OR_BG },
-                if press {
-                    BG_PRESS
-                } else if hover {
-                    BG_HOVER
-                } else {
-                    BG_SIDEBAR_OR_BG
-                },
-                if hover { TEXT } else { TEXT_2 },
-            ),
-            Style::Danger => (
+            )),
+            Style::Ghost => {
+                hover.then_some((BORDER, if press { BG_PRESS } else { BG_HOVER }, TEXT))
+            }
+            Style::Danger => Some((
                 if hover { ERR } else { DANGER_BORDER },
                 if press {
                     BG_PRESS
@@ -1049,13 +1610,15 @@ impl Manager {
                     BG
                 },
                 ERR,
-            ),
+            )),
         };
-        if matches!(style, Style::Ghost) && !hover {
-            // Ghost buttons sit on any background: draw only the label at rest.
-        } else {
-            cv.round_border(r, 6.0 * s, border, fill);
-        }
+        let color = match colors {
+            Some((border, fill, color)) => {
+                cv.round_border(r, 6.0 * s, border, fill);
+                color
+            }
+            None => TEXT_2, // ghost at rest: label only
+        };
         let font = if matches!(style, Style::Primary) {
             f.semi
         } else {
@@ -1088,12 +1651,9 @@ fn centered(
         base.round(),
         text,
         color,
-        f32::MAX,
+        (r.right() as f32 - x).max(0.0),
     );
 }
-
-/// Placeholder colour for ghost buttons at rest (not drawn).
-const BG_SIDEBAR_OR_BG: u32 = BG_SIDEBAR;
 
 #[derive(Clone, Copy)]
 enum Style {
@@ -1104,7 +1664,7 @@ enum Style {
 }
 
 /// Sample data for `--snapshot-ui`; never the user's saved connections.
-pub fn sample() -> Manager {
+pub fn sample(session_tab: bool) -> Ui {
     let store = Store::memory(vec![
         Connection {
             name: "Office workstation".into(),
@@ -1131,27 +1691,24 @@ pub fn sample() -> Manager {
             height: 900,
         },
     ]);
-    let mut m = Manager::new(store, 1.0);
-    m.sessions = vec![
-        SessionRow {
-            id: 1,
-            name: "Office workstation".into(),
-            host: "10.0.0.15".into(),
-            state: RowState::Connected {
-                width: 1280,
-                height: 800,
-                bpp: 32,
-            },
-        },
-        SessionRow {
-            id: 2,
-            name: "Build server".into(),
-            host: "build-01.lab.local".into(),
-            state: RowState::Failed(
-                "authentication failed: server error 0xc000006d STATUS_LOGON_FAILURE".into(),
-            ),
-        },
-    ];
+    let mut m = Ui::new(store, 1.0);
+    m.open_tab(1, "Office workstation".into(), "10.0.0.15".into());
+    m.tabs[0].state = TabState::Connected {
+        width: 1280,
+        height: 720,
+        bpp: 32,
+    };
+    m.tabs[0].clipboard = true;
+    m.tabs[0].drives.push(SharedDrive {
+        device_id: 1,
+        name: "Share".into(),
+        path: r"D:\Share".into(),
+    });
+    m.open_tab(2, "Build server".into(), "build-01.lab.local".into());
+    m.tabs[1].state = TabState::Failed(
+        "authentication failed: server error 0xc000006d STATUS_LOGON_FAILURE".into(),
+    );
+    m.active = if session_tab { Some(1) } else { None };
     m.set_message("Connected to 10.0.0.15.", TEXT_2);
     m
 }
