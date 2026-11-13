@@ -34,14 +34,29 @@ transport, auto-reconnect, RDS licensing (LICENSE_REQUEST), legacy RDP security.
 
 ## Usage
 
+The password comes from `RDP_PASSWORD` or an interactive prompt. In `cmd.exe`,
+write `DOMAIN\user` without quotes (cmd keeps single quotes literally; rdpc
+strips one matching pair anyway).
+
 ```
-cargo build --release
-# password from RDP_PASSWORD or an interactive prompt
-target/release/rdpc 192.168.1.20 -u DOMAIN\user --size 1280x800
-target/release/rdpc 192.168.1.20 -u user --screenshot desk.png --wait 15 -v
+# window mode (Ctrl+Alt+F12 closes the client locally)
+cargo run -p rdpc -- 192.168.1.20 -u DOMAIN\user
+cargo run -p rdpc -- 192.168.1.20:3390 -u user -d DOMAIN --size 1600x900
+
+# headless: wait until the screen settles, save a PNG, disconnect
+cargo run -p rdpc -- 192.168.1.20 -u DOMAIN\user --screenshot desk.png --wait 15
+
+# protocol trace to stderr (sent PDUs as hex; the Client Info PDU with the password is redacted)
+cargo run -p rdpc -- 192.168.1.20 -u DOMAIN\user -v
+
+# optimized build
+cargo run --release -p rdpc -- 192.168.1.20 -u DOMAIN\user
 ```
 
-Window mode: Ctrl+Alt+F12 closes the client locally. `-v` traces the protocol to stderr.
+On the owner's PC, `.cargo/config.toml` (copied from `.cargo/config.example.toml`)
+uses the shared sccache and rust-lld and puts build output in
+`E:/Development/_cache/cargo-target/rdp-rs`, so the binary is
+`E:/Development/_cache/cargo-target/rdp-rs/debug/rdpc.exe`.
 
 ## Tests
 
