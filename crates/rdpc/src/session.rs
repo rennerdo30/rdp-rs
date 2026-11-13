@@ -10,6 +10,8 @@ use std::time::Duration;
 use rdp::input::{PTRFLAGS_BUTTON1, PTRFLAGS_BUTTON2, PTRFLAGS_BUTTON3};
 use rdp::{Client, Config, ConnectionInfo, Damage, Framebuffer, InputEvent, StaticChannel};
 
+use crate::recorder::Recorder;
+
 pub enum Event {
     Connected(ConnectionInfo),
     /// New damage is waiting in `Shared`.
@@ -45,9 +47,35 @@ pub struct Worker {
     /// True while a Frame event is in flight, so the worker sends at most one.
     pub notified: Arc<AtomicBool>,
     pub thread: Option<JoinHandle<()>>,
+    /// The session recording, while one runs; the worker hands it every update.
+    recorder: Arc<Mutex<Option<Recorder>>>,
 }
 
 impl Worker {
+    /// Starts recording (Some) or stops it (None); applies at the next update.
+    /// The new recorder starts from the picture on screen now. Returns the
+    /// recorder this replaces, for the caller to [`Recorder::finish`] (that
+    /// waits for the encoder to drain, so off the UI thread if it matters);
+    /// dropping it finishes the file as well.
+    #[allow(dead_code, reason = "called by the session UI's record control")]
+    pub fn set_recorder(&self, mut recorder: Option<Recorder>) -> Option<Recorder> {
+        if let Some(r) = recorder.as_mut() {
+            let s = self.shared.lock().unwrap();
+            r.frame(&s.fb);
+        }
+        let mut slot = self.recorder.lock().unwrap_or_else(|p| p.into_inner());
+        std::mem::replace(&mut *slot, recorder)
+    }
+
+    /// True while a recording runs.
+    #[allow(dead_code, reason = "called by the session UI's record control")]
+    pub fn is_recording(&self) -> bool {
+        self.recorder
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .is_some()
+    }
+
     pub fn close(&mut self) {
         let _ = self.tx.send(Cmd::Close);
     }
@@ -71,16 +99,18 @@ pub fn spawn(
         full: true,
     }));
     let notified = Arc::new(AtomicBool::new(false));
-    let (s, n) = (shared.clone(), notified.clone());
+    let recorder = Arc::new(Mutex::new(None));
+    let (s, n, r) = (shared.clone(), notified.clone(), recorder.clone());
     let thread = std::thread::Builder::new()
         .name("rdp-session".into())
-        .spawn(move || run(cfg, channels, rx, s, n, emit))
+        .spawn(move || run(cfg, channels, rx, s, n, r, emit))
         .expect("spawn session thread");
     Worker {
         tx,
         shared,
         notified,
         thread: Some(thread),
+        recorder,
     }
 }
 
@@ -97,6 +127,7 @@ fn run(
     rx: Receiver<Cmd>,
     shared: Arc<Mutex<Shared>>,
     notified: Arc<AtomicBool>,
+    recorder: Arc<Mutex<Option<Recorder>>>,
     emit: impl Fn(Event),
 ) {
     // The graphics pipeline decodes AVC420 with Media Foundation; the
@@ -159,6 +190,10 @@ fn run(
             drop(s);
             if !notified.swap(true, Ordering::AcqRel) {
                 emit(Event::Frame);
+            }
+            // One copy into the recorder's mailbox; encoding is on its thread.
+            if let Some(r) = recorder.lock().unwrap_or_else(|p| p.into_inner()).as_mut() {
+                r.frame(fb);
             }
         }
         if let Some(p) = out.pointer {
