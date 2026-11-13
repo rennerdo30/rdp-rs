@@ -10,8 +10,8 @@
 use ffwd_render::{Canvas, FontId, Rect, TextEngine};
 
 use crate::store::{
-    Connection, Group, Inherit, PRESETS, Quality, SessionOptions, Store, WinKeys, normalize_path,
-    parent_of, preset_name,
+    COMPRESSION, Connection, Group, Inherit, PRESETS, Quality, SessionOptions, Store, WinKeys,
+    normalize_path, parent_of, preset_name,
 };
 use crate::text_field::TextField;
 use crate::theme::*;
@@ -127,6 +127,9 @@ pub enum Hit {
     TabPreset(u64, usize),
     TabDepth(u64, usize),
     TabExperience(u64, u8),
+    /// Compression: index into COMPRESSION (panel and form).
+    TabCompression(u64, usize),
+    FormCompression(usize),
     /// Enter or leave full screen.
     FullScreen,
     /// Server certificate prompt: trust (and remember) or refuse.
@@ -1234,6 +1237,12 @@ impl Ui {
                 *flag = !*flag;
                 return Some(Action::SetQuality(id, t.quality));
             }
+            Hit::TabCompression(id, i) => {
+                let t = self.tab_mut(id)?;
+                t.quality.compression = COMPRESSION[i].0;
+                return Some(Action::SetQuality(id, t.quality));
+            }
+            Hit::FormCompression(i) => self.opts.quality.compression = COMPRESSION[i].0,
             Hit::FormPreset(i) => {
                 let depth = self.opts.quality.color_depth;
                 self.opts.quality = Quality::preset(PRESETS[i].0, depth);
@@ -2602,6 +2611,20 @@ impl Ui {
             .collect();
             y = self.chip_rows(cv, te, f, fx, y, fw, fh, &items) + row - fh;
 
+            label(cv, te, y, "Compression");
+            let items: Vec<(String, bool, Hit)> = COMPRESSION
+                .iter()
+                .enumerate()
+                .map(|(i, (key, name))| {
+                    (
+                        name.to_string(),
+                        q.compression == *key,
+                        Hit::FormCompression(i),
+                    )
+                })
+                .collect();
+            y = self.chip_rows(cv, te, f, fx, y, fw, fh, &items) + row - fh;
+
             label(cv, te, y, "Win keys");
             let items: Vec<(String, bool, Hit)> = WinKeys::ALL
                 .iter()
@@ -3514,7 +3537,33 @@ impl Ui {
                 Hit::TabExperience(id, i as u8),
             );
         }
-        y + 6 * p(42.0) + p(10.0)
+        y += 6 * p(42.0) + p(20.0);
+
+        self.caption(cv, te, f, x, y, w, "COMPRESSION");
+        y += p(24.0);
+        let items: Vec<(String, bool, Hit)> = COMPRESSION
+            .iter()
+            .enumerate()
+            .map(|(i, (key, name))| {
+                (
+                    name.to_string(),
+                    q.compression == *key,
+                    Hit::TabCompression(id, i),
+                )
+            })
+            .collect();
+        self.segmented(cv, te, f, Rect::new(x, y, w, p(32.0)), &items);
+        y += p(32.0);
+        self.hint(
+            cv,
+            te,
+            f,
+            x,
+            y + p(14.0),
+            w,
+            "Less data on slow links; costs a little CPU.",
+        );
+        y + p(30.0)
     }
 
     #[allow(clippy::too_many_arguments)]

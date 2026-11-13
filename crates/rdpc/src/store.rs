@@ -191,7 +191,39 @@ pub struct Quality {
     pub window_drag: bool,
     pub animations: bool,
     pub visual_styles: bool,
+    /// Bulk compression (advertised; the server may pick a lower one).
+    pub compression: Comp,
 }
+
+/// Bulk compression setting, saved by name.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Comp {
+    #[default]
+    Off,
+    Rdp5,
+    Rdp6,
+    Rdp61,
+}
+
+impl Comp {
+    fn library(self) -> rdp::Compression {
+        match self {
+            Comp::Off => rdp::Compression::Off,
+            Comp::Rdp5 => rdp::Compression::Rdp5,
+            Comp::Rdp6 => rdp::Compression::Rdp6,
+            Comp::Rdp61 => rdp::Compression::Rdp61,
+        }
+    }
+}
+
+/// Compression choices in the UI: (setting, label).
+pub const COMPRESSION: [(Comp, &str); 4] = [
+    (Comp::Off, "Off"),
+    (Comp::Rdp61, "RDP 6.1"),
+    (Comp::Rdp6, "RDP 6.0"),
+    (Comp::Rdp5, "RDP 5.0"),
+];
 
 impl Default for Quality {
     fn default() -> Self {
@@ -229,6 +261,7 @@ impl Quality {
             window_drag: e.window_drag,
             animations: e.animations,
             visual_styles: e.visual_styles,
+            compression: Comp::Off,
         }
     }
 
@@ -236,6 +269,7 @@ impl Quality {
         let ct = rdp::ConnectionType::from_u8(self.connection).unwrap_or_default();
         cfg.connection_type = ct;
         cfg.color_depth = rdp::experience::valid_color_depth(self.color_depth);
+        cfg.compression = self.compression.library();
         cfg.experience = rdp::Experience {
             wallpaper: self.wallpaper,
             font_smoothing: self.font_smoothing,
