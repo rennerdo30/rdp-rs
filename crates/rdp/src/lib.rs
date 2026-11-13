@@ -18,6 +18,7 @@
 //! - [`redirect`]: server redirection (session broker, load balancing) and RDSTLS
 //! - [`rdpsnd`]: audio output on the `rdpsnd` channel (MS-RDPEA)
 //! - [`audin`]: microphone redirection on the `AUDIO_INPUT` dynamic channel (MS-RDPEAI)
+//! - [`rail`]: RemoteApp, the `rail` channel and window orders (MS-RDPERP)
 //! - [`rdpdr`]: device redirection (MS-RDPEFS) with shared drives, printers (MS-RDPEPC) and smart cards (MS-RDPESC)
 
 pub mod audin;
@@ -46,6 +47,7 @@ pub mod monitor;
 pub mod ntlm;
 pub mod pdu;
 pub mod pointer;
+pub mod rail;
 pub mod rdpdr;
 pub mod rdpsnd;
 pub mod redirect;
@@ -73,6 +75,7 @@ pub use log::set_verbose;
 pub use monitor::{Monitor, Orientation, VirtualDesktop};
 pub use pdu::AutoReconnectCookie;
 pub use pointer::{PointerShape, PointerUpdate};
+pub use rail::{RailEvent, RailHandle, RailState, RailWindow, RemoteApp};
 pub use rdpdr::{
     Device, Drive, IoCompletion, IoRequest, PrintBackend, PrintFormat, Printer, PrinterInfo, Rdpdr,
     RdpdrHandle, SmartCardBackend, rdpdr, share_printers, smart_card_device,

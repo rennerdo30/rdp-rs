@@ -273,6 +273,7 @@ fn info(auto_reconnect: Option<[u8; ARC_PACKET_LEN]>) -> Vec<u8> {
         auto_reconnect,
         performance_flags: 7,
         compression: None,
+        rail: false,
     })
 }
 

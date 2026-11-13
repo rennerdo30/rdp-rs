@@ -222,6 +222,7 @@ fn redirected_client_info_carries_the_blob() {
         auto_reconnect: None,
         performance_flags: 0,
         compression: None,
+        rail: false,
     };
     let blob = [0x02, 0x00, 0x00, 0x80, 0x44, 0x53, 0x48, 0x4c, 0x00, 0x00];
     let pdu = pdu::client_info_redirected(&info, &blob);

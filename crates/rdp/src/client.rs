@@ -101,6 +101,10 @@ pub struct Config {
     /// [`Client::redirection`] to follow a redirection after activation, or
     /// to reconnect with an LB_NOREDIRECT routing token.
     pub redirection: Option<Redirection>,
+    /// RemoteApp mode (MS-RDPERP): start this program in seamless windows
+    /// instead of a desktop. The client opens the `rail` channel itself;
+    /// [`Client::rail`] gives its handle.
+    pub remote_app: Option<crate::RemoteApp>,
 }
 
 impl Config {
@@ -129,6 +133,7 @@ impl Config {
             monitors: Vec::new(),
             auth: None,
             redirection: None,
+            remote_app: None,
         }
     }
 }
@@ -159,6 +164,8 @@ pub struct PollOutcome {
     pub pointer: Option<PointerUpdate>,
     /// The server's latest Monitor Layout PDU (2.2.12.1) during this poll.
     pub monitors: Option<Vec<crate::Monitor>>,
+    /// RemoteApp window and channel events, in order (MS-RDPERP).
+    pub rail: Vec<crate::RailEvent>,
 }
 
 /// Why a session ended, and whether an auto-reconnect (MS-RDPBCGR 5.5) fits.
@@ -249,6 +256,8 @@ pub struct Client {
     monitor_layout: Vec<crate::Monitor>,
     /// The last Server Redirection PDU that was not followed here.
     redirection: Option<Redirection>,
+    /// RemoteApp window model, when [`Config::remote_app`] is set.
+    rail: Option<crate::RailHandle>,
 }
 
 /// One connection attempt's end: a session, or a redirection to follow
@@ -428,12 +437,27 @@ impl Client {
     pub fn connect_with(cfg: &Config, mut handlers: Vec<Box<dyn StaticChannel>>) -> Result<Client> {
         let gfx =
             (cfg.graphics == crate::Graphics::Gfx).then(|| add_gfx_channel(cfg, &mut handlers));
+        // RemoteApp: the rail channel is opened by the client itself.
+        let rail = match &cfg.remote_app {
+            Some(app) => {
+                let (channel, handle) = crate::rail::rail(
+                    app.clone(),
+                    cfg.width,
+                    cfg.height,
+                    crate::rail::client_status_flags(cfg.auto_reconnect.is_some()),
+                )?;
+                handlers.push(Box::new(channel));
+                Some(handle)
+            }
+            None => None,
+        };
         let mut cfg = cfg.clone();
         for hop in 1.. {
-            let (to, from, back) = match Self::connect_hop(&cfg, handlers, gfx.clone())? {
-                Hop::Done(client) => return Ok(*client),
-                Hop::Redirect(to, from, back) => (to, from, back),
-            };
+            let (to, from, back) =
+                match Self::connect_hop(&cfg, handlers, gfx.clone(), rail.clone())? {
+                    Hop::Done(client) => return Ok(*client),
+                    Hop::Redirect(to, from, back) => (to, from, back),
+                };
             if hop > redirect::MAX_REDIRECTS {
                 return Err(Error::Protocol(format!(
                     "more than {} server redirections",
@@ -453,6 +477,7 @@ impl Client {
         cfg: &Config,
         handlers: Vec<Box<dyn StaticChannel>>,
         gfx: Option<crate::gfx::GfxHandle>,
+        rail: Option<crate::RailHandle>,
     ) -> Result<Hop> {
         // Several monitors: the desktop is their bounding box (2.2.1.3.6).
         let desktop = match cfg.monitors.as_slice() {
@@ -614,6 +639,7 @@ impl Client {
                 .map(|c| c.client_packet(&pdu::ENHANCED_SECURITY_CLIENT_RANDOM)),
             performance_flags: cfg.experience.performance_flags(),
             compression: cfg.compression.type_code(),
+            rail: rail.is_some(),
         };
         // A redirection's password blob goes to the target unchanged; after
         // an RDSTLS logon the Client Info carries no password.
@@ -676,6 +702,12 @@ impl Client {
             trace!("ignoring PDU while waiting for Demand Active");
         };
         trace!("demand active: {demand:?}");
+        if rail.is_some() && !demand.supports_rail() {
+            // MS-RDPERP 3.2.5.1.5: the client MUST drop the connection.
+            return Err(Error::Unsupported(
+                "the server does not offer RemoteApp (no RAIL capability sets)".into(),
+            ));
+        }
         // The server assigns channel ids in the order the client listed them.
         let slots: Vec<Slot> = handlers
             .into_iter()
@@ -722,6 +754,7 @@ impl Client {
             gfx,
             monitor_layout: Vec::new(),
             redirection: informational,
+            rail,
         };
         // 7. Finalization; the Font Map reply is handled by the session loop.
         client.activate(&demand)?;
@@ -747,14 +780,18 @@ impl Client {
 
     fn activate(&mut self, demand: &DemandActive) -> Result<()> {
         self.share_id = demand.share_id;
-        let confirm = pdu::confirm_active(
+        let rail_caps = self
+            .rail
+            .as_ref()
+            .map(|_| crate::rail::client_caps(demand.window_list.as_ref()));
+        let confirm = pdu::confirm_active_with(
             demand.share_id,
             self.user_id,
-            demand.width,
-            demand.height,
+            (demand.width, demand.height),
             self.keyboard_layout,
             self.color_depth,
             self.bulk.max() != Compression::Off,
+            rail_caps.as_ref(),
         );
         send_io(&mut self.f, self.user_id, self.io_channel, &confirm)?;
         self.send_data(pdu::PDUTYPE2_SYNCHRONIZE, &pdu::synchronize())?;
@@ -831,6 +868,9 @@ impl Client {
                 Err(e) => return Err(e),
             }
             self.present_gfx(&mut out);
+            if let Some(rail) = &self.rail {
+                out.rail.extend(rail.take_events());
+            }
             if self.active {
                 self.tick_channels()?;
             }
@@ -966,6 +1006,10 @@ impl Client {
         let payload = self.bulk.decompress(payload, compressed_type)?;
         let payload = &payload[..];
         match ty {
+            pdu::PDUTYPE2_UPDATE if crate::cursor::le16(payload, 0) == Some(0) => {
+                // UPDATETYPE_ORDERS (MS-RDPEGDI 2.2.2.1): RemoteApp window orders.
+                self.window_orders(crate::rail::orders::parse_slowpath_orders(payload));
+            }
             pdu::PDUTYPE2_UPDATE => {
                 codec::draw_bitmap_update(payload, &mut self.fb, &mut out.damage)?;
                 out.updated |= !out.damage.is_empty();
@@ -1014,7 +1058,9 @@ impl Client {
                     codec::draw_bitmap_update(&data, &mut self.fb, &mut out.damage)?;
                     out.updated |= !out.damage.is_empty();
                 }
-                fastpath::UPDATETYPE_ORDERS => trace!("drawing orders ignored (not negotiated)"),
+                fastpath::UPDATETYPE_ORDERS => {
+                    self.window_orders(crate::rail::orders::parse_fastpath_orders(&data))
+                }
                 0x5..=0xC => match self.pointers.fast_path(code, &data) {
                     Ok(Some(p)) => out.pointer = Some(p),
                     Ok(None) => {}
@@ -1025,6 +1071,21 @@ impl Client {
             }
         }
         Ok(())
+    }
+
+    /// Applies RemoteApp window orders (MS-RDPERP 2.2.1.3); other drawing
+    /// orders are not negotiated and are dropped. Bad orders never end the session.
+    fn window_orders(&mut self, orders: Result<Vec<crate::rail::orders::WindowOrder>>) {
+        match (orders, &self.rail) {
+            (Ok(o), Some(rail)) => rail.apply_orders(o),
+            (Ok(o), None) => trace!("{} window orders ignored (not RemoteApp)", o.len()),
+            (Err(e), _) => trace!("orders update ignored: {e}"),
+        }
+    }
+
+    /// The RemoteApp window model and actions, when [`Config::remote_app`] is set.
+    pub fn rail(&self) -> Option<crate::RailHandle> {
+        self.rail.clone()
     }
 
     /// Routes one virtual channel chunk to its handler and sends the replies.
