@@ -27,6 +27,8 @@ const RNS_UD_CS_VALID_CONNECTION_TYPE: u16 = 0x0020;
 const RNS_UD_CS_SUPPORT_DYNVC_GFX_PROTOCOL: u16 = 0x0100;
 /// The client handles Server Heartbeat PDUs (MS-RDPBCGR 2.2.1.3.2, 2.2.16.1).
 const RNS_UD_CS_SUPPORT_HEARTBEAT_PDU: u16 = 0x0400;
+/// The client handles the Monitor Layout PDU (MS-RDPBCGR 2.2.1.3.2, 2.2.12.1).
+const RNS_UD_CS_SUPPORT_MONITOR_LAYOUT_PDU: u16 = 0x0040;
 
 pub struct ClientSettings<'a> {
     pub width: u16,
@@ -43,6 +45,11 @@ pub struct ClientSettings<'a> {
     pub channels: &'a [(&'a str, u32)],
     /// Offer the graphics pipeline (MS-RDPEGFX) in earlyCapabilityFlags.
     pub gfx: bool,
+    /// Several monitors: sends TS_UD_CS_MONITOR and TS_UD_CS_MONITOR_EX
+    /// (2.2.1.3.6, 2.2.1.3.10). Only for a server that set
+    /// EXTENDED_CLIENT_DATA_SUPPORTED (2.2.1.2.1). `width` and `height`
+    /// should be the layout's bounding box.
+    pub monitors: Option<&'a crate::monitor::VirtualDesktop>,
 }
 
 fn block(out: &mut Vec<u8>, ty: u16, body: &[u8]) {
@@ -97,6 +104,11 @@ pub fn client_data_blocks(s: &ClientSettings) -> Vec<u8> {
             | RNS_UD_CS_STRONG_ASYMMETRIC_KEYS
             | RNS_UD_CS_VALID_CONNECTION_TYPE
             | RNS_UD_CS_SUPPORT_HEARTBEAT_PDU
+            | if s.monitors.is_some() {
+                RNS_UD_CS_SUPPORT_MONITOR_LAYOUT_PDU
+            } else {
+                0
+            }
             | if s.gfx {
                 RNS_UD_CS_SUPPORT_DYNVC_GFX_PROTOCOL
             } else {
@@ -138,6 +150,10 @@ pub fn client_data_blocks(s: &ClientSettings) -> Vec<u8> {
     cluster.put_u32(0);
     block(&mut out, CS_CLUSTER, &cluster);
 
+    if let Some(d) = s.monitors {
+        out.extend(crate::monitor::client_monitor_data(d));
+        out.extend(crate::monitor::client_monitor_ex_data(d, s.scale));
+    }
     out
 }
 
@@ -224,6 +240,7 @@ mod tests {
             connection_type: crate::ConnectionType::Lan,
             channels: &[],
             gfx: false,
+            monitors: None,
         };
         let b = client_data_blocks(&s);
         assert_eq!(u16::from_le_bytes([b[0], b[1]]), CS_CORE);

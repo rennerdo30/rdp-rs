@@ -87,6 +87,10 @@ pub struct Config {
     /// H.264 decoder for AVC420 with [`crate::Graphics::Gfx`]; without one
     /// (or if it returns `None`) the client advertises AVC as disabled.
     pub h264: Option<crate::H264Factory>,
+    /// Several monitors (MS-RDPBCGR 2.2.1.3.6); empty is one monitor of
+    /// `width` x `height`. When set, the desktop is their bounding box and
+    /// `width`/`height` are not used.
+    pub monitors: Vec<crate::Monitor>,
 }
 
 impl Config {
@@ -112,6 +116,7 @@ impl Config {
             compression: Compression::Off,
             graphics: crate::Graphics::Bitmap,
             h264: None,
+            monitors: Vec::new(),
         }
     }
 }
@@ -140,6 +145,8 @@ pub struct PollOutcome {
     pub closed: Option<CloseReason>,
     /// The latest cursor change during this poll.
     pub pointer: Option<PointerUpdate>,
+    /// The server's latest Monitor Layout PDU (2.2.12.1) during this poll.
+    pub monitors: Option<Vec<crate::Monitor>>,
 }
 
 /// Why a session ended, and whether an auto-reconnect (MS-RDPBCGR 5.5) fits.
@@ -226,6 +233,8 @@ pub struct Client {
     arc_cookie: Option<AutoReconnectCookie>,
     /// Graphics pipeline output, when [`Config::graphics`] asks for it.
     gfx: Option<crate::gfx::GfxHandle>,
+    /// The server's monitor layout (2.2.12.1); empty until it sends one.
+    monitor_layout: Vec<crate::Monitor>,
 }
 
 /// Adds the graphics channel to the `drdynvc` handler, or adds a `drdynvc`
@@ -343,6 +352,10 @@ impl Client {
 
     /// Connects and opens the given static virtual channels.
     pub fn connect_with(cfg: &Config, mut handlers: Vec<Box<dyn StaticChannel>>) -> Result<Client> {
+        let desktop = match cfg.monitors.as_slice() {
+            [] => None,
+            m => Some(crate::monitor::VirtualDesktop::new(m)?),
+        };
         let gfx =
             (cfg.graphics == crate::Graphics::Gfx).then(|| add_gfx_channel(cfg, &mut handlers));
         let mut deadline = Instant::now() + cfg.timeout;
@@ -377,7 +390,10 @@ impl Client {
         let cookie: String = user.chars().take(9).collect();
         let requested = x224::PROTOCOL_SSL | x224::PROTOCOL_HYBRID | x224::PROTOCOL_HYBRID_EX;
         f.write(&x224::connection_request(&cookie, requested))?;
-        let protocol = x224::parse_connection_confirm(&read_x224(&mut f, deadline)?)?;
+        let confirm = read_x224(&mut f, deadline)?;
+        let protocol = x224::parse_connection_confirm(&confirm)?;
+        let extended_data =
+            x224::negotiation_flags(&confirm) & x224::EXTENDED_CLIENT_DATA_SUPPORTED != 0;
         trace!("negotiated protocol {protocol:#x}");
         if protocol & requested == 0 {
             return Err(Error::Unsupported(
@@ -429,9 +445,25 @@ impl Client {
             .map(|h| (h.name().to_string(), h.options()))
             .collect();
         let def_refs: Vec<(&str, u32)> = defs.iter().map(|(n, o)| (n.as_str(), *o)).collect();
+        if let Some(d) = &desktop {
+            trace!(
+                "{} monitors, desktop {}x{}{}",
+                d.monitors.len(),
+                d.width,
+                d.height,
+                if extended_data {
+                    ""
+                } else {
+                    " (server takes no monitor data: one spanning monitor)"
+                }
+            );
+        }
+        let (width, height) = desktop.as_ref().map_or((cfg.width, cfg.height), |d| {
+            (d.width as u16, d.height as u16)
+        });
         let settings = gcc::ClientSettings {
-            width: cfg.width,
-            height: cfg.height,
+            width,
+            height,
             keyboard_layout: cfg.keyboard_layout,
             client_name: &cfg.client_name,
             selected_protocol: protocol,
@@ -440,6 +472,7 @@ impl Client {
             connection_type: cfg.connection_type,
             channels: &def_refs,
             gfx: gfx.is_some(),
+            monitors: desktop.as_ref().filter(|_| extended_data),
         };
         f.write(&x224::data(&mcs::connect_initial(
             &gcc::conference_create_request(&settings),
@@ -554,6 +587,7 @@ impl Client {
             // sends the new one in the Save Session Info PDU.
             arc_cookie: None,
             gfx,
+            monitor_layout: Vec::new(),
         };
         // 7. Finalization; the Font Map reply is handled by the session loop.
         client.activate(&demand)?;
@@ -591,6 +625,12 @@ impl Client {
             &pdu::control(pdu::CTRLACTION_REQUEST_CONTROL),
         )?;
         self.send_data(pdu::PDUTYPE2_FONTLIST, &pdu::font_list())
+    }
+
+    /// The server's monitor layout (MS-RDPBCGR 2.2.12.1) in primary-relative
+    /// coordinates; empty until the server sends one.
+    pub fn monitor_layout(&self) -> &[crate::Monitor] {
+        &self.monitor_layout
     }
 
     pub fn info(&self) -> &ConnectionInfo {
@@ -796,6 +836,17 @@ impl Client {
             // the Client Info credentials (3.3.5.3.11).
             pdu::PDUTYPE2_ARC_STATUS_PDU => trace!("server rejected the auto-reconnect cookie"),
             pdu::PDUTYPE2_SHUTDOWN_DENIED => trace!("shutdown denied"),
+            // A bad layout is traced and dropped; it never ends the session.
+            crate::monitor::PDUTYPE2_MONITOR_LAYOUT_PDU => {
+                match crate::monitor::parse_monitor_layout(payload) {
+                    Ok(m) => {
+                        trace!("server monitor layout: {m:?}");
+                        self.monitor_layout = m.clone();
+                        out.monitors = Some(m);
+                    }
+                    Err(e) => trace!("monitor layout PDU ignored: {e}"),
+                }
+            }
             _ => {}
         }
         Ok(())

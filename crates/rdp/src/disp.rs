@@ -14,6 +14,7 @@ use std::time::{Duration, Instant};
 use crate::cursor::{Put, Reader};
 use crate::dvc::{DvcOut, DynamicChannel};
 use crate::error::{Result, proto};
+use crate::monitor::{Monitor, VirtualDesktop};
 use crate::trace;
 
 /// Dynamic virtual channel name (MS-RDPEDISP 2.1).
@@ -133,7 +134,73 @@ pub fn monitor_layout_pdu(width: u32, height: u32, scale: u32) -> Vec<u8> {
     v
 }
 
+/// DISPLAYCONTROL_MONITOR_LAYOUT_PDU (MS-RDPEDISP 2.2.2.2) with every
+/// monitor of `d` (primary first, at (0,0)). A monitor's scale of 0 takes
+/// `session_scale`.
+pub fn monitors_layout_pdu(d: &VirtualDesktop, session_scale: u32) -> Vec<u8> {
+    let n = d.monitors.len() as u32;
+    let len = 8 + 8 + MONITOR_LAYOUT_SIZE * n;
+    let mut v = Vec::with_capacity(len as usize);
+    v.put_u32(PDU_TYPE_MONITOR_LAYOUT);
+    v.put_u32(len);
+    v.put_u32(MONITOR_LAYOUT_SIZE);
+    v.put_u32(n); // NumMonitors
+    for m in &d.monitors {
+        // DISPLAYCONTROL_MONITOR_LAYOUT (MS-RDPEDISP 2.2.2.2.1)
+        let scale = crate::monitor::monitor_scale(m, session_scale);
+        v.put_u32(if m.primary { MONITOR_PRIMARY } else { 0 });
+        v.put_u32(m.left as u32);
+        v.put_u32(m.top as u32);
+        v.put_u32(m.width());
+        v.put_u32(m.height());
+        v.put_u32(m.physical_mm.0);
+        v.put_u32(m.physical_mm.1);
+        v.put_u32(m.orientation.degrees());
+        v.put_u32(scale);
+        v.put_u32(device_scale(scale));
+    }
+    v
+}
+
+/// Fits a layout to the protocol and the server (MS-RDPEDISP 2.2.2.2,
+/// 2.2.2.2.1): each monitor 200..=8192 pixels per side with an even width
+/// (its top-left corner stays), at most MaxNumMonitors (the primary is
+/// kept), and the total area within MaxMonitorAreaFactorA ×
+/// MaxMonitorAreaFactorB × MaxNumMonitors. None if no valid layout is left.
+pub fn fit_layout(monitors: &[Monitor], caps: Option<&DisplayCaps>) -> Option<VirtualDesktop> {
+    let sized: Vec<Monitor> = monitors
+        .iter()
+        .map(|m| {
+            let w = m.width().clamp(MIN_SIZE, MAX_SIZE) & !1;
+            let h = m.height().clamp(MIN_SIZE, MAX_SIZE);
+            Monitor {
+                right: m.left.saturating_add(w as i32 - 1),
+                bottom: m.top.saturating_add(h as i32 - 1),
+                ..m.clone()
+            }
+        })
+        .collect();
+    let mut d = VirtualDesktop::new(&sized).ok()?;
+    if let Some(c) = caps {
+        d.monitors.truncate(c.max_num_monitors.max(1) as usize);
+        let (a, b) = (c.max_monitor_area_factor_a, c.max_monitor_area_factor_b);
+        let area: u64 = d
+            .monitors
+            .iter()
+            .map(|m| m.width() as u64 * m.height() as u64)
+            .sum();
+        if a > 0 && b > 0 && area > a as u64 * b as u64 * c.max_num_monitors.max(1) as u64 {
+            return None;
+        }
+        // Recompute the bounding box without the dropped monitors.
+        d = VirtualDesktop::new(&d.monitors).ok()?;
+    }
+    Some(d)
+}
+
 const PENDING: u64 = 1 << 63;
+/// In `request`/`last_size`: the pending item is [`Shared::layout`].
+const LAYOUT: u64 = 1 << 62;
 
 struct Shared {
     /// `PENDING | width << 32 | height`, or 0 when nothing is pending.
@@ -143,6 +210,8 @@ struct Shared {
     scale: std::sync::atomic::AtomicU32,
     /// The last requested size (same packing, without PENDING), for re-sends.
     last_size: AtomicU64,
+    /// The last multi-monitor layout from [`DisplayHandle::request_layout`].
+    layout: std::sync::Mutex<Vec<Monitor>>,
 }
 
 /// UI side of the Display Control channel.
@@ -154,9 +223,20 @@ pub struct DisplayHandle {
 impl DisplayHandle {
     /// Asks for a new remote size. Only the latest request is kept.
     pub fn request_resize(&self, width: u32, height: u32) {
-        let size = ((width.min(0x7FFF_FFFF) as u64) << 32) | height as u64;
+        let size = ((width.min(0x3FFF_FFFF) as u64) << 32) | height as u64;
         self.shared.last_size.store(size, Ordering::Release);
         self.shared.request.store(PENDING | size, Ordering::Release);
+    }
+
+    /// Asks for a new multi-monitor layout (MS-RDPEDISP 2.2.2.2), in
+    /// virtual desktop coordinates like [`crate::Config::monitors`]. The
+    /// latest request wins, whether a layout or a [`Self::request_resize`].
+    pub fn request_layout(&self, monitors: &[Monitor]) {
+        *self.shared.layout.lock().unwrap_or_else(|e| e.into_inner()) = monitors.to_vec();
+        self.shared.last_size.store(LAYOUT, Ordering::Release);
+        self.shared
+            .request
+            .store(PENDING | LAYOUT, Ordering::Release);
     }
 
     /// Sets the desktop scale in percent (100..=500) and re-sends the current
@@ -197,6 +277,7 @@ pub fn display_control_with_clock(clock: Clock) -> (DisplayControl, DisplayHandl
         ready: AtomicBool::new(false),
         scale: std::sync::atomic::AtomicU32::new(100),
         last_size: AtomicU64::new(0),
+        layout: std::sync::Mutex::new(Vec::new()),
     });
     let ch = DisplayControl {
         shared: shared.clone(),
@@ -252,9 +333,34 @@ impl DynamicChannel for DisplayControl {
         if v == 0 {
             return Ok(());
         }
-        let (w, h) = (((v >> 32) & 0x7FFF_FFFF) as u32, v as u32);
-        let (w, h) = clamp_size(w, h, self.caps.as_ref());
         let scale = self.shared.scale.load(Ordering::Acquire);
+        if v & LAYOUT != 0 {
+            let monitors = self
+                .shared
+                .layout
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
+            match fit_layout(&monitors, self.caps.as_ref()) {
+                Some(d) => {
+                    trace!(
+                        "display control layout: {} monitors, {}x{}",
+                        d.monitors.len(),
+                        d.width,
+                        d.height
+                    );
+                    out.send(monitors_layout_pdu(&d, scale));
+                    self.last_sent = Some(now);
+                }
+                None => trace!(
+                    "display control layout of {} monitors not sendable",
+                    monitors.len()
+                ),
+            }
+            return Ok(());
+        }
+        let (w, h) = (((v >> 32) & 0x3FFF_FFFF) as u32, v as u32);
+        let (w, h) = clamp_size(w, h, self.caps.as_ref());
         trace!("display control layout {w}x{h} at {scale} %");
         out.send(monitor_layout_pdu(w, h, scale));
         self.last_sent = Some(now);

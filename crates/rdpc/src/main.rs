@@ -2,7 +2,7 @@
 //!
 //!   rdpc                                     connection manager
 //!   rdpc <host[:port]> -u <[DOMAIN\]user> [-d domain] [--size WxH] [-v]
-//!        [--compression off|rdp4|rdp5|rdp6|rdp61] [--gfx]
+//!        [--compression off|rdp4|rdp5|rdp6|rdp61] [--gfx] [--multimon]
 //!                                            one session window
 //!   rdpc <host> -u <user> --screenshot out.png [--wait SECONDS]
 //!                                            headless: save the desktop as PNG
@@ -67,6 +67,8 @@ struct Args {
     microphone: Option<Option<u32>>,
     list_microphones: bool,
     gfx: bool,
+    /// `--multimon`: span the session over all local monitors.
+    multimon: bool,
 }
 
 fn usage() -> ! {
@@ -76,6 +78,7 @@ fn usage() -> ! {
          \x20           [--gateway gwhost[:port]]   (RD Gateway, same credentials)\n\
          \x20           [--compression off|rdp4|rdp5|rdp6|rdp61]\n\
          \x20           [--gfx]   (graphics pipeline, MS-RDPEGFX)\n\
+         \x20           [--multimon]   (all local monitors, MS-RDPBCGR 2.2.1.3.6)\n\
          \x20      rdpc <host> -u <user> --screenshot out.png [--wait SECONDS]\n\
          \x20      rdpc <host> -u <user> --record out.mp4 [--wait SECONDS]\n\
          \x20      rdpc ... --microphone [INDEX]   (microphone on; see --list-microphones)\n\
@@ -140,6 +143,7 @@ fn parse_args() -> Args {
             }
             "--list-microphones" => a.list_microphones = true,
             "--gfx" => a.gfx = true,
+            "--multimon" => a.multimon = true,
             "-h" | "--help" => usage(),
             s if s.starts_with('-') => usage(),
             s => {
@@ -254,6 +258,10 @@ fn main() {
         cfg.width = w;
         cfg.height = h;
     }
+    if args.multimon {
+        cfg.monitors = local_monitors();
+        eprintln!("{} local monitors: {:?}", cfg.monitors.len(), cfg.monitors);
+    }
     if args.gfx {
         cfg.graphics = rdp::Graphics::Gfx;
         #[cfg(windows)]
@@ -288,6 +296,73 @@ fn release_own_console() {
         // SAFETY: no arguments; a failure only leaves the console open.
         unsafe { FreeConsole() };
     }
+}
+
+/// The local monitors in virtual-screen coordinates, with their effective
+/// scale (EnumDisplayMonitors, GetMonitorInfoW, GetDpiForMonitor).
+#[cfg(windows)]
+fn local_monitors() -> Vec<rdp::Monitor> {
+    use windows_sys::Win32::Foundation::{LPARAM, RECT};
+    use windows_sys::Win32::Graphics::Gdi::{
+        EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITORINFO,
+    };
+    use windows_sys::Win32::UI::HiDpi::{
+        DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetDpiForMonitor, MDT_EFFECTIVE_DPI,
+        SetThreadDpiAwarenessContext,
+    };
+    use windows_sys::Win32::UI::WindowsAndMessaging::MONITORINFOF_PRIMARY;
+    use windows_sys::core::BOOL;
+
+    unsafe extern "system" fn add(m: HMONITOR, _: HDC, _: *mut RECT, data: LPARAM) -> BOOL {
+        // SAFETY: `data` is the Vec passed below, alive for the whole call.
+        let list = unsafe { &mut *(data as *mut Vec<rdp::Monitor>) };
+        let mut info: MONITORINFO = unsafe { std::mem::zeroed() };
+        info.cbSize = std::mem::size_of::<MONITORINFO>() as u32;
+        // SAFETY: `info` is a valid MONITORINFO with cbSize set.
+        if unsafe { GetMonitorInfoW(m, &mut info) } == 0 {
+            return 1;
+        }
+        let (mut dx, mut dy) = (96u32, 96u32);
+        // SAFETY: valid monitor handle and out pointers.
+        let scale = match unsafe { GetDpiForMonitor(m, MDT_EFFECTIVE_DPI, &mut dx, &mut dy) } {
+            0 => dx * 100 / 96,
+            _ => 0,
+        };
+        let r = info.rcMonitor;
+        list.push(rdp::Monitor {
+            left: r.left,
+            top: r.top,
+            right: r.right - 1,
+            bottom: r.bottom - 1,
+            primary: info.dwFlags & MONITORINFOF_PRIMARY != 0,
+            scale,
+            ..Default::default()
+        });
+        1
+    }
+
+    let mut list: Vec<rdp::Monitor> = Vec::new();
+    // Physical pixels, not DPI-virtualized ones, for this thread only.
+    // SAFETY: plain calls; the previous context is restored after.
+    unsafe {
+        let old = SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+        EnumDisplayMonitors(
+            std::ptr::null_mut(),
+            std::ptr::null(),
+            Some(add),
+            &mut list as *mut Vec<rdp::Monitor> as LPARAM,
+        );
+        if !old.is_null() {
+            SetThreadDpiAwarenessContext(old);
+        }
+    }
+    list
+}
+
+#[cfg(not(windows))]
+fn local_monitors() -> Vec<rdp::Monitor> {
+    eprintln!("--multimon: monitor enumeration is Windows-only; using one monitor");
+    Vec::new()
 }
 
 /// Headless mode: connect, wait until the screen has settled, save a PNG and
