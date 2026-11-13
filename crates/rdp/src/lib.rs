@@ -8,6 +8,7 @@
 //! - [`pdu`]: share control/data PDUs, client info, capabilities, finalization
 //! - [`fastpath`] + [`input`]: fast-path output updates and fast-path input events
 //! - [`codec`]: interleaved RLE and planar bitmap codecs (MS-RDPBCGR 2.2.9.1.1.3.1.2.4, MS-RDPEGDI 2.2.2.5.1)
+//! - [`dvc`] + [`disp`]: dynamic virtual channels (MS-RDPEDYC) and Display Control (MS-RDPEDISP)
 //! - [`client`]: the connection sequence and the session loop
 
 pub mod channel;
@@ -17,6 +18,8 @@ pub mod credssp;
 pub mod crypto;
 pub mod cursor;
 pub mod der;
+pub mod disp;
+pub mod dvc;
 pub mod error;
 pub mod fastpath;
 pub mod framebuffer;
@@ -31,6 +34,8 @@ pub mod x224;
 
 pub use channel::{ChannelOut, StaticChannel};
 pub use client::{Client, Config, ConnectionInfo, PollOutcome};
+pub use disp::{DisplayControl, DisplayHandle, display_control};
+pub use dvc::{Drdynvc, DvcOut, DynamicChannel};
 pub use error::{Error, Result};
 pub use framebuffer::{Damage, Framebuffer};
 pub use input::InputEvent;
