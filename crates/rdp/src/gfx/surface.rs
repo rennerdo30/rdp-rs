@@ -80,6 +80,20 @@ impl Surface {
         out
     }
 
+    /// The pixels of `area`, row by row, `area.w` x `area.h` of them; the
+    /// part outside the surface reads as 0.
+    pub fn read_padded(&self, area: Area) -> Vec<u32> {
+        let mut out = vec![0; area.w * area.h];
+        if let Some(a) = area.clip(self.width, self.height) {
+            for row in 0..a.h {
+                let s = (a.y + row) * self.width + a.x;
+                let d = row * area.w;
+                out[d..d + a.w].copy_from_slice(&self.pixels[s..s + a.w]);
+            }
+        }
+        out
+    }
+
     pub fn fill(&mut self, area: Area, color: u32) -> Option<Area> {
         let a = area.clip(self.width, self.height)?;
         for row in a.y..a.y + a.h {

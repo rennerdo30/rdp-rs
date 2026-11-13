@@ -821,7 +821,7 @@ fn wire_to_surface_uncompressed_and_planar() {
             wire(1, CODECID_UNCOMPRESSED, (4, 4, 6, 5), &raw),
             wire(1, CODECID_PLANAR, (0, 0, 2, 1), &planar),
             wire(1, CODECID_UNCOMPRESSED, (8, 8, 10, 9), &wrong),
-            wire(1, CODECID_CLEARCODEC, (10, 10, 12, 12), &[0; 8]),
+            wire(1, CODECID_CAVIDEO, (10, 10, 12, 12), &[0; 8]),
             pdu(CMDID_ENDFRAME, &hex("01 00 00 00")),
         ],
     );
@@ -836,6 +836,127 @@ fn wire_to_surface_uncompressed_and_planar() {
     // The bad and the unsupported updates changed nothing.
     assert_eq!(fb.pixels[8 * 32 + 8], 0);
     assert_eq!(fb.pixels[10 * 32 + 10], 0);
+}
+
+/// A ClearCodec stream (MS-RDPEGFX 2.2.4.1) with residual and bands layers.
+fn clear(residual: &[u8], bands: &[u8]) -> Vec<u8> {
+    let mut v = vec![0, 0];
+    v.extend((residual.len() as u32).to_le_bytes());
+    v.extend((bands.len() as u32).to_le_bytes());
+    v.extend(0u32.to_le_bytes());
+    v.extend_from_slice(residual);
+    v.extend_from_slice(bands);
+    v
+}
+
+/// One-column band at (x, 0) down to `y_end`, black background.
+fn clear_band(x: u16, y_end: u16, vbar: &str) -> Vec<u8> {
+    let mut v = Vec::new();
+    for n in [x, x, 0, y_end] {
+        v.extend(n.to_le_bytes());
+    }
+    v.extend([0, 0, 0]);
+    v.extend(hex(vbar));
+    v
+}
+
+#[test]
+fn wire_to_surface_clearcodec_caches_live_per_channel() {
+    let (mut ch, h) = graphics(None);
+    setup(&mut ch);
+    let acks = run(
+        &mut ch,
+        &[
+            wire(1, CODECID_UNCOMPRESSED, (7, 7, 8, 8), &hex("11 22 33 00")),
+            // 4 x 4 at (4,4): two residual pixels, a Short V-Bar miss of one
+            // pixel in a two-high band at column 2. (7,7) is not covered.
+            wire(
+                1,
+                CODECID_CLEARCODEC,
+                (4, 4, 8, 8),
+                &clear(&hex("01 02 03 02"), &clear_band(2, 1, "00 01 0a 0b 0c")),
+            ),
+            // The next PDU hits Short V-Bar 0.
+            wire(
+                1,
+                CODECID_CLEARCODEC,
+                (0, 0, 2, 2),
+                &clear(&[], &clear_band(0, 0, "00 40 00")),
+            ),
+            // An unknown surface still feeds the storages: V-Bar 2 ...
+            wire(
+                9,
+                CODECID_CLEARCODEC,
+                (0, 0, 1, 1),
+                &clear(&[], &clear_band(0, 0, "00 01 04 05 06")),
+            ),
+            // ... which this PDU draws.
+            wire(
+                1,
+                CODECID_CLEARCODEC,
+                (1, 0, 2, 1),
+                &clear(&[], &clear_band(0, 0, "02 80")),
+            ),
+            // Corrupt data fails this PDU only.
+            wire(1, CODECID_CLEARCODEC, (0, 8, 4, 12), &hex("00 00 ff")),
+            pdu(CMDID_ENDFRAME, &hex("01 00 00 00")),
+        ],
+    );
+    assert_eq!(acks, vec![frame_acknowledge(0, 1, 1)]);
+    let mut fb = crate::Framebuffer::new(32, 16);
+    h.present(&mut fb, &mut Vec::new());
+    let at = |x: usize, y: usize| fb.pixels[y * 32 + x];
+    assert_eq!(at(4, 4), 0x0003_0201);
+    assert_eq!(at(5, 4), 0x0003_0201);
+    assert_eq!(at(6, 4), 0x000C_0B0A);
+    assert_eq!(at(6, 5), 0);
+    assert_eq!(at(7, 7), 0x0033_2211);
+    assert_eq!(at(0, 0), 0x000C_0B0A);
+    assert_eq!(at(1, 0), 0x0006_0504);
+    // The channel keeps working after the corrupt PDU.
+    run(
+        &mut ch,
+        &[
+            wire(
+                1,
+                CODECID_CLEARCODEC,
+                (2, 0, 3, 1),
+                &clear(&[], &clear_band(0, 0, "01 80")),
+            ),
+            pdu(CMDID_ENDFRAME, &hex("02 00 00 00")),
+        ],
+    );
+    h.present(&mut fb, &mut Vec::new());
+    assert_eq!(fb.pixels[2], 0x000C_0B0A);
+}
+
+#[test]
+fn clearcodec_storage_resets_when_the_channel_closes() {
+    let (mut ch, h) = graphics(None);
+    setup(&mut ch);
+    let miss = clear(&[], &clear_band(0, 0, "00 01 0a 0b 0c"));
+    let hit = clear(&[], &clear_band(0, 0, "00 80"));
+    let frame = |id: u32| pdu(CMDID_ENDFRAME, &(id).to_le_bytes());
+    run(
+        &mut ch,
+        &[
+            wire(1, CODECID_CLEARCODEC, (0, 0, 1, 1), &miss),
+            wire(1, CODECID_CLEARCODEC, (1, 0, 2, 1), &hit),
+            frame(1),
+        ],
+    );
+    let mut fb = crate::Framebuffer::new(32, 16);
+    h.present(&mut fb, &mut Vec::new());
+    assert_eq!(fb.pixels[1], 0x000C_0B0A);
+    // A new channel starts with empty storages: the same hit draws nothing.
+    ch.closed();
+    setup(&mut ch);
+    run(
+        &mut ch,
+        &[wire(1, CODECID_CLEARCODEC, (1, 0, 2, 1), &hit), frame(2)],
+    );
+    h.present(&mut fb, &mut Vec::new());
+    assert_eq!(fb.pixels[1], 0);
 }
 
 #[test]
