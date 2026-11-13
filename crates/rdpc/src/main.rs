@@ -70,10 +70,22 @@ fn parse_args() -> Args {
             }
         }
     }
+    // cmd.exe passes single quotes through literally: 'DOMAIN\user' keeps its quotes.
+    a.user = strip_quotes(&a.user);
+    a.domain = strip_quotes(&a.domain);
     if a.host.is_empty() || a.user.is_empty() {
         usage();
     }
     a
+}
+
+fn strip_quotes(s: &str) -> String {
+    for q in ['\'', '"'] {
+        if s.len() >= 2 && s.starts_with(q) && s.ends_with(q) {
+            return s[1..s.len() - 1].to_string();
+        }
+    }
+    s.to_string()
 }
 
 fn hex(b: &[u8]) -> String {

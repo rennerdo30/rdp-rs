@@ -1,0 +1,26 @@
+# Machine-local Cargo settings. Copy to .cargo/config.toml (gitignored) and adjust.
+# Below: the owner's Windows PC. Contributors need none of this; plain `cargo build` works.
+# No PATH or environment changes: everything is set here, per process.
+
+[build]
+# Shared local sccache: dependencies compile once per machine and are reused
+# across projects and worktrees. Workspace crates stay incremental, which
+# sccache passes through uncached; that is the fast path for them.
+rustc-wrapper = "E:/Development/_tools/sccache/0.19.0/sccache-v0.19.0-x86_64-pc-windows-msvc/sccache.exe"
+# Build output stays outside the repository.
+target-dir = "E:/Development/_cache/cargo-target/rdp-rs"
+# Owner PC load rule: leave headroom for the games' builds.
+jobs = 8
+
+[env]
+SCCACHE_DIR = { value = "E:/sccache", force = true }
+
+# rust-lld is not the default on Windows and links several times faster than link.exe.
+[target.x86_64-pc-windows-msvc]
+linker = "rust-lld.exe"
+
+[target.aarch64-pc-windows-msvc]
+linker = "rust-lld.exe"
+
+[net]
+retry = 2

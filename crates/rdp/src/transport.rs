@@ -28,6 +28,10 @@ enum Stream {
     Tls(Box<(ClientConnection, TcpStream)>),
 }
 
+fn is_reset(e: &io::Error) -> bool {
+    matches!(e.kind(), io::ErrorKind::ConnectionReset | io::ErrorKind::ConnectionAborted)
+}
+
 fn is_timeout(e: &io::Error) -> bool {
     matches!(e.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut)
 }
@@ -137,7 +141,12 @@ impl Framer {
                 }
             }
             let mut tmp = std::mem::take(&mut self.buf);
-            let got = self.stream().read_some(&mut tmp);
+            let got = self.stream().read_some(&mut tmp).map_err(|e| match e {
+                Error::Io(io) if is_reset(&io) => {
+                    Error::Disconnected("connection reset by server".into())
+                }
+                other => other,
+            });
             self.buf = tmp;
             if got? == 0 {
                 match deadline {

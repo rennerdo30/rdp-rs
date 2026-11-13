@@ -401,7 +401,12 @@ impl Client {
         Ok(())
     }
 
+    /// Sends input once the session is active; before that the server rejects
+    /// input as out of sequence, so events are dropped.
     pub fn send_input(&mut self, events: &[InputEvent]) -> Result<()> {
+        if !self.active {
+            return Ok(());
+        }
         for chunk in events.chunks(15) {
             self.f.write(&fastpath_input(chunk))?;
         }

@@ -1,0 +1,5 @@
+# Current stable on 2026-11-13 (Rust blog: "Announcing Rust 1.100.0", 2026-11-12).
+[toolchain]
+channel = "1.100.0"
+profile = "minimal"
+components = ["clippy", "rustfmt"]

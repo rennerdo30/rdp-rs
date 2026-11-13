@@ -37,7 +37,7 @@ transport, auto-reconnect, RDS licensing (LICENSE_REQUEST), legacy RDP security.
 ```
 cargo build --release
 # password from RDP_PASSWORD or an interactive prompt
-target/release/rdpc 192.168.1.20 -u 'DOMAIN\user' --size 1280x800
+target/release/rdpc 192.168.1.20 -u DOMAIN\user --size 1280x800
 target/release/rdpc 192.168.1.20 -u user --screenshot desk.png --wait 15 -v
 ```
 

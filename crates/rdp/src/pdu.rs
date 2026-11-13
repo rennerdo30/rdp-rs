@@ -404,6 +404,7 @@ pub fn error_info_name(code: u32) -> &'static str {
         0x0000_000A => "server requires fresh credentials",
         0x0000_000B => "disconnected by the user on the server",
         0x0000_000C => "logged off by the user",
+        0x10C9..=0x1195 => "server rejected a client PDU (protocol error, MS-RDPBCGR 2.2.5.1.1)",
         _ => "see MS-RDPBCGR 2.2.5.1.1",
     }
 }
