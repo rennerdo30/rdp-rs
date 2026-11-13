@@ -47,8 +47,16 @@ impl Controls {
         // falls back to the static rdpsnd channel, which also needs rdpdr
         // declared (MS-RDPEA 2.1). Offer both; whichever opens plays.
         let speaker: Speaker = Arc::new(AtomicU32::new(DEFAULT_DEVICE));
-        let (rdpsnd, audio_static) = rdp::rdpsnd(Box::new(WaveOut::new(speaker.clone())));
-        let (audio_dvc_channel, audio_dvc) = rdp::rdpsnd(Box::new(WaveOut::new(speaker.clone())));
+        // Compressed formats: ADPCM in the library, AAC and MP3 on Media
+        // Foundation where present; PCM stays the fallback.
+        let codecs = || rdp::AudioCodecs {
+            adpcm: true,
+            decoder: crate::audio_mf::decoder(),
+        };
+        let (rdpsnd, audio_static) =
+            rdp::rdpsnd_with(Box::new(WaveOut::new(speaker.clone())), codecs());
+        let (audio_dvc_channel, audio_dvc) =
+            rdp::rdpsnd_with(Box::new(WaveOut::new(speaker.clone())), codecs());
         let mic_device: DeviceChoice = Arc::new(Mutex::new(None));
         let (audin, microphone) = rdp::audin(Box::new(WaveIn::new(mic_device.clone())));
         let dynamic: Vec<Box<dyn rdp::DynamicChannel>> = vec![

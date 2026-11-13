@@ -71,4 +71,6 @@ pub use rdpdr::{
     Device, Drive, IoCompletion, IoRequest, PrintBackend, PrintFormat, Printer, PrinterInfo, Rdpdr,
     RdpdrHandle, SmartCardBackend, rdpdr, share_printers, smart_card_device,
 };
-pub use rdpsnd::{AudioBackend, AudioHandle, PcmFormat, Rdpsnd, rdpsnd};
+pub use rdpsnd::{
+    AudioBackend, AudioCodecs, AudioDecoder, AudioHandle, PcmFormat, Rdpsnd, rdpsnd, rdpsnd_with,
+};
