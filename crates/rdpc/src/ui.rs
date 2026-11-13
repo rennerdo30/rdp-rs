@@ -134,6 +134,9 @@ pub enum Hit {
     TabPreset(u64, usize),
     TabDepth(u64, usize),
     TabExperience(u64, u8),
+    /// Graphics: 0 bitmaps, 1 GFX (panel and form).
+    TabGraphics(u64, usize),
+    FormGraphics(usize),
     /// Compression: index into COMPRESSION (panel and form).
     TabCompression(u64, usize),
     FormCompression(usize),
@@ -1302,6 +1305,12 @@ impl Ui {
                 return Some(Action::SetQuality(id, t.quality));
             }
             Hit::FormCompression(i) => self.opts.quality.compression = COMPRESSION[i].0,
+            Hit::TabGraphics(id, i) => {
+                let t = self.tab_mut(id)?;
+                t.quality.gfx = i == 1;
+                return Some(Action::SetQuality(id, t.quality));
+            }
+            Hit::FormGraphics(i) => self.opts.quality.gfx = i == 1,
             Hit::FormPreset(i) => {
                 let depth = self.opts.quality.color_depth;
                 self.opts.quality = Quality::preset(PRESETS[i].0, depth);
@@ -3201,6 +3210,31 @@ impl Ui {
             return y - p(20.0);
         }
         let q = self.opts.quality;
+        self.caption(cv, te, f, x, y, w, "GRAPHICS");
+        y += p(24.0);
+        let subs = [
+            "Classic bitmap updates. Lowest latency; the default.",
+            "Graphics pipeline with H.264. Experimental.",
+        ];
+        let cells = self.card(cv, x, y, w, &[p(50.0); 2]);
+        for (i, (r, (name, sub))) in cells
+            .iter()
+            .zip([("Bitmaps", subs[0]), ("GFX (H.264)", subs[1])])
+            .enumerate()
+        {
+            self.card_choice(
+                cv,
+                te,
+                f,
+                *r,
+                name,
+                sub,
+                q.gfx == (i == 1),
+                Hit::FormGraphics(i),
+            );
+        }
+        y += 2 * p(50.0) + p(20.0);
+
         self.caption(cv, te, f, x, y, w, "WINDOWS KEYS (WIN, ALT+TAB, …)");
         y += p(24.0);
         let items: Vec<(String, bool, Hit)> = WinKeys::ALL
@@ -3997,6 +4031,16 @@ impl Ui {
             );
         }
         y += 6 * p(42.0) + p(20.0);
+
+        self.caption(cv, te, f, x, y, w, "GRAPHICS");
+        y += p(24.0);
+        let items: Vec<(String, bool, Hit)> = ["Bitmaps", "GFX (H.264)"]
+            .iter()
+            .enumerate()
+            .map(|(i, n)| (n.to_string(), q.gfx == (i == 1), Hit::TabGraphics(id, i)))
+            .collect();
+        self.segmented(cv, te, f, Rect::new(x, y, w, p(32.0)), &items);
+        y += p(32.0) + p(20.0);
 
         self.caption(cv, te, f, x, y, w, "COMPRESSION");
         y += p(24.0);

@@ -197,6 +197,8 @@ pub struct Quality {
     pub visual_styles: bool,
     /// Bulk compression (advertised; the server may pick a lower one).
     pub compression: Comp,
+    /// Graphics pipeline (MS-RDPEGFX, H.264) instead of bitmap updates.
+    pub gfx: bool,
 }
 
 /// Bulk compression setting, saved by name.
@@ -266,6 +268,7 @@ impl Quality {
             animations: e.animations,
             visual_styles: e.visual_styles,
             compression: Comp::Off,
+            gfx: false,
         }
     }
 
@@ -274,6 +277,16 @@ impl Quality {
         cfg.connection_type = ct;
         cfg.color_depth = rdp::experience::valid_color_depth(self.color_depth);
         cfg.compression = self.compression.library();
+        if self.gfx {
+            cfg.graphics = rdp::Graphics::Gfx;
+            #[cfg(windows)]
+            {
+                cfg.h264 = Some(crate::h264_mf::factory());
+            }
+        } else {
+            cfg.graphics = rdp::Graphics::Bitmap;
+            cfg.h264 = None;
+        }
         cfg.experience = rdp::Experience {
             wallpaper: self.wallpaper,
             font_smoothing: self.font_smoothing,
