@@ -333,14 +333,21 @@ fn parse_reset_graphics_and_wire_to_surface() {
     );
     let mut bad = b.clone();
     bad[16] = 17; // monitorCount over 16
-    assert!(parse_pdus(&bad).is_err());
+    assert!(
+        parse_pdus(&bad).unwrap().is_empty(),
+        "the bad PDU is skipped"
+    );
     // 17 monitors refused even when the PDU is long enough to hold them.
     let mut body = Vec::new();
     body.put_u32(1024);
     body.put_u32(768);
     body.put_u32(17);
     body.resize(12 + 17 * 20, 0);
-    assert!(parse_pdus(&pdu(CMDID_RESETGRAPHICS, &body)).is_err());
+    assert!(
+        parse_pdus(&pdu(CMDID_RESETGRAPHICS, &body))
+            .unwrap()
+            .is_empty()
+    );
     body[8] = 16;
     assert!(parse_pdus(&pdu(CMDID_RESETGRAPHICS, &body)).is_ok());
     let mut body = hex("01 00 0A 00 20");
@@ -379,8 +386,9 @@ fn parse_rejects_malformed_pdus() {
             &hex("00 00 00 00 10 00 00 00 00 00 00 00"),
         ), // width 0
     ];
+    // A broken header fails the message; a broken body skips that PDU.
     for c in &cases {
-        assert!(parse_pdus(c).is_err(), "{c:02x?}");
+        assert!(parse_pdus(c).map_or(true, |v| v.is_empty()), "{c:02x?}");
     }
     // Unknown commands are reported, not refused.
     assert_eq!(one(&pdu(0x0016, &[1, 2, 3])), ServerPdu::Other(0x0016));
@@ -769,10 +777,24 @@ fn channel_error_closes_only_graphics() {
     req.extend_from_slice(CHANNEL_NAME.as_bytes());
     req.push(0);
     feed(&mut d, &req);
-    // A broken ZGFX stream closes the channel (DYNVC_CLOSE).
+    // A broken ZGFX stream is dropped; the channel stays open (no
+    // DYNVC_CLOSE), or the session would never draw again.
+    assert!(feed(&mut d, &dvc_data(&[0xE5, 0x04])).is_empty());
+}
+
+#[test]
+fn a_bad_pdu_does_not_cost_the_frame_acknowledgement() {
+    let (mut ch, _handle) = graphics(None);
+    setup(&mut ch);
+    let bad = pdu(CMDID_SOLIDFILL, &hex("00 00 00 00 00 00 05 00")); // rects missing
+    let end = pdu(CMDID_ENDFRAME, &7u32.to_le_bytes());
+    let sent = run(&mut ch, &[bad, end]);
+    assert_eq!(sent.len(), 1, "one FrameAcknowledge");
+    assert_eq!(u16::from_le_bytes([sent[0][0], sent[0][1]]), 0x000D);
     assert_eq!(
-        feed(&mut d, &dvc_data(&[0xE5, 0x04])),
-        vec![vec![0x40, 0x05]]
+        u32::from_le_bytes(sent[0][12..16].try_into().unwrap()),
+        7,
+        "frameId"
     );
 }
 

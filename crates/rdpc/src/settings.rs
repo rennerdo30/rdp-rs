@@ -9,6 +9,30 @@ pub struct AppSettings {
     pub auto_lock_minutes: u32,
     /// Installed copies look for a newer release once a day.
     pub check_updates: bool,
+    /// Protocol tracing into the log file (see [`log_path`]).
+    pub diagnostic_log: bool,
+}
+
+/// The diagnostic log: `%LOCALAPPDATA%\rdp-rs\logs\rdpc.log`, rewritten
+/// at each start.
+pub fn log_path() -> Option<std::path::PathBuf> {
+    std::env::var_os("LOCALAPPDATA")
+        .or_else(|| std::env::var_os("HOME"))
+        .map(|p| {
+            std::path::PathBuf::from(p)
+                .join("rdp-rs")
+                .join("logs")
+                .join("rdpc.log")
+        })
+}
+
+/// Turns protocol tracing and the log file on or off.
+pub fn apply_logging(on: bool) {
+    rdp::set_verbose(on);
+    let _ = rdp::log::set_log_file(if on { log_path() } else { None }.as_deref());
+    if on {
+        rdp::trace!("rdpc {} diagnostic log", env!("CARGO_PKG_VERSION"));
+    }
 }
 
 impl Default for AppSettings {
@@ -16,6 +40,7 @@ impl Default for AppSettings {
         AppSettings {
             auto_lock_minutes: 15,
             check_updates: true,
+            diagnostic_log: false,
         }
     }
 }

@@ -213,7 +213,12 @@ pub fn parse_pdus(buf: &[u8]) -> Result<Vec<(ServerPdu<'_>, usize)>> {
         }
         let body = &buf[at + HEADER_LEN..at + len];
         at += len;
-        out.push((parse_body(cmd, body)?, at));
+        // One PDU that cannot be read is skipped by its length: the rest of
+        // the message (an EndFrame and its acknowledgement) still counts.
+        match parse_body(cmd, body) {
+            Ok(pdu) => out.push((pdu, at)),
+            Err(e) => crate::trace!("gfx: command {cmd:#x} of {len} bytes skipped: {e}"),
+        }
     }
     Ok(out)
 }

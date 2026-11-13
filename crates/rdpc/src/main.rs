@@ -181,7 +181,8 @@ fn hex(b: &[u8]) -> String {
 
 fn main() {
     let args = parse_args();
-    rdp::set_verbose(args.verbose);
+    // -v, or Settings > Diagnostic log: trace to stderr and to the log file.
+    settings::apply_logging(args.verbose || settings::AppSettings::load().diagnostic_log);
 
     if args.version {
         // The installer test and support reports read this line.

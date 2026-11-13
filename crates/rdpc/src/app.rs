@@ -750,6 +750,30 @@ impl App {
                 }
                 self.dirty();
             }
+            Action::SetDiagnosticLog(on) => {
+                self.settings.diagnostic_log = on;
+                let _ = self.settings.save();
+                crate::settings::apply_logging(on);
+                if let Some(m) = &mut self.win {
+                    m.ui.diagnostic_log = on;
+                }
+                if on {
+                    self.message(
+                        "Diagnostic log on: connect, then send rdpc.log.",
+                        theme::TEXT_2,
+                    );
+                }
+                self.dirty();
+            }
+            Action::OpenLogFolder => {
+                if let Some(dir) =
+                    crate::settings::log_path().and_then(|p| p.parent().map(|d| d.to_path_buf()))
+                {
+                    let _ = std::fs::create_dir_all(&dir);
+                    // Explorer shows the folder and exits on its own.
+                    let _ = std::process::Command::new("explorer").arg(&dir).spawn();
+                }
+            }
             Action::SetCheckUpdates(on) => {
                 self.settings.check_updates = on;
                 let _ = self.settings.save();
@@ -1442,6 +1466,7 @@ impl ApplicationHandler<UserEvent> for App {
                             });
                             ui.auto_lock = self.settings.auto_lock_minutes;
                             ui.check_updates = self.settings.check_updates;
+                            ui.diagnostic_log = rdp::log::verbose();
                             ui.remembered = remembered_exists(&mut ui);
                             if self.settings.check_updates {
                                 check_for_update(self.proxy.clone());

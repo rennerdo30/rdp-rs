@@ -145,6 +145,8 @@ pub enum Hit {
     ImportCancel,
     CheckUpdates,
     SetupVault,
+    DiagnosticLog,
+    OpenLogFolder,
     /// Microphone device: index into `mics` + 1 (0 = default); form and panel.
     FormMic(usize),
     TabMic(u64, usize),
@@ -359,6 +361,8 @@ pub enum Action {
     /// Settings.
     SetAutoLock(u32),
     SetCheckUpdates(bool),
+    SetDiagnosticLog(bool),
+    OpenLogFolder,
     SetRemember(bool),
     ChangeMaster {
         current: zeroize::Zeroizing<String>,
@@ -455,6 +459,7 @@ pub struct Ui {
     pub auto_lock: u32,
     pub check_updates: bool,
     pub remembered: bool,
+    pub diagnostic_log: bool,
     /// Settings: the change-master form is open; a backup waits for its password.
     change_master: bool,
     pub import_file: Option<std::path::PathBuf>,
@@ -540,6 +545,7 @@ impl Ui {
             auto_lock: 15,
             check_updates: true,
             remembered: false,
+            diagnostic_log: false,
             change_master: false,
             import_file: None,
             settings_note: None,
@@ -1332,6 +1338,8 @@ impl Ui {
             }
             Hit::AutoLock(i) => return Some(Action::SetAutoLock(crate::settings::AUTO_LOCK[i])),
             Hit::CheckUpdates => return Some(Action::SetCheckUpdates(!self.check_updates)),
+            Hit::DiagnosticLog => return Some(Action::SetDiagnosticLog(!self.diagnostic_log)),
+            Hit::OpenLogFolder => return Some(Action::OpenLogFolder),
             Hit::RememberKey => return Some(Action::SetRemember(!self.remembered)),
             Hit::ChangeMasterOpen => {
                 self.change_master = true;
@@ -2899,7 +2907,34 @@ impl Ui {
             check,
             Hit::CheckUpdates,
         );
-        y += p(58.0);
+        y += p(58.0) + p(24.0);
+
+        // Troubleshooting
+        self.caption(cv, te, f, x, y, w, "TROUBLESHOOTING");
+        y += p(24.0);
+        let cells = self.card(cv, x, y, w, &[p(58.0), p(58.0)]);
+        let log_on = self.diagnostic_log;
+        self.card_switch(
+            cv,
+            te,
+            f,
+            cells[0],
+            "Diagnostic log",
+            "Protocol details to rdpc.log; never passwords",
+            log_on,
+            Hit::DiagnosticLog,
+        );
+        self.card_action(
+            cv,
+            te,
+            f,
+            cells[1],
+            "Log folder",
+            r"%LOCALAPPDATA%\rdp-rs\logs",
+            "Open",
+            Hit::OpenLogFolder,
+        );
+        y += p(116.0);
 
         self.home_content = y + p(40.0) - top;
         let max = (self.home_content - area.h).max(0);

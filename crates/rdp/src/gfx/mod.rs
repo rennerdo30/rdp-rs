@@ -216,6 +216,12 @@ impl GraphicsChannel {
                 // Zero there reads as QUEUE_DEPTH_UNAVAILABLE (2.2.2.13).
                 let depth = (unprocessed as u32).min(pdu::SUSPEND_FRAME_ACKNOWLEDGEMENT - 1);
                 out.send(pdu::frame_acknowledge(depth, frame_id, self.frames));
+                if self.frames <= 3 || self.frames.is_multiple_of(200) {
+                    trace!(
+                        "gfx: frame {frame_id} acknowledged ({} decoded)",
+                        self.frames
+                    );
+                }
             }
             ServerPdu::SolidFill {
                 surface_id,
@@ -408,9 +414,21 @@ impl DynamicChannel for GraphicsChannel {
     /// One RDP_SEGMENTED_DATA message (2.1). A decompression or framing
     /// error closes the channel: the history is lost and later messages
     /// cannot be decoded.
+    /// A message that cannot be decompressed or parsed is traced and
+    /// dropped: an error here would close the channel, and with it every
+    /// screen update for the rest of the session.
     fn process(&mut self, msg: &[u8], out: &mut DvcOut) -> Result<()> {
-        let buf = self.zgfx.decompress(msg)?;
-        self.handle(&buf, out)
+        let buf = match self.zgfx.decompress(msg) {
+            Ok(b) => b,
+            Err(e) => {
+                trace!("gfx: message of {} bytes dropped: {e}", msg.len());
+                return Ok(());
+            }
+        };
+        if let Err(e) = self.handle(&buf, out) {
+            trace!("gfx: message of {} bytes dropped: {e}", buf.len());
+        }
+        Ok(())
     }
 
     fn closed(&mut self) {
