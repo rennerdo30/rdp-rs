@@ -6,6 +6,8 @@
 //!                                            one session window
 //!   rdpc <host> -u <user> --screenshot out.png [--wait SECONDS]
 //!                                            headless: save the desktop as PNG
+//!   rdpc <host> -u <user> --record out.mp4 [--wait SECONDS] [--screenshot out.png]
+//!                                            headless: record the session as MP4
 //!   rdpc --snapshot-ui out.png [--scale 1.5] render the manager offscreen
 //!   rdpc --icon-png out.png [--icon-size N]  write the app icon as a PNG
 //!   rdpc --version                           print `rdpc <version>`
@@ -26,6 +28,7 @@ mod known_hosts;
 mod mic;
 mod picker;
 mod printing;
+mod recorder;
 mod session;
 mod settings;
 mod smartcard;
@@ -50,6 +53,8 @@ struct Args {
     gateway: Option<(String, u16)>,
     size: Option<(u16, u16)>,
     screenshot: Option<String>,
+    /// `--record out.mp4`: headless recording for `--wait` seconds.
+    record: Option<String>,
     snapshot_ui: Option<String>,
     icon_png: Option<String>,
     icon_size: usize,
@@ -72,6 +77,7 @@ fn usage() -> ! {
          \x20           [--compression off|rdp4|rdp5|rdp6|rdp61]\n\
          \x20           [--gfx]   (graphics pipeline, MS-RDPEGFX)\n\
          \x20      rdpc <host> -u <user> --screenshot out.png [--wait SECONDS]\n\
+         \x20      rdpc <host> -u <user> --record out.mp4 [--wait SECONDS]\n\
          \x20      rdpc ... --microphone [INDEX]   (microphone on; see --list-microphones)\n\
          \x20      rdpc --snapshot-ui out.png [--scale 1.5]\n\
          \x20      rdpc --icon-png out.png [--icon-size N]\n\
@@ -111,6 +117,7 @@ fn parse_args() -> Args {
                 ));
             }
             "--screenshot" => a.screenshot = Some(val()),
+            "--record" => a.record = Some(val()),
             "--snapshot-ui" => a.snapshot_ui = Some(val()),
             "--icon-png" => a.icon_png = Some(val()),
             "--icon-size" => {
@@ -148,7 +155,9 @@ fn parse_args() -> Args {
     // cmd.exe passes single quotes through literally: 'DOMAIN\user' keeps its quotes.
     a.user = strip_quotes(&a.user);
     a.domain = strip_quotes(&a.domain);
-    if !a.host.is_empty() && a.user.is_empty() || a.screenshot.is_some() && a.host.is_empty() {
+    if !a.host.is_empty() && a.user.is_empty()
+        || (a.screenshot.is_some() || a.record.is_some()) && a.host.is_empty()
+    {
         usage();
     }
     a
@@ -252,14 +261,15 @@ fn main() {
         }
     }
 
-    match &args.screenshot {
-        Some(path) => {
-            if let Err(e) = screenshot(&cfg, path, Duration::from_secs(args.wait)) {
-                eprintln!("error: {e}");
-                std::process::exit(1);
-            }
+    if args.screenshot.is_some() || args.record.is_some() {
+        let wait = Duration::from_secs(args.wait);
+        let (png, mp4) = (args.screenshot.as_deref(), args.record.as_deref());
+        if let Err(e) = screenshot(&cfg, png, mp4, wait) {
+            eprintln!("error: {e}");
+            std::process::exit(1);
         }
-        None => std::process::exit(app::run(Some((args.host.clone(), cfg)))),
+    } else {
+        std::process::exit(app::run(Some((args.host.clone(), cfg))));
     }
 }
 
@@ -279,10 +289,13 @@ fn release_own_console() {
     }
 }
 
-/// Headless mode: connect, wait until the screen has settled, save a PNG and disconnect.
+/// Headless mode: connect, wait until the screen has settled, save a PNG and
+/// disconnect. With `record`, the session is recorded to that MP4 file for
+/// the whole `max_wait` instead of stopping once the screen settles.
 fn screenshot(
     cfg: &Config,
-    path: &str,
+    path: Option<&str>,
+    record: Option<&str>,
     max_wait: Duration,
 ) -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("connecting to {}:{} ...", cfg.host, cfg.port);
@@ -302,6 +315,15 @@ fn screenshot(
             hex(gw)
         );
     }
+    let mut recorder = match record {
+        Some(p) => Some(recorder::Recorder::start(
+            std::path::Path::new(p),
+            info.width as u32,
+            info.height as u32,
+            recorder::DEFAULT_FPS,
+        )?),
+        None => None,
+    };
     let start = Instant::now();
     let mut last_update: Option<Instant> = None;
     let mut refreshed = false;
@@ -312,21 +334,38 @@ fn screenshot(
         }
         if out.updated {
             last_update = Some(Instant::now());
+            if let Some(r) = recorder.as_mut() {
+                r.frame(client.framebuffer());
+            }
         }
         if client.is_active() && !refreshed {
             client.request_refresh()?;
             refreshed = true;
         }
-        if last_update.is_some_and(|t| t.elapsed() > Duration::from_millis(2500)) {
+        if recorder.is_none()
+            && last_update.is_some_and(|t| t.elapsed() > Duration::from_millis(2500))
+        {
             break;
         }
     }
     if last_update.is_none() {
         eprintln!("warning: no screen updates received within {max_wait:?}");
     }
-    let fb = client.framebuffer();
-    write_png(path, fb.width, fb.height, &fb.pixels)?;
-    eprintln!("saved {}x{} screenshot to {path}", fb.width, fb.height);
+    if let Some(r) = recorder {
+        let i = r.finish()?;
+        eprintln!(
+            "recorded {:.1} s, {} frames, {} bytes to {}",
+            i.duration.as_secs_f64(),
+            i.frames,
+            i.bytes,
+            i.path.display()
+        );
+    }
+    if let Some(path) = path {
+        let fb = client.framebuffer();
+        write_png(path, fb.width, fb.height, &fb.pixels)?;
+        eprintln!("saved {}x{} screenshot to {path}", fb.width, fb.height);
+    }
     client.disconnect();
     Ok(())
 }
