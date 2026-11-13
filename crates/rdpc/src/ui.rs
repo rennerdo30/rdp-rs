@@ -68,6 +68,10 @@ pub const SCALES: [u32; 4] = [100, 125, 150, 200];
 
 pub const SIZES: [(u16, u16); 4] = [(1280, 800), (1600, 900), (1920, 1080), (2560, 1440)];
 
+/// Placeholder of a password field whose password is saved: drawn as dots.
+const SAVED_MASK: &str =
+    "\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}";
+
 /// Colour depths offered in the form.
 const DEPTHS: [u16; 4] = [32, 24, 16, 15];
 
@@ -3301,7 +3305,7 @@ impl Ui {
                 .store
                 .source_of(parent, &Inherit::ALL, |i| i.credentials)
                 .filter(|g| g.password.is_some())
-                .map(|g| format!("Saved in {} (type to override)", g.path));
+                .map(|_| SAVED_MASK.to_string());
             let hint = saved_in.unwrap_or_else(|| "Asked for each connection".into());
             self.field_row(cv, te, f, cells[0], "Password", Field::Password, &hint);
             return y + rh;
@@ -3318,7 +3322,7 @@ impl Ui {
             r"DOMAIN\user or user@domain",
         );
         let pw_hint = if saved {
-            "Saved (type to change)"
+            SAVED_MASK
         } else if group_mode {
             "Used by members that inherit it"
         } else {
@@ -5104,8 +5108,17 @@ impl Ui {
         let inner = r.inset((pad - 1.0) as i32, 2);
         let tf = self.field(field).clone();
         let display = tf.display();
+        // A saved password shows as dots, like a filled field; focusing it
+        // says that typing replaces it.
+        let saved = placeholder == SAVED_MASK;
+        let placeholder = if saved && focused {
+            "Type to replace the saved password"
+        } else {
+            placeholder
+        };
         if display.is_empty() && !focused {
-            te.draw_in(cv, f.ui, size, r, pad, placeholder, TEXT_4);
+            let color = if saved { TEXT_2 } else { TEXT_4 };
+            te.draw_in(cv, f.ui, size, r, pad, placeholder, color);
         } else {
             let scroll = if focused {
                 self.field_scroll(field, r, te, f)
@@ -5321,7 +5334,9 @@ pub fn sample_settings(vault: bool) -> Ui {
 /// The connection editor on `page` for a top-level connection.
 pub fn sample_form(page: u8) -> Ui {
     let mut m = sample(false);
+    m.store.connections[2].password = Some("sample".into());
     m.select(2);
+    m.focus = None;
     m.form_page = page;
     m.speakers = vec![
         "Speakers (Realtek Audio)".into(),

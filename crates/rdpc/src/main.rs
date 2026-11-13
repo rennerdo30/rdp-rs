@@ -352,6 +352,7 @@ fn snapshot_ui(path: &str, scale: f32) -> Result<(), Box<dyn std::error::Error>>
     }
     // The quick panel pages, and full screen.
     for (page, full, suffix) in [
+        (20, false, "-form-general"),
         (21, false, "-form-display"),
         (22, false, "-form-experience"),
         (23, false, "-form-sharing"),
