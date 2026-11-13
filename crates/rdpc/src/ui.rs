@@ -98,6 +98,7 @@ pub enum Hit {
     Disconnect(u64),
     Clipboard(u64),
     Printers(u64),
+    Sound(u64),
     SmartCards(u64),
     Fit(u64),
     AddDrive(u64),
@@ -140,6 +141,7 @@ pub struct Tab {
     pub state: TabState,
     pub clipboard: bool,
     pub printers: bool,
+    pub sound: bool,
     pub smart_cards: bool,
     pub fit: bool,
     pub drives: Vec<SharedDrive>,
@@ -157,6 +159,7 @@ pub enum Action {
     CloseTab(u64),
     SetClipboard(u64, bool),
     SetPrinters(u64, bool),
+    SetSound(u64, bool),
     SetSmartCards(u64, bool),
     SetFit(u64, bool),
     AddDrive(u64, String),
@@ -281,6 +284,7 @@ impl Ui {
             state: TabState::Connecting,
             clipboard: false,
             printers: false,
+            sound: false,
             smart_cards: false,
             fit,
             drives: Vec::new(),
@@ -523,6 +527,11 @@ impl Ui {
             Hit::Drawer => self.drawer = !self.drawer,
             Hit::Reconnect(id) => return Some(Action::Reconnect(id)),
             Hit::Disconnect(id) => return Some(Action::Disconnect(id)),
+            Hit::Sound(id) => {
+                let t = self.tab_mut(id)?;
+                t.sound = !t.sound;
+                return Some(Action::SetSound(id, t.sound));
+            }
             Hit::Printers(id) => {
                 let t = self.tab_mut(id)?;
                 t.printers = !t.printers;
@@ -1302,7 +1311,7 @@ impl Ui {
             return;
         };
         let (clip_on, fit_on, drives) = (tab.clipboard, tab.fit, tab.drives.clone());
-        let (printers_on, cards_on) = (tab.printers, tab.smart_cards);
+        let (printers_on, cards_on, sound_on) = (tab.printers, tab.smart_cards, tab.sound);
         let x = d.x + p(18.0);
         let w = d.w - p(36.0);
         let mut y = d.y + p(16.0);
@@ -1329,6 +1338,17 @@ impl Ui {
             "Text, both directions",
             clip_on,
             Hit::Clipboard(id),
+        );
+        y += p(48.0);
+        self.switch_row(
+            cv,
+            te,
+            f,
+            Rect::new(x, y, w, p(30.0)),
+            "Sound",
+            "Remote audio on this PC",
+            sound_on,
+            Hit::Sound(id),
         );
         y += p(48.0);
         self.switch_row(

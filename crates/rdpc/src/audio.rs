@@ -5,7 +5,6 @@
 //! wave is copied into one of [`SLOTS`] buffers and queued; finished buffers
 //! are recycled on the next write; when all are still playing the wave is
 //! dropped. The queue therefore holds at most [`SLOTS`] waves of latency.
-#![allow(dead_code)] // wired in by RDP-3 integration
 
 use rdp::rdpsnd::{AudioBackend, PcmFormat};
 
@@ -21,17 +20,6 @@ pub struct WaveOut {
     device: Option<win::Device>,
     /// Waves dropped because every buffer was still queued.
     dropped: u64,
-}
-
-impl WaveOut {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Waves dropped so far because the queue was full.
-    pub fn dropped(&self) -> u64 {
-        self.dropped
-    }
 }
 
 #[cfg(windows)]
@@ -244,9 +232,9 @@ mod tests {
 
     #[test]
     fn write_before_open_is_an_error() {
-        let mut w = WaveOut::new();
+        let mut w = WaveOut::default();
         assert!(w.write(&[0; 4]).is_err());
         w.close();
-        assert_eq!(w.dropped(), 0);
+        assert_eq!(w.dropped, 0);
     }
 }

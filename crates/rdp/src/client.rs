@@ -541,6 +541,14 @@ impl Client {
                 return Ok(());
             }
         };
+        // The first four bytes are each channel's message header (type and
+        // flags or component and packet id); never payload data.
+        let head: String = msg.iter().take(4).map(|b| format!("{b:02x}")).collect();
+        trace!(
+            "channel {}: message of {} bytes, header {head}",
+            slot.handler.name(),
+            msg.len()
+        );
         let mut out = ChannelOut::default();
         if let Err(e) = slot.handler.process(&msg, &mut out) {
             // A broken channel must never end the session.

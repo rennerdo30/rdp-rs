@@ -239,6 +239,7 @@ impl App {
             t.clipboard = false;
             t.printers = false;
             t.smart_cards = false;
+            t.sound = false;
         }
         self.dirty();
     }
@@ -283,6 +284,10 @@ impl App {
                     w.ui.close_tab(id);
                 }
                 self.dirty();
+            }
+            Action::SetSound(id, on) => {
+                let r = self.sessions.get(&id).map(|s| s.controls.set_sound(on));
+                self.toggle_result(id, r, on, "Sound", |t| t.sound = false);
             }
             Action::SetPrinters(id, on) => {
                 let r = self.sessions.get(&id).map(|s| s.controls.set_printers(on));

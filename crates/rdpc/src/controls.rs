@@ -4,7 +4,9 @@
 //! Every session declares all channels at connect time (the protocol cannot
 //! add them later); sharing itself starts off and follows the drawer toggles.
 
-use rdp::{ClipboardHandle, DisplayHandle, Drdynvc, RdpdrHandle, StaticChannel};
+use rdp::{AudioHandle, ClipboardHandle, DisplayHandle, Drdynvc, RdpdrHandle, StaticChannel};
+
+use crate::audio::WaveOut;
 
 use std::sync::{Arc, Mutex};
 
@@ -16,6 +18,7 @@ pub struct Controls {
     display: DisplayHandle,
     clipboard: ClipboardHandle,
     devices: RdpdrHandle,
+    audio: AudioHandle,
     /// Device ids of the printers currently shared.
     printers: Mutex<Vec<u32>>,
     /// Device id of the shared smart card subsystem, while shared.
@@ -29,10 +32,13 @@ impl Controls {
         let (display_channel, display) = rdp::display_control();
         let (cliprdr, clipboard) = rdp::cliprdr(Box::new(WindowsClipboard { owner }));
         let (rdpdr, devices) = rdp::rdpdr(client_name);
+        // Windows servers only use rdpsnd when rdpdr is also declared (MS-RDPEA 2.1).
+        let (rdpsnd, audio) = rdp::rdpsnd(Box::new(WaveOut::default()));
         let channels: Vec<Box<dyn StaticChannel>> = vec![
             Box::new(Drdynvc::new(vec![Box::new(display_channel)])),
             Box::new(cliprdr),
             Box::new(rdpdr),
+            Box::new(rdpsnd),
         ];
         (
             channels,
@@ -40,6 +46,7 @@ impl Controls {
                 display,
                 clipboard,
                 devices,
+                audio,
                 printers: Mutex::new(Vec::new()),
                 smart_card: Mutex::new(None),
             },
@@ -49,6 +56,12 @@ impl Controls {
     /// Text clipboard sharing, both directions; applies on the next session poll.
     pub fn set_clipboard(&self, on: bool) -> Result<(), String> {
         self.clipboard.set_enabled(on);
+        Ok(())
+    }
+
+    /// Plays the session's sound locally; off drops the audio (no renegotiation).
+    pub fn set_sound(&self, on: bool) -> Result<(), String> {
+        self.audio.set_enabled(on);
         Ok(())
     }
 
