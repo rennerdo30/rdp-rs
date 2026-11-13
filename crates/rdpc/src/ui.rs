@@ -76,6 +76,9 @@ pub enum Field {
     DrivePath,
     /// Shared-folder path in the connection form.
     FormDrive,
+    /// Master password (unlock or create), and its confirmation.
+    Master,
+    MasterConfirm,
 }
 
 const FORM: [Field; 5] = [
@@ -113,6 +116,13 @@ pub enum Hit {
     FormShare(u8),
     FormRemoveDrive(usize),
     FormAddDrive,
+    /// Vault: save-password chip, unlock, remember, create, cancel, lock.
+    SavePassword,
+    Unlock,
+    Remember,
+    CreateVault,
+    CancelVault,
+    Lock,
     AddDrive(u64),
     RemoveDrive(u64, usize),
     CtrlAltDel(u64),
@@ -185,6 +195,15 @@ pub enum Action {
     CtrlAltDel(u64),
     WinMinimize,
     WinClose,
+    /// Derive the key off the UI thread, then open the vault.
+    Unlock {
+        master: zeroize::Zeroizing<String>,
+        remember: bool,
+    },
+    CreateVault {
+        master: zeroize::Zeroizing<String>,
+    },
+    Lock,
 }
 
 pub enum Key {
@@ -214,7 +233,15 @@ pub struct Ui {
     selected: Option<usize>,
     /// Session settings of the connection being edited.
     opts: SessionOptions,
-    fields: [TextField; 8],
+    /// The edited connection keeps (or gets) a saved password.
+    save_password: bool,
+    /// Showing the "set a master password" panel.
+    vault_setup: bool,
+    remember: bool,
+    /// Key derivation running.
+    pub unlocking: bool,
+    vault_error: Option<String>,
+    fields: [TextField; 10],
     size: usize,
     focus: Option<Field>,
     pub tabs: Vec<Tab>,
@@ -261,6 +288,11 @@ impl Ui {
             store,
             selected: None,
             opts: SessionOptions::default(),
+            save_password: false,
+            vault_setup: false,
+            remember: false,
+            unlocking: false,
+            vault_error: None,
             fields: Default::default(),
             size: 0,
             focus: None,
@@ -285,10 +317,15 @@ impl Ui {
             title_height: 0,
         };
         m.fields[Field::Password as usize] = TextField::secret();
+        m.fields[Field::Master as usize] = TextField::secret();
+        m.fields[Field::MasterConfirm as usize] = TextField::secret();
         if m.store.connections.is_empty() {
             m.new_connection();
         } else {
             m.select(0);
+        }
+        if m.store.is_locked() {
+            m.focus = Some(Field::Master);
         }
         m
     }
@@ -375,6 +412,7 @@ impl Ui {
             .position(|&s| s == (c.width, c.height))
             .map_or(0, |i| i + 1);
         self.opts = c.options.clone();
+        self.save_password = c.password.is_some();
         self.focus = Some(Field::Password);
     }
 
@@ -386,6 +424,7 @@ impl Ui {
         self.field_mut(Field::Port).set("3389");
         self.size = 0;
         self.opts = SessionOptions::default();
+        self.save_password = false;
         self.focus = Some(Field::Host);
     }
 
@@ -421,6 +460,17 @@ impl Ui {
             width,
             height,
             options: self.opts.clone(),
+            password: if self.save_password && self.store.is_vault() {
+                let typed = &self.field(Field::Password).text;
+                if typed.is_empty() {
+                    self.selected
+                        .and_then(|i| self.store.connections[i].password.clone())
+                } else {
+                    Some(typed.clone())
+                }
+            } else {
+                None
+            },
         })
     }
 
@@ -466,7 +516,24 @@ impl Ui {
                 return None;
             }
         };
-        let mut cfg = rdp::Config::new(&c.host, &c.user, &self.field(Field::Password).text);
+        // A typed password wins; otherwise the saved one (vault only).
+        let password = c
+            .password
+            .clone()
+            .unwrap_or_else(|| self.field(Field::Password).text.clone());
+        if self.save_password
+            && self.store.is_vault()
+            && !self.field(Field::Password).text.is_empty()
+        {
+            // Connecting with "Save password" on remembers what was typed.
+            if let Some(i) = self.selected {
+                self.store.connections[i].password = c.password.clone();
+                if let Err(e) = self.store.save() {
+                    self.set_message(e, ERR);
+                }
+            }
+        }
+        let mut cfg = rdp::Config::new(&c.host, &c.user, &password);
         cfg.port = c.port;
         let fit = c.width == 0;
         if !fit {
@@ -622,6 +689,25 @@ impl Ui {
                 }
             }
             Hit::FormAddDrive => self.form_add_drive(),
+            Hit::SavePassword => {
+                if self.store.is_vault() {
+                    self.save_password = !self.save_password;
+                } else {
+                    // Saving passwords needs the encrypted vault first.
+                    self.vault_setup = true;
+                    self.vault_error = None;
+                    self.focus = Some(Field::Master);
+                }
+            }
+            Hit::Remember => self.remember = !self.remember,
+            Hit::Unlock => return self.unlock(),
+            Hit::CreateVault => return self.create_vault(),
+            Hit::CancelVault => {
+                self.vault_setup = false;
+                self.field_mut(Field::Master).set("");
+                self.field_mut(Field::MasterConfirm).set("");
+            }
+            Hit::Lock => return Some(Action::Lock),
             Hit::Scale(id, i) => {
                 let t = self.tab_mut(id)?;
                 t.scale = if i == 0 { None } else { Some(SCALES[i - 1]) };
@@ -640,6 +726,78 @@ impl Ui {
             Hit::WinClose => return Some(Action::WinClose),
         }
         None
+    }
+
+    fn unlock(&mut self) -> Option<Action> {
+        if self.unlocking {
+            return None;
+        }
+        let master =
+            zeroize::Zeroizing::new(std::mem::take(&mut self.field_mut(Field::Master).text));
+        self.field_mut(Field::Master).set("");
+        if master.is_empty() {
+            self.vault_error = Some("Enter your master password.".into());
+            return None;
+        }
+        self.unlocking = true;
+        self.vault_error = None;
+        Some(Action::Unlock {
+            master,
+            remember: self.remember,
+        })
+    }
+
+    fn create_vault(&mut self) -> Option<Action> {
+        let a = zeroize::Zeroizing::new(self.field(Field::Master).text.clone());
+        let b = zeroize::Zeroizing::new(self.field(Field::MasterConfirm).text.clone());
+        if a.chars().count() < 8 {
+            self.vault_error = Some("Use at least 8 characters.".into());
+            return None;
+        }
+        if a != b {
+            self.vault_error = Some("The two passwords differ.".into());
+            return None;
+        }
+        self.field_mut(Field::Master).set("");
+        self.field_mut(Field::MasterConfirm).set("");
+        self.unlocking = true;
+        self.vault_error = None;
+        Some(Action::CreateVault { master: a })
+    }
+
+    /// The app calls these with the result of key derivation.
+    pub fn store_mut(&mut self) -> &mut Store {
+        &mut self.store
+    }
+
+    pub fn vault_opened(&mut self) {
+        self.unlocking = false;
+        self.vault_error = None;
+        if self.vault_setup {
+            self.vault_setup = false;
+            self.save_password = true;
+            self.set_message(
+                "Master password set. Passwords you save are encrypted.",
+                TEXT_2,
+            );
+        } else if self.store.connections.is_empty() {
+            self.new_connection();
+        } else {
+            self.select(0);
+        }
+    }
+
+    pub fn vault_failed(&mut self, e: String) {
+        self.unlocking = false;
+        self.vault_error = Some(e);
+        self.focus = Some(Field::Master);
+    }
+
+    pub fn vault_locked(&mut self) {
+        self.selected = None;
+        self.new_connection();
+        self.focus = Some(Field::Master);
+        self.set_message("Locked.", TEXT_2);
     }
 
     fn form_add_drive(&mut self) {
@@ -688,6 +846,8 @@ impl Ui {
                 return self.active.and_then(|id| self.add_drive(id));
             }
             Key::Enter if self.focus == Some(Field::FormDrive) => self.form_add_drive(),
+            Key::Enter if self.store.is_locked() => return self.unlock(),
+            Key::Enter if self.vault_setup => return self.create_vault(),
             Key::Enter if self.active.is_none() => return self.connect(),
             Key::Enter => {}
             Key::Esc => self.focus = None,
@@ -793,6 +953,9 @@ impl Ui {
         let content = Rect::new(main.x, strip_h, main.w, main.h - strip_h);
         match self.active_tab().map(|t| t.id) {
             Some(id) => self.paint_session(cv, te, f, content, id),
+            None if self.store.is_locked() || self.vault_setup => {
+                self.paint_vault(cv, te, f, content)
+            }
             None => self.paint_home(cv, te, f, content),
         }
 
@@ -839,17 +1002,25 @@ impl Ui {
         let head = Rect::new(pad, p(5.0), area.w - 2 * pad, p(28.0));
         te.draw_in(cv, f.semi, 11.5 * s, head, 0.0, "CONNECTIONS", TEXT_3);
         let nw = p(62.0);
-        self.button(
-            cv,
-            te,
-            f,
-            Rect::new(head.right() - nw, head.y, nw, head.h),
-            "+ New",
-            Style::Ghost,
-            Hit::New,
-        );
-        // "+ New" sits in the title row: a control there, not a window drag.
-        self.title_controls.push((head.right() - nw, head.right()));
+        if !self.store.is_locked() {
+            self.button(
+                cv,
+                te,
+                f,
+                Rect::new(head.right() - nw, head.y, nw, head.h),
+                "+ New",
+                Style::Ghost,
+                Hit::New,
+            );
+            // "+ New" sits in the title row: a control there, not a window drag.
+            self.title_controls.push((head.right() - nw, head.right()));
+        }
+        if self.store.is_vault() {
+            let lw = p(52.0);
+            let lr = Rect::new(head.right() - nw - lw - p(4.0), head.y, lw, head.h);
+            self.button(cv, te, f, lr, "Lock", Style::Ghost, Hit::Lock);
+            self.title_controls.push((lr.x, lr.right()));
+        }
         self.text_input(
             cv,
             te,
@@ -869,7 +1040,11 @@ impl Ui {
                 13.0 * s,
                 Rect::new(pad, list.y + p(8.0), list.w - 2 * pad, p(22.0)),
                 0.0,
-                "No saved connections yet.",
+                if self.store.is_locked() {
+                    "Locked."
+                } else {
+                    "No saved connections yet."
+                },
                 TEXT_3,
             );
             te.draw_in(
@@ -878,7 +1053,11 @@ impl Ui {
                 12.0 * s,
                 Rect::new(pad, list.y + p(30.0), list.w - 2 * pad, p(20.0)),
                 0.0,
-                "Fill in the form and press Save.",
+                if self.store.is_locked() {
+                    "Unlock to see your connections."
+                } else {
+                    "Fill in the form and press Save."
+                },
                 TEXT_4,
             );
         } else if vis.is_empty() {
@@ -1192,6 +1371,132 @@ impl Ui {
         }
     }
 
+    /// The unlock screen, or the "set a master password" panel.
+    fn paint_vault(&mut self, cv: &mut Canvas, te: &mut TextEngine, f: &Fonts, area: Rect) {
+        let s = self.scale;
+        let p = |v: f32| (v * s).round() as i32;
+        let old = cv.set_clip(area);
+        let w = p(420.0).min(area.w - p(64.0));
+        let x = area.x + (area.w - w) / 2;
+        let mut y = area.y + p(90.0);
+        let creating = !self.store.is_locked();
+        let (title, sub) = if creating {
+            (
+                "Set a master password",
+                "Saved passwords are encrypted with it. Forget it, and they are lost.",
+            )
+        } else {
+            (
+                "Unlock your connections",
+                "Your connections and saved passwords are encrypted.",
+            )
+        };
+        te.draw(
+            cv,
+            f.semi,
+            20.0 * s,
+            x as f32,
+            (y + p(20.0)) as f32,
+            title,
+            TEXT,
+            w as f32,
+        );
+        y += p(34.0);
+        te.draw(
+            cv,
+            f.ui,
+            12.5 * s,
+            x as f32,
+            (y + p(14.0)) as f32,
+            sub,
+            TEXT_3,
+            w as f32,
+        );
+        y += p(36.0);
+        let fh = p(34.0);
+        self.text_input(
+            cv,
+            te,
+            f,
+            Rect::new(x, y, w, fh),
+            Field::Master,
+            "Master password",
+        );
+        y += fh + p(10.0);
+        if creating {
+            self.text_input(
+                cv,
+                te,
+                f,
+                Rect::new(x, y, w, fh),
+                Field::MasterConfirm,
+                "Repeat the master password",
+            );
+            y += fh + p(10.0);
+        } else {
+            let text = if self.remember {
+                "✓ Remember on this PC (Windows account)"
+            } else {
+                "Remember on this PC (Windows account)"
+            };
+            let on = self.remember;
+            self.chip(cv, te, f, x, y, p(30.0), text, on, Hit::Remember);
+            y += p(40.0);
+        }
+        if let Some(e) = self.vault_error.clone() {
+            te.draw(
+                cv,
+                f.ui,
+                12.5 * s,
+                x as f32,
+                (y + p(12.0)) as f32,
+                &e,
+                ERR,
+                w as f32,
+            );
+            y += p(26.0);
+        }
+        let bh = p(36.0);
+        if self.unlocking {
+            let busy = if creating {
+                "Encrypting…"
+            } else {
+                "Unlocking…"
+            };
+            centered(cv, te, f.ui, 13.0 * s, Rect::new(x, y, w, bh), busy, TEXT_2);
+        } else if creating {
+            self.button(
+                cv,
+                te,
+                f,
+                Rect::new(x, y, p(170.0), bh),
+                "Set master password",
+                Style::Primary,
+                Hit::CreateVault,
+            );
+            self.button(
+                cv,
+                te,
+                f,
+                Rect::new(x + p(178.0), y, p(96.0), bh),
+                "Cancel",
+                Style::Secondary,
+                Hit::CancelVault,
+            );
+        } else {
+            self.button(
+                cv,
+                te,
+                f,
+                Rect::new(x, y, p(120.0), bh),
+                "Unlock",
+                Style::Primary,
+                Hit::Unlock,
+            );
+        }
+        cv.set_clip(old);
+    }
+
     fn paint_home(&mut self, cv: &mut Canvas, te: &mut TextEngine, f: &Fonts, area: Rect) {
         let s = self.scale;
         let p = |v: f32| (v * s).round() as i32;
@@ -1285,13 +1590,42 @@ impl Ui {
         );
         y += row;
         label(cv, te, y, "Password");
+        let saved = self.save_password
+            && self.selected.is_some_and(|i| {
+                self.store
+                    .connections
+                    .get(i)
+                    .is_some_and(|c| c.password.is_some())
+            });
+        let chip_text = if self.save_password {
+            "✓ Save password"
+        } else {
+            "Save password"
+        };
+        let chip_w = te.measure(f.ui, 12.5 * s, chip_text) as i32 + p(24.0);
         self.text_input(
             cv,
             te,
             f,
-            Rect::new(fx, y, fw, fh),
+            Rect::new(fx, y, fw - chip_w - p(8.0), fh),
             Field::Password,
-            "Asked for each connection",
+            if saved {
+                "Saved (type to change)"
+            } else {
+                "Asked for each connection"
+            },
+        );
+        let save_on = self.save_password;
+        self.chip(
+            cv,
+            te,
+            f,
+            fx + fw - chip_w,
+            y,
+            fh,
+            chip_text,
+            save_on,
+            Hit::SavePassword,
         );
         y += row;
         label(cv, te, y, "Display");
@@ -2101,6 +2435,7 @@ pub fn sample(session_tab: bool) -> Ui {
             width: 0,
             height: 0,
             options: SessionOptions::default(),
+            password: None,
         },
         Connection {
             name: "Build server".into(),
@@ -2110,6 +2445,7 @@ pub fn sample(session_tab: bool) -> Ui {
             width: 1920,
             height: 1080,
             options: SessionOptions::default(),
+            password: None,
         },
         Connection {
             name: "Test VM (Windows 11)".into(),
@@ -2119,6 +2455,7 @@ pub fn sample(session_tab: bool) -> Ui {
             width: 1600,
             height: 900,
             options: SessionOptions::default(),
+            password: None,
         },
     ]);
     let mut m = Ui::new(store, 1.0);

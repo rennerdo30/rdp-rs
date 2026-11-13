@@ -23,6 +23,7 @@ mod store;
 mod text_field;
 mod theme;
 mod ui;
+mod vault;
 
 use std::time::{Duration, Instant};
 
@@ -244,6 +245,14 @@ fn snapshot_ui(path: &str, scale: f32) -> Result<(), Box<dyn std::error::Error>>
         write_png(&out, w, h, &px)?;
         eprintln!("saved {w}x{h} snapshot to {out}");
     }
+    // The unlock screen of an encrypted vault.
+    let mut m = ui::Ui::new(store::Store::locked_sample(), scale);
+    m.custom_frame = cfg!(windows);
+    let mut px = vec![0u32; w * h];
+    m.paint(&mut Canvas::new(&mut px, w, h), &mut te, &fonts);
+    let out = path.replace(".png", "-unlock.png");
+    write_png(&out, w, h, &px)?;
+    eprintln!("saved {w}x{h} snapshot to {out}");
     Ok(())
 }
 

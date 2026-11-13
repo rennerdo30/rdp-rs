@@ -16,6 +16,10 @@ png = "0.18.1"
 rpassword = "7"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Vault: memory-hard key derivation and authenticated encryption (RustCrypto).
+argon2 = "0.6"
+chacha20poly1305 = "0.11"
+zeroize = "1.9"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61.2", features = [
@@ -26,6 +30,7 @@ windows-sys = { version = "0.61.2", features = [
     "Win32_Media_Audio",
     "Win32_Security",
     "Win32_Security_Credentials",
+    "Win32_Security_Cryptography",
     "Win32_System_DataExchange",
     "Win32_System_Memory",
     "Win32_System_Threading",

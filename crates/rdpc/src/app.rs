@@ -35,6 +35,13 @@ pub enum UserEvent {
     Session(u64, session::Event),
     /// The frame hook saw the maximise button or window state change.
     Frame,
+    /// Key derivation for the vault finished (unlock or create).
+    Vault(VaultResult),
+}
+
+pub enum VaultResult {
+    Unlocked(Result<crate::vault::VaultKey, String>, bool),
+    Created(Result<crate::vault::VaultKey, String>),
 }
 
 struct Gfx {
@@ -459,6 +466,34 @@ impl App {
                 }
             }
             Action::WinClose => self.quit = true,
+            Action::Unlock { master, remember } => {
+                let params = self
+                    .win
+                    .as_mut()
+                    .and_then(|m| m.ui.store_mut().vault_bytes())
+                    .ok_or_else(|| "The vault file cannot be read.".to_string())
+                    .and_then(|b| crate::vault::read_params(&b));
+                let proxy = self.proxy.clone();
+                // Argon2id takes about half a second: never on the UI thread.
+                std::thread::spawn(move || {
+                    let r = params.and_then(|p| crate::vault::derive(&master, p));
+                    let _ = proxy.send_event(UserEvent::Vault(VaultResult::Unlocked(r, remember)));
+                });
+            }
+            Action::CreateVault { master } => {
+                let proxy = self.proxy.clone();
+                std::thread::spawn(move || {
+                    let r = crate::vault::derive(&master, crate::vault::KdfParams::fresh());
+                    let _ = proxy.send_event(UserEvent::Vault(VaultResult::Created(r)));
+                });
+            }
+            Action::Lock => {
+                if let Some(m) = &mut self.win {
+                    m.ui.store_mut().lock();
+                    m.ui.vault_locked();
+                }
+                self.dirty();
+            }
         }
     }
 
@@ -710,6 +745,33 @@ impl App {
         }
     }
 
+    fn vault_result(&mut self, r: VaultResult) {
+        let Some(m) = &mut self.win else { return };
+        let ui = &mut m.ui;
+        match r {
+            VaultResult::Unlocked(Ok(key), remember) => {
+                let remembered = remember.then(|| crate::vault::protect_key(&key)).flatten();
+                match ui.store_mut().unlock(key) {
+                    Ok(()) => {
+                        if let (Some(blob), Some(path)) =
+                            (remembered, ui.store_mut().remembered_key_path())
+                            && let Err(e) = std::fs::write(&path, blob)
+                        {
+                            ui.set_message(format!("Could not remember the key: {e}"), theme::WARN);
+                        }
+                        ui.vault_opened();
+                    }
+                    Err(e) => ui.vault_failed(e),
+                }
+            }
+            VaultResult::Created(Ok(key)) => match ui.store_mut().create_vault(key) {
+                Ok(()) => ui.vault_opened(),
+                Err(e) => ui.vault_failed(e),
+            },
+            VaultResult::Unlocked(Err(e), _) | VaultResult::Created(Err(e)) => ui.vault_failed(e),
+        }
+    }
+
     /// The worker finished: join it and show why in the tab.
     fn ended(&mut self, id: u64, state: TabState) {
         if let Some(s) = self.sessions.get_mut(&id)
@@ -850,6 +912,7 @@ impl ApplicationHandler<UserEvent> for App {
                         gfx,
                         ui: {
                             let mut ui = Ui::new(Store::load(), scale);
+                            remembered_unlock(&mut ui);
                             ui.custom_frame = framed;
                             ui
                         },
@@ -878,6 +941,10 @@ impl ApplicationHandler<UserEvent> for App {
     fn user_event(&mut self, el: &ActiveEventLoop, event: UserEvent) {
         let (id, ev) = match event {
             UserEvent::Session(id, ev) => (id, ev),
+            UserEvent::Vault(r) => {
+                self.vault_result(r);
+                return self.dirty();
+            }
             UserEvent::Frame => {
                 if let Some(m) = &mut self.win {
                     #[cfg(windows)]
@@ -1162,4 +1229,24 @@ fn drive_name(path: &str) -> String {
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| path.trim_end_matches(['\\', '/', ':']).to_string())
+}
+
+/// "Remember on this PC": open the vault with the DPAPI-protected key, if any.
+fn remembered_unlock(ui: &mut Ui) {
+    let store = ui.store_mut();
+    if !store.is_locked() {
+        return;
+    }
+    let Some(path) = store.remembered_key_path() else {
+        return;
+    };
+    let Some(key) = std::fs::read(&path)
+        .ok()
+        .and_then(|b| crate::vault::unprotect_key(&b))
+    else {
+        return;
+    };
+    if store.unlock(key).is_ok() {
+        ui.vault_opened();
+    }
 }
