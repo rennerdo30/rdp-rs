@@ -10,9 +10,11 @@
 //! - [`pdu`]: the graphics PDUs (2.2.1 - 2.2.4).
 //! - [`surface`]: surfaces, bitmap cache and the output buffer (3.3.1).
 //! - [`h264`]: the H.264 decoder interface and colour conversion (3.3.8.3).
+//! - [`clearcodec`]: ClearCodec and its caches (2.2.4.1, 3.3.8.1), with the
+//!   NSCodec subcodec in [`nsc`] (MS-RDPNSC).
 //!
-//! Codecs: uncompressed, planar (MS-RDPEGDI 2.2.2.5.1) and AVC420 (2.2.4.4)
-//! when an H.264 decoder is supplied. Not implemented: ClearCodec, AVC444,
+//! Codecs: uncompressed, planar (MS-RDPEGDI 2.2.2.5.1), ClearCodec and
+//! AVC420 (2.2.4.4) when an H.264 decoder is supplied. Not implemented: AVC444,
 //! RemoteFX and RemoteFX Progressive (WireToSurface2) and Alpha; their
 //! updates are dropped and traced. The persistent bitmap cache is not
 //! offered (no RDPGFX_CACHE_IMPORT_OFFER_PDU, 3.3.5.16).
@@ -21,11 +23,15 @@
 //! acknowledged at once (3.3.5.12, 3.3.5.13); the session loop copies the
 //! composed areas into its framebuffer through [`GfxHandle::present`].
 
+pub mod clearcodec;
 pub mod h264;
+pub mod nsc;
 pub mod pdu;
 pub mod surface;
 pub mod zgfx;
 
+#[cfg(test)]
+mod clearcodec_tests;
 #[cfg(test)]
 mod tests;
 
@@ -37,6 +43,7 @@ use crate::error::Result;
 use crate::framebuffer::{Damage, Framebuffer};
 use crate::trace;
 
+use clearcodec::ClearCodec;
 use h264::H264Decoder;
 use pdu::{CapSet, Rect16, ServerPdu};
 use surface::{Area, GfxState};
@@ -107,6 +114,9 @@ pub struct GraphicsChannel {
     state: Arc<Mutex<GfxState>>,
     zgfx: zgfx::Zgfx,
     h264: Option<Box<dyn H264Decoder>>,
+    /// ClearCodec storages and cursors; they belong to the channel, not to
+    /// a surface (3.3.1.9 - 3.3.1.13).
+    clear: ClearCodec,
     /// The capability set the server confirmed (3.3.1.14).
     confirmed: Option<CapSet>,
     /// Frames decoded since the channel opened (2.2.2.13).
@@ -122,6 +132,7 @@ pub fn graphics(h264: Option<Box<dyn H264Decoder>>) -> (GraphicsChannel, GfxHand
             state: state.clone(),
             zgfx: zgfx::Zgfx::new(),
             h264,
+            clear: ClearCodec::new(),
             confirmed: None,
             frames: 0,
         },
@@ -314,6 +325,20 @@ impl GraphicsChannel {
                     .collect()
             }
             pdu::CODECID_PLANAR => planar::decode(data, w, h)?,
+            pdu::CODECID_CLEARCODEC => {
+                if w * h > surface::MAX_SURFACE_PIXELS {
+                    return crate::error::proto(format!("{w}x{h} ClearCodec bitmap"));
+                }
+                // Layers draw over what the surface shows; the stream is
+                // decoded even for an unknown surface so the caches stay in
+                // step with the server.
+                let mut px = self
+                    .state()
+                    .surface(id)
+                    .map_or_else(|| vec![0; w * h], |s| s.read_padded(target));
+                self.clear.decode(data, w, h, &mut px)?;
+                px
+            }
             pdu::CODECID_AVC420 => return self.avc420(id, dest, data),
             _ => {
                 trace!("gfx: codec {codec:#x} not implemented; {w}x{h} update dropped");
@@ -391,6 +416,7 @@ impl DynamicChannel for GraphicsChannel {
     fn closed(&mut self) {
         trace!("gfx: channel closed");
         self.zgfx = zgfx::Zgfx::new();
+        self.clear = ClearCodec::new();
         self.confirmed = None;
     }
 }
