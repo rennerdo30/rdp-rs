@@ -61,6 +61,19 @@ pub fn parse_connection_confirm(frame: &[u8]) -> Result<u32> {
     }
 }
 
+/// RDP_NEG_RSP flag: the server takes Extended Client Data Blocks such as
+/// the monitor data (MS-RDPBCGR 2.2.1.2.1).
+pub const EXTENDED_CLIENT_DATA_SUPPORTED: u8 = 0x01;
+
+/// The flags of the RDP_NEG_RSP in an X.224 Connection Confirm
+/// (MS-RDPBCGR 2.2.1.2.1); 0 when the server sent none.
+pub fn negotiation_flags(frame: &[u8]) -> u8 {
+    match frame.get(4..) {
+        Some(p) if p.len() >= 15 && p[0] as usize >= 6 + 8 && p[7] == 0x02 => p[8],
+        _ => 0,
+    }
+}
+
 /// Wraps MCS data in an X.224 Data TPDU inside TPKT.
 pub fn data(payload: &[u8]) -> Vec<u8> {
     let mut b = vec![0x02, 0xF0, 0x80];

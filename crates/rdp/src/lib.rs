@@ -11,6 +11,7 @@
 //! - [`compress`]: bulk decompression, RDP 4.0 to 6.1 (MS-RDPBCGR 3.1.8, MS-RDPEGDI 3.1.8)
 //! - [`codec`]: interleaved RLE and planar bitmap codecs (MS-RDPBCGR 2.2.9.1.1.3.1.2.4, MS-RDPEGDI 2.2.2.5.1)
 //! - [`dvc`] + [`disp`]: dynamic virtual channels (MS-RDPEDYC) and Display Control (MS-RDPEDISP)
+//! - [`monitor`]: multi-monitor layouts (MS-RDPBCGR 2.2.1.3.6, 2.2.1.3.10, 2.2.12.1)
 //! - [`gfx`]: the graphics pipeline (MS-RDPEGFX), opt-in through [`Graphics::Gfx`]
 //! - [`cliprdr`]: clipboard redirection on the `cliprdr` channel (MS-RDPECLIP)
 //! - [`client`]: the connection sequence and the session loop
@@ -40,6 +41,7 @@ pub mod gfx;
 pub mod input;
 pub mod log;
 pub mod mcs;
+pub mod monitor;
 pub mod ntlm;
 pub mod pdu;
 pub mod pointer;
@@ -65,6 +67,7 @@ pub use gfx::Graphics;
 pub use gfx::h264::{H264Decoder, H264Factory, Yuv420Frame};
 pub use input::InputEvent;
 pub use log::set_verbose;
+pub use monitor::{Monitor, Orientation, VirtualDesktop};
 pub use pdu::AutoReconnectCookie;
 pub use pointer::{PointerShape, PointerUpdate};
 pub use rdpdr::{

@@ -41,6 +41,7 @@ fn session() -> (Client, TcpStream) {
         pointers: PointerCache::default(),
         arc_cookie: None,
         gfx: None,
+        monitor_layout: Vec::new(),
     };
     (client, server)
 }
@@ -264,4 +265,56 @@ fn gfx_reset_resizes_the_session_framebuffer() {
     let mut poll = PollOutcome::default();
     client.present_gfx(&mut poll);
     assert!(!poll.resized && !poll.updated && poll.damage.is_empty());
+}
+
+#[test]
+fn monitor_layout_pdu_is_stored_and_reported() {
+    let (mut client, _server) = session();
+    assert!(client.monitor_layout().is_empty());
+    // Monitor Layout PDU (2.2.12.1): two monitors, the second left of the primary.
+    let mut body = vec![2, 0, 0, 0];
+    for v in [0, 0, 1919, 1079, 1, -1280, 0, -1, 1023, 0i32] {
+        body.extend(v.to_le_bytes());
+    }
+    let pdu = pdu::share_data(
+        0x0001_03ea,
+        0x03ea,
+        crate::monitor::PDUTYPE2_MONITOR_LAYOUT_PDU,
+        &body,
+    );
+    let mut out = PollOutcome::default();
+    client.handle_share(&pdu, &mut out).unwrap();
+    let want = vec![
+        crate::Monitor::new(0, 0, 1920, 1080, true),
+        crate::Monitor::new(-1280, 0, 1280, 1024, false),
+    ];
+    assert_eq!(out.monitors.as_ref(), Some(&want));
+    assert_eq!(client.monitor_layout(), &want[..]);
+    // A malformed layout is dropped; the session and the old layout stay.
+    let bad = pdu::share_data(
+        0x0001_03ea,
+        0x03ea,
+        crate::monitor::PDUTYPE2_MONITOR_LAYOUT_PDU,
+        &body[..30],
+    );
+    let mut out = PollOutcome::default();
+    client.handle_share(&bad, &mut out).unwrap();
+    assert!(out.monitors.is_none() && out.closed.is_none());
+    assert_eq!(client.monitor_layout(), &want[..]);
+}
+
+#[test]
+fn negotiation_flags_from_connection_confirm() {
+    // X.224 Connection Confirm with RDP_NEG_RSP (2.2.1.2): flags 0x1F, HYBRID.
+    let mut cc = vec![0x03, 0x00, 0x00, 0x13, 0x0e, 0xd0, 0, 0, 0x12, 0x34, 0];
+    cc.extend([0x02, 0x1f, 0x08, 0x00, 0x02, 0x00, 0x00, 0x00]);
+    assert_eq!(x224::parse_connection_confirm(&cc).unwrap(), 2);
+    assert_eq!(x224::negotiation_flags(&cc), 0x1f);
+    cc[12] = 0x00;
+    assert_eq!(x224::negotiation_flags(&cc), 0);
+    // A failure response or no negotiation data has no flags.
+    cc[11] = 0x03;
+    cc[12] = 0x01;
+    assert_eq!(x224::negotiation_flags(&cc), 0);
+    assert_eq!(x224::negotiation_flags(&cc[..11]), 0);
 }
