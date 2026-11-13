@@ -1,0 +1,12 @@
+[package]
+name = "rdpc"
+description = "Prototype RDP client built on the rdp crate"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+rdp = { path = "../rdp" }
+minifb = "0.28"
+png = "0.18"
+rpassword = "7"

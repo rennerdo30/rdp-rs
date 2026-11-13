@@ -1,0 +1,12 @@
+[package]
+name = "rdp"
+description = "RDP client protocol implementation written from the Microsoft Open Specifications"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+# TLS transport only; every RDP layer above it is implemented in this crate.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+# SHA-256 and the system RNG.
+ring = "0.17"
