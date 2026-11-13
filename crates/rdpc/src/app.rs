@@ -41,6 +41,8 @@ pub enum UserEvent {
     Retry(u64),
     /// A Windows key combination taken by the keyboard hook: (scancode, extended, down).
     HookKey(u8, bool, bool),
+    /// A recording was finished (its file, or why it failed).
+    Recorded(Result<crate::recorder::RecordingInfo, String>),
     /// Export: the chosen file; Import: the chosen backup (asks its password).
     ExportTo(std::path::PathBuf),
     ImportFrom(std::path::PathBuf),
@@ -225,6 +227,53 @@ pub fn run(direct: Option<(String, Config)>) -> i32 {
 }
 
 impl App {
+    /// Starts recording a session into `Videos\rdpc`, or stops and finishes
+    /// the file (off the UI thread: the encoder drains first).
+    fn toggle_recording(&mut self, id: u64) {
+        let Some(worker) = self.sessions.get(&id).and_then(|s| s.worker.as_ref()) else {
+            return;
+        };
+        if worker.is_recording() {
+            let old = worker.set_recorder(None);
+            if let Some(t) = self.win.as_mut().and_then(|w| w.ui.tab_mut(id)) {
+                t.recording = false;
+            }
+            if let Some(rec) = old {
+                let proxy = self.proxy.clone();
+                std::thread::spawn(move || {
+                    let _ = proxy.send_event(UserEvent::Recorded(rec.finish()));
+                });
+            }
+            self.message("Finishing the recording…", theme::TEXT_2);
+            return;
+        }
+        let (w, h) = worker
+            .shared
+            .lock()
+            .map(|s| (s.fb.width as u32, s.fb.height as u32))
+            .unwrap_or((0, 0));
+        let name = self
+            .win
+            .as_ref()
+            .and_then(|m| m.ui.tabs.iter().find(|t| t.id == id))
+            .map(|t| t.name.clone())
+            .unwrap_or_else(|| "session".into());
+        let path = recording_path(&name);
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        match crate::recorder::Recorder::start(&path, w, h, crate::recorder::DEFAULT_FPS) {
+            Ok(rec) => {
+                worker.set_recorder(Some(rec));
+                if let Some(t) = self.win.as_mut().and_then(|m| m.ui.tab_mut(id)) {
+                    t.recording = true;
+                }
+                self.message(format!("Recording to {}", path.display()), theme::WARN);
+            }
+            Err(e) => self.message(format!("Cannot record: {e}"), theme::ERR),
+        }
+    }
+
     /// Quits, but asks first while sessions are open or connecting.
     fn request_quit(&mut self) {
         let open = self.win.as_ref().map_or(0, |m| {
@@ -686,6 +735,7 @@ impl App {
             }
             Action::WinClose => self.request_quit(),
             Action::Quit => self.quit = true,
+            Action::ToggleRecording(id) => self.toggle_recording(id),
             Action::Relayout => {
                 if let Some(m) = &mut self.win {
                     m.shown.clear();
@@ -1195,6 +1245,10 @@ impl App {
     }
 
     fn ended(&mut self, id: u64, state: TabState) {
+        // The worker's recorder finishes its file when the worker goes.
+        if let Some(t) = self.win.as_mut().and_then(|w| w.ui.tab_mut(id)) {
+            t.recording = false;
+        }
         if let Some(s) = self.sessions.get_mut(&id)
             && let Some(mut w) = s.worker.take()
             && let Some(t) = w.thread.take()
@@ -1474,6 +1528,25 @@ impl ApplicationHandler<UserEvent> for App {
                 return self.dirty();
             }
             UserEvent::Picked(_, None) => return,
+            UserEvent::Recorded(r) => {
+                match r {
+                    Ok(info) => {
+                        let secs = info.duration.as_secs();
+                        self.message(
+                            format!(
+                                "Recording saved: {} ({}:{:02}, {:.1} MB).",
+                                info.path.display(),
+                                secs / 60,
+                                secs % 60,
+                                info.bytes as f64 / 1e6
+                            ),
+                            theme::OK,
+                        );
+                    }
+                    Err(e) => self.message(format!("Recording failed: {e}"), theme::ERR),
+                }
+                return;
+            }
             UserEvent::ExportTo(path) => {
                 if let Some(m) = &mut self.win {
                     let r =
@@ -1929,5 +2002,47 @@ fn clean_clipboard_files(root: &std::path::Path) {
         if old && e.path().is_dir() {
             let _ = std::fs::remove_dir_all(e.path());
         }
+    }
+}
+
+/// `Videos\rdpc\<name> <date> <time>.mp4` in the user's profile.
+fn recording_path(name: &str) -> std::path::PathBuf {
+    let base = std::env::var_os("USERPROFILE")
+        .map(|p| std::path::PathBuf::from(p).join("Videos"))
+        .unwrap_or_else(std::env::temp_dir)
+        .join("rdpc");
+    let clean: String = name
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || " -_.()".contains(c) {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    base.join(format!("{} {}.mp4", clean.trim(), local_stamp()))
+}
+
+/// The local date and time as "2026-11-14 09-30-05".
+fn local_stamp() -> String {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::Foundation::SYSTEMTIME;
+        use windows_sys::Win32::System::SystemInformation::GetLocalTime;
+        // SAFETY: GetLocalTime fills the given structure.
+        let mut t: SYSTEMTIME = unsafe { std::mem::zeroed() };
+        unsafe { GetLocalTime(&mut t) };
+        format!(
+            "{:04}-{:02}-{:02} {:02}-{:02}-{:02}",
+            t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond
+        )
+    }
+    #[cfg(not(windows))]
+    {
+        let secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        secs.to_string()
     }
 }

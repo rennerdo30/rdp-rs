@@ -165,6 +165,8 @@ pub enum Hit {
     FullScreen,
     /// Full screen: keep the bar, or let it hide.
     PinBar,
+    /// Start or stop recording the session to a video.
+    Record(u64),
     /// Quit confirmation: quit, stay, and the dimmed rest of the window.
     ExitConfirm,
     ExitCancel,
@@ -276,6 +278,8 @@ pub struct Tab {
     /// Microphone on, and the device it records from (None: default).
     pub microphone: bool,
     pub mic: Option<String>,
+    /// The session's picture is being recorded to a video file.
+    pub recording: bool,
 }
 
 /// A server certificate to trust or refuse.
@@ -350,6 +354,8 @@ pub enum Action {
     Quit,
     /// The session area changed size (fit may resize the remote desktop).
     Relayout,
+    /// Start or stop recording a session.
+    ToggleRecording(u64),
     /// Settings.
     SetAutoLock(u32),
     SetCheckUpdates(bool),
@@ -637,6 +643,7 @@ impl Ui {
             speaker: None,
             microphone: false,
             mic: None,
+            recording: false,
         });
         self.active = Some(id);
         self.session_focus = false;
@@ -1377,6 +1384,7 @@ impl Ui {
                 self.drawer_scroll = 0;
             }
             Hit::FullScreen => return Some(Action::SetFullscreen(!self.fullscreen)),
+            Hit::Record(id) => return Some(Action::ToggleRecording(id)),
             Hit::PinBar => {
                 self.bar_pinned = !self.bar_pinned;
                 self.bar_revealed = self.bar_pinned;
@@ -4003,6 +4011,15 @@ impl Ui {
                 Style::Secondary,
             ),
         ];
+        let recording = self.tabs.iter().any(|t| t.id == id && t.recording);
+        if matches!(state, TabState::Connected { .. }) {
+            let (text, style) = if recording {
+                ("Stop recording", Style::Danger)
+            } else {
+                ("Record", Style::Secondary)
+            };
+            buttons.insert(0, (text, Hit::Record(id), style));
+        }
         if self.fullscreen {
             let pin = if self.bar_pinned {
                 "Auto-hide bar"
