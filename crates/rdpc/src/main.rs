@@ -9,7 +9,6 @@
 //!
 //! The password comes from RDP_PASSWORD or an interactive prompt.
 
-
 mod app;
 mod clipboard;
 mod manager;

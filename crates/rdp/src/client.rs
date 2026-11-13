@@ -3,6 +3,7 @@
 use std::net::{TcpStream, ToSocketAddrs};
 use std::time::{Duration, Instant};
 
+use crate::channel::{self, ChannelOut, Slot, StaticChannel};
 use crate::codec;
 use crate::credssp;
 use crate::crypto::sha256;
@@ -83,6 +84,16 @@ pub struct Client {
     info: ConnectionInfo,
     active: bool,
     last_error_info: u32,
+    channels: Vec<Slot>,
+}
+
+/// Sends one complete virtual channel message, chunked.
+fn send_channel(f: &mut Framer, user_id: u16, slot: &Slot, msg: &[u8]) -> Result<()> {
+    let show = slot.handler.options() & channel::CHANNEL_OPTION_SHOW_PROTOCOL != 0;
+    for c in channel::chunk(msg, show) {
+        f.write(&x224::data(&mcs::send_data_request(user_id, slot.id, &c)))?;
+    }
+    Ok(())
 }
 
 fn send_io(f: &mut Framer, user_id: u16, io: u16, data: &[u8]) -> Result<()> {
@@ -115,11 +126,18 @@ fn read_mcs(f: &mut Framer, deadline: Instant) -> Result<Vec<u8>> {
     Ok(x224::data_payload(&read_x224(f, deadline)?)?.to_vec())
 }
 
-fn read_channel(f: &mut Framer, deadline: Instant) -> Result<(u16, Vec<u8>)> {
+/// Reads the next I/O channel PDU during the connection sequence. Virtual
+/// channel traffic this early is dropped (servers start it after activation).
+fn read_io(f: &mut Framer, io: u16, deadline: Instant) -> Result<Vec<u8>> {
     loop {
         let payload = read_mcs(f, deadline)?;
         match mcs::parse_domain_pdu(&payload)? {
-            DomainPdu::SendDataIndication { channel, data } => return Ok((channel, data.to_vec())),
+            DomainPdu::SendDataIndication { channel, data } if channel == io => {
+                return Ok(data.to_vec());
+            }
+            DomainPdu::SendDataIndication { channel, .. } => {
+                trace!("channel {channel} data before activation dropped");
+            }
             DomainPdu::DisconnectProviderUltimatum { reason } => {
                 return Err(Error::Disconnected(format!(
                     "MCS disconnect, reason {reason}"
@@ -140,7 +158,13 @@ fn split_user(cfg: &Config) -> (String, String) {
 }
 
 impl Client {
+    /// Connects without virtual channels.
     pub fn connect(cfg: &Config) -> Result<Client> {
+        Self::connect_with(cfg, Vec::new())
+    }
+
+    /// Connects and opens the given static virtual channels.
+    pub fn connect_with(cfg: &Config, handlers: Vec<Box<dyn StaticChannel>>) -> Result<Client> {
         let deadline = Instant::now() + cfg.timeout;
         let (user, domain) = split_user(cfg);
 
@@ -191,13 +215,18 @@ impl Client {
         }
 
         // 3. MCS connect with GCC conference data
+        let defs: Vec<(String, u32)> = handlers
+            .iter()
+            .map(|h| (h.name().to_string(), h.options()))
+            .collect();
+        let def_refs: Vec<(&str, u32)> = defs.iter().map(|(n, o)| (n.as_str(), *o)).collect();
         let settings = gcc::ClientSettings {
             width: cfg.width,
             height: cfg.height,
             keyboard_layout: cfg.keyboard_layout,
             client_name: &cfg.client_name,
             selected_protocol: protocol,
-            channels: &[],
+            channels: &def_refs,
         };
         f.write(&x224::data(&mcs::connect_initial(
             &gcc::conference_create_request(&settings),
@@ -219,6 +248,20 @@ impl Client {
             trace!("joined channel {joined}");
         }
         let io = server.io_channel;
+        // The server assigns channel ids in the order the client listed them.
+        let slots: Vec<Slot> = handlers
+            .into_iter()
+            .zip(server.channel_ids.iter().copied())
+            .map(|(handler, id)| {
+                trace!("virtual channel {} on MCS channel {id}", handler.name());
+                Slot {
+                    id,
+                    handler,
+                    defrag: Default::default(),
+                    failed: false,
+                }
+            })
+            .collect();
 
         // 5. Client info and licensing
         let info_pdu = pdu::client_info(&pdu::ClientInfo {
@@ -229,7 +272,7 @@ impl Client {
         send_io(&mut f, user_id, io, &info_pdu)?;
         // With TLS the server answers with one "valid client" licensing PDU.
         let mut pending = None;
-        let (_, data) = read_channel(&mut f, deadline)?;
+        let data = read_io(&mut f, io, deadline)?;
         if pdu::looks_like_share_control(&data) {
             pending = Some(data); // server skipped licensing
         } else {
@@ -240,7 +283,7 @@ impl Client {
         let demand = loop {
             let data = match pending.take() {
                 Some(d) => d,
-                None => read_channel(&mut f, deadline)?.1,
+                None => read_io(&mut f, io, deadline)?,
             };
             let parts = pdu::split_share_control(&data)?;
             if let Some((_, body)) = parts.iter().find(|(t, _)| *t == pdu::PDUTYPE_DEMANDACTIVE) {
@@ -268,6 +311,7 @@ impl Client {
             },
             active: false,
             last_error_info: 0,
+            channels: slots,
         };
         // 7. Finalization; the Font Map reply is handled by the session loop.
         client.activate(&demand)?;
@@ -330,6 +374,9 @@ impl Client {
                 }
                 Err(e) => return Err(e),
             }
+            if self.active {
+                self.tick_channels()?;
+            }
             if out.closed.is_some() || Instant::now() >= end {
                 return Ok(out);
             }
@@ -356,9 +403,9 @@ impl Client {
                 let data = data.to_vec();
                 self.handle_share(&data, out)
             }
-            DomainPdu::SendDataIndication { channel, .. } => {
-                trace!("data on unhandled channel {channel}");
-                Ok(())
+            DomainPdu::SendDataIndication { channel, data } => {
+                let data = data.to_vec();
+                self.channel_data(channel, &data)
             }
             DomainPdu::DisconnectProviderUltimatum { reason } => {
                 out.closed =
@@ -442,6 +489,65 @@ impl Client {
             }
         }
         Ok(())
+    }
+
+    /// Routes one virtual channel chunk to its handler and sends the replies.
+    fn channel_data(&mut self, channel: u16, chunk: &[u8]) -> Result<()> {
+        let Some(i) = self.channels.iter().position(|s| s.id == channel) else {
+            trace!("data on unknown channel {channel}");
+            return Ok(());
+        };
+        let slot = &mut self.channels[i];
+        if slot.failed {
+            return Ok(());
+        }
+        let msg = match slot.defrag.feed(chunk) {
+            Ok(Some(m)) => m,
+            Ok(None) => return Ok(()),
+            Err(e) => {
+                trace!("channel {}: {e}; channel disabled", slot.handler.name());
+                slot.failed = true;
+                return Ok(());
+            }
+        };
+        let mut out = ChannelOut::default();
+        if let Err(e) = slot.handler.process(&msg, &mut out) {
+            // A broken channel must never end the session.
+            trace!("channel {}: {e}; channel disabled", slot.handler.name());
+            slot.failed = true;
+        }
+        self.flush_channel(i, out)
+    }
+
+    fn tick_channels(&mut self) -> Result<()> {
+        for i in 0..self.channels.len() {
+            let slot = &mut self.channels[i];
+            if slot.failed {
+                continue;
+            }
+            let mut out = ChannelOut::default();
+            if let Err(e) = slot.handler.tick(&mut out) {
+                trace!("channel {}: {e}; channel disabled", slot.handler.name());
+                slot.failed = true;
+            }
+            self.flush_channel(i, out)?;
+        }
+        Ok(())
+    }
+
+    fn flush_channel(&mut self, i: usize, mut out: ChannelOut) -> Result<()> {
+        for msg in out.take() {
+            send_channel(&mut self.f, self.user_id, &self.channels[i], &msg)?;
+        }
+        Ok(())
+    }
+
+    /// Names of the virtual channels the server accepted.
+    pub fn channel_names(&self) -> Vec<String> {
+        self.channels
+            .iter()
+            .map(|s| s.handler.name().to_string())
+            .collect()
     }
 
     /// Sends input once the session is active; before that the server rejects
