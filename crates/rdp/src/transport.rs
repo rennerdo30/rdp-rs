@@ -7,6 +7,9 @@
 //! 997") and the socket in an undefined state. A partial PDU stays in `buf`
 //! until the rest arrives, so the session loop interleaves network reads
 //! with window events on one thread.
+//!
+//! The bytes travel over a [`ByteStream`]: plain TCP, or an RD Gateway
+//! tunnel ([`crate::gateway`]) that carries them in HTTP_DATA_PACKETs.
 
 use std::io::{self, Read, Write};
 use std::net::{Shutdown, TcpStream};
@@ -42,6 +45,18 @@ enum Incoming {
     Failed(io::Error),
 }
 
+/// The write side of the byte stream under the RDP connection.
+pub trait ByteStream: Write + Send {
+    /// Ends the connection, which also ends a blocking read on the read side.
+    fn shutdown(&mut self);
+}
+
+impl ByteStream for TcpStream {
+    fn shutdown(&mut self) {
+        let _ = TcpStream::shutdown(self, Shutdown::Both);
+    }
+}
+
 /// Bytes from the socket, read on a thread of their own.
 struct Reader {
     rx: Receiver<Incoming>,
@@ -51,7 +66,7 @@ struct Reader {
 }
 
 impl Reader {
-    fn spawn(sock: TcpStream) -> Reader {
+    fn spawn(sock: Box<dyn Read + Send>) -> Reader {
         let (tx, rx) = channel();
         std::thread::Builder::new()
             .name("rdp-socket-read".into())
@@ -127,8 +142,8 @@ impl Reader {
 }
 
 pub struct Framer {
-    /// The write side; the reader thread owns a clone for reading.
-    sock: TcpStream,
+    /// The write side; the reader thread owns the read side.
+    sock: Box<dyn ByteStream>,
     reader: Reader,
     tls: Option<Box<ClientConnection>>,
     /// How long one read waits for data (`set_read_timeout`).
@@ -139,7 +154,7 @@ pub struct Framer {
 impl Drop for Framer {
     fn drop(&mut self) {
         // Ends the reader thread's blocking read.
-        let _ = self.sock.shutdown(Shutdown::Both);
+        self.sock.shutdown();
     }
 }
 
@@ -148,8 +163,14 @@ impl Framer {
         let read = sock
             .try_clone()
             .expect("clone socket for the reader thread");
+        Self::over(Box::new(sock), Box::new(read))
+    }
+
+    /// A framer over any byte stream: `read` is read on a thread of its own
+    /// with blocking reads, Ok(0) meaning the peer closed the stream.
+    pub fn over(stream: Box<dyn ByteStream>, read: Box<dyn Read + Send>) -> Self {
         Self {
-            sock,
+            sock: stream,
             reader: Reader::spawn(read),
             tls: None,
             wait: Duration::from_millis(100),
@@ -272,15 +293,9 @@ impl Framer {
         if self.tls.is_some() {
             return proto("TLS already active");
         }
-        let provider = Arc::new(rustls::crypto::ring::default_provider());
-        let config = ClientConfig::builder_with_provider(provider.clone())
-            .with_safe_default_protocol_versions()?
-            .dangerous()
-            .with_custom_certificate_verifier(Arc::new(AcceptAnyCert(provider)))
-            .with_no_client_auth();
         let name = ServerName::try_from(host.to_string())
             .map_err(|_| Error::Protocol(format!("invalid server name {host:?}")))?;
-        let mut conn = ClientConnection::new(Arc::new(config), name)?;
+        let mut conn = ClientConnection::new(tls_config()?, name)?;
         while conn.is_handshaking() {
             while conn.wants_write() {
                 conn.write_tls(&mut self.sock)?;
@@ -331,6 +346,17 @@ fn frame_len(b: &[u8]) -> Result<Option<usize>> {
     }
     let Some(&l2) = b.get(2) else { return Ok(None) };
     Ok(Some((((l1 & 0x7F) as usize) << 8) | l2 as usize))
+}
+
+/// rustls client settings shared by the RDP and the gateway TLS.
+pub(crate) fn tls_config() -> Result<Arc<ClientConfig>> {
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let config = ClientConfig::builder_with_provider(provider.clone())
+        .with_safe_default_protocol_versions()?
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(AcceptAnyCert(provider)))
+        .with_no_client_auth();
+    Ok(Arc::new(config))
 }
 
 /// Prototype only: RDP servers usually present self-signed certificates. The

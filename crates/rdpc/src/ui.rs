@@ -4167,7 +4167,10 @@ pub fn sample_panel(page: u8, fullscreen: bool) -> Ui {
     let mut m = sample(true);
     m.drawer_page = page;
     m.fullscreen = fullscreen;
-    m.speakers = vec!["Speakers (Realtek Audio)".into(), "Headset (USB Audio)".into()];
+    m.speakers = vec![
+        "Speakers (Realtek Audio)".into(),
+        "Headset (USB Audio)".into(),
+    ];
     if let Some(t) = m.tab_mut(1) {
         t.clipboard = true;
         t.sound = true;

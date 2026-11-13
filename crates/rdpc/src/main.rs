@@ -41,6 +41,8 @@ struct Args {
     port: u16,
     user: String,
     domain: String,
+    /// RD Gateway `host[:port]`; it takes the RDP credentials.
+    gateway: Option<(String, u16)>,
     size: Option<(u16, u16)>,
     screenshot: Option<String>,
     snapshot_ui: Option<String>,
@@ -56,6 +58,7 @@ fn usage() -> ! {
     eprintln!(
         "usage: rdpc                                   (connection manager)\n\
          \x20      rdpc <host[:port]> -u <[DOMAIN\\]user> [-d domain] [--size WxH] [-v]\n\
+         \x20           [--gateway gwhost[:port]]   (RD Gateway, same credentials)\n\
          \x20      rdpc <host> -u <user> --screenshot out.png [--wait SECONDS]\n\
          \x20      rdpc --snapshot-ui out.png [--scale 1.5]\n\
          \x20      rdpc --icon-png out.png [--icon-size N]\n\
@@ -79,6 +82,13 @@ fn parse_args() -> Args {
         match arg.as_str() {
             "-u" | "--user" => a.user = val(),
             "-d" | "--domain" => a.domain = val(),
+            "--gateway" => {
+                let v = val();
+                a.gateway = Some(match v.rsplit_once(':') {
+                    Some((h, p)) => (h.into(), p.parse().unwrap_or_else(|_| usage())),
+                    None => (v, 443),
+                });
+            }
             "--size" => {
                 let v = val();
                 let (w, h) = v.split_once('x').unwrap_or_else(|| usage());
@@ -192,6 +202,12 @@ fn main() {
     let mut cfg = Config::new(&args.host, &args.user, &password);
     cfg.port = args.port;
     cfg.domain = args.domain.clone();
+    if let Some((host, port)) = &args.gateway {
+        let mut gw = rdp::GatewayConfig::new(host, &args.user, &password);
+        gw.port = *port;
+        gw.domain = args.domain.clone();
+        cfg.gateway = Some(gw);
+    }
     if let Some((w, h)) = args.size {
         cfg.width = w;
         cfg.height = h;
@@ -241,6 +257,12 @@ fn screenshot(
         "server certificate SHA-256 {} (not verified: prototype)",
         hex(&info.certificate_sha256)
     );
+    if let Some(gw) = &info.gateway_certificate_sha256 {
+        eprintln!(
+            "gateway certificate SHA-256 {} (not verified: prototype)",
+            hex(gw)
+        );
+    }
     let start = Instant::now();
     let mut last_update: Option<Instant> = None;
     let mut refreshed = false;
