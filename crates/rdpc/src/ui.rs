@@ -87,16 +87,19 @@ pub enum Field {
     MasterConfirm,
     /// Group path of a connection, or the parent path of a group.
     GroupPath,
+    /// RD Gateway host[:port].
+    Gateway,
 }
 
 /// Fields cleared for a new connection or group.
-const FORM: [Field; 6] = [
+const FORM: [Field; 7] = [
     Field::Name,
     Field::Host,
     Field::Port,
     Field::User,
     Field::Password,
     Field::GroupPath,
+    Field::Gateway,
 ];
 
 /// One sidebar row: a group or a connection, with its tree depth.
@@ -239,6 +242,8 @@ pub struct CertPrompt {
     pub fingerprint: String,
     /// A different certificate was trusted for this server before.
     pub changed: bool,
+    /// The server it belongs to: the RDP host, or the gateway.
+    pub host: String,
 }
 
 /// The tab values the panel paints (copied out to paint without borrowing).
@@ -345,7 +350,7 @@ pub struct Ui {
     /// Key derivation running.
     pub unlocking: bool,
     vault_error: Option<String>,
-    fields: [TextField; 11],
+    fields: [TextField; 12],
     size: usize,
     focus: Option<Field>,
     pub tabs: Vec<Tab>,
@@ -556,6 +561,7 @@ impl Ui {
         self.field_mut(Field::User).set(&c.user);
         self.field_mut(Field::Password).set("");
         self.field_mut(Field::GroupPath).set(&c.group);
+        self.field_mut(Field::Gateway).set(&c.gateway);
         self.size = size_index(c.width, c.height);
         self.opts = c.options.clone();
         self.save_password = c.password.is_some();
@@ -575,6 +581,7 @@ impl Ui {
         self.field_mut(Field::Name).set(g.name());
         self.field_mut(Field::GroupPath).set(g.parent());
         self.field_mut(Field::User).set(&g.user);
+        self.field_mut(Field::Gateway).set(&g.gateway);
         self.size = size_index(g.width, g.height);
         self.opts = g.options.clone();
         self.save_password = g.password.is_some();
@@ -718,6 +725,7 @@ impl Ui {
             options: self.opts.clone(),
             password: self.form_password(inherit.credentials),
             group: normalize_path(&self.field(Field::GroupPath).text),
+            gateway: self.field(Field::Gateway).text.trim().to_string(),
             inherit,
         })
     }
@@ -747,6 +755,7 @@ impl Ui {
             path,
             user: self.field(Field::User).text.trim().to_string(),
             password: self.form_password(inherit.credentials),
+            gateway: self.field(Field::Gateway).text.trim().to_string(),
             width,
             height,
             options: self.opts.clone(),
@@ -982,11 +991,15 @@ impl Ui {
                 } else {
                     g.user.as_str()
                 };
-                if g.password.is_some() {
+                let mut t = if g.password.is_some() {
                     format!("{user} · password saved")
                 } else {
                     user.to_string()
+                };
+                if !g.gateway.is_empty() {
+                    t += &format!(" · via {}", g.gateway);
                 }
+                t
             }
             1 => {
                 let size = if g.width == 0 {
@@ -1046,10 +1059,14 @@ impl Ui {
             v.extend([Field::Host, Field::Port]);
         }
         v.push(Field::GroupPath);
-        if !self.form_inherit().credentials {
+        let own = !self.form_inherit().credentials;
+        if own {
             v.push(Field::User);
         }
         v.push(Field::Password);
+        if own {
+            v.push(Field::Gateway);
+        }
         v
     }
 
@@ -2491,6 +2508,16 @@ impl Ui {
                 Hit::SavePassword,
             );
             y += row;
+            label(cv, te, y, "Gateway");
+            self.text_input(
+                cv,
+                te,
+                f,
+                Rect::new(fx, y, fw, fh),
+                Field::Gateway,
+                "None (direct), or an RD Gateway, e.g. rdg.example.com",
+            );
+            y += row;
         }
 
         // Display and scale
@@ -2895,7 +2922,7 @@ impl Ui {
                     .find(|t| t.id == id)
                     .and_then(|t| t.cert.clone());
                 match cert {
-                    Some(c) => self.paint_cert_prompt(cv, te, f, area, id, &host, &c),
+                    Some(c) => self.paint_cert_prompt(cv, te, f, area, id, &c.host.clone(), &c),
                     None => centered(
                         cv,
                         te,
@@ -4124,6 +4151,21 @@ enum Style {
     Danger,
 }
 
+/// "host" or "host:port" (443 by default); None when empty.
+fn parse_gateway(text: &str) -> Option<(String, u16)> {
+    let t = text.trim();
+    if t.is_empty() {
+        return None;
+    }
+    let t = t.trim_start_matches("https://").trim_end_matches('/');
+    match t.rsplit_once(':') {
+        Some((h, p)) if !h.is_empty() && p.parse::<u16>().is_ok() => {
+            Some((h.to_string(), p.parse().unwrap_or(443)))
+        }
+        _ => Some((t.to_string(), 443)),
+    }
+}
+
 fn size_index(w: u16, h: u16) -> usize {
     SIZES.iter().position(|&s| s == (w, h)).map_or(0, |i| i + 1)
 }
@@ -4132,6 +4174,12 @@ fn size_index(w: u16, h: u16) -> usize {
 fn session_action(r: &Connection, password: &str) -> Action {
     let mut cfg = rdp::Config::new(&r.host, &r.user, password);
     cfg.port = r.port;
+    if let Some(gw) = parse_gateway(&r.gateway) {
+        // The gateway login uses the connection's credentials.
+        let mut g = rdp::GatewayConfig::new(&gw.0, &r.user, password);
+        g.port = gw.1;
+        cfg.gateway = Some(g);
+    }
     let fit = r.width == 0;
     if !fit {
         cfg.width = r.width;
@@ -4156,6 +4204,7 @@ pub fn sample_cert(changed: bool) -> Ui {
                 .collect::<Vec<_>>()
                 .join(":"),
             changed,
+            host: "10.0.0.15".into(),
         });
     }
     m
@@ -4205,6 +4254,7 @@ pub fn sample(session_tab: bool) -> Ui {
             height: 0,
             options: SessionOptions::default(),
             password: None,
+            gateway: String::new(),
             group: "Work".into(),
             inherit: Inherit::ALL,
         },
@@ -4217,6 +4267,7 @@ pub fn sample(session_tab: bool) -> Ui {
             height: 1080,
             options: SessionOptions::default(),
             password: None,
+            gateway: String::new(),
             group: "Work/Lab".into(),
             inherit: Inherit {
                 credentials: true,
@@ -4232,6 +4283,7 @@ pub fn sample(session_tab: bool) -> Ui {
             height: 900,
             options: SessionOptions::default(),
             password: None,
+            gateway: String::new(),
             group: String::new(),
             inherit: Inherit::default(),
         },
@@ -4339,5 +4391,18 @@ mod tests {
         assert!(m.scroll_home(cx, cy, 100.0));
         assert_eq!(m.home_scroll, 0);
         assert!(!m.scroll_home(cx, cy, 5.0), "already at the top");
+    }
+
+    #[test]
+    fn gateway_text_parses() {
+        assert_eq!(parse_gateway(""), None);
+        assert_eq!(
+            parse_gateway("rdg.example.com"),
+            Some(("rdg.example.com".into(), 443))
+        );
+        assert_eq!(
+            parse_gateway("https://rdg:8443/"),
+            Some(("rdg".into(), 8443))
+        );
     }
 }

@@ -33,6 +33,9 @@ pub struct Connection {
     /// Group path ("Work/Servers"); empty: top level.
     #[serde(default)]
     pub group: String,
+    /// RD Gateway as host[:port]; empty: direct. Part of Credentials.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub gateway: String,
     /// Sections taken from the group instead of this connection.
     #[serde(default)]
     pub inherit: Inherit,
@@ -67,6 +70,9 @@ pub struct Group {
     pub user: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub password: Option<String>,
+    /// RD Gateway as host[:port]; empty: direct.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub gateway: String,
     pub width: u16,
     pub height: u16,
     pub options: SessionOptions,
@@ -584,6 +590,7 @@ impl Store {
         if let Some(g) = self.source_of(&c.group, &c.inherit, |i| i.credentials) {
             out.user = g.user.clone();
             out.password = g.password.clone();
+            out.gateway = g.gateway.clone();
         }
         if let Some(g) = self.source_of(&c.group, &c.inherit, |i| i.display) {
             out.width = g.width;

@@ -1616,6 +1616,7 @@ fn certificate_check(proxy: EventLoopProxy<UserEvent>, id: u64) -> rdp::Certific
         let prompt = ui::CertPrompt {
             fingerprint: c.fingerprint(),
             changed: known.is_some(),
+            host: c.host.clone(),
         };
         let sent = proxy
             .lock()
