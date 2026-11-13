@@ -633,7 +633,7 @@ fn unknown_orders_end_the_batch() {
     let mut u = Vec::new();
     u.put_u16(3);
     u.extend(hex("2e 07 00 01 00 00 04"));
-    u.extend([0x09, 0x01, 0x02]);
+    u.extend([0x09]); // a primary order's controlFlags; its fields follow unsized
     u.extend(hex("2e 07 00 01 00 00 04"));
     assert_eq!(
         parse_fastpath_orders(&u).unwrap(),
