@@ -13,6 +13,7 @@ enum Ev {
     Open(PcmFormat),
     Write(Vec<u8>),
     Close,
+    Dec(Dec),
 }
 
 /// Records calls; each write advances the shared fake clock by `write_ms`.
@@ -92,7 +93,7 @@ const STEREO_48K: PcmFormat = PcmFormat {
 
 /// MS-RDPEA 4.1.1: Server Audio Formats and Version PDU (version 5; PCM
 /// 22.05 kHz, A-law, mu-law, MS ADPCM with 32 extra bytes, IMA ADPCM).
-const SPEC_SERVER_FORMATS: &[u8] = &[
+pub(crate) const SPEC_SERVER_FORMATS: &[u8] = &[
     0x07, 0x2b, 0x90, 0x00, 0x08, 0xfb, 0x8b, 0x00, 0xe0, 0xf1, 0x09, 0x00, 0x70, 0x27, 0x1f, 0x77,
     0x00, 0x00, 0x05, 0x00, 0xff, 0x05, 0x00, 0x00, 0x01, 0x00, 0x02, 0x00, 0x22, 0x56, 0x00, 0x00,
     0x88, 0x58, 0x01, 0x00, 0x04, 0x00, 0x10, 0x00, 0x00, 0x00, 0x06, 0x00, 0x02, 0x00, 0x22, 0x56,
@@ -144,6 +145,22 @@ fn negotiated(r: &mut Rig) {
         &[pcm_entry(STEREO_48K), pcm_entry(mono_44)],
     ))
     .unwrap();
+}
+
+/// A negotiated PCM entry of the client's format list.
+fn pcm_slot(f: PcmFormat) -> (AudioFormat, Codec) {
+    let bytes = pcm_entry(f);
+    let mut r = Reader::new(&bytes);
+    (AudioFormat::parse(&mut r).unwrap(), Codec::Pcm(f))
+}
+
+/// The PCM formats of the client's format list.
+fn pcm_list(r: &Rig) -> Vec<PcmFormat> {
+    let pcm = |c: &Codec| match c {
+        Codec::Pcm(p) => *p,
+        _ => panic!("not PCM: {c:?}"),
+    };
+    r.ch.formats.iter().map(|(_, c)| pcm(c)).collect()
 }
 
 fn wave2_pdu(timestamp: u16, format_no: u16, block_no: u8, data: &[u8]) -> Vec<u8> {
@@ -250,7 +267,7 @@ fn negotiation_keeps_supported_pcm_in_server_order_and_sends_quality_mode() {
     assert_eq!(out[0], want);
     // Quality Mode PDU, HIGH_QUALITY (MS-RDPEA 2.2.2.3).
     assert_eq!(out[1], [0x0c, 0x00, 0x04, 0x00, 0x02, 0x00, 0x00, 0x00]);
-    assert_eq!(r.ch.formats, [mono_44, STEREO_48K]);
+    assert_eq!(pcm_list(&r), [mono_44, STEREO_48K]);
 }
 
 /// MS-RDPEA 4.1.3 / 4.1.4 (data elided in the spec; filled with a pattern).
@@ -297,7 +314,7 @@ fn spec_wave_info_and_wave() -> (Vec<u8>, Vec<u8>, Vec<u8>) {
 
 /// The spec's WaveInfo uses format #15: give the client 16 formats.
 fn sixteen_formats(r: &mut Rig) {
-    r.ch.formats = vec![STEREO_48K; 16];
+    r.ch.formats = vec![pcm_slot(STEREO_48K); 16];
 }
 
 #[test]
@@ -337,11 +354,11 @@ fn wave_confirm_adds_handling_time() {
 fn spec_wave2_plays_and_confirms() {
     let mut r = rig();
     sixteen_formats(&mut r);
-    r.ch.formats[3] = PcmFormat {
+    r.ch.formats[3] = pcm_slot(PcmFormat {
         channels: 1,
         sample_rate: 44_100,
         bits: 16,
-    };
+    });
     r.handle.set_enabled(true);
     let mut msg = vec![
         0x0d, 0x00, 0x04, 0x01, 0x16, 0xa1, 0x03, 0x00, 0x02, 0x00, 0x00, 0x00, 0xc2, 0xb8, 0xac,
@@ -356,7 +373,7 @@ fn spec_wave2_plays_and_confirms() {
         out,
         vec![vec![0x05, 0x00, 0x04, 0x00, 0x16, 0xa1, 0x02, 0x00]]
     );
-    assert_eq!(r.events(), [Ev::Open(r.ch.formats[3]), Ev::Write(data)]);
+    assert_eq!(r.events(), [Ev::Open(pcm_list(&r)[3]), Ev::Write(data)]);
 }
 
 #[test]
@@ -390,7 +407,7 @@ fn switching_on_and_off_mid_stream() {
     r.feed(&wave2_pdu(4, 1, 4, &[4; 8])).unwrap();
     assert_eq!(
         r.events(),
-        [Ev::Close, Ev::Open(r.ch.formats[1]), Ev::Write(vec![4; 8])]
+        [Ev::Close, Ev::Open(pcm_list(&r)[1]), Ev::Write(vec![4; 8])]
     );
     // Off: the next poll releases the device; waves are still confirmed.
     r.handle.set_enabled(false);
@@ -547,4 +564,314 @@ fn truncated_pdus_never_panic() {
         r.feed(&info).unwrap();
         let _ = r.feed(&wave[..n]);
     }
+}
+
+// Compressed formats: ADPCM in the library, others through an AudioDecoder.
+
+use super::codec::{
+    WAVE_FORMAT_AAC_MS, WAVE_FORMAT_ADPCM, WAVE_FORMAT_DVI_ADPCM, WAVE_FORMAT_MPEGLAYER3,
+};
+
+/// Decodes by mapping each input byte b to the 16-bit sample b * 2 (so
+/// the output is checkable), after `latency` waves of no output. Takes
+/// MP3 and AAC; records its calls in the rig's log.
+struct FakeDecoder {
+    log: Arc<Mutex<Vec<Ev>>>,
+    latency: usize,
+    fail: bool,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum Dec {
+    Open(u16, u32),
+    Close,
+}
+
+impl AudioDecoder for FakeDecoder {
+    fn accepts(&self, f: &AudioFormat) -> bool {
+        matches!(f.tag, WAVE_FORMAT_MPEGLAYER3 | WAVE_FORMAT_AAC_MS)
+    }
+    fn open(&mut self, f: &AudioFormat) -> std::result::Result<PcmFormat, String> {
+        self.log
+            .lock()
+            .unwrap()
+            .push(Ev::Dec(Dec::Open(f.tag, f.avg_bytes_per_sec)));
+        Ok(PcmFormat {
+            channels: f.channels,
+            sample_rate: f.samples_per_sec,
+            bits: 16,
+        })
+    }
+    fn decode(&mut self, data: &[u8], pcm: &mut Vec<u8>) -> std::result::Result<(), String> {
+        if self.fail {
+            return Err("corrupt frame".into());
+        }
+        if self.latency > 0 {
+            self.latency -= 1;
+            return Ok(());
+        }
+        for &b in data {
+            pcm.extend_from_slice(&(u16::from(b) * 2).to_le_bytes());
+        }
+        Ok(())
+    }
+    fn close(&mut self) {
+        self.log.lock().unwrap().push(Ev::Dec(Dec::Close));
+    }
+}
+
+/// A rig with ADPCM on or off and an optional fake decoder (latency, fail).
+fn codec_rig(adpcm: bool, decoder: Option<(usize, bool)>) -> Rig {
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let decoder = decoder.map(|(latency, fail)| {
+        Box::new(FakeDecoder {
+            log: log.clone(),
+            latency,
+            fail,
+        }) as Box<dyn AudioDecoder>
+    });
+    let (mut ch, handle) = rdpsnd_with(
+        Box::new(Mock {
+            log: log.clone(),
+            now_ms: Arc::new(AtomicU64::new(0)),
+            write_ms: 0,
+            fail_open: false,
+        }),
+        AudioCodecs { adpcm, decoder },
+    );
+    let base = Instant::now();
+    ch.clock = Arc::new(move || base);
+    Rig { ch, handle, log }
+}
+
+/// An AUDIO_FORMAT entry, 44.1 kHz stereo, with the given fields.
+fn entry(tag: u16, avg: u32, block_align: u16, bits: u16, extra: &[u8]) -> Vec<u8> {
+    let mut v = Vec::new();
+    v.put_u16(tag);
+    v.put_u16(2);
+    v.put_u32(44_100);
+    v.put_u32(avg);
+    v.put_u16(block_align);
+    v.put_u16(bits);
+    v.put_u16(extra.len() as u16);
+    v.put_bytes(extra);
+    v
+}
+
+/// The MS-RDPEA 4.1.1 MS ADPCM entry: 22.05 kHz stereo, nBlockAlign 1024.
+fn ms_adpcm_entry() -> Vec<u8> {
+    SPEC_SERVER_FORMATS[78..128].to_vec()
+}
+
+/// The MS-RDPEA 4.1.1 IMA ADPCM entry: 22.05 kHz stereo, nBlockAlign 1024.
+fn ima_entry() -> Vec<u8> {
+    SPEC_SERVER_FORMATS[128..].to_vec()
+}
+
+/// With ADPCM on, the MS-RDPEA 4.1.1 server list (PCM 22.05 kHz, A-law,
+/// mu-law, MS ADPCM, IMA ADPCM) yields both ADPCM entries, byte-exact,
+/// and (the spec's server is version 5, so only from a version 8 server)
+/// a Quality Mode PDU asking for DYNAMIC_QUALITY.
+#[test]
+fn spec_server_formats_with_adpcm() {
+    assert_eq!(ms_adpcm_entry()[..2], [0x02, 0x00]);
+    assert_eq!(ima_entry()[..2], [0x11, 0x00]);
+    let mut r = codec_rig(true, None);
+    let out = r.feed(SPEC_SERVER_FORMATS).unwrap();
+    let mut want = client_formats(TSSNDCAPS_ALIVE, 0, 0, 0, 8, &[]);
+    want[2] = (20 + 50 + 20) as u8;
+    want[18] = 2;
+    want.extend(ms_adpcm_entry());
+    want.extend(ima_entry());
+    assert_eq!(out, vec![want.clone()]);
+    let mut v8 = SPEC_SERVER_FORMATS.to_vec();
+    v8[21] = 8;
+    let out = r.feed(&v8).unwrap();
+    assert_eq!(out, vec![want, quality_mode(DYNAMIC_QUALITY)]);
+    assert!(matches!(r.ch.formats[0].1, Codec::MsAdpcm(_)));
+    assert!(matches!(r.ch.formats[1].1, Codec::ImaAdpcm(_)));
+}
+
+/// The client lists AAC (the 12 kB/s entry first), MP3, MS ADPCM,
+/// IMA ADPCM, then PCM, whatever the server's order; formats nobody
+/// decodes are left out; wFormatNo then indexes the client's list.
+#[test]
+fn negotiation_offers_best_first_and_selects_by_index() {
+    let mut r = codec_rig(true, Some((0, false)));
+    let pcm = pcm_entry(STEREO_48K);
+    let aac_hi = entry(WAVE_FORMAT_AAC_MS, 24_000, 4, 16, &[]);
+    let aac = entry(WAVE_FORMAT_AAC_MS, 12_000, 4, 16, &[]);
+    let mp3_extra = [1, 0, 2, 0, 0, 0, 0x80, 1, 1, 0, 0x71, 5];
+    let mp3 = entry(WAVE_FORMAT_MPEGLAYER3, 16_000, 1, 0, &mp3_extra);
+    let gsm = entry(0x0031, 8_000, 65, 0, &[64, 1]);
+    let server = [
+        pcm.clone(),
+        ima_entry(),
+        mp3.clone(),
+        aac_hi.clone(),
+        gsm,
+        ms_adpcm_entry(),
+        aac.clone(),
+    ];
+    let out = r.feed(&server_formats_pdu(8, &server)).unwrap();
+    let list = parse_server_formats(&out[0][4..]).unwrap();
+    let tags: Vec<u16> = list.formats.iter().map(|f| f.tag).collect();
+    assert_eq!(
+        tags,
+        [
+            WAVE_FORMAT_AAC_MS,
+            WAVE_FORMAT_AAC_MS,
+            WAVE_FORMAT_MPEGLAYER3,
+            WAVE_FORMAT_ADPCM,
+            WAVE_FORMAT_DVI_ADPCM,
+            WAVE_FORMAT_PCM,
+        ]
+    );
+    // Each entry is the server's, byte-exact.
+    let body = &out[0][4 + 20..];
+    let want = [aac, aac_hi, mp3, ms_adpcm_entry(), ima_entry(), pcm].concat();
+    assert_eq!(body, &want[..]);
+    assert_eq!(out[1], quality_mode(DYNAMIC_QUALITY));
+    // Format 2 is the MP3 entry: the decoder opens for it, its PCM plays.
+    r.handle.set_enabled(true);
+    let out = r.feed(&wave2_pdu(10, 2, 1, &[1, 2])).unwrap();
+    assert_eq!(out, vec![wave_confirm(10, 1)]);
+    let mp3_pcm = PcmFormat {
+        channels: 2,
+        sample_rate: 44_100,
+        bits: 16,
+    };
+    assert_eq!(
+        r.events(),
+        [
+            Ev::Dec(Dec::Open(WAVE_FORMAT_MPEGLAYER3, 16_000)),
+            Ev::Open(mp3_pcm),
+            Ev::Write(vec![2, 0, 4, 0]),
+        ]
+    );
+    // Format 5 is PCM: decoder and device close, PCM plays as is.
+    r.feed(&wave2_pdu(11, 5, 2, &[7; 4])).unwrap();
+    assert_eq!(
+        r.events(),
+        [
+            Ev::Close,
+            Ev::Dec(Dec::Close),
+            Ev::Open(STEREO_48K),
+            Ev::Write(vec![7; 4]),
+        ]
+    );
+    // Format 0 is the 12 kB/s AAC entry.
+    r.feed(&wave2_pdu(12, 0, 3, &[0])).unwrap();
+    assert_eq!(
+        r.events()[1],
+        Ev::Dec(Dec::Open(WAVE_FORMAT_AAC_MS, 12_000))
+    );
+}
+
+/// PCM-only lists keep HIGH_QUALITY; without ADPCM or a decoder the
+/// compressed entries are not offered.
+#[test]
+fn pcm_only_keeps_high_quality() {
+    let mut r = codec_rig(false, None);
+    let server = [ms_adpcm_entry(), pcm_entry(STEREO_48K), ima_entry()];
+    let out = r.feed(&server_formats_pdu(8, &server)).unwrap();
+    assert_eq!(out[0][18], 1);
+    assert_eq!(out[1], quality_mode(HIGH_QUALITY));
+}
+
+/// A WaveInfo + Wave pair carrying two MS-ADPCM blocks of 1024 bytes
+/// (the spec's format) plays as 2 x 1012 stereo sample frames.
+#[test]
+fn ms_adpcm_wave_pdus_decode_whole_blocks() {
+    let mut r = codec_rig(true, None);
+    r.feed(&server_formats_pdu(8, &[ms_adpcm_entry()])).unwrap();
+    r.handle.set_enabled(true);
+    // Block: predictors 0/0, deltas 16, iSamp1 300/-300, iSamp2 0, nibbles 0.
+    let mut block = vec![0, 0, 16, 0, 16, 0];
+    block.extend(300i16.to_le_bytes());
+    block.extend((-300i16).to_le_bytes());
+    block.extend([0; 4]);
+    block.resize(1024, 0);
+    let audio = [block.clone(), block].concat();
+    let mut msg = vec![SNDC_WAVE, 0];
+    msg.put_u16((8 + audio.len()) as u16);
+    msg.put_u16(0x1111);
+    msg.put_u16(0);
+    msg.put_u8(3);
+    msg.put_zeros(3);
+    msg.put_bytes(&audio[..4]);
+    assert!(r.feed(&msg).unwrap().is_empty());
+    let mut wave = vec![0; 4];
+    wave.extend_from_slice(&audio[4..]);
+    assert_eq!(r.feed(&wave).unwrap(), vec![wave_confirm(0x1111, 3)]);
+    let ev = r.events();
+    assert_eq!(ev.len(), 2);
+    assert_eq!(
+        ev[0],
+        Ev::Open(PcmFormat {
+            channels: 2,
+            sample_rate: 22_050,
+            bits: 16,
+        })
+    );
+    let Ev::Write(pcm) = &ev[1] else {
+        panic!("{ev:?}")
+    };
+    assert_eq!(pcm.len(), 2 * 1012 * 4);
+    let s: Vec<i16> = pcm
+        .chunks(2)
+        .map(|b| i16::from_le_bytes([b[0], b[1]]))
+        .collect();
+    // iSamp2 pair, iSamp1 pair, then the predictor (256, 0) holds 300/-300.
+    assert_eq!(s[..6], [0, 0, 300, -300, 300, -300]);
+    assert_eq!(s[2024..2028], [0, 0, 300, -300]);
+}
+
+/// IMA ADPCM through Wave2: the header samples come first.
+#[test]
+fn ima_adpcm_wave2_plays() {
+    let mut r = codec_rig(true, None);
+    r.feed(&server_formats_pdu(8, &[ima_entry()])).unwrap();
+    r.handle.set_enabled(true);
+    let mut block = vec![0u8; 1024];
+    block[0..2].copy_from_slice(&1234i16.to_le_bytes());
+    block[4..6].copy_from_slice(&(-1234i16).to_le_bytes());
+    r.feed(&wave2_pdu(1, 0, 1, &block)).unwrap();
+    let ev = r.events();
+    let Ev::Write(pcm) = &ev[1] else {
+        panic!("{ev:?}")
+    };
+    assert_eq!(pcm.len(), 1017 * 4);
+    assert_eq!(pcm[..8], [0xd2, 0x04, 0x2e, 0xfb, 0xd2, 0x04, 0x2e, 0xfb]);
+}
+
+/// A decoder with latency writes nothing until it has output; a decode
+/// error drops that wave; every wave is still confirmed; a Close PDU
+/// closes the decoder too.
+#[test]
+fn decoder_latency_errors_and_close() {
+    let mp3 = entry(WAVE_FORMAT_MPEGLAYER3, 16_000, 1, 0, &[]);
+    let mut r = codec_rig(false, Some((1, false)));
+    r.feed(&server_formats_pdu(8, std::slice::from_ref(&mp3)))
+        .unwrap();
+    r.handle.set_enabled(true);
+    assert_eq!(
+        r.feed(&wave2_pdu(1, 0, 1, &[5])).unwrap(),
+        vec![wave_confirm(1, 1)]
+    );
+    assert_eq!(r.events().len(), 2, "decoder and device open, no write");
+    r.feed(&wave2_pdu(2, 0, 2, &[6])).unwrap();
+    assert_eq!(r.events(), [Ev::Write(vec![12, 0])]);
+    r.feed(&[0x01, 0x00, 0x00, 0x00]).unwrap();
+    assert_eq!(r.events(), [Ev::Close, Ev::Dec(Dec::Close)]);
+
+    let mut r = codec_rig(false, Some((0, true)));
+    r.feed(&server_formats_pdu(8, &[mp3])).unwrap();
+    r.handle.set_enabled(true);
+    assert_eq!(
+        r.feed(&wave2_pdu(3, 0, 3, &[5])).unwrap(),
+        vec![wave_confirm(3, 3)]
+    );
+    let ev = r.events();
+    assert!(!ev.iter().any(|e| matches!(e, Ev::Write(_))), "{ev:?}");
 }

@@ -16,6 +16,7 @@
 
 mod app;
 mod audio;
+mod audio_mf;
 mod clipboard;
 mod controls;
 #[cfg(windows)]

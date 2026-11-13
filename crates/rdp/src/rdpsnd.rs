@@ -2,7 +2,9 @@
 //! virtual channel.
 //!
 //! Scope: uncompressed PCM, 16-bit, mono or stereo, 44.1 or 48 kHz
-//! ([`CLIENT_FORMATS`]). The client advertises no UDP port, so all audio
+//! ([`CLIENT_FORMATS`]); with [`rdpsnd_with`] also MS-ADPCM and IMA ADPCM
+//! (decoded in [`codec`]) and whatever a client [`AudioDecoder`] accepts
+//! (AAC, MP3), offered best first. The client advertises no UDP port, so all audio
 //! arrives over the virtual channel as WaveInfo + Wave PDUs (versions below
 //! 8) or Wave2 PDUs (both sides at version 8).
 //!
@@ -35,6 +37,11 @@ use crate::channel::{ChannelOut, StaticChannel};
 use crate::cursor::{Put, Reader};
 use crate::error::{Result, proto};
 use crate::trace;
+
+#[path = "rdpsnd_codec.rs"]
+pub mod codec;
+pub use codec::AudioDecoder;
+use codec::{Codec, ImaAdpcm, MsAdpcm};
 
 // RDPSND PDU Header msgType values (MS-RDPEA 2.2.1).
 pub const SNDC_CLOSE: u8 = 0x01;
@@ -151,14 +158,33 @@ impl AudioHandle {
     }
 }
 
-/// Creates the `rdpsnd` channel handler and its UI switch. Playback starts off.
+/// Compressed formats the client offers besides PCM.
+#[derive(Default)]
+pub struct AudioCodecs {
+    /// Offer MS-ADPCM and IMA ADPCM (decoded by the library).
+    pub adpcm: bool,
+    /// Decoder for further formats (AAC, MP3); None offers none.
+    pub decoder: Option<Box<dyn AudioDecoder>>,
+}
+
+/// Creates the `rdpsnd` channel handler and its UI switch, PCM only.
+/// Playback starts off.
 pub fn rdpsnd(backend: Box<dyn AudioBackend>) -> (Rdpsnd, AudioHandle) {
+    rdpsnd_with(backend, AudioCodecs::default())
+}
+
+/// Like [`rdpsnd`], also offering the compressed formats of `codecs`.
+pub fn rdpsnd_with(backend: Box<dyn AudioBackend>, codecs: AudioCodecs) -> (Rdpsnd, AudioHandle) {
     let enabled = Arc::new(AtomicBool::new(false));
     let handle = AudioHandle {
         enabled: enabled.clone(),
     };
     let channel = Rdpsnd {
         backend,
+        adpcm: codecs.adpcm,
+        decoder: codecs.decoder,
+        decoder_open: false,
+        pcm: Vec::new(),
         enabled,
         server_version: 0,
         formats: Vec::new(),
@@ -342,15 +368,24 @@ struct WaveInfo {
 /// Client side of the audio output virtual channel.
 pub struct Rdpsnd {
     backend: Box<dyn AudioBackend>,
+    /// Offer and decode the ADPCM formats.
+    adpcm: bool,
+    /// The client's decoder for further compressed formats.
+    decoder: Option<Box<dyn AudioDecoder>>,
+    /// The decoder is open for the current format.
+    decoder_open: bool,
+    /// Decoded PCM of the current wave (reused buffer).
+    pcm: Vec<u8>,
     enabled: Arc<AtomicBool>,
     /// wVersion of the last Server Audio Formats and Version PDU.
     server_version: u16,
-    /// The client's format list; wFormatNo indexes it (MS-RDPEA 3.1.1.2).
-    formats: Vec<PcmFormat>,
+    /// The client's format list and how each is decoded; wFormatNo indexes
+    /// it (MS-RDPEA 3.1.1.2).
+    formats: Vec<(AudioFormat, Codec)>,
     /// WaveInfo PDU whose Wave PDU is the next message.
     pending: Option<WaveInfo>,
-    /// Format the backend is open with; None while closed.
-    open: Option<PcmFormat>,
+    /// Index of the format the backend is open for; None while closed.
+    open: Option<u16>,
     /// Time source for the Wave Confirm timestamp (replaced in tests).
     clock: Arc<dyn Fn() -> Instant + Send + Sync>,
 }
@@ -364,25 +399,98 @@ impl Rdpsnd {
         if self.open.take().is_some() {
             self.backend.close();
         }
+        if std::mem::take(&mut self.decoder_open)
+            && let Some(d) = self.decoder.as_mut()
+        {
+            d.close();
+        }
+    }
+
+    /// How the client would play `f`, if at all: PCM as is, then the
+    /// library's ADPCM decoders, then the client's decoder.
+    fn codec_for(&self, f: &AudioFormat) -> Option<Codec> {
+        if let Some(pcm) = f.client_pcm() {
+            return Some(Codec::Pcm(pcm));
+        }
+        if self.adpcm {
+            if let Some(d) = MsAdpcm::new(f) {
+                return Some(Codec::MsAdpcm(d));
+            }
+            if let Some(d) = ImaAdpcm::new(f) {
+                return Some(Codec::ImaAdpcm(d));
+            }
+        }
+        self.decoder
+            .as_ref()
+            .is_some_and(|d| d.accepts(f))
+            .then_some(Codec::External)
+    }
+
+    /// Opens the decoder (if any) and the backend for format `index`.
+    fn open_format(&mut self, index: u16) -> std::result::Result<(), String> {
+        let (format, codec) = &self.formats[usize::from(index)];
+        let pcm = match codec {
+            Codec::Pcm(p) => *p,
+            Codec::MsAdpcm(d) => d.output,
+            Codec::ImaAdpcm(d) => d.output,
+            Codec::External => {
+                let d = self.decoder.as_mut().ok_or("no audio decoder")?;
+                let pcm = d.open(format)?;
+                self.decoder_open = true;
+                pcm
+            }
+        };
+        self.backend.open(&pcm)?;
+        self.open = Some(index);
+        Ok(())
+    }
+
+    /// Plays one wave of the open format, decoding it to PCM first.
+    fn play(&mut self, index: u16, sample: &[u8]) -> std::result::Result<(), String> {
+        let mut pcm = std::mem::take(&mut self.pcm);
+        pcm.clear();
+        let decoded = match &self.formats[usize::from(index)].1 {
+            Codec::Pcm(_) => return self.backend.write(sample),
+            Codec::MsAdpcm(d) => d.decode(sample, &mut pcm),
+            Codec::ImaAdpcm(d) => d.decode(sample, &mut pcm),
+            Codec::External => match self.decoder.as_mut() {
+                Some(d) => d.decode(sample, &mut pcm),
+                None => Err("no audio decoder".into()),
+            },
+        };
+        // A decoder still filling its pipeline yields nothing to play yet.
+        let r = decoded.and_then(|()| {
+            if pcm.is_empty() {
+                Ok(())
+            } else {
+                self.backend.write(&pcm)
+            }
+        });
+        self.pcm = pcm;
+        r
     }
 
     /// Server Audio Formats and Version PDU (MS-RDPEA 3.2.5.1.1.1): answers
-    /// with the supported subset of the server's formats, in the server's
-    /// order (3.2.5.1.1.2), then a Quality Mode PDU if both versions are at
-    /// least 6 (3.2.5.1.1.3). A repeated PDU restarts the protocol (3.2.5.2.1.7).
+    /// with the supported subset of the server's formats (3.2.5.1.1.2), best
+    /// first ([`codec::rank`]; equal ranks keep the server's order), then a
+    /// Quality Mode PDU if both versions are at least 6 (3.2.5.1.1.3):
+    /// HIGH_QUALITY for PCM only, else DYNAMIC_QUALITY so the server can
+    /// move to a compressed format on a slow link (2.2.2.3). A repeated PDU
+    /// restarts the protocol (3.2.5.2.1.7).
     fn server_formats(&mut self, body: &[u8], out: &mut ChannelOut) -> Result<()> {
         let server = parse_server_formats(body)?;
         self.close_backend();
         self.pending = None;
         self.server_version = server.version;
-        let mut offered = Vec::new();
-        self.formats.clear();
-        for f in &server.formats {
-            if let Some(pcm) = f.client_pcm() {
-                offered.push(f.clone());
-                self.formats.push(pcm);
-            }
-        }
+        let mut taken: Vec<(AudioFormat, Codec)> = server
+            .formats
+            .iter()
+            .filter_map(|f| Some((f.clone(), self.codec_for(f)?)))
+            .collect();
+        taken.sort_by_key(|(f, _)| codec::rank(f));
+        let offered: Vec<AudioFormat> = taken.iter().map(|(f, _)| f.clone()).collect();
+        let compressed = taken.iter().any(|(_, c)| !matches!(c, Codec::Pcm(_)));
+        self.formats = taken;
         trace!(
             "rdpsnd: server version {} offers {} formats, client takes {}",
             server.version,
@@ -398,7 +506,11 @@ impl Rdpsnd {
             &offered,
         ));
         if server.version >= 6 && CLIENT_VERSION >= 6 {
-            out.send(quality_mode(HIGH_QUALITY));
+            out.send(quality_mode(if compressed {
+                DYNAMIC_QUALITY
+            } else {
+                HIGH_QUALITY
+            }));
         }
         Ok(())
     }
@@ -480,24 +592,24 @@ impl Rdpsnd {
         received: Instant,
         out: &mut ChannelOut,
     ) -> Result<()> {
-        let Some(&format) = self.formats.get(usize::from(format_no)) else {
+        if usize::from(format_no) >= self.formats.len() {
             return proto(format!(
                 "rdpsnd: wave format {format_no} of {} negotiated",
                 self.formats.len()
             ));
-        };
+        }
         if self.playing() {
-            if self.open != Some(format) {
+            if self.open != Some(format_no) {
                 self.close_backend();
-                match self.backend.open(&format) {
-                    Ok(()) => self.open = Some(format),
-                    Err(e) => trace!("rdpsnd: audio device open failed: {e}"),
+                if let Err(e) = self.open_format(format_no) {
+                    trace!("rdpsnd: audio open failed: {e}");
+                    self.close_backend();
                 }
             }
             if self.open.is_some()
-                && let Err(e) = self.backend.write(sample)
+                && let Err(e) = self.play(format_no, sample)
             {
-                trace!("rdpsnd: audio write failed: {e}");
+                trace!("rdpsnd: audio decode or write failed: {e}");
             }
             trace!(
                 "rdpsnd: block {block_no} format {format_no}, {} bytes played",
