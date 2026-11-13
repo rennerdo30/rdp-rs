@@ -34,6 +34,7 @@ mod recorder;
 mod session;
 mod settings;
 mod smartcard;
+mod span;
 #[cfg(windows)]
 mod sspi;
 mod store;

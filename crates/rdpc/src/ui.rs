@@ -174,6 +174,8 @@ pub enum Hit {
     PinBar,
     /// Start or stop recording the session to a video.
     Record(u64),
+    /// Bring a session from its monitors back into the window.
+    Unspan(u64),
     /// Quit confirmation: quit, stay, and the dimmed rest of the window.
     ExitConfirm,
     ExitCancel,
@@ -287,6 +289,8 @@ pub struct Tab {
     pub mic: Option<String>,
     /// The session's picture is being recorded to a video file.
     pub recording: bool,
+    /// Shown on chosen monitors in their own windows, not in this tab.
+    pub spanned: bool,
 }
 
 /// A server certificate to trust or refuse.
@@ -363,6 +367,8 @@ pub enum Action {
     Relayout,
     /// Start or stop recording a session.
     ToggleRecording(u64),
+    /// Bring a session from its monitors back into the window.
+    Unspan(u64),
     /// Settings.
     SetAutoLock(u32),
     SetCheckUpdates(bool),
@@ -662,6 +668,7 @@ impl Ui {
             microphone: false,
             mic: None,
             recording: false,
+            spanned: false,
         });
         self.active = Some(id);
         self.session_focus = false;
@@ -1422,6 +1429,7 @@ impl Ui {
             }
             Hit::FullScreen => return Some(Action::SetFullscreen(!self.fullscreen)),
             Hit::Record(id) => return Some(Action::ToggleRecording(id)),
+            Hit::Unspan(id) => return Some(Action::Unspan(id)),
             Hit::PinBar => {
                 self.bar_pinned = !self.bar_pinned;
                 self.bar_revealed = self.bar_pinned;
@@ -4049,6 +4057,37 @@ impl Ui {
             self.session_clip = Some(Rect::new(area.x, bar.bottom(), area.w, area.h - bar.h));
         }
         match state.clone() {
+            TabState::Connected { .. } if self.tabs.iter().any(|t| t.id == id && t.spanned) => {
+                let mid = area.y + area.h / 2;
+                centered(
+                    cv,
+                    te,
+                    f.semi,
+                    15.0 * s,
+                    Rect::new(area.x, mid - p(48.0), area.w, p(24.0)),
+                    "This session is on its monitors",
+                    TEXT,
+                );
+                centered(
+                    cv,
+                    te,
+                    f.ui,
+                    12.5 * s,
+                    Rect::new(area.x, mid - p(22.0), area.w, p(20.0)),
+                    "Ctrl+Alt+Break or the bar at their top edge brings it back here.",
+                    TEXT_3,
+                );
+                let bw = p(190.0);
+                self.button(
+                    cv,
+                    te,
+                    f,
+                    Rect::new(area.x + (area.w - bw) / 2, mid + p(10.0), bw, p(34.0)),
+                    "Show it in this window",
+                    Style::Primary,
+                    Hit::Unspan(id),
+                );
+            }
             TabState::Connected { .. } => {
                 self.session_area = Some((id, area));
                 self.hits

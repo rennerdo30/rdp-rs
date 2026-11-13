@@ -135,6 +135,8 @@ struct Session {
     retry_pending: bool,
     /// The worker waits for this answer about the server certificate.
     cert_reply: Option<std::sync::mpsc::Sender<bool>>,
+    /// Shown in its own windows on chosen monitors (see `span`).
+    spanned: bool,
 }
 
 #[derive(Clone, PartialEq)]
@@ -166,12 +168,6 @@ struct MainWin {
     /// window resizes or moves, Windows may change screen pixels behind our
     /// back, so presenting only changed tiles could leave stale ones.
     settle: Option<std::time::Instant>,
-    /// Spanning monitors: where the window was before (position, size, maximised).
-    span_restore: Option<(
-        winit::dpi::PhysicalPosition<i32>,
-        winit::dpi::PhysicalSize<u32>,
-        bool,
-    )>,
     /// The session a mouse button went down in (gets the release too).
     pressed_in: Option<u64>,
 }
@@ -191,6 +187,11 @@ pub struct App {
     caption_sent: Option<ui::TitleGeometry>,
     /// A newer release offered by the update check.
     update: Option<rdpc_update::Candidate>,
+    /// Session windows on chosen monitors, and those still to open (the
+    /// event loop creates windows), and the session whose window has focus.
+    spans: Vec<crate::span::SpanWin>,
+    pending_spans: Vec<crate::span::SpanSpec>,
+    span_focus: Option<u64>,
     settings: crate::settings::AppSettings,
     /// The last keyboard or mouse input (idle auto-lock).
     last_input: std::time::Instant,
@@ -223,6 +224,9 @@ pub fn run(direct: Option<(String, Config)>) -> i32 {
         quit: false,
         caption_sent: None,
         update: None,
+        spans: Vec::new(),
+        pending_spans: Vec::new(),
+        span_focus: None,
         settings: crate::settings::AppSettings::load(),
         last_input: std::time::Instant::now(),
         exit_code: 0,
@@ -309,18 +313,6 @@ impl App {
 
     fn set_fullscreen(&mut self, on: bool) {
         let Some(m) = &mut self.win else { return };
-        // Leaving a monitor span: back to the window as it was.
-        if !on && let Some((pos, size, maximized)) = m.span_restore.take() {
-            let win = &m.gfx.window;
-            win.set_decorations(true);
-            win.set_outer_position(pos);
-            let _ = win.request_inner_size(size);
-            win.set_maximized(maximized);
-            m.ui.fullscreen = false;
-            m.shown.clear();
-            self.settle();
-            return self.dirty();
-        }
         if on && m.ui.active.is_none() {
             return;
         }
@@ -351,16 +343,24 @@ impl App {
     /// The keyboard hook takes Windows key combinations only while the
     /// session has the keyboard and its setting asks for it.
     fn update_key_hook(&self) {
-        let on = self.win.as_ref().is_some_and(|m| {
-            let ui = &m.ui;
-            ui.window_active
-                && ui.session_focus
-                && ui.active_tab().is_some_and(|t| match t.win_keys {
-                    WinKeys::Local => false,
-                    WinKeys::Remote => true,
-                    WinKeys::FullScreen => ui.fullscreen,
-                })
+        let span = self.span_focus.is_some_and(|id| {
+            self.win.as_ref().is_some_and(|m| {
+                m.ui.tabs
+                    .iter()
+                    .any(|t| t.id == id && t.win_keys != WinKeys::Local)
+            })
         });
+        let on = span
+            || self.win.as_ref().is_some_and(|m| {
+                let ui = &m.ui;
+                ui.window_active
+                    && ui.session_focus
+                    && ui.active_tab().is_some_and(|t| match t.win_keys {
+                        WinKeys::Local => false,
+                        WinKeys::Remote => true,
+                        WinKeys::FullScreen => ui.fullscreen,
+                    })
+            });
         crate::keyhook::set_active(on);
     }
 
@@ -399,21 +399,37 @@ impl App {
         // Picture quality is fixed at logon; reconnects keep this config.
         opts.quality.apply(&mut cfg);
         // Chosen monitors: the session spans them, full screen.
-        let span = if opts.monitors.is_empty() {
-            None
+        let chosen = if opts.monitors.is_empty() {
+            Vec::new()
         } else {
-            let chosen = crate::monitors::chosen(&crate::monitors::list(), &opts.monitors);
-            let b = crate::monitors::bounds(&chosen);
-            if b.is_none() {
-                self.message(
-                    "The chosen monitors are not connected; using this window.",
-                    theme::WARN,
-                );
-            }
-            cfg.monitors = chosen.iter().map(|m| m.monitor.clone()).collect();
-            b
+            crate::monitors::chosen(&crate::monitors::list(), &opts.monitors)
         };
-        let fit = fit && span.is_none();
+        if !opts.monitors.is_empty() && chosen.is_empty() {
+            self.message(
+                "The chosen monitors are not connected; using this window.",
+                theme::WARN,
+            );
+        }
+        cfg.monitors = chosen.iter().map(|m| m.monitor.clone()).collect();
+        // One window per chosen monitor, each showing its part of the desktop.
+        let span: Vec<crate::span::SpanSpec> = match crate::monitors::bounds(&chosen) {
+            None => Vec::new(),
+            Some((bx, by, _, _)) => chosen
+                .iter()
+                .enumerate()
+                .map(|(i, m)| crate::span::SpanSpec {
+                    session: 0,
+                    rect: (m.monitor.left, m.monitor.top, m.width(), m.height()),
+                    fb: (
+                        (m.monitor.left - bx) as usize,
+                        (m.monitor.top - by) as usize,
+                    ),
+                    first: i == 0,
+                    title: name.clone(),
+                })
+                .collect(),
+        };
+        let fit = fit && span.is_empty();
         let id = self.next_id;
         self.next_id += 1;
         let (worker, controls) = self.spawn_worker(id, cfg.clone());
@@ -433,41 +449,25 @@ impl App {
                 retries: 0,
                 retry_pending: false,
                 cert_reply: None,
+                spanned: false,
             },
         );
         self.apply_options(id, &opts);
-        if let Some(b) = span {
-            self.span_window(b);
+        if !span.is_empty() {
+            if let Some(s) = self.sessions.get_mut(&id) {
+                s.spanned = true;
+            }
+            if let Some(t) = self.win.as_mut().and_then(|w| w.ui.tab_mut(id)) {
+                t.spanned = true;
+            }
+            for mut spec in span {
+                spec.session = id;
+                self.pending_spans.push(spec);
+            }
         }
         self.dirty();
     }
 
-    /// Covers the chosen monitors with the window: borderless, at their
-    /// bounding box, the session filling it (the bar hides at the top edge).
-    fn span_window(&mut self, (x, y, w, h): (i32, i32, i32, i32)) {
-        let Some(m) = &mut self.win else { return };
-        let win = &m.gfx.window;
-        if m.span_restore.is_none() {
-            m.span_restore = Some((
-                win.outer_position().unwrap_or_default(),
-                win.inner_size(),
-                win.is_maximized(),
-            ));
-        }
-        win.set_fullscreen(None);
-        win.set_maximized(false);
-        win.set_decorations(false);
-        win.set_outer_position(winit::dpi::PhysicalPosition::new(x, y));
-        let _ = win.request_inner_size(winit::dpi::PhysicalSize::new(w as u32, h as u32));
-        m.ui.fullscreen = true;
-        m.ui.drawer = false;
-        m.shown.clear();
-        self.settle();
-    }
-
-    /// Applies a connection's session settings to a new session: the scale,
-    /// and sharing switched on before logon (folders and printers are there
-    /// when the desktop appears). The drawer shows the same state.
     fn apply_options(&mut self, id: u64, opts: &SessionOptions) {
         let scale = opts.scale.unwrap_or_else(|| self.auto_scale());
         let Some(s) = self.sessions.get(&id) else {
@@ -800,6 +800,7 @@ impl App {
             Action::WinClose => self.request_quit(),
             Action::Quit => self.quit = true,
             Action::ToggleRecording(id) => self.toggle_recording(id),
+            Action::Unspan(id) => self.unspan(id),
             Action::Relayout => {
                 if let Some(m) = &mut self.win {
                     m.shown.clear();
@@ -1387,6 +1388,16 @@ impl App {
     }
 
     fn ended(&mut self, id: u64, state: TabState) {
+        // Its monitor windows close; the tab tells what happened.
+        if self.spans.iter().any(|s| s.session == id) {
+            self.spans.retain(|s| s.session != id);
+            if let Some(s) = self.sessions.get_mut(&id) {
+                s.spanned = false;
+            }
+            if let Some(t) = self.win.as_mut().and_then(|w| w.ui.tab_mut(id)) {
+                t.spanned = false;
+            }
+        }
         // The worker's recorder finishes its file when the worker goes.
         if let Some(t) = self.win.as_mut().and_then(|w| w.ui.tab_mut(id)) {
             t.recording = false;
@@ -1499,6 +1510,9 @@ fn blit(
 impl ApplicationHandler<UserEvent> for App {
     /// After a resize or move settles, present the whole window once more.
     fn about_to_wait(&mut self, el: &ActiveEventLoop) {
+        for spec in std::mem::take(&mut self.pending_spans) {
+            self.open_span(el, spec);
+        }
         // Idle auto-lock of the vault.
         let lock_at = self.auto_lock_deadline();
         if lock_at.is_some_and(|t| std::time::Instant::now() >= t) {
@@ -1604,7 +1618,6 @@ impl ApplicationHandler<UserEvent> for App {
                         shown_cursor: Shown::Icon(CursorIcon::Default),
                         chrome_dirty: true,
                         settle: None,
-                        span_restore: None,
                         pressed_in: None,
                     });
                 }
@@ -1829,6 +1842,10 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                 };
                 self.apply_cursor();
+                self.apply_span_cursor(id);
+            }
+            session::Event::Frame if self.sessions.get(&id).is_some_and(|s| s.spanned) => {
+                self.render_spans(id);
             }
             session::Event::Frame => {
                 if active {
@@ -1918,7 +1935,10 @@ impl App {
         self.caption_sent = Some(geo);
     }
 
-    fn window_event_inner(&mut self, _el: &ActiveEventLoop, _wid: WindowId, event: WindowEvent) {
+    fn window_event_inner(&mut self, _el: &ActiveEventLoop, wid: WindowId, event: WindowEvent) {
+        if let Some(i) = self.spans.iter().position(|s| s.window.id() == wid) {
+            return self.span_event(i, event);
+        }
         if self.win.is_none() {
             return;
         }
@@ -2219,5 +2239,208 @@ fn local_stamp() -> String {
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_secs());
         secs.to_string()
+    }
+}
+
+impl App {
+    /// Opens one monitor window of a session spread over several monitors.
+    fn open_span(&mut self, el: &ActiveEventLoop, spec: crate::span::SpanSpec) {
+        let (x, y, w, h) = spec.rect;
+        let attrs = Window::default_attributes()
+            .with_title(format!("{} - rdpc", spec.title))
+            .with_decorations(false)
+            .with_position(winit::dpi::PhysicalPosition::new(x, y))
+            .with_inner_size(winit::dpi::PhysicalSize::new(w as u32, h as u32))
+            .with_window_icon(crate::icon::window_icon(64));
+        let made = el
+            .create_window(attrs)
+            .map_err(|e| e.to_string())
+            .and_then(|win| crate::span::SpanWin::new(Rc::new(win), spec));
+        match made {
+            Ok(sw) => {
+                sw.window.request_redraw();
+                sw.window.focus_window();
+                self.spans.push(sw);
+            }
+            Err(e) => self.message(format!("Cannot open the monitor window: {e}"), theme::ERR),
+        }
+    }
+
+    /// Back from the monitors into the window's tab (the desktop then
+    /// follows the tab's size).
+    fn unspan(&mut self, id: u64) {
+        self.spans.retain(|s| s.session != id);
+        if self.span_focus == Some(id) {
+            self.span_focus = None;
+        }
+        if let Some(s) = self.sessions.get_mut(&id) {
+            s.spanned = false;
+            s.fit_requested = None;
+        }
+        if let Some(t) = self.win.as_mut().and_then(|w| w.ui.tab_mut(id)) {
+            t.spanned = false;
+            t.fit = true;
+        }
+        if let Some(m) = &self.win {
+            m.gfx.window.focus_window();
+        }
+        self.update_key_hook();
+        self.dirty();
+    }
+
+    /// Hands new session pictures to its monitor windows.
+    fn render_spans(&mut self, id: u64) {
+        let Some(worker) = self.sessions.get(&id).and_then(|s| s.worker.as_ref()) else {
+            return;
+        };
+        let mut sh = worker.shared.lock().unwrap();
+        worker.notified.store(false, Ordering::Release);
+        let damage = std::mem::take(&mut sh.damage);
+        let full = std::mem::take(&mut sh.full);
+        for sw in self.spans.iter_mut().filter(|s| s.session == id) {
+            if full {
+                sw.needs_full = true;
+            }
+            sw.present(&sh.fb, &damage, &mut self.te, &self.fonts);
+        }
+    }
+
+    /// The remote cursor on a session's monitor windows.
+    fn apply_span_cursor(&self, id: u64) {
+        let Some(s) = self.sessions.get(&id) else {
+            return;
+        };
+        for sw in self.spans.iter().filter(|w| w.session == id) {
+            let w = &sw.window;
+            match &s.cursor {
+                RemoteCursor::Default => {
+                    w.set_cursor_visible(true);
+                    w.set_cursor(CursorIcon::Default);
+                }
+                RemoteCursor::Hidden => w.set_cursor_visible(false),
+                RemoteCursor::Custom(c) => {
+                    w.set_cursor_visible(true);
+                    w.set_cursor(c.clone());
+                }
+            }
+        }
+    }
+
+    fn span_fb_size(&self, id: u64) -> (usize, usize) {
+        self.sessions
+            .get(&id)
+            .and_then(|s| s.worker.as_ref())
+            .and_then(|w| w.shared.lock().ok().map(|s| (s.fb.width, s.fb.height)))
+            .unwrap_or((0, 0))
+    }
+
+    /// Input and window events of a monitor window: everything goes to its
+    /// session, except the session bar at the top of the first monitor.
+    fn span_event(&mut self, i: usize, event: WindowEvent) {
+        let id = self.spans[i].session;
+        match event {
+            WindowEvent::CloseRequested => self.unspan(id),
+            WindowEvent::Resized(sz) => {
+                self.spans[i].resized(sz.width, sz.height);
+                self.spans[i].window.request_redraw();
+            }
+            WindowEvent::ScaleFactorChanged {
+                mut inner_size_writer,
+                ..
+            } => {
+                // The window keeps its monitor's size in physical pixels.
+                let (w, h) = self.spans[i].size;
+                let _ = inner_size_writer
+                    .request_inner_size(winit::dpi::PhysicalSize::new(w as u32, h as u32));
+            }
+            WindowEvent::RedrawRequested => {
+                self.spans[i].needs_full = true;
+                self.render_spans(id);
+            }
+            WindowEvent::Focused(focused) => {
+                if focused {
+                    self.span_focus = Some(id);
+                } else {
+                    if self.span_focus == Some(id) {
+                        self.span_focus = None;
+                    }
+                    self.send(id, session::release_modifiers());
+                }
+                self.update_key_hook();
+            }
+            WindowEvent::ModifiersChanged(mods) => self.mods = mods.state(),
+            WindowEvent::CursorEntered { .. } => self.apply_span_cursor(id),
+            WindowEvent::CursorMoved { position, .. } => {
+                let (x, y) = (position.x as i32, position.y as i32);
+                if self.spans[i].pointer(x, y) {
+                    self.render_spans(id);
+                }
+                if !self.spans[i].over_bar(y) {
+                    let fb = self.span_fb_size(id);
+                    let pos = self.spans[i].to_session(x, y, fb);
+                    if let Some(s) = self.sessions.get_mut(&id)
+                        && s.mouse != pos
+                    {
+                        s.mouse = pos;
+                        self.send(id, vec![InputEvent::mouse_move(pos.0, pos.1)]);
+                    }
+                }
+            }
+            WindowEvent::MouseInput { state, button, .. } => {
+                self.last_input = std::time::Instant::now();
+                let down = state == ElementState::Pressed;
+                let (x, y) = self.spans[i].cursor;
+                if self.spans[i].over_bar(y) {
+                    if !down && button == MouseButton::Left {
+                        match self.spans[i].button_at(x, y) {
+                            Some(crate::span::BarButton::Exit) => self.unspan(id),
+                            Some(crate::span::BarButton::Disconnect) => {
+                                self.handle_action(Action::Disconnect(id))
+                            }
+                            None => {}
+                        }
+                    }
+                    return;
+                }
+                let fb = self.span_fb_size(id);
+                let pos = self.spans[i].to_session(x, y, fb);
+                self.send(
+                    id,
+                    session::mouse_button(button, down, pos)
+                        .into_iter()
+                        .collect(),
+                );
+            }
+            WindowEvent::MouseWheel { delta, .. } => {
+                self.last_input = std::time::Instant::now();
+                let (x, y) = self.spans[i].cursor;
+                let fb = self.span_fb_size(id);
+                let pos = self.spans[i].to_session(x, y, fb);
+                self.send(id, session::wheel(delta, pos).into_iter().collect());
+            }
+            WindowEvent::KeyboardInput { event, .. } => {
+                self.last_input = std::time::Instant::now();
+                // Ctrl+Alt+Break leaves the monitors, as full screen elsewhere.
+                if event.state.is_pressed()
+                    && self.mods.control_key()
+                    && self.mods.alt_key()
+                    && matches!(
+                        event.logical_key,
+                        WKey::Named(NamedKey::Pause | NamedKey::Cancel)
+                    )
+                {
+                    return self.unspan(id);
+                }
+                if let Some(e) = session::key_event(&event) {
+                    self.send(id, vec![e]);
+                } else {
+                    let u = session::unicode_events(&event);
+                    if !u.is_empty() {
+                        self.send(id, u);
+                    }
+                }
+            }
+            _ => {}
+        }
     }
 }
