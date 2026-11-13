@@ -63,6 +63,25 @@ fn zgfx_example5_unencoded_run_in_compressed_segment() {
 }
 
 #[test]
+fn zgfx_longer_distances_and_lengths() {
+    let mut z = Zgfx::new();
+    let raw: Vec<u8> = (1..=200u8).collect();
+    let mut msg = vec![0xE0, 0x04];
+    msg.extend_from_slice(&raw);
+    z.decompress(&msg).unwrap();
+    // 10010 0001000 = distance 32 + 8 = 40; "0" = length 3; 3 unused bits.
+    assert_eq!(
+        z.decompress(&hex("E0 24 90 80 03")).unwrap(),
+        [161, 162, 163]
+    );
+    // That copy is history too. 10011 000000010 = distance 160 + 2 = 162
+    // (back to value 42); "110 101" = length 8 + 5 = 13;
+    // 4 unused bits.
+    let out = z.decompress(&hex("E0 24 98 0B 50 04")).unwrap();
+    assert_eq!(out, (42..55).collect::<Vec<u8>>());
+}
+
+#[test]
 fn zgfx_history_persists_across_messages() {
     let mut z = Zgfx::new();
     z.decompress(&hex("E0 04 41 42 43")).unwrap();
@@ -413,6 +432,13 @@ fn yuv_to_rgb_hand_computed() {
     // G = (12800 - 48*(-28) - 120*92) >> 8 = (12800 + 1344 - 11040) >> 8 = 12.
     // R = (12800 + 37076) >> 8 = 194; B = (12800 - 13300) >> 8 -> 0.
     assert_eq!(yuv_to_rgb(50, 100, 220), 0x00C2_0C00);
+    // One value per coefficient where a coefficient off by one shows:
+    // B = 475*127 >> 8 = 235; G = (32768 + 48*128) >> 8 = 152;
+    // G = (32768 + 120*128) >> 8 = 188; R = 403*127 >> 8 = 199.
+    assert_eq!(yuv_to_rgb(0, 255, 128), 0x0000_00EB);
+    assert_eq!(yuv_to_rgb(128, 0, 128), 0x0080_9800);
+    assert_eq!(yuv_to_rgb(128, 128, 0), 0x0000_BC80);
+    assert_eq!(yuv_to_rgb(0, 128, 255), 0x00C7_0000);
 }
 
 #[test]
@@ -477,6 +503,19 @@ fn fill_compose_present() {
     let red: Vec<usize> = (0..32).filter(|&i| fb.pixels[i] == 0x00FF_0000).collect();
     assert_eq!(red, [9, 10, 17, 18, 30, 31]);
     assert!(!s.fill(9, 0, &[Area::new(0, 0, 1, 1)]), "unknown surface");
+}
+
+#[test]
+fn mapping_shows_what_the_surface_already_holds() {
+    let mut s = GfxState::new();
+    s.reset(4, 4);
+    s.create(1, 2, 2).unwrap();
+    s.fill(1, 9, &[Area::new(0, 0, 2, 2)]);
+    s.compose();
+    assert!(s.output().pixels.iter().all(|&p| p == 0), "not mapped yet");
+    s.map(1, 2, 2);
+    s.compose();
+    assert_eq!(s.output().pixels.iter().filter(|&&p| p == 9).count(), 4);
 }
 
 #[test]
@@ -818,6 +857,40 @@ fn wire_to_surface_avc420_copies_regions_only() {
             15 * 32 + 23
         ]
     );
+}
+
+#[test]
+fn avc420_regions_clip_to_dest_and_picture() {
+    let dec = FakeH264 {
+        calls: Default::default(),
+        v: 60,
+    };
+    let (mut ch, h) = graphics(Some(Box::new(dec)));
+    setup(&mut ch);
+    // destRect (4,0)-(32,16) is wider than the 16x16 picture: the region
+    // (16,1)-(26,2) keeps x 16..20 (picture columns 12..16).
+    let mut wide = hex("01 00 00 00");
+    wide.extend(rect(16, 1, 26, 2));
+    wide.extend(hex("16 64 00 00 00 01"));
+    // destRect (0,8)-(2,10): the region (1,9)-(8,16) keeps (1,9) only.
+    let mut small = hex("01 00 00 00");
+    small.extend(rect(1, 9, 8, 16));
+    small.extend(hex("16 64 00 00 00 01"));
+    run(
+        &mut ch,
+        &[
+            wire(1, CODECID_AVC420, (4, 0, 32, 16), &wide),
+            wire(1, CODECID_AVC420, (0, 8, 2, 10), &small),
+            pdu(CMDID_ENDFRAME, &hex("04 00 00 00")),
+        ],
+    );
+    let mut fb = crate::Framebuffer::new(32, 16);
+    h.present(&mut fb, &mut Vec::new());
+    let px = yuv_to_rgb(128, 128, 60);
+    let set: Vec<usize> = (0..fb.pixels.len())
+        .filter(|&i| fb.pixels[i] == px)
+        .collect();
+    assert_eq!(set, [32 + 16, 32 + 17, 32 + 18, 32 + 19, 9 * 32 + 1]);
 }
 
 #[test]
