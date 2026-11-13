@@ -553,8 +553,8 @@ dependencies = [
 
 [[package]]
 name = "ffwd-render"
-version = "0.2.0-beta.1"
-source = "git+https://github.com/rennerdo30/ffwd?rev=c79ee208e0763bb639ffde4ee69422a04eaef615#c79ee208e0763bb639ffde4ee69422a04eaef615"
+version = "0.2.0-beta.3"
+source = "git+https://github.com/rennerdo30/ffwd?rev=97fcd22ba06fc62bf7ab52cb50b7205887190083#97fcd22ba06fc62bf7ab52cb50b7205887190083"
 dependencies = [
  "fontdue",
 ]
@@ -1451,7 +1451,7 @@ checksum = "20675572f6f24e9e76ef639bc5552774ed45f1c30e2951e1e99c59888861c539"
 
 [[package]]
 name = "rdp"
-version = "0.1.0"
+version = "0.1.0-beta.1"
 dependencies = [
  "ring",
  "rustls",
@@ -1459,7 +1459,7 @@ dependencies = [
 
 [[package]]
 name = "rdpc"
-version = "0.1.0"
+version = "0.1.0-beta.1"
 dependencies = [
  "argon2",
  "chacha20poly1305",
@@ -1480,7 +1480,7 @@ dependencies = [
 
 [[package]]
 name = "rdpc-update"
-version = "0.1.0"
+version = "0.1.0-beta.1"
 dependencies = [
  "serde_json",
  "sha2",

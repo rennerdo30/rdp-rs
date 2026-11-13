@@ -10,7 +10,7 @@ rdp = { path = "../rdp" }
 rdpc-update = { path = "../rdpc-update" }
 # CPU canvas and text from ffwd (https://github.com/rennerdo30/ffwd, its
 # decision 0001), pinned to a published commit.
-ffwd-render = { git = "https://github.com/rennerdo30/ffwd", rev = "c79ee208e0763bb639ffde4ee69422a04eaef615" }
+ffwd-render = { git = "https://github.com/rennerdo30/ffwd", rev = "97fcd22ba06fc62bf7ab52cb50b7205887190083" }
 winit = "0.30.13"
 softbuffer = "0.4.8"
 png = "0.18.1"
