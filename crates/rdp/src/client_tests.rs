@@ -42,6 +42,7 @@ fn session() -> (Client, TcpStream) {
         arc_cookie: None,
         gfx: None,
         monitor_layout: Vec::new(),
+        redirection: None,
     };
     (client, server)
 }
@@ -317,4 +318,33 @@ fn negotiation_flags_from_connection_confirm() {
     cc[12] = 0x01;
     assert_eq!(x224::negotiation_flags(&cc), 0);
     assert_eq!(x224::negotiation_flags(&cc[..11]), 0);
+}
+
+/// Enhanced Security Server Redirection PDU (2.2.13.3.1) with only RedirFlags set.
+fn redirection_pdu(flags: u32) -> Vec<u8> {
+    let mut p = vec![0x16, 0x00, 0x0a, 0x00, 0xea, 0x03, 0x00, 0x00]; // header, pad2Octets
+    p.extend([0x00, 0x04, 0x0c, 0x00, 0x05, 0x00, 0x00, 0x00]); // Flags, Length, SessionID 5
+    p.extend(flags.to_le_bytes());
+    p.extend([0x00, 0x00]); // pad
+    p
+}
+
+#[test]
+fn redirection_after_activation_ends_the_session() {
+    let (mut client, _server) = session();
+    let mut out = PollOutcome::default();
+    // LB_NOREDIRECT: kept for a reconnect, the session goes on.
+    client
+        .handle_share(&redirection_pdu(0x80), &mut out)
+        .unwrap();
+    assert!(out.closed.is_none());
+    assert!(client.redirection().unwrap().no_redirect());
+    // A real redirection ends the session (not as a network drop) and the
+    // caller gets the PDU to reconnect with new channel handlers.
+    client.handle_share(&redirection_pdu(0), &mut out).unwrap();
+    let closed = out.closed.unwrap();
+    assert!(!closed.reconnectable, "{closed:?}");
+    assert!(closed.text.contains("redirected"), "{closed:?}");
+    let r = client.redirection().unwrap();
+    assert_eq!((r.session_id, r.no_redirect()), (5, false));
 }

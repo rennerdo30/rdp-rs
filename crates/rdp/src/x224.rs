@@ -15,16 +15,33 @@ pub fn tpkt(payload: &[u8]) -> Vec<u8> {
     out
 }
 
+/// RDSTLS (MS-RDPBCGR 5.4.5.3), for a redirected logon with an encrypted password.
+pub const PROTOCOL_RDSTLS: u32 = 0x4;
+
 /// X.224 Connection Request with routing cookie and RDP_NEG_REQ.
 pub fn connection_request(cookie_user: &str, protocols: u32) -> Vec<u8> {
     let cookie = format!("Cookie: mstshash={cookie_user}\r\n");
+    request(cookie.as_bytes(), protocols)
+}
+
+/// X.224 Connection Request with a routing token (from a Server Redirection
+/// PDU's LoadBalanceInfo, ending in CR LF) in place of the cookie (2.2.1.1,
+/// 3.2.5.3.1).
+pub fn connection_request_routed(token: &[u8], protocols: u32) -> Result<Vec<u8>> {
+    if !token.ends_with(b"\r\n") || 6 + token.len() + 8 > 0xFE {
+        return proto("routing token too long or not terminated by CR LF");
+    }
+    Ok(request(token, protocols))
+}
+
+fn request(token: &[u8], protocols: u32) -> Vec<u8> {
     let mut b = Vec::new();
-    b.put_u8((6 + cookie.len() + 8) as u8); // length indicator
+    b.put_u8((6 + token.len() + 8) as u8); // length indicator
     b.put_u8(0xE0); // CR
     b.put_u16_be(0); // dst-ref
     b.put_u16_be(0); // src-ref
     b.put_u8(0); // class 0
-    b.put_bytes(cookie.as_bytes());
+    b.put_bytes(token);
     b.put_u8(0x01); // TYPE_RDP_NEG_REQ
     b.put_u8(0);
     b.put_u16(8);

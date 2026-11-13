@@ -64,6 +64,8 @@ fn gcc_client_data_carries_the_monitor_blocks() {
         channels: &[],
         gfx: false,
         monitors: Some(&d),
+        redirected_session_id: None,
+        redirected_smartcard: false,
     };
     let b = crate::gcc::client_data_blocks(&s);
     // desktopWidth/Height (offsets 8, 10) are the bounding box 3200 x 1080.
