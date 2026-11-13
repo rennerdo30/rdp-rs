@@ -9,7 +9,10 @@
 
 use ffwd_render::{Canvas, FontId, Rect, TextEngine};
 
-use crate::store::{Connection, Group, Inherit, SessionOptions, Store, normalize_path, parent_of};
+use crate::store::{
+    Connection, Group, Inherit, PRESETS, Quality, SessionOptions, Store, normalize_path, parent_of,
+    preset_name,
+};
 use crate::text_field::TextField;
 use crate::theme::*;
 
@@ -65,6 +68,9 @@ pub const SCALES: [u32; 4] = [100, 125, 150, 200];
 
 pub const SIZES: [(u16, u16); 4] = [(1280, 800), (1600, 900), (1920, 1080), (2560, 1440)];
 
+/// Colour depths offered in the form.
+const DEPTHS: [u16; 4] = [32, 24, 16, 15];
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Field {
     Filter = 0,
@@ -113,6 +119,10 @@ pub enum Hit {
     NewInGroup,
     /// Connection/group form: inherit chip (credentials, display, sharing).
     FormInherit(u8),
+    /// Quality: speed preset (index into PRESETS), colour depth, experience toggle.
+    FormPreset(usize),
+    FormDepth(usize),
+    FormExperience(u8),
     New,
     Field(Field),
     Size(usize),
@@ -308,6 +318,10 @@ pub struct Ui {
     pub update_busy: bool,
     /// Asked once to confirm an update that closes open sessions.
     update_confirm: bool,
+    /// Connection form scrolling: offset, content height, visible area.
+    home_scroll: i32,
+    home_content: i32,
+    home_area: Rect,
 }
 
 /// Title-row geometry in physical pixels for the frame hook.
@@ -358,6 +372,9 @@ impl Ui {
             update: None,
             update_busy: false,
             update_confirm: false,
+            home_scroll: 0,
+            home_content: 0,
+            home_area: Rect::default(),
         };
         m.fields[Field::Password as usize] = TextField::secret();
         m.fields[Field::Master as usize] = TextField::secret();
@@ -895,7 +912,12 @@ impl Ui {
                     .options
                     .scale
                     .map_or("Auto scale".to_string(), |v| format!("{v} %"));
-                format!("{size} · {scale}")
+                let q = g.options.quality;
+                format!(
+                    "{size} · {scale} · {} · {}-bit",
+                    preset_name(q.connection),
+                    q.color_depth
+                )
             }
             _ => {
                 let o = &g.options;
@@ -1061,6 +1083,23 @@ impl Ui {
             Hit::NewInGroup => {
                 let g = self.context_group();
                 self.new_connection_in(&g);
+            }
+            Hit::FormPreset(i) => {
+                let depth = self.opts.quality.color_depth;
+                self.opts.quality = Quality::preset(PRESETS[i].0, depth);
+            }
+            Hit::FormDepth(i) => self.opts.quality.color_depth = DEPTHS[i],
+            Hit::FormExperience(i) => {
+                let q = &mut self.opts.quality;
+                let flag = match i {
+                    0 => &mut q.wallpaper,
+                    1 => &mut q.font_smoothing,
+                    2 => &mut q.composition,
+                    3 => &mut q.window_drag,
+                    4 => &mut q.animations,
+                    _ => &mut q.visual_styles,
+                };
+                *flag = !*flag;
             }
             Hit::FormInherit(i) => {
                 let h = &mut self.inherit;
@@ -1867,6 +1906,33 @@ impl Ui {
         }
     }
 
+    /// Chips that wrap to new rows at width `w`; returns the bottom of the last row.
+    #[allow(clippy::too_many_arguments)]
+    fn chip_rows(
+        &mut self,
+        cv: &mut Canvas,
+        te: &mut TextEngine,
+        f: &Fonts,
+        x: i32,
+        y: i32,
+        w: i32,
+        h: i32,
+        items: &[(String, bool, Hit)],
+    ) -> i32 {
+        let s = self.scale;
+        let p = |v: f32| (v * s).round() as i32;
+        let (mut cx, mut y) = (x, y);
+        for (text, on, hit) in items {
+            let cw = te.measure(f.ui, 12.5 * s, text) as i32 + p(24.0);
+            if cx > x && cx + cw > x + w {
+                cx = x;
+                y += h + p(4.0);
+            }
+            cx += self.chip(cv, te, f, cx, y, h, text, *on, *hit) + p(6.0);
+        }
+        y + h
+    }
+
     /// A selectable chip at (x, y); returns its width.
     #[allow(clippy::too_many_arguments)]
     fn chip(
@@ -2054,6 +2120,9 @@ impl Ui {
         let s = self.scale;
         let p = |v: f32| (v * s).round() as i32;
         let old = cv.set_clip(area);
+        let first_hit = self.hits.len();
+        self.home_area = area;
+        let top = area.y - self.home_scroll;
         let x0 = area.x + p(32.0);
         let label_w = p(96.0);
         let fx = x0 + label_w;
@@ -2073,7 +2142,7 @@ impl Ui {
             f.semi,
             20.0 * s,
             x0 as f32,
-            (area.y + p(42.0)) as f32,
+            (top + p(42.0)) as f32,
             &title,
             TEXT,
             form_w as f32,
@@ -2106,13 +2175,13 @@ impl Ui {
             f.ui,
             12.5 * s,
             x0 as f32,
-            (area.y + p(64.0)) as f32,
+            (top + p(64.0)) as f32,
             &sub,
             TEXT_3,
             form_w as f32,
         );
 
-        let mut y = area.y + p(88.0);
+        let mut y = top + p(88.0);
         let row = p(44.0);
         let fh = p(32.0);
         let label = |cv: &mut Canvas, te: &mut TextEngine, y: i32, text: &str| {
@@ -2317,6 +2386,45 @@ impl Ui {
                 cx += self.chip(cv, te, f, cx, y, fh, &text, chosen, Hit::FormScale(i)) + p(6.0);
             }
             y += row;
+
+            let q = self.opts.quality;
+            label(cv, te, y, "Quality");
+            let items: Vec<(String, bool, Hit)> = PRESETS
+                .iter()
+                .enumerate()
+                .map(|(i, (c, name))| (name.to_string(), q.connection == *c, Hit::FormPreset(i)))
+                .collect();
+            y = self.chip_rows(cv, te, f, fx, y, fw, fh, &items) + row - fh;
+
+            label(cv, te, y, "Colours");
+            let items: Vec<(String, bool, Hit)> = DEPTHS
+                .iter()
+                .enumerate()
+                .map(|(i, d)| (format!("{d}-bit"), q.color_depth == *d, Hit::FormDepth(i)))
+                .collect();
+            y = self.chip_rows(cv, te, f, fx, y, fw, fh, &items) + row - fh;
+
+            label(cv, te, y, "Show");
+            let items: Vec<(String, bool, Hit)> = [
+                ("Wallpaper", q.wallpaper),
+                ("Font smoothing", q.font_smoothing),
+                ("Composition", q.composition),
+                ("Drag contents", q.window_drag),
+                ("Animations", q.animations),
+                ("Visual styles", q.visual_styles),
+            ]
+            .into_iter()
+            .enumerate()
+            .map(|(i, (t, on))| {
+                let text = if on {
+                    format!("✓ {t}")
+                } else {
+                    t.to_string()
+                };
+                (text, on, Hit::FormExperience(i as u8))
+            })
+            .collect();
+            y = self.chip_rows(cv, te, f, fx, y, fw, fh, &items) + row - fh;
         }
 
         // Sharing and shared folders
@@ -2444,7 +2552,46 @@ impl Ui {
             TEXT_4,
             fw as f32,
         );
+        // Scrolling: remember the height, keep the offset in range, show a bar.
+        self.home_content = y + bh + p(40.0) - top;
+        let max = (self.home_content - area.h).max(0);
+        if self.home_scroll > max {
+            self.home_scroll = max;
+        }
+        if max > 0 {
+            let track = area.h - p(8.0);
+            let bar = (track * area.h / self.home_content).max(p(24.0));
+            let by = area.y + p(4.0) + (track - bar) * self.home_scroll / max;
+            cv.fill_round(
+                Rect::new(area.right() - p(7.0), by, p(4.0), bar),
+                2.0 * s,
+                BORDER_HOVER,
+            );
+        }
+        // Hits of rows scrolled out of view must not catch clicks.
+        let mut i = first_hit;
+        while i < self.hits.len() {
+            let r = self.hits[i].0.intersect(area);
+            if r.w <= 0 || r.h <= 0 {
+                self.hits.remove(i);
+            } else {
+                self.hits[i].0 = r;
+                i += 1;
+            }
+        }
         cv.set_clip(old);
+    }
+
+    /// Mouse wheel over the connection form; true when it scrolled.
+    pub fn scroll_home(&mut self, x: i32, y: i32, lines: f32) -> bool {
+        if self.active.is_some() || !self.home_area.contains(x, y) {
+            return false;
+        }
+        let max = (self.home_content - self.home_area.h).max(0);
+        let next = (self.home_scroll - (lines * 48.0 * self.scale) as i32).clamp(0, max);
+        let changed = next != self.home_scroll;
+        self.home_scroll = next;
+        changed
     }
 
     fn paint_session(
@@ -3232,5 +3379,43 @@ mod tests {
             Some(Field::GroupPath),
             "groups have no host or port"
         );
+    }
+
+    #[test]
+    fn a_tall_form_scrolls_and_hidden_rows_take_no_clicks() {
+        let mut te = TextEngine::new();
+        let Some(fonts) = load_fonts(&mut te) else {
+            return; // no UI font on this machine (headless CI)
+        };
+        let mut m = sample(false);
+        m.select(2); // top level, no inheritance: every row shown
+        let (w, h) = (1100usize, 520usize);
+        let mut px = vec![0u32; w * h];
+        m.paint(&mut Canvas::new(&mut px, w, h), &mut te, &fonts);
+        assert!(
+            m.home_content > m.home_area.h,
+            "form taller than the window"
+        );
+        let inside = |m: &Ui| {
+            m.hits
+                .iter()
+                .all(|(r, h)| !matches!(h, Hit::Connect) || r.y >= m.home_area.y)
+        };
+        let (cx, cy) = (m.home_area.x + 50, m.home_area.y + 50);
+        assert!(m.scroll_home(cx, cy, -100.0), "scrolls down");
+        m.paint(&mut Canvas::new(&mut px, w, h), &mut te, &fonts);
+        assert_eq!(
+            m.home_scroll,
+            m.home_content - m.home_area.h,
+            "clamped at the end"
+        );
+        assert!(inside(&m));
+        assert!(
+            m.hits.iter().any(|(_, h)| *h == Hit::Connect),
+            "buttons reachable"
+        );
+        assert!(m.scroll_home(cx, cy, 100.0));
+        assert_eq!(m.home_scroll, 0);
+        assert!(!m.scroll_home(cx, cy, 5.0), "already at the top");
     }
 }

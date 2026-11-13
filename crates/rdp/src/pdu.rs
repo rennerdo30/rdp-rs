@@ -34,6 +34,8 @@ pub struct ClientInfo<'a> {
     /// ARC_CS_PRIVATE_PACKET (MS-RDPBCGR 2.2.4.3) for an auto-reconnect logon
     /// (3.2.5.3.11, 5.5); `None` sends cbAutoReconnectCookie = 0.
     pub auto_reconnect: Option<[u8; ARC_PACKET_LEN]>,
+    /// performanceFlags (see `Experience::performance_flags`).
+    pub performance_flags: u32,
 }
 
 /// Client Info PDU (TS_INFO_PACKET with extended info), preceded by the basic security header.
@@ -78,7 +80,7 @@ pub fn client_info(ci: &ClientInfo) -> Vec<u8> {
     out.put_bytes(&dir);
     out.put_zeros(172); // TS_TIME_ZONE_INFORMATION (UTC)
     out.put_u32(0); // clientSessionId
-    out.put_u32(0x0000_0007); // no wallpaper, full-window drag or menu animations
+    out.put_u32(ci.performance_flags); // performanceFlags
     // cbAutoReconnectCookie is zero or 0x001C (2.2.1.11.1.1.1). The credentials
     // above stay in the PDU: if the server rejects the cookie it logs on with
     // them instead (3.3.5.3.11).
@@ -402,7 +404,7 @@ fn cap(out: &mut Vec<u8>, count: &mut u16, ty: u16, body: &[u8]) {
     *count += 1;
 }
 
-fn capabilities(width: u16, height: u16, keyboard_layout: u32) -> (u16, Vec<u8>) {
+fn capabilities(width: u16, height: u16, keyboard_layout: u32, bpp: u16) -> (u16, Vec<u8>) {
     let mut out = Vec::new();
     let mut n = 0;
 
@@ -423,7 +425,7 @@ fn capabilities(width: u16, height: u16, keyboard_layout: u32) -> (u16, Vec<u8>)
     cap(&mut out, &mut n, CAPSTYPE_GENERAL, &b);
 
     let mut b = Vec::new();
-    b.put_u16(32); // preferredBitsPerPixel
+    b.put_u16(bpp); // preferredBitsPerPixel
     b.put_u16(1);
     b.put_u16(1);
     b.put_u16(1);
@@ -545,8 +547,9 @@ pub fn confirm_active(
     width: u16,
     height: u16,
     keyboard_layout: u32,
+    bpp: u16,
 ) -> Vec<u8> {
-    let (count, caps) = capabilities(width, height, keyboard_layout);
+    let (count, caps) = capabilities(width, height, keyboard_layout, bpp);
     let source = b"RDPRS\0";
     let mut b = Vec::new();
     b.put_u32(share_id);
@@ -620,7 +623,7 @@ mod tests {
 
     #[test]
     fn confirm_active_lengths_are_consistent() {
-        let pdu = confirm_active(0x1234, 1007, 1280, 800, 0x409);
+        let pdu = confirm_active(0x1234, 1007, 1280, 800, 0x409, 32);
         let total = u16::from_le_bytes([pdu[0], pdu[1]]) as usize;
         assert_eq!(total, pdu.len());
         let combined = u16::from_le_bytes([pdu[14], pdu[15]]) as usize;

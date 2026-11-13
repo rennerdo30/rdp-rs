@@ -40,6 +40,12 @@ pub struct Config {
     /// session that dropped. The credentials are still sent: the server falls
     /// back to them if it rejects the cookie (3.3.5.3.11).
     pub auto_reconnect: Option<AutoReconnectCookie>,
+    /// Colour depth: 15, 16, 24 or 32 bits per pixel.
+    pub color_depth: u16,
+    /// Connection speed hint for the server.
+    pub connection_type: crate::ConnectionType,
+    /// Desktop features (wallpaper, font smoothing, …); fixed at logon.
+    pub experience: crate::Experience,
 }
 
 impl Config {
@@ -57,6 +63,9 @@ impl Config {
             scale: 100,
             timeout: Duration::from_secs(20),
             auto_reconnect: None,
+            color_depth: 32,
+            connection_type: crate::ConnectionType::Lan,
+            experience: crate::Experience::default(),
         }
     }
 }
@@ -142,6 +151,7 @@ pub struct Client {
     io_channel: u16,
     share_id: u32,
     keyboard_layout: u32,
+    color_depth: u16,
     fb: Framebuffer,
     fastpath: Reassembler,
     info: ConnectionInfo,
@@ -303,6 +313,8 @@ impl Client {
             client_name: &cfg.client_name,
             selected_protocol: protocol,
             scale: cfg.scale,
+            color_depth: cfg.color_depth,
+            connection_type: cfg.connection_type,
             channels: &def_refs,
         };
         f.write(&x224::data(&mcs::connect_initial(
@@ -352,7 +364,15 @@ impl Client {
                 .auto_reconnect
                 .as_ref()
                 .map(|c| c.client_packet(&pdu::ENHANCED_SECURITY_CLIENT_RANDOM)),
+            performance_flags: cfg.experience.performance_flags(),
         });
+        trace!(
+            "experience: {:?}, {} bpp, {:?} (performance flags {:#x})",
+            cfg.experience,
+            cfg.color_depth,
+            cfg.connection_type,
+            cfg.experience.performance_flags()
+        );
         if cfg.auto_reconnect.is_some() {
             trace!("client info carries an auto-reconnect cookie");
         }
@@ -386,6 +406,7 @@ impl Client {
             io_channel: io,
             share_id: demand.share_id,
             keyboard_layout: cfg.keyboard_layout,
+            color_depth: crate::experience::valid_color_depth(cfg.color_depth),
             fb: Framebuffer::new(demand.width as usize, demand.height as usize),
             fastpath: Reassembler::default(),
             info: ConnectionInfo {
@@ -426,6 +447,7 @@ impl Client {
             demand.width,
             demand.height,
             self.keyboard_layout,
+            self.color_depth,
         );
         send_io(&mut self.f, self.user_id, self.io_channel, &confirm)?;
         self.send_data(pdu::PDUTYPE2_SYNCHRONIZE, &pdu::synchronize())?;

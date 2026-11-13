@@ -135,6 +135,81 @@ pub struct SessionOptions {
     pub smart_cards: bool,
     /// Local folders shared as drives.
     pub drives: Vec<String>,
+    /// Picture quality and desktop experience (part of Display for inheritance).
+    pub quality: Quality,
+}
+
+/// Picture quality, as on mstsc's Display and Experience tabs. Fixed at
+/// logon: a change applies on the next connect or reconnect.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Quality {
+    /// Connection speed (MS-RDPBCGR connectionType): 6 LAN, 5 WAN,
+    /// 4 broadband, 2 low-speed broadband, 1 modem.
+    pub connection: u8,
+    /// 15, 16, 24 or 32 bits per pixel.
+    pub color_depth: u16,
+    pub wallpaper: bool,
+    pub font_smoothing: bool,
+    pub composition: bool,
+    pub window_drag: bool,
+    pub animations: bool,
+    pub visual_styles: bool,
+}
+
+impl Default for Quality {
+    fn default() -> Self {
+        Quality::preset(rdp::ConnectionType::Lan as u8, 32)
+    }
+}
+
+/// The speed presets offered in the form: (connection type, label).
+pub const PRESETS: [(u8, &str); 5] = [
+    (6, "LAN"),
+    (5, "WAN"),
+    (4, "Broadband"),
+    (2, "Low bandwidth"),
+    (1, "Modem"),
+];
+
+pub fn preset_name(connection: u8) -> &'static str {
+    match connection {
+        3 => "Satellite",
+        c => PRESETS.iter().find(|p| p.0 == c).map_or("LAN", |p| p.1),
+    }
+}
+
+impl Quality {
+    /// What mstsc enables at that speed; the colour depth stays as given.
+    pub fn preset(connection: u8, color_depth: u16) -> Quality {
+        let ct = rdp::ConnectionType::from_u8(connection).unwrap_or_default();
+        let e = rdp::Experience::for_connection(ct);
+        Quality {
+            connection: ct as u8,
+            color_depth,
+            wallpaper: e.wallpaper,
+            font_smoothing: e.font_smoothing,
+            composition: e.desktop_composition,
+            window_drag: e.window_drag,
+            animations: e.animations,
+            visual_styles: e.visual_styles,
+        }
+    }
+
+    pub fn apply(&self, cfg: &mut rdp::Config) {
+        let ct = rdp::ConnectionType::from_u8(self.connection).unwrap_or_default();
+        cfg.connection_type = ct;
+        cfg.color_depth = rdp::experience::valid_color_depth(self.color_depth);
+        cfg.experience = rdp::Experience {
+            wallpaper: self.wallpaper,
+            font_smoothing: self.font_smoothing,
+            desktop_composition: self.composition,
+            window_drag: self.window_drag,
+            animations: self.animations,
+            visual_styles: self.visual_styles,
+            cursor_shadow: rdp::Experience::for_connection(ct).cursor_shadow,
+        };
+    }
 }
 
 enum Backend {
@@ -484,11 +559,13 @@ impl Store {
             out.width = g.width;
             out.height = g.height;
             out.options.scale = g.options.scale;
+            out.options.quality = g.options.quality;
         }
         if let Some(g) = self.source_of(&c.group, &c.inherit, |i| i.sharing) {
-            let scale = out.options.scale;
+            let (scale, quality) = (out.options.scale, out.options.quality);
             out.options = g.options.clone();
             out.options.scale = scale;
+            out.options.quality = quality;
         }
         out
     }
@@ -722,5 +799,53 @@ mod tests {
         );
         let json = String::from_utf8(s.file_json(false).unwrap()).unwrap();
         assert!(!json.contains("hunter2"));
+    }
+
+    #[test]
+    fn quality_is_inherited_with_display_not_with_sharing() {
+        let modem = SessionOptions {
+            clipboard: true,
+            quality: Quality::preset(1, 16),
+            ..Default::default()
+        };
+        let g = Group {
+            path: "W".into(),
+            options: modem,
+            ..Default::default()
+        };
+        let sharing_only = Connection {
+            group: "W".into(),
+            inherit: Inherit {
+                sharing: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let s = store_with(vec![g], vec![]);
+        let r = s.resolve(&sharing_only);
+        assert!(r.options.clipboard);
+        assert_eq!(r.options.quality, Quality::default(), "own quality kept");
+        let display = Connection {
+            inherit: Inherit {
+                display: true,
+                ..Default::default()
+            },
+            ..sharing_only
+        };
+        let r = s.resolve(&display);
+        assert_eq!(r.options.quality.connection, 1);
+        assert_eq!(r.options.quality.color_depth, 16);
+        assert!(!r.options.quality.wallpaper);
+        let mut cfg = rdp::Config::new("h", "u", "p");
+        r.options.quality.apply(&mut cfg);
+        assert_eq!(cfg.color_depth, 16);
+        assert_eq!(cfg.experience.performance_flags() & 1, 1, "wallpaper off");
+    }
+
+    #[test]
+    fn saved_options_without_quality_load_as_lan() {
+        let o: SessionOptions = serde_json::from_str(r#"{"clipboard":true}"#).unwrap();
+        assert_eq!(o.quality, Quality::default());
+        assert!(o.quality.wallpaper && o.quality.color_depth == 32);
     }
 }

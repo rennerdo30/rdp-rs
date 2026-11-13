@@ -20,6 +20,7 @@ fn session() -> (Client, TcpStream) {
         io_channel: 1003,
         share_id: 0x0001_03ea,
         keyboard_layout: 0x409,
+        color_depth: 32,
         fb: Framebuffer::new(4, 4),
         fastpath: Reassembler::default(),
         info: ConnectionInfo {

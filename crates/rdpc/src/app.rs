@@ -20,7 +20,7 @@ use rdp::{Config, InputEvent};
 use softbuffer::{Context, Surface};
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
-use winit::event::{ElementState, MouseButton, WindowEvent};
+use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::keyboard::{Key as WKey, ModifiersState, NamedKey};
 use winit::window::{CursorIcon, CustomCursor, Window, WindowId};
@@ -241,6 +241,8 @@ impl App {
     fn start_session(&mut self, name: String, mut cfg: Config, fit: bool, opts: SessionOptions) {
         // Auto scale follows this PC's Windows scaling.
         cfg.scale = opts.scale.unwrap_or_else(|| self.auto_scale());
+        // Picture quality is fixed at logon; reconnects keep this config.
+        opts.quality.apply(&mut cfg);
         let id = self.next_id;
         self.next_id += 1;
         let (worker, controls) = self.spawn_worker(id, cfg.clone());
@@ -328,6 +330,7 @@ impl App {
             printers: t.printers,
             smart_cards: t.smart_cards,
             drives: t.drives.iter().map(|d| d.path.clone()).collect(),
+            ..Default::default()
         }
     }
 
@@ -1379,6 +1382,14 @@ impl App {
                 let (x, y) = self.win.as_ref().unwrap().cursor;
                 if let Some((id, fx, fy)) = self.mouse_to_session(x, y) {
                     self.send(id, session::wheel(delta, (fx, fy)).into_iter().collect());
+                } else {
+                    let lines = match delta {
+                        MouseScrollDelta::LineDelta(_, l) => l,
+                        MouseScrollDelta::PixelDelta(p) => p.y as f32 / 40.0,
+                    };
+                    if self.win.as_mut().unwrap().ui.scroll_home(x, y, lines) {
+                        self.dirty();
+                    }
                 }
             }
             WindowEvent::ModifiersChanged(mods) => self.mods = mods.state(),

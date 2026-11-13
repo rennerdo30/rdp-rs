@@ -271,6 +271,7 @@ fn info(auto_reconnect: Option<[u8; ARC_PACKET_LEN]>) -> Vec<u8> {
         user: "u",
         password: "p",
         auto_reconnect,
+        performance_flags: 7,
     })
 }
 

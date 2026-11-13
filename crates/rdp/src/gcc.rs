@@ -24,7 +24,6 @@ const RNS_UD_CS_SUPPORT_ERRINFO_PDU: u16 = 0x0001;
 const RNS_UD_CS_WANT_32BPP_SESSION: u16 = 0x0002;
 const RNS_UD_CS_STRONG_ASYMMETRIC_KEYS: u16 = 0x0008;
 const RNS_UD_CS_VALID_CONNECTION_TYPE: u16 = 0x0020;
-const CONNECTION_TYPE_LAN: u8 = 0x06;
 
 pub struct ClientSettings<'a> {
     pub width: u16,
@@ -34,6 +33,9 @@ pub struct ClientSettings<'a> {
     pub selected_protocol: u32,
     /// Desktop scale in percent (100..=500), as Windows' display scaling.
     pub scale: u32,
+    /// 15, 16, 24 or 32 bits per pixel.
+    pub color_depth: u16,
+    pub connection_type: crate::ConnectionType,
     /// Static virtual channels: (name, options).
     pub channels: &'a [(&'a str, u32)],
 }
@@ -72,18 +74,26 @@ pub fn client_data_blocks(s: &ClientSettings) -> Vec<u8> {
     core.put_u16(RNS_UD_COLOR_8BPP); // postBeta2ColorDepth
     core.put_u16(1); // clientProductId
     core.put_u32(0); // serialNumber
-    core.put_u16(24); // highColorDepth
+    // 32 bpp is asked for with RNS_UD_CS_WANT_32BPP_SESSION; highColorDepth
+    // then says 24 (2.2.1.3.2).
+    let depth = crate::experience::valid_color_depth(s.color_depth);
+    core.put_u16(depth.min(24)); // highColorDepth
     core.put_u16(
         RNS_UD_24BPP_SUPPORT | RNS_UD_16BPP_SUPPORT | RNS_UD_15BPP_SUPPORT | RNS_UD_32BPP_SUPPORT,
     );
+    let want32 = if depth == 32 {
+        RNS_UD_CS_WANT_32BPP_SESSION
+    } else {
+        0
+    };
     core.put_u16(
         RNS_UD_CS_SUPPORT_ERRINFO_PDU
-            | RNS_UD_CS_WANT_32BPP_SESSION
+            | want32
             | RNS_UD_CS_STRONG_ASYMMETRIC_KEYS
             | RNS_UD_CS_VALID_CONNECTION_TYPE,
     );
     core.put_zeros(64); // clientDigProductId
-    core.put_u8(CONNECTION_TYPE_LAN); // connectionType (valid per the flag above)
+    core.put_u8(s.connection_type as u8); // connectionType (valid per the flag above)
     core.put_u8(0); // pad1octet
     core.put_u32(s.selected_protocol);
     // Display scaling (MS-RDPBCGR 2.2.1.3.2): the physical size is derived
@@ -199,6 +209,8 @@ mod tests {
             client_name: "TEST",
             selected_protocol: 3,
             scale: 150,
+            color_depth: 32,
+            connection_type: crate::ConnectionType::Lan,
             channels: &[],
         };
         let b = client_data_blocks(&s);
