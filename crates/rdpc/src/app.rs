@@ -39,6 +39,8 @@ pub enum UserEvent {
     Vault(VaultResult),
     /// Time for the next automatic reconnect attempt of a dropped session.
     Retry(u64),
+    /// A session waits for the user to trust its server certificate.
+    Certificate(u64, ui::CertPrompt, std::sync::mpsc::Sender<bool>),
     /// The update check found a newer release.
     UpdateAvailable(rdpc_update::Candidate),
     /// Installing an update: the setup started (rdpc closes), or it failed.
@@ -116,6 +118,8 @@ struct Session {
     retries: usize,
     /// A retry is scheduled (cleared by Disconnect or a manual reconnect).
     retry_pending: bool,
+    /// The worker waits for this answer about the server certificate.
+    cert_reply: Option<std::sync::mpsc::Sender<bool>>,
 }
 
 #[derive(Clone, PartialEq)]
@@ -255,6 +259,7 @@ impl App {
     fn start_session(&mut self, name: String, mut cfg: Config, fit: bool, opts: SessionOptions) {
         // Auto scale follows this PC's Windows scaling.
         cfg.scale = opts.scale.unwrap_or_else(|| self.auto_scale());
+        cfg.verify_certificate = Some(certificate_check(self.proxy.clone(), self.next_id));
         // Picture quality is fixed at logon; reconnects keep this config.
         opts.quality.apply(&mut cfg);
         let id = self.next_id;
@@ -275,6 +280,7 @@ impl App {
                 cursors: Vec::new(),
                 retries: 0,
                 retry_pending: false,
+                cert_reply: None,
             },
         );
         self.apply_options(id, &opts);
@@ -412,6 +418,15 @@ impl App {
                 self.dirty();
             }
             Action::SetFullscreen(on) => self.set_fullscreen(on),
+            Action::CertAnswer(id, trust) => {
+                if let Some(tx) = self.sessions.get_mut(&id).and_then(|s| s.cert_reply.take()) {
+                    let _ = tx.send(trust);
+                }
+                if let Some(t) = self.win.as_mut().and_then(|w| w.ui.tab_mut(id)) {
+                    t.cert = None;
+                }
+                self.dirty();
+            }
             Action::InstallUpdate => {
                 let Some(c) = self.update.clone() else {
                     return;
@@ -436,6 +451,9 @@ impl App {
             }
             Action::Disconnect(id) => {
                 if let Some(s) = self.sessions.get_mut(&id) {
+                    if let Some(tx) = s.cert_reply.take() {
+                        let _ = tx.send(false);
+                    }
                     if s.retry_pending {
                         s.retry_pending = false;
                         if let Some(t) = self.win.as_mut().and_then(|w| w.ui.tab_mut(id)) {
@@ -1131,6 +1149,19 @@ impl ApplicationHandler<UserEvent> for App {
                 }
                 return self.message(format!("Update failed: {e}"), theme::ERR);
             }
+            UserEvent::Certificate(id, prompt, reply) => {
+                match self.sessions.get_mut(&id) {
+                    Some(s) => s.cert_reply = Some(reply),
+                    None => {
+                        let _ = reply.send(false);
+                        return;
+                    }
+                }
+                if let Some(t) = self.win.as_mut().and_then(|w| w.ui.tab_mut(id)) {
+                    t.cert = Some(prompt);
+                }
+                return self.dirty();
+            }
             UserEvent::Retry(id) => {
                 if let Some(s) = self.sessions.get_mut(&id)
                     && std::mem::take(&mut s.retry_pending)
@@ -1489,4 +1520,32 @@ fn check_for_update(proxy: EventLoopProxy<UserEvent>) {
             Err(e) => rdp::trace!("ui: update check failed: {e}"),
         }
     });
+}
+
+/// Trust on first use: a known, unchanged certificate connects; a new or
+/// changed one asks the user in the session tab (the worker waits).
+fn certificate_check(proxy: EventLoopProxy<UserEvent>, id: u64) -> rdp::CertificateCheck {
+    let proxy = std::sync::Mutex::new(proxy);
+    rdp::CertificateCheck(Arc::new(move |c: &rdp::ServerCertificate| {
+        let fp = crate::known_hosts::hex(&c.sha256);
+        let known = crate::known_hosts::lookup(&c.host, c.port);
+        if known.as_deref() == Some(fp.as_str()) {
+            rdp::trace!("ui: {}:{} certificate known", c.host, c.port);
+            return true;
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        let prompt = ui::CertPrompt {
+            fingerprint: c.fingerprint(),
+            changed: known.is_some(),
+        };
+        let sent = proxy
+            .lock()
+            .map(|p| p.send_event(UserEvent::Certificate(id, prompt, tx)).is_ok())
+            .unwrap_or(false);
+        let trusted = sent && rx.recv().unwrap_or(false);
+        if trusted && let Err(e) = crate::known_hosts::remember(&c.host, c.port, &fp) {
+            rdp::trace!("ui: cannot remember the certificate: {e}");
+        }
+        trusted
+    }))
 }

@@ -236,7 +236,7 @@ impl Default for Store {
     }
 }
 
-fn data_dir() -> Option<PathBuf> {
+pub fn data_dir() -> Option<PathBuf> {
     let base = std::env::var_os("APPDATA").or_else(|| std::env::var_os("HOME"))?;
     Some(PathBuf::from(base).join("rdp-rs"))
 }

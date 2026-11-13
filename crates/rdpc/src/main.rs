@@ -18,6 +18,7 @@ mod controls;
 #[cfg(windows)]
 mod frame;
 mod icon;
+mod known_hosts;
 mod printing;
 mod session;
 mod smartcard;
@@ -288,12 +289,17 @@ fn snapshot_ui(path: &str, scale: f32) -> Result<(), Box<dyn std::error::Error>>
     }
     // The quick panel pages, and full screen.
     for (page, full, suffix) in [
+        (8, false, "-cert"),
+        (9, false, "-cert-changed"),
         (1, false, "-panel-display"),
         (2, false, "-panel-quality"),
         (3, false, "-panel-session"),
         (0, true, "-fullscreen"),
     ] {
-        let mut m = ui::sample_panel(page, full);
+        let mut m = match page {
+            8 | 9 => ui::sample_cert(page == 9),
+            _ => ui::sample_panel(page, full),
+        };
         m.scale = scale;
         m.custom_frame = cfg!(windows);
         let mut px = vec![0u32; w * h];

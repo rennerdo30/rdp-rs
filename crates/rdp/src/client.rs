@@ -20,6 +20,33 @@ use crate::trace;
 use crate::transport::{Frame, Framer};
 use crate::x224;
 
+/// The RDP server's TLS certificate, shown to the caller before any
+/// credentials are sent (CredSSP runs only after the check passes).
+#[derive(Debug, Clone)]
+pub struct ServerCertificate {
+    pub host: String,
+    pub port: u16,
+    /// The end-entity certificate, DER.
+    pub der: Vec<u8>,
+    pub sha256: [u8; 32],
+}
+
+impl ServerCertificate {
+    /// "AB:CD:…" over the SHA-256 of the certificate.
+    pub fn fingerprint(&self) -> String {
+        self.sha256
+            .iter()
+            .map(|b| format!("{b:02X}"))
+            .collect::<Vec<_>>()
+            .join(":")
+    }
+}
+
+/// Decides whether a server certificate is trusted. It may block, for
+/// example to ask the user; the connection's step deadline restarts after it.
+#[derive(Clone)]
+pub struct CertificateCheck(pub std::sync::Arc<dyn Fn(&ServerCertificate) -> bool + Send + Sync>);
+
 #[derive(Clone)]
 pub struct Config {
     pub host: String,
@@ -46,6 +73,9 @@ pub struct Config {
     pub connection_type: crate::ConnectionType,
     /// Desktop features (wallpaper, font smoothing, …); fixed at logon.
     pub experience: crate::Experience,
+    /// Checks the server certificate before credentials are sent. None
+    /// accepts any certificate (the fingerprint is still traced).
+    pub verify_certificate: Option<CertificateCheck>,
 }
 
 impl Config {
@@ -66,6 +96,7 @@ impl Config {
             color_depth: 32,
             connection_type: crate::ConnectionType::Lan,
             experience: crate::Experience::default(),
+            verify_certificate: None,
         }
     }
 }
@@ -251,7 +282,7 @@ impl Client {
 
     /// Connects and opens the given static virtual channels.
     pub fn connect_with(cfg: &Config, handlers: Vec<Box<dyn StaticChannel>>) -> Result<Client> {
-        let deadline = Instant::now() + cfg.timeout;
+        let mut deadline = Instant::now() + cfg.timeout;
         let (user, domain) = split_user(cfg);
 
         let addr = (cfg.host.as_str(), cfg.port)
@@ -278,6 +309,19 @@ impl Client {
         // 2. TLS, then NLA
         let cert = f.upgrade_tls(&cfg.host, deadline)?;
         let certificate_sha256 = sha256(&cert);
+        if let Some(check) = &cfg.verify_certificate {
+            let server = ServerCertificate {
+                host: cfg.host.clone(),
+                port: cfg.port,
+                der: cert.clone(),
+                sha256: certificate_sha256,
+            };
+            if !(check.0)(&server) {
+                return Err(Error::Auth("the server certificate was not trusted".into()));
+            }
+            // The check may have waited for the user.
+            deadline = Instant::now() + cfg.timeout;
+        }
         if protocol & (x224::PROTOCOL_HYBRID | x224::PROTOCOL_HYBRID_EX) != 0 {
             let public_key = der::subject_public_key(&cert)?;
             credssp::authenticate(

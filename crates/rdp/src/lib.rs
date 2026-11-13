@@ -41,7 +41,9 @@ pub mod transport;
 pub mod x224;
 
 pub use channel::{ChannelOut, StaticChannel};
-pub use client::{Client, CloseReason, Config, ConnectionInfo, PollOutcome};
+pub use client::{
+    CertificateCheck, Client, CloseReason, Config, ConnectionInfo, PollOutcome, ServerCertificate,
+};
 pub use cliprdr::{ClipboardBackend, ClipboardHandle, Cliprdr, cliprdr};
 pub use disp::{DisplayControl, DisplayHandle, display_control};
 pub use dvc::{Drdynvc, DvcOut, DynamicChannel, StaticOverDvc};

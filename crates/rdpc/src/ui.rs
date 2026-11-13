@@ -126,6 +126,9 @@ pub enum Hit {
     TabExperience(u64, u8),
     /// Enter or leave full screen.
     FullScreen,
+    /// Server certificate prompt: trust (and remember) or refuse.
+    CertTrust(u64),
+    CertRefuse(u64),
     /// Quality: speed preset (index into PRESETS), colour depth, experience toggle.
     FormPreset(usize),
     FormDepth(usize),
@@ -212,6 +215,17 @@ pub struct Tab {
     /// Quality chosen in the panel, and the one the session logged on with.
     pub quality: Quality,
     pub quality_live: Quality,
+    /// The server certificate waits for the user's decision.
+    pub cert: Option<CertPrompt>,
+}
+
+/// A server certificate to trust or refuse.
+#[derive(Clone, Debug)]
+pub struct CertPrompt {
+    /// "AB:CD:…" (SHA-256).
+    pub fingerprint: String,
+    /// A different certificate was trusted for this server before.
+    pub changed: bool,
 }
 
 /// The tab values the panel paints (copied out to paint without borrowing).
@@ -267,6 +281,8 @@ pub enum Action {
     /// A session's quality for its next logon.
     SetQuality(u64, Quality),
     SetFullscreen(bool),
+    /// The user's answer about a server certificate.
+    CertAnswer(u64, bool),
 }
 
 pub enum Key {
@@ -483,6 +499,7 @@ impl Ui {
             drives: Vec::new(),
             quality: Quality::default(),
             quality_live: Quality::default(),
+            cert: None,
         });
         self.active = Some(id);
         self.session_focus = false;
@@ -1134,6 +1151,8 @@ impl Ui {
                 self.drawer_scroll = 0;
             }
             Hit::FullScreen => return Some(Action::SetFullscreen(!self.fullscreen)),
+            Hit::CertTrust(id) => return Some(Action::CertAnswer(id, true)),
+            Hit::CertRefuse(id) => return Some(Action::CertAnswer(id, false)),
             Hit::TabPreset(id, i) => {
                 let t = self.tab_mut(id)?;
                 t.quality = Quality::preset(PRESETS[i].0, t.quality.color_depth);
@@ -2782,15 +2801,23 @@ impl Ui {
                 self.hits.push((area, Hit::Session(id)));
             }
             TabState::Connecting => {
-                centered(
-                    cv,
-                    te,
-                    f.ui,
-                    14.0 * s,
-                    Rect::new(area.x, area.y, area.w, area.h - p(40.0)),
-                    &format!("Connecting to {name}…"),
-                    TEXT_2,
-                );
+                let cert = self
+                    .tabs
+                    .iter()
+                    .find(|t| t.id == id)
+                    .and_then(|t| t.cert.clone());
+                match cert {
+                    Some(c) => self.paint_cert_prompt(cv, te, f, area, id, &host, &c),
+                    None => centered(
+                        cv,
+                        te,
+                        f.ui,
+                        14.0 * s,
+                        Rect::new(area.x, area.y, area.w, area.h - p(40.0)),
+                        &format!("Connecting to {name}…"),
+                        TEXT_2,
+                    ),
+                }
             }
             TabState::Ended(why) | TabState::Failed(why) => {
                 let failed = matches!(
@@ -2841,6 +2868,129 @@ impl Ui {
                 );
             }
         }
+    }
+
+    /// Asks whether to trust the server certificate (first connection, or a
+    /// certificate that changed since it was trusted).
+    #[allow(clippy::too_many_arguments)]
+    fn paint_cert_prompt(
+        &mut self,
+        cv: &mut Canvas,
+        te: &mut TextEngine,
+        f: &Fonts,
+        area: Rect,
+        id: u64,
+        host: &str,
+        c: &CertPrompt,
+    ) {
+        let s = self.scale;
+        let p = |v: f32| (v * s).round() as i32;
+        let w = p(460.0).min(area.w - p(32.0));
+        let h = p(250.0);
+        let r = Rect::new(area.x + (area.w - w) / 2, area.y + (area.h - h) / 2, w, h);
+        let (border, title, color) = if c.changed {
+            (DANGER_BORDER, "The server certificate changed", ERR)
+        } else {
+            (BORDER, "Verify the server", TEXT)
+        };
+        cv.round_border(r, 10.0 * s, border, BG_BAR);
+        let x = r.x + p(22.0);
+        let tw = (r.w - p(44.0)) as f32;
+        te.draw(
+            cv,
+            f.semi,
+            16.0 * s,
+            x as f32,
+            (r.y + p(36.0)) as f32,
+            title,
+            color,
+            tw,
+        );
+        let line = if c.changed {
+            format!("{host} shows a different certificate than the one you trusted.")
+        } else {
+            format!("First connection to {host}. Check the fingerprint with its admin.")
+        };
+        te.draw(
+            cv,
+            f.ui,
+            12.5 * s,
+            x as f32,
+            (r.y + p(62.0)) as f32,
+            &line,
+            TEXT_2,
+            tw,
+        );
+        let sub = if c.changed {
+            "A reinstalled server does this, but so does an attack."
+        } else {
+            "Your password is sent only after you trust it."
+        };
+        te.draw(
+            cv,
+            f.ui,
+            12.0 * s,
+            x as f32,
+            (r.y + p(82.0)) as f32,
+            sub,
+            TEXT_3,
+            tw,
+        );
+        // The fingerprint, 16 bytes per line.
+        let fr = Rect::new(x, r.y + p(100.0), r.w - p(44.0), p(56.0));
+        cv.round_border(fr, 6.0 * s, BORDER_SOFT, BG);
+        te.draw(
+            cv,
+            f.ui,
+            11.0 * s,
+            (fr.x + p(12.0)) as f32,
+            (fr.y + p(14.0)) as f32,
+            "SHA-256",
+            TEXT_4,
+            tw,
+        );
+        let (a, b) = c.fingerprint.split_at(c.fingerprint.len().min(48));
+        for (i, part) in [a.trim_end_matches(':'), b].iter().enumerate() {
+            te.draw(
+                cv,
+                f.ui,
+                12.0 * s,
+                (fr.x + p(12.0)) as f32,
+                (fr.y + p(30.0) + i as i32 * p(16.0)) as f32,
+                part,
+                TEXT,
+                (fr.w - p(24.0)) as f32,
+            );
+        }
+        let by = r.bottom() - p(22.0) - p(34.0);
+        let trust = if c.changed {
+            "Trust the new one"
+        } else {
+            "Trust and connect"
+        };
+        let tw2 = te.measure(f.semi, 13.0 * s, trust) as i32 + p(32.0);
+        self.button(
+            cv,
+            te,
+            f,
+            Rect::new(x, by, tw2, p(34.0)),
+            trust,
+            if c.changed {
+                Style::Danger
+            } else {
+                Style::Primary
+            },
+            Hit::CertTrust(id),
+        );
+        self.button(
+            cv,
+            te,
+            f,
+            Rect::new(x + tw2 + p(8.0), by, p(96.0), p(34.0)),
+            "Cancel",
+            Style::Secondary,
+            Hit::CertRefuse(id),
+        );
     }
 
     /// The quick panel: four pages (Sharing, Display, Quality, Session) of
@@ -3807,6 +3957,22 @@ fn session_action(r: &Connection, password: &str) -> Action {
         fit,
         opts: r.options.clone(),
     }
+}
+
+/// A session tab waiting for the user to trust the server certificate.
+pub fn sample_cert(changed: bool) -> Ui {
+    let mut m = sample(true);
+    if let Some(t) = m.tab_mut(1) {
+        t.state = TabState::Connecting;
+        t.cert = Some(CertPrompt {
+            fingerprint: (0..32u8)
+                .map(|b| format!("{:02X}", b.wrapping_mul(37)))
+                .collect::<Vec<_>>()
+                .join(":"),
+            changed,
+        });
+    }
+    m
 }
 
 /// A session tab with the quick panel on `page`; page 2 shows a quality
