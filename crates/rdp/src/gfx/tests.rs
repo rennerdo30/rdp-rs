@@ -931,6 +931,35 @@ fn wire_to_surface_clearcodec_caches_live_per_channel() {
 }
 
 #[test]
+fn clearcodec_storage_resets_when_the_channel_closes() {
+    let (mut ch, h) = graphics(None);
+    setup(&mut ch);
+    let miss = clear(&[], &clear_band(0, 0, "00 01 0a 0b 0c"));
+    let hit = clear(&[], &clear_band(0, 0, "00 80"));
+    let frame = |id: u32| pdu(CMDID_ENDFRAME, &(id).to_le_bytes());
+    run(
+        &mut ch,
+        &[
+            wire(1, CODECID_CLEARCODEC, (0, 0, 1, 1), &miss),
+            wire(1, CODECID_CLEARCODEC, (1, 0, 2, 1), &hit),
+            frame(1),
+        ],
+    );
+    let mut fb = crate::Framebuffer::new(32, 16);
+    h.present(&mut fb, &mut Vec::new());
+    assert_eq!(fb.pixels[1], 0x000C_0B0A);
+    // A new channel starts with empty storages: the same hit draws nothing.
+    ch.closed();
+    setup(&mut ch);
+    run(
+        &mut ch,
+        &[wire(1, CODECID_CLEARCODEC, (1, 0, 2, 1), &hit), frame(2)],
+    );
+    h.present(&mut fb, &mut Vec::new());
+    assert_eq!(fb.pixels[1], 0);
+}
+
+#[test]
 fn wire_to_surface_avc420_copies_regions_only() {
     let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let dec = FakeH264 {
