@@ -129,6 +129,12 @@ pub enum Hit {
     /// Server certificate prompt: trust (and remember) or refuse.
     CertTrust(u64),
     CertRefuse(u64),
+    /// Folder picker: connection form, or the session's panel.
+    BrowseForm,
+    BrowseDrive(u64),
+    /// Sound output: index into `speakers` + 1 (0 = default); panel and form.
+    TabSpeaker(u64, usize),
+    FormSpeaker(usize),
     /// Windows key combinations: panel (live) and connection form.
     TabWinKeys(u64, usize),
     FormWinKeys(usize),
@@ -222,6 +228,8 @@ pub struct Tab {
     pub cert: Option<CertPrompt>,
     /// Where Windows key combinations go (changeable live).
     pub win_keys: WinKeys,
+    /// The output device its sound plays on (None: default).
+    pub speaker: Option<String>,
 }
 
 /// A server certificate to trust or refuse.
@@ -247,6 +255,7 @@ struct TabView {
     state: TabState,
     host: String,
     win_keys: WinKeys,
+    speaker: Option<String>,
 }
 
 pub enum Action {
@@ -289,6 +298,10 @@ pub enum Action {
     SetFullscreen(bool),
     /// The user's answer about a server certificate.
     CertAnswer(u64, bool),
+    /// Open the folder picker; None: for the connection form.
+    Browse(Option<u64>),
+    /// Sound of a session to this output (None: default).
+    SetSpeaker(u64, Option<String>),
 }
 
 pub enum Key {
@@ -346,6 +359,8 @@ pub struct Ui {
     drawer_area: Rect,
     /// The window is full screen (the app sets it): only the session and its bar.
     pub fullscreen: bool,
+    /// Local sound output devices (the app fills it in).
+    pub speakers: Vec<String>,
     /// Keyboard goes to the active session (set by clicking into it).
     pub session_focus: bool,
     /// Where the active session's picture goes, set by `paint`.
@@ -415,6 +430,7 @@ impl Ui {
             drawer_content: 0,
             drawer_area: Rect::default(),
             fullscreen: false,
+            speakers: Vec::new(),
             session_focus: false,
             session_area: None,
             hover: None,
@@ -507,6 +523,7 @@ impl Ui {
             quality_live: Quality::default(),
             cert: None,
             win_keys: WinKeys::default(),
+            speaker: None,
         });
         self.active = Some(id);
         self.session_focus = false;
@@ -1163,6 +1180,17 @@ impl Ui {
                 t.win_keys = WinKeys::ALL[i];
             }
             Hit::FormWinKeys(i) => self.opts.win_keys = WinKeys::ALL[i],
+            Hit::BrowseForm => return Some(Action::Browse(None)),
+            Hit::BrowseDrive(id) => return Some(Action::Browse(Some(id))),
+            Hit::TabSpeaker(id, i) => {
+                let name = i.checked_sub(1).and_then(|i| self.speakers.get(i).cloned());
+                let t = self.tab_mut(id)?;
+                t.speaker = name.clone();
+                return Some(Action::SetSpeaker(id, name));
+            }
+            Hit::FormSpeaker(i) => {
+                self.opts.speaker = i.checked_sub(1).and_then(|i| self.speakers.get(i).cloned());
+            }
             Hit::CertTrust(id) => return Some(Action::CertAnswer(id, true)),
             Hit::CertRefuse(id) => return Some(Action::CertAnswer(id, false)),
             Hit::TabPreset(id, i) => {
@@ -1400,6 +1428,13 @@ impl Ui {
             self.opts.drives.push(path);
         }
         self.field_mut(Field::FormDrive).set("");
+    }
+
+    /// A folder chosen in the picker for the connection form.
+    pub fn form_add_folder(&mut self, path: String) {
+        if !self.opts.drives.contains(&path) {
+            self.opts.drives.push(path);
+        }
     }
 
     fn add_drive(&mut self, id: u64) -> Option<Action> {
@@ -2583,6 +2618,21 @@ impl Ui {
             }
             y += row;
 
+            if o.sound {
+                label(cv, te, y, "Sound on");
+                let chosen = o
+                    .speaker
+                    .as_ref()
+                    .and_then(|s| self.speakers.iter().position(|d| d == s))
+                    .map_or(0, |i| i + 1);
+                let items: Vec<(String, bool, Hit)> = std::iter::once("Default output".to_string())
+                    .chain(self.speakers.iter().cloned())
+                    .enumerate()
+                    .map(|(i, n)| (n, chosen == i, Hit::FormSpeaker(i)))
+                    .collect();
+                y = self.chip_rows(cv, te, f, fx, y, fw, fh, &items) + row - fh;
+            }
+
             label(cv, te, y, "Folders");
             let mut cx = fx;
             for (i, path) in o.drives.iter().enumerate() {
@@ -2598,13 +2648,23 @@ impl Ui {
                 y += p(38.0);
             }
             let add_w = p(64.0);
+            let browse_w = p(88.0);
             self.text_input(
                 cv,
                 te,
                 f,
-                Rect::new(fx, y, fw - add_w - p(8.0), fh),
+                Rect::new(fx, y, fw - add_w - browse_w - p(16.0), fh),
                 Field::FormDrive,
                 r"Folder to share, e.g. C:\Share",
+            );
+            self.button(
+                cv,
+                te,
+                f,
+                Rect::new(fx + fw - add_w - browse_w - p(8.0), y, browse_w, fh),
+                "Browse…",
+                Style::Secondary,
+                Hit::BrowseForm,
             );
             self.button(
                 cv,
@@ -3045,6 +3105,7 @@ impl Ui {
             state: tab.state.clone(),
             host: tab.host.clone(),
             win_keys: tab.win_keys,
+            speaker: tab.speaker.clone(),
         };
         let x = d.x + p(16.0);
         let w = d.w - p(32.0);
@@ -3140,6 +3201,24 @@ impl Ui {
         }
         y += 4 * p(52.0) + p(20.0);
 
+        if t.sound {
+            self.caption(cv, te, f, x, y, w, "PLAY SOUND ON");
+            y += p(24.0);
+            let names: Vec<String> = std::iter::once("Default output".to_string())
+                .chain(self.speakers.iter().cloned())
+                .collect();
+            let chosen = t
+                .speaker
+                .as_ref()
+                .and_then(|s| self.speakers.iter().position(|d| d == s))
+                .map_or(0, |i| i + 1);
+            let cells = self.card(cv, x, y, w, &vec![p(40.0); names.len()]);
+            for (i, (r, name)) in cells.iter().zip(&names).enumerate() {
+                self.card_radio(cv, te, f, *r, name, chosen == i, Hit::TabSpeaker(id, i));
+            }
+            y += names.len() as i32 * p(40.0) + p(20.0);
+        }
+
         self.caption(cv, te, f, x, y, w, "SHARED FOLDERS");
         y += p(24.0);
         if t.drives.is_empty() {
@@ -3200,6 +3279,16 @@ impl Ui {
             y += n as i32 * p(50.0);
         }
         y += p(10.0);
+        self.button(
+            cv,
+            te,
+            f,
+            Rect::new(x, y, w, p(34.0)),
+            "Browse for a folder…",
+            Style::Secondary,
+            Hit::BrowseDrive(id),
+        );
+        y += p(42.0);
         let add_w = p(60.0);
         self.text_input(
             cv,
@@ -3207,7 +3296,7 @@ impl Ui {
             f,
             Rect::new(x, y, w - add_w - p(6.0), p(32.0)),
             Field::DrivePath,
-            r"Folder, e.g. C:\Share",
+            r"or type a path, e.g. C:\Share",
         );
         self.button(
             cv,
@@ -3713,6 +3802,58 @@ impl Ui {
         self.hits.push((r, hit));
     }
 
+    /// A one-line card row that is one of several choices.
+    #[allow(clippy::too_many_arguments)]
+    fn card_radio(
+        &mut self,
+        cv: &mut Canvas,
+        te: &mut TextEngine,
+        f: &Fonts,
+        r: Rect,
+        label: &str,
+        chosen: bool,
+        hit: Hit,
+    ) {
+        let s = self.scale;
+        let p = |v: f32| (v * s).round() as i32;
+        if self.hover == Some(hit) {
+            cv.fill_round(
+                Rect::new(r.x + p(3.0), r.y + p(3.0), r.w - p(6.0), r.h - p(6.0)),
+                6.0 * s,
+                BG_HOVER,
+            );
+        }
+        let mid = r.y + r.h / 2;
+        let font = if chosen { f.semi } else { f.ui };
+        te.draw(
+            cv,
+            font,
+            12.5 * s,
+            (r.x + p(14.0)) as f32,
+            (mid + p(5.0)) as f32,
+            label,
+            TEXT,
+            (r.w - p(64.0)) as f32,
+        );
+        let (cx, cy) = ((r.right() - p(26.0)) as f32, mid as f32);
+        if chosen {
+            cv.fill_circle(cx, cy, 9.0 * s, ACCENT);
+            cv.stroke(
+                &[
+                    (cx - 4.0 * s, cy),
+                    (cx - 1.2 * s, cy + 3.0 * s),
+                    (cx + 4.2 * s, cy - 3.2 * s),
+                ],
+                1.8 * s,
+                ACCENT_TEXT,
+            );
+        } else {
+            cv.fill_circle(cx, cy, 9.0 * s, BORDER_HOVER);
+            cv.fill_circle(cx, cy, 7.5 * s, BG_BAR);
+        }
+        self.hits.push((r, hit));
+    }
+
     fn draw_switch(&self, cv: &mut Canvas, x: i32, y: i32, on: bool) {
         let s = self.scale;
         let p = |v: f32| (v * s).round() as i32;
@@ -4026,8 +4167,11 @@ pub fn sample_panel(page: u8, fullscreen: bool) -> Ui {
     let mut m = sample(true);
     m.drawer_page = page;
     m.fullscreen = fullscreen;
+    m.speakers = vec!["Speakers (Realtek Audio)".into(), "Headset (USB Audio)".into()];
     if let Some(t) = m.tab_mut(1) {
         t.clipboard = true;
+        t.sound = true;
+        t.speaker = Some("Headset (USB Audio)".into());
         if page == 2 {
             t.quality.wallpaper = false;
         }

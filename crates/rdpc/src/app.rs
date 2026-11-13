@@ -41,6 +41,8 @@ pub enum UserEvent {
     Retry(u64),
     /// A Windows key combination taken by the keyboard hook: (scancode, extended, down).
     HookKey(u8, bool, bool),
+    /// The folder picker closed: (session or None for the form, folder).
+    Picked(Option<u64>, Option<std::path::PathBuf>),
     /// A session waits for the user to trust its server certificate.
     Certificate(u64, ui::CertPrompt, std::sync::mpsc::Sender<bool>),
     /// The update check found a newer release.
@@ -317,6 +319,7 @@ impl App {
         };
         let c = &s.controls;
         c.set_scale(scale);
+        c.set_speaker(crate::audio::device_index(opts.speaker.as_deref()));
         let mut warn = Vec::new();
         let mut on = |r: Result<(), String>, what: &str| match r {
             Ok(()) => true,
@@ -345,6 +348,7 @@ impl App {
             t.quality = opts.quality;
             t.quality_live = opts.quality;
             t.win_keys = opts.win_keys;
+            t.speaker = opts.speaker.clone();
             t.scale = opts.scale;
             t.clipboard = clipboard;
             t.sound = sound;
@@ -375,6 +379,7 @@ impl App {
             drives: t.drives.iter().map(|d| d.path.clone()).collect(),
             quality: t.quality,
             win_keys: t.win_keys,
+            speaker: t.speaker.clone(),
         }
     }
 
@@ -440,6 +445,20 @@ impl App {
                 self.dirty();
             }
             Action::SetFullscreen(on) => self.set_fullscreen(on),
+            Action::Browse(target) => {
+                let proxy = std::sync::Mutex::new(self.proxy.clone());
+                crate::picker::pick_folder(self.hwnd(), move |path| {
+                    if let Ok(p) = proxy.lock() {
+                        let _ = p.send_event(UserEvent::Picked(target, path));
+                    }
+                });
+            }
+            Action::SetSpeaker(id, name) => {
+                if let Some(s) = self.sessions.get(&id) {
+                    s.controls
+                        .set_speaker(crate::audio::device_index(name.as_deref()));
+                }
+            }
             Action::CertAnswer(id, trust) => {
                 if let Some(tx) = self.sessions.get_mut(&id).and_then(|s| s.cert_reply.take()) {
                     let _ = tx.send(trust);
@@ -1125,6 +1144,7 @@ impl ApplicationHandler<UserEvent> for App {
                         ui: {
                             let mut ui = Ui::new(Store::load(), scale);
                             remembered_unlock(&mut ui);
+                            ui.speakers = crate::audio::output_devices();
                             check_for_update(self.proxy.clone());
                             ui.custom_frame = framed;
                             ui
@@ -1195,6 +1215,19 @@ impl ApplicationHandler<UserEvent> for App {
                 }
                 return;
             }
+            UserEvent::Picked(target, Some(path)) => {
+                let path = path.to_string_lossy().into_owned();
+                match target {
+                    Some(id) => self.handle_action(Action::AddDrive(id, path)),
+                    None => {
+                        if let Some(m) = &mut self.win {
+                            m.ui.form_add_folder(path);
+                        }
+                    }
+                }
+                return self.dirty();
+            }
+            UserEvent::Picked(_, None) => return,
             UserEvent::Certificate(id, prompt, reply) => {
                 match self.sessions.get_mut(&id) {
                     Some(s) => s.cert_reply = Some(reply),

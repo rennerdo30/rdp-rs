@@ -135,6 +135,9 @@ pub struct SessionOptions {
     pub smart_cards: bool,
     /// Local folders shared as drives.
     pub drives: Vec<String>,
+    /// Output device for the session's sound, by name; None: the default.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub speaker: Option<String>,
     /// Picture quality and desktop experience (part of Display for inheritance).
     pub quality: Quality,
     /// Where Windows key combinations go (part of Display for inheritance).

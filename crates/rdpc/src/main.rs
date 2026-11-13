@@ -20,6 +20,7 @@ mod frame;
 mod icon;
 mod keyhook;
 mod known_hosts;
+mod picker;
 mod printing;
 mod session;
 mod smartcard;

@@ -8,7 +8,8 @@ use rdp::{
     AudioHandle, ClipboardHandle, DisplayHandle, Drdynvc, RdpdrHandle, StaticChannel, StaticOverDvc,
 };
 
-use crate::audio::WaveOut;
+use crate::audio::{DEFAULT_DEVICE, Speaker, WaveOut};
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use std::sync::{Arc, Mutex};
 
@@ -22,6 +23,7 @@ pub struct Controls {
     devices: RdpdrHandle,
     /// Sound over `rdpsnd` and over `AUDIO_PLAYBACK_DVC`; the server uses one.
     audio: [AudioHandle; 2],
+    speaker: Speaker,
     /// Device ids of the printers currently shared.
     printers: Mutex<Vec<u32>>,
     /// Device id of the shared smart card subsystem, while shared.
@@ -38,8 +40,9 @@ impl Controls {
         // Windows 8+ opens audio as the AUDIO_PLAYBACK_DVC dynamic channel and
         // falls back to the static rdpsnd channel, which also needs rdpdr
         // declared (MS-RDPEA 2.1). Offer both; whichever opens plays.
-        let (rdpsnd, audio_static) = rdp::rdpsnd(Box::new(WaveOut::default()));
-        let (audio_dvc_channel, audio_dvc) = rdp::rdpsnd(Box::new(WaveOut::default()));
+        let speaker: Speaker = Arc::new(AtomicU32::new(DEFAULT_DEVICE));
+        let (rdpsnd, audio_static) = rdp::rdpsnd(Box::new(WaveOut::new(speaker.clone())));
+        let (audio_dvc_channel, audio_dvc) = rdp::rdpsnd(Box::new(WaveOut::new(speaker.clone())));
         let dynamic: Vec<Box<dyn rdp::DynamicChannel>> = vec![
             Box::new(display_channel),
             Box::new(StaticOverDvc::new("AUDIO_PLAYBACK_DVC", audio_dvc_channel)),
@@ -59,6 +62,7 @@ impl Controls {
                 clipboard,
                 devices,
                 audio,
+                speaker,
                 printers: Mutex::new(Vec::new()),
                 smart_card: Mutex::new(None),
             },
@@ -69,6 +73,13 @@ impl Controls {
     pub fn set_clipboard(&self, on: bool) -> Result<(), String> {
         self.clipboard.set_enabled(on);
         Ok(())
+    }
+
+    /// Where the session's sound plays: a waveOut device index, or None for
+    /// the default output. Applies at once (the next wave reopens the device).
+    pub fn set_speaker(&self, device: Option<u32>) {
+        self.speaker
+            .store(device.unwrap_or(DEFAULT_DEVICE), Ordering::Relaxed);
     }
 
     /// Plays the session's sound locally; off drops the audio (no renegotiation).

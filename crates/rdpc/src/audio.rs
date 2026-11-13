@@ -6,31 +6,73 @@
 //! are recycled on the next write; when all are still playing the wave is
 //! dropped. The queue therefore holds at most [`SLOTS`] waves of latency.
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
+
 use rdp::rdpsnd::{AudioBackend, PcmFormat};
+
+/// The chosen output device, shared with the session controls: a waveOut
+/// device index, or [`DEFAULT_DEVICE`] for the system default.
+pub type Speaker = Arc<AtomicU32>;
+
+/// WAVE_MAPPER: the system's default output.
+pub const DEFAULT_DEVICE: u32 = u32::MAX;
 
 /// Queued buffers (one wave each). Windows servers send waves of about 20 to
 /// 50 ms, so this bounds the local latency to a few hundred milliseconds
 /// while riding out network jitter.
 pub const SLOTS: usize = 12;
 
-/// Audio backend on the default waveOut device (WAVE_MAPPER).
-#[derive(Default)]
+/// Audio backend on a waveOut device: the chosen one, or the default.
 pub struct WaveOut {
     #[cfg(windows)]
     device: Option<win::Device>,
     /// Waves dropped because every buffer was still queued.
     dropped: u64,
+    speaker: Speaker,
+    /// The format and device the open handle plays (a device change reopens it).
+    format: Option<PcmFormat>,
+    opened_on: u32,
+}
+
+impl Default for WaveOut {
+    fn default() -> Self {
+        WaveOut::new(Arc::new(AtomicU32::new(DEFAULT_DEVICE)))
+    }
+}
+
+impl WaveOut {
+    pub fn new(speaker: Speaker) -> Self {
+        WaveOut {
+            #[cfg(windows)]
+            device: None,
+            dropped: 0,
+            speaker,
+            format: None,
+            opened_on: DEFAULT_DEVICE,
+        }
+    }
 }
 
 #[cfg(windows)]
 impl AudioBackend for WaveOut {
     fn open(&mut self, format: &PcmFormat) -> Result<(), String> {
         self.close();
-        self.device = Some(win::Device::open(format)?);
+        let on = self.speaker.load(Ordering::Relaxed);
+        self.device = Some(win::Device::open(format, on)?);
+        self.format = Some(*format);
+        self.opened_on = on;
         Ok(())
     }
 
     fn write(&mut self, samples: &[u8]) -> Result<(), String> {
+        // Another output was chosen: move playback there.
+        let want = self.speaker.load(Ordering::Relaxed);
+        if want != self.opened_on
+            && let Some(format) = self.format
+        {
+            self.open(&format)?;
+        }
         let Some(device) = self.device.as_mut() else {
             return Err("audio device not open".into());
         };
@@ -108,7 +150,7 @@ mod win {
     unsafe impl Send for Device {}
 
     impl Device {
-        pub fn open(format: &PcmFormat) -> Result<Self, String> {
+        pub fn open(format: &PcmFormat, device: u32) -> Result<Self, String> {
             let (tag, channels, rate, avg, align, bits) = wave_format(format);
             let wfx = WAVEFORMATEX {
                 wFormatTag: tag,
@@ -122,7 +164,12 @@ mod win {
             let mut handle: HWAVEOUT = null_mut();
             // SAFETY: valid out pointer and format; no callback (CALLBACK_NULL),
             // so finished buffers are found by polling WHDR_DONE.
-            let rc = unsafe { waveOutOpen(&mut handle, WAVE_MAPPER, &wfx, 0, 0, CALLBACK_NULL) };
+            let id = if device == super::DEFAULT_DEVICE {
+                WAVE_MAPPER
+            } else {
+                device
+            };
+            let rc = unsafe { waveOutOpen(&mut handle, id, &wfx, 0, 0, CALLBACK_NULL) };
             if rc != MMSYSERR_NOERROR {
                 return Err(format!("waveOutOpen failed ({rc})"));
             }
@@ -212,6 +259,47 @@ mod win {
             }
         }
     }
+}
+
+/// Names of the local output devices, by waveOut index.
+pub fn output_devices() -> Vec<String> {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::Media::Audio::{
+            WAVEOUTCAPSW, waveOutGetDevCapsW, waveOutGetNumDevs,
+        };
+        use windows_sys::Win32::Media::MMSYSERR_NOERROR;
+        // SAFETY: plain queries with a valid out structure of the given size.
+        let n = unsafe { waveOutGetNumDevs() };
+        (0..n)
+            .filter_map(|i| {
+                let mut caps: WAVEOUTCAPSW = unsafe { std::mem::zeroed() };
+                let rc = unsafe {
+                    waveOutGetDevCapsW(
+                        i as usize,
+                        &mut caps,
+                        std::mem::size_of::<WAVEOUTCAPSW>() as u32,
+                    )
+                };
+                (rc == MMSYSERR_NOERROR).then(|| {
+                    let name = caps.szPname;
+                    let len = name.iter().position(|&c| c == 0).unwrap_or(name.len());
+                    String::from_utf16_lossy(&name[..len])
+                })
+            })
+            .collect()
+    }
+    #[cfg(not(windows))]
+    Vec::new()
+}
+
+/// The waveOut index of a device saved by name; None: the default (or gone).
+pub fn device_index(name: Option<&str>) -> Option<u32> {
+    let name = name?;
+    output_devices()
+        .iter()
+        .position(|d| d == name)
+        .map(|i| i as u32)
 }
 
 #[cfg(test)]
