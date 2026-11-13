@@ -334,6 +334,15 @@ fn parse_reset_graphics_and_wire_to_surface() {
     let mut bad = b.clone();
     bad[16] = 17; // monitorCount over 16
     assert!(parse_pdus(&bad).is_err());
+    // 17 monitors refused even when the PDU is long enough to hold them.
+    let mut body = Vec::new();
+    body.put_u32(1024);
+    body.put_u32(768);
+    body.put_u32(17);
+    body.resize(12 + 17 * 20, 0);
+    assert!(parse_pdus(&pdu(CMDID_RESETGRAPHICS, &body)).is_err());
+    body[8] = 16;
+    assert!(parse_pdus(&pdu(CMDID_RESETGRAPHICS, &body)).is_ok());
     let mut body = hex("01 00 0A 00 20");
     body.extend(rect(1, 1, 3, 2));
     body.extend(hex("03 00 00 00 AA BB CC"));
@@ -390,7 +399,8 @@ fn avc420_metablock() {
     let mut data = hex("02 00 00 00");
     data.extend(rect(0, 0, 16, 16));
     data.extend(rect(16, 0, 32, 8));
-    data.extend(hex("16 64 9A 32")); // qp 22 q 100; qp 26 progressive q 50
+    // qp 22 q 100 with the reserved bit set; qp 26 progressive q 50.
+    data.extend(hex("56 64 9A 32"));
     data.extend(hex("00 00 00 01 67"));
     let m = parse_avc420(&data).unwrap();
     assert_eq!(m.regions.len(), 2);
@@ -461,6 +471,18 @@ fn yuv_frame_validate_and_sample() {
         ..f.clone()
     };
     assert!(short.validate().is_err());
+    // Chroma is shared by 2x2 pixels: x 4 and 5 use chroma column 2.
+    let wide = Yuv420Frame {
+        width: 6,
+        height: 2,
+        y: vec![128; 12],
+        u: vec![128, 128, 0],
+        v: vec![128; 3],
+        y_stride: 6,
+        uv_stride: 3,
+    };
+    assert_eq!(wide.rgb(4, 1), yuv_to_rgb(128, 0, 128));
+    assert_eq!(wide.rgb(3, 1), 0x0080_8080);
 }
 
 // ---- Surfaces, cache, output (3.3.1) ----
@@ -574,6 +596,12 @@ fn surface_to_surface_overlapping_copy() {
     assert!(s.copy(1, Area::new(2, 0, 2, 1), 2, &[(0, 0), (2, 0)]));
     assert_eq!(s.surface(2).unwrap().pixels, [2, 3, 2]);
     assert!(!s.copy(1, Area::new(0, 0, 1, 1), 9, &[(0, 0)]));
+    // Several points: every copy uses the source as it was before the
+    // first one (the first write overlaps the source).
+    let mut s = state_with_surface(4, 1);
+    s.blit(1, Area::new(0, 0, 4, 1), &[1, 2, 3, 4], 4);
+    assert!(s.copy(1, Area::new(0, 0, 2, 1), 1, &[(1, 0), (2, 0)]));
+    assert_eq!(s.surface(1).unwrap().pixels, [1, 1, 1, 2]);
 }
 
 #[test]
