@@ -11,6 +11,7 @@
 //! - [`dvc`] + [`disp`]: dynamic virtual channels (MS-RDPEDYC) and Display Control (MS-RDPEDISP)
 //! - [`cliprdr`]: clipboard redirection on the `cliprdr` channel (MS-RDPECLIP)
 //! - [`client`]: the connection sequence and the session loop
+//! - [`rdpsnd`]: audio output on the `rdpsnd` channel (MS-RDPEA)
 //! - [`rdpdr`]: device redirection (MS-RDPEFS) with shared drives, printers (MS-RDPEPC) and smart cards (MS-RDPESC)
 
 pub mod channel;
@@ -34,6 +35,7 @@ pub mod ntlm;
 pub mod pdu;
 pub mod pointer;
 pub mod rdpdr;
+pub mod rdpsnd;
 pub mod transport;
 pub mod x224;
 
@@ -51,3 +53,4 @@ pub use rdpdr::{
     Device, Drive, IoCompletion, IoRequest, PrintBackend, PrintFormat, Printer, PrinterInfo, Rdpdr,
     RdpdrHandle, SmartCardBackend, rdpdr, share_printers, smart_card_device,
 };
+pub use rdpsnd::{AudioBackend, AudioHandle, PcmFormat, Rdpsnd, rdpsnd};
