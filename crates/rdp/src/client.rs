@@ -82,6 +82,11 @@ pub struct Config {
     pub gateway: Option<crate::gateway::GatewayConfig>,
     /// Highest bulk compression type to advertise (MS-RDPBCGR 3.1.8).
     pub compression: Compression,
+    /// Bitmap updates (default) or the graphics pipeline (MS-RDPEGFX).
+    pub graphics: crate::Graphics,
+    /// H.264 decoder for AVC420 with [`crate::Graphics::Gfx`]; without one
+    /// (or if it returns `None`) the client advertises AVC as disabled.
+    pub h264: Option<crate::H264Factory>,
 }
 
 impl Config {
@@ -105,6 +110,8 @@ impl Config {
             verify_certificate: None,
             gateway: None,
             compression: Compression::Off,
+            graphics: crate::Graphics::Bitmap,
+            h264: None,
         }
     }
 }
@@ -204,6 +211,34 @@ pub struct Client {
     channels: Vec<Slot>,
     pointers: PointerCache,
     arc_cookie: Option<AutoReconnectCookie>,
+    /// Graphics pipeline output, when [`Config::graphics`] asks for it.
+    gfx: Option<crate::gfx::GfxHandle>,
+}
+
+/// Adds the graphics channel to the `drdynvc` handler, or adds a `drdynvc`
+/// handler for it (MS-RDPEGFX 2.1).
+fn add_gfx_channel(
+    cfg: &Config,
+    handlers: &mut Vec<Box<dyn StaticChannel>>,
+) -> crate::gfx::GfxHandle {
+    let decoder = cfg.h264.as_ref().and_then(|make| make());
+    trace!(
+        "graphics pipeline offered; H.264 decoder {}",
+        if decoder.is_some() {
+            "available"
+        } else {
+            "not available"
+        }
+    );
+    let (channel, handle) = crate::gfx::graphics(decoder);
+    let mut channel: Option<Box<dyn crate::DynamicChannel>> = Some(Box::new(channel));
+    if let Some(host) = handlers.iter_mut().find_map(|h| h.as_drdynvc()) {
+        host.add(channel.take().expect("not yet added"));
+    }
+    if let Some(channel) = channel {
+        handlers.push(Box::new(crate::Drdynvc::new(vec![channel])));
+    }
+    handle
 }
 
 /// Sends one complete virtual channel message, chunked.
@@ -294,7 +329,9 @@ impl Client {
     }
 
     /// Connects and opens the given static virtual channels.
-    pub fn connect_with(cfg: &Config, handlers: Vec<Box<dyn StaticChannel>>) -> Result<Client> {
+    pub fn connect_with(cfg: &Config, mut handlers: Vec<Box<dyn StaticChannel>>) -> Result<Client> {
+        let gfx =
+            (cfg.graphics == crate::Graphics::Gfx).then(|| add_gfx_channel(cfg, &mut handlers));
         let mut deadline = Instant::now() + cfg.timeout;
         let (user, domain) = split_user(cfg);
 
@@ -389,6 +426,7 @@ impl Client {
             color_depth: cfg.color_depth,
             connection_type: cfg.connection_type,
             channels: &def_refs,
+            gfx: gfx.is_some(),
         };
         f.write(&x224::data(&mcs::connect_initial(
             &gcc::conference_create_request(&settings),
@@ -500,6 +538,7 @@ impl Client {
             // The server regenerates the cookie on every connect (5.5) and
             // sends the new one in the Save Session Info PDU.
             arc_cookie: None,
+            gfx,
         };
         // 7. Finalization; the Font Map reply is handled by the session loop.
         client.activate(&demand)?;
@@ -577,6 +616,7 @@ impl Client {
                 }
                 Err(e) => return Err(e),
             }
+            self.present_gfx(&mut out);
             if self.active {
                 self.tick_channels()?;
             }
@@ -584,6 +624,18 @@ impl Client {
                 return Ok(out);
             }
         }
+    }
+
+    /// Copies finished graphics pipeline frames into the framebuffer.
+    fn present_gfx(&mut self, out: &mut PollOutcome) {
+        let Some(gfx) = &self.gfx else { return };
+        let before = out.damage.len();
+        if gfx.present(&mut self.fb, &mut out.damage) {
+            out.resized = true;
+            self.info.width = self.fb.width as u16;
+            self.info.height = self.fb.height as u16;
+        }
+        out.updated |= out.damage.len() > before;
     }
 
     /// The latest auto-reconnect cookie from the server (MS-RDPBCGR 2.2.4.2),

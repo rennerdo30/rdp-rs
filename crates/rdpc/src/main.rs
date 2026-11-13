@@ -2,7 +2,7 @@
 //!
 //!   rdpc                                     connection manager
 //!   rdpc <host[:port]> -u <[DOMAIN\]user> [-d domain] [--size WxH] [-v]
-//!        [--compression off|rdp4|rdp5|rdp6|rdp61]
+//!        [--compression off|rdp4|rdp5|rdp6|rdp61] [--gfx]
 //!                                            one session window
 //!   rdpc <host> -u <user> --screenshot out.png [--wait SECONDS]
 //!                                            headless: save the desktop as PNG
@@ -18,6 +18,8 @@ mod clipboard;
 mod controls;
 #[cfg(windows)]
 mod frame;
+#[cfg(windows)]
+mod h264_mf;
 mod icon;
 mod keyhook;
 mod known_hosts;
@@ -58,6 +60,7 @@ struct Args {
     /// `--microphone [index]`: Some(None) is the default device.
     microphone: Option<Option<u32>>,
     list_microphones: bool,
+    gfx: bool,
 }
 
 fn usage() -> ! {
@@ -66,6 +69,7 @@ fn usage() -> ! {
          \x20      rdpc <host[:port]> -u <[DOMAIN\\]user> [-d domain] [--size WxH] [-v]\n\
          \x20           [--gateway gwhost[:port]]   (RD Gateway, same credentials)\n\
          \x20           [--compression off|rdp4|rdp5|rdp6|rdp61]\n\
+         \x20           [--gfx]   (graphics pipeline, MS-RDPEGFX)\n\
          \x20      rdpc <host> -u <user> --screenshot out.png [--wait SECONDS]\n\
          \x20      rdpc ... --microphone [INDEX]   (microphone on; see --list-microphones)\n\
          \x20      rdpc --snapshot-ui out.png [--scale 1.5]\n\
@@ -127,6 +131,7 @@ fn parse_args() -> Args {
                 a.microphone = Some(index.and_then(|v| v.parse().ok()));
             }
             "--list-microphones" => a.list_microphones = true,
+            "--gfx" => a.gfx = true,
             "-h" | "--help" => usage(),
             s if s.starts_with('-') => usage(),
             s => {
@@ -237,6 +242,13 @@ fn main() {
     if let Some((w, h)) = args.size {
         cfg.width = w;
         cfg.height = h;
+    }
+    if args.gfx {
+        cfg.graphics = rdp::Graphics::Gfx;
+        #[cfg(windows)]
+        {
+            cfg.h264 = Some(h264_mf::factory());
+        }
     }
 
     match &args.screenshot {
