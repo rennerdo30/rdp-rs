@@ -37,7 +37,12 @@ pub enum UserEvent {
     Frame,
     /// Key derivation for the vault finished (unlock or create).
     Vault(VaultResult),
+    /// Time for the next automatic reconnect attempt of a dropped session.
+    Retry(u64),
 }
+
+/// Automatic reconnect attempts after a network drop, and the wait before each.
+const RETRY_DELAYS_S: [u64; 5] = [1, 2, 4, 8, 15];
 
 pub enum VaultResult {
     Unlocked(Result<crate::vault::VaultKey, String>, bool),
@@ -103,6 +108,10 @@ struct Session {
     /// Native cursors made from the server's shapes, by shape identity. The
     /// Arc is kept so a freed shape's address cannot be reused for another.
     cursors: Vec<(Arc<rdp::PointerShape>, CustomCursor)>,
+    /// Automatic reconnects since the last successful connection.
+    retries: usize,
+    /// A retry is scheduled (cleared by Disconnect or a manual reconnect).
+    retry_pending: bool,
 }
 
 #[derive(Clone, PartialEq)]
@@ -230,6 +239,8 @@ impl App {
                 fit_requested: None,
                 cursor: RemoteCursor::Default,
                 cursors: Vec::new(),
+                retries: 0,
+                retry_pending: false,
             },
         );
         self.apply_options(id, &opts);
@@ -362,11 +373,26 @@ impl App {
                 }
             }
             Action::Disconnect(id) => {
-                if let Some(w) = self.sessions.get_mut(&id).and_then(|s| s.worker.as_mut()) {
-                    w.close();
+                if let Some(s) = self.sessions.get_mut(&id) {
+                    if s.retry_pending {
+                        s.retry_pending = false;
+                        if let Some(t) = self.win.as_mut().and_then(|w| w.ui.tab_mut(id)) {
+                            t.state = TabState::Ended("reconnect cancelled".into());
+                        }
+                    }
+                    if let Some(w) = s.worker.as_mut() {
+                        w.close();
+                    }
                 }
             }
-            Action::Reconnect(id) => self.reconnect(id),
+            Action::Reconnect(id) => {
+                if let Some(s) = self.sessions.get_mut(&id) {
+                    s.retry_pending = false;
+                    s.retries = 0;
+                    s.cfg.auto_reconnect = None;
+                }
+                self.reconnect(id)
+            }
             Action::CloseTab(id) => {
                 if let Some(mut s) = self.sessions.remove(&id)
                     && let Some(w) = s.worker.as_mut()
@@ -778,6 +804,48 @@ impl App {
     }
 
     /// The worker finished: join it and show why in the tab.
+    /// The network dropped a session: reconnect after a short wait, with the
+    /// server's auto-reconnect cookie, a few times before giving up.
+    fn dropped(&mut self, id: u64, why: String, cookie: Option<rdp::AutoReconnectCookie>) {
+        let Some(s) = self.sessions.get_mut(&id) else {
+            return;
+        };
+        let attempt = s.retries;
+        let Some(&delay) = RETRY_DELAYS_S.get(attempt) else {
+            return self.ended(
+                id,
+                TabState::Failed(format!(
+                    "{why} (gave up after {} reconnect attempts)",
+                    RETRY_DELAYS_S.len()
+                )),
+            );
+        };
+        s.retries += 1;
+        s.retry_pending = true;
+        if cookie.is_some() {
+            s.cfg.auto_reconnect = cookie;
+        }
+        rdp::trace!(
+            "ui: session {id} dropped ({why}); reconnect {}/{} in {delay} s",
+            attempt + 1,
+            RETRY_DELAYS_S.len()
+        );
+        self.ended(id, TabState::Connecting);
+        self.message(
+            format!(
+                "Connection lost ({why}). Reconnecting in {delay} s, attempt {}/{}…",
+                attempt + 1,
+                RETRY_DELAYS_S.len()
+            ),
+            theme::WARN,
+        );
+        let proxy = self.proxy.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_secs(delay));
+            let _ = proxy.send_event(UserEvent::Retry(id));
+        });
+    }
+
     fn ended(&mut self, id: u64, state: TabState) {
         if let Some(s) = self.sessions.get_mut(&id)
             && let Some(mut w) = s.worker.take()
@@ -950,6 +1018,14 @@ impl ApplicationHandler<UserEvent> for App {
                 self.vault_result(r);
                 return self.dirty();
             }
+            UserEvent::Retry(id) => {
+                if let Some(s) = self.sessions.get_mut(&id)
+                    && std::mem::take(&mut s.retry_pending)
+                {
+                    self.reconnect(id);
+                }
+                return;
+            }
             UserEvent::Frame => {
                 if let Some(m) = &mut self.win {
                     #[cfg(windows)]
@@ -964,6 +1040,9 @@ impl ApplicationHandler<UserEvent> for App {
         let active = self.win.as_ref().and_then(|w| w.ui.active) == Some(id);
         match ev {
             session::Event::Connected(info) => {
+                if let Some(s) = self.sessions.get_mut(&id) {
+                    s.retries = 0;
+                }
                 if let Some(t) = self.win.as_mut().and_then(|w| w.ui.tab_mut(id)) {
                     t.state = TabState::Connected {
                         width: info.width,
@@ -1037,6 +1116,7 @@ impl ApplicationHandler<UserEvent> for App {
                 self.ended(id, TabState::Ended(why));
             }
             session::Event::Failed(why) => self.ended(id, TabState::Failed(why)),
+            session::Event::Dropped { why, cookie } => self.dropped(id, why, cookie),
         }
     }
 

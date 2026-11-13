@@ -15,6 +15,12 @@ pub enum Event {
     /// New damage is waiting in `Shared`.
     Frame,
     Closed(String),
+    /// The network dropped the session; reconnecting may resume it (the
+    /// cookie lets the server reattach without a new logon).
+    Dropped {
+        why: String,
+        cookie: Option<rdp::AutoReconnectCookie>,
+    },
     /// The remote cursor changed shape (or was hidden / reset).
     Pointer(rdp::PointerUpdate),
     Failed(String),
@@ -122,6 +128,12 @@ fn run(
         }
         let out = match client.poll(Duration::from_millis(4)) {
             Ok(o) => o,
+            Err(e) if e.is_network_drop() => {
+                return emit(Event::Dropped {
+                    why: e.to_string(),
+                    cookie: client.auto_reconnect_cookie(),
+                });
+            }
             Err(e) => return emit(Event::Failed(e.to_string())),
         };
         if out.resized || !out.damage.is_empty() {
@@ -147,6 +159,12 @@ fn run(
             emit(Event::Pointer(p));
         }
         if let Some(reason) = out.closed {
+            if reason.reconnectable {
+                return emit(Event::Dropped {
+                    why: reason.text,
+                    cookie: client.auto_reconnect_cookie(),
+                });
+            }
             return emit(Event::Closed(reason.text));
         }
     }
