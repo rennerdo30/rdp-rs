@@ -166,6 +166,12 @@ struct MainWin {
     /// window resizes or moves, Windows may change screen pixels behind our
     /// back, so presenting only changed tiles could leave stale ones.
     settle: Option<std::time::Instant>,
+    /// Spanning monitors: where the window was before (position, size, maximised).
+    span_restore: Option<(
+        winit::dpi::PhysicalPosition<i32>,
+        winit::dpi::PhysicalSize<u32>,
+        bool,
+    )>,
     /// The session a mouse button went down in (gets the release too).
     pressed_in: Option<u64>,
 }
@@ -303,6 +309,18 @@ impl App {
 
     fn set_fullscreen(&mut self, on: bool) {
         let Some(m) = &mut self.win else { return };
+        // Leaving a monitor span: back to the window as it was.
+        if !on && let Some((pos, size, maximized)) = m.span_restore.take() {
+            let win = &m.gfx.window;
+            win.set_decorations(true);
+            win.set_outer_position(pos);
+            let _ = win.request_inner_size(size);
+            win.set_maximized(maximized);
+            m.ui.fullscreen = false;
+            m.shown.clear();
+            self.settle();
+            return self.dirty();
+        }
         if on && m.ui.active.is_none() {
             return;
         }
@@ -380,6 +398,22 @@ impl App {
         cfg.keyboard_layout = crate::keyhook::local_layout();
         // Picture quality is fixed at logon; reconnects keep this config.
         opts.quality.apply(&mut cfg);
+        // Chosen monitors: the session spans them, full screen.
+        let span = if opts.monitors.is_empty() {
+            None
+        } else {
+            let chosen = crate::monitors::chosen(&crate::monitors::list(), &opts.monitors);
+            let b = crate::monitors::bounds(&chosen);
+            if b.is_none() {
+                self.message(
+                    "The chosen monitors are not connected; using this window.",
+                    theme::WARN,
+                );
+            }
+            cfg.monitors = chosen.iter().map(|m| m.monitor.clone()).collect();
+            b
+        };
+        let fit = fit && span.is_none();
         let id = self.next_id;
         self.next_id += 1;
         let (worker, controls) = self.spawn_worker(id, cfg.clone());
@@ -402,7 +436,33 @@ impl App {
             },
         );
         self.apply_options(id, &opts);
+        if let Some(b) = span {
+            self.span_window(b);
+        }
         self.dirty();
+    }
+
+    /// Covers the chosen monitors with the window: borderless, at their
+    /// bounding box, the session filling it (the bar hides at the top edge).
+    fn span_window(&mut self, (x, y, w, h): (i32, i32, i32, i32)) {
+        let Some(m) = &mut self.win else { return };
+        let win = &m.gfx.window;
+        if m.span_restore.is_none() {
+            m.span_restore = Some((
+                win.outer_position().unwrap_or_default(),
+                win.inner_size(),
+                win.is_maximized(),
+            ));
+        }
+        win.set_fullscreen(None);
+        win.set_maximized(false);
+        win.set_decorations(false);
+        win.set_outer_position(winit::dpi::PhysicalPosition::new(x, y));
+        let _ = win.request_inner_size(winit::dpi::PhysicalSize::new(w as u32, h as u32));
+        m.ui.fullscreen = true;
+        m.ui.drawer = false;
+        m.shown.clear();
+        self.settle();
     }
 
     /// Applies a connection's session settings to a new session: the scale,
@@ -482,6 +542,8 @@ impl App {
             speaker: t.speaker.clone(),
             microphone: t.microphone,
             mic: t.mic.clone(),
+            // A reconnect keeps the session's monitors in its config.
+            monitors: Vec::new(),
         }
     }
 
@@ -1515,6 +1577,7 @@ impl ApplicationHandler<UserEvent> for App {
                             remembered_unlock(&mut ui);
                             ui.speakers = crate::audio::output_devices();
                             ui.mics = crate::mic::input_devices();
+                            ui.local_monitors = crate::monitors::list();
                             // Loads the folder picker's shell components early.
                             crate::picker::prewarm();
                             std::thread::spawn(|| {
@@ -1541,6 +1604,7 @@ impl ApplicationHandler<UserEvent> for App {
                         shown_cursor: Shown::Icon(CursorIcon::Default),
                         chrome_dirty: true,
                         settle: None,
+                        span_restore: None,
                         pressed_in: None,
                     });
                 }

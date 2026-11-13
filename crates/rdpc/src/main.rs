@@ -26,6 +26,7 @@ mod icon;
 mod keyhook;
 mod known_hosts;
 mod mic;
+mod monitors;
 mod picker;
 mod printing;
 mod recorder;
@@ -280,7 +281,7 @@ fn main() {
         cfg.height = h;
     }
     if args.multimon {
-        cfg.monitors = local_monitors();
+        cfg.monitors = monitors::list().into_iter().map(|m| m.monitor).collect();
         eprintln!("{} local monitors: {:?}", cfg.monitors.len(), cfg.monitors);
     }
     if args.gfx {
@@ -317,73 +318,6 @@ fn release_own_console() {
         // SAFETY: no arguments; a failure only leaves the console open.
         unsafe { FreeConsole() };
     }
-}
-
-/// The local monitors in virtual-screen coordinates, with their effective
-/// scale (EnumDisplayMonitors, GetMonitorInfoW, GetDpiForMonitor).
-#[cfg(windows)]
-fn local_monitors() -> Vec<rdp::Monitor> {
-    use windows_sys::Win32::Foundation::{LPARAM, RECT};
-    use windows_sys::Win32::Graphics::Gdi::{
-        EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITORINFO,
-    };
-    use windows_sys::Win32::UI::HiDpi::{
-        DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetDpiForMonitor, MDT_EFFECTIVE_DPI,
-        SetThreadDpiAwarenessContext,
-    };
-    use windows_sys::Win32::UI::WindowsAndMessaging::MONITORINFOF_PRIMARY;
-    use windows_sys::core::BOOL;
-
-    unsafe extern "system" fn add(m: HMONITOR, _: HDC, _: *mut RECT, data: LPARAM) -> BOOL {
-        // SAFETY: `data` is the Vec passed below, alive for the whole call.
-        let list = unsafe { &mut *(data as *mut Vec<rdp::Monitor>) };
-        let mut info: MONITORINFO = unsafe { std::mem::zeroed() };
-        info.cbSize = std::mem::size_of::<MONITORINFO>() as u32;
-        // SAFETY: `info` is a valid MONITORINFO with cbSize set.
-        if unsafe { GetMonitorInfoW(m, &mut info) } == 0 {
-            return 1;
-        }
-        let (mut dx, mut dy) = (96u32, 96u32);
-        // SAFETY: valid monitor handle and out pointers.
-        let scale = match unsafe { GetDpiForMonitor(m, MDT_EFFECTIVE_DPI, &mut dx, &mut dy) } {
-            0 => dx * 100 / 96,
-            _ => 0,
-        };
-        let r = info.rcMonitor;
-        list.push(rdp::Monitor {
-            left: r.left,
-            top: r.top,
-            right: r.right - 1,
-            bottom: r.bottom - 1,
-            primary: info.dwFlags & MONITORINFOF_PRIMARY != 0,
-            scale,
-            ..Default::default()
-        });
-        1
-    }
-
-    let mut list: Vec<rdp::Monitor> = Vec::new();
-    // Physical pixels, not DPI-virtualized ones, for this thread only.
-    // SAFETY: plain calls; the previous context is restored after.
-    unsafe {
-        let old = SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
-        EnumDisplayMonitors(
-            std::ptr::null_mut(),
-            std::ptr::null(),
-            Some(add),
-            &mut list as *mut Vec<rdp::Monitor> as LPARAM,
-        );
-        if !old.is_null() {
-            SetThreadDpiAwarenessContext(old);
-        }
-    }
-    list
-}
-
-#[cfg(not(windows))]
-fn local_monitors() -> Vec<rdp::Monitor> {
-    eprintln!("--multimon: monitor enumeration is Windows-only; using one monitor");
-    Vec::new()
 }
 
 /// Headless mode: connect, wait until the screen has settled, save a PNG and

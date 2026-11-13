@@ -152,6 +152,9 @@ pub struct SessionOptions {
     pub quality: Quality,
     /// Where Windows key combinations go (part of Display for inheritance).
     pub win_keys: WinKeys,
+    /// Local monitors the session spans, by device name; empty: the window.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub monitors: Vec<String>,
 }
 
 /// Where Win, Alt+Tab and the like go, as mstsc's "Apply Windows key combinations".
@@ -725,6 +728,7 @@ impl Store {
             out.options.scale = g.options.scale;
             out.options.quality = g.options.quality;
             out.options.win_keys = g.options.win_keys;
+            out.options.monitors = g.options.monitors.clone();
         }
         if let Some(g) = self.source_of(&c.group, &c.inherit, |i| i.sharing) {
             let own = out.options.clone();
@@ -732,6 +736,7 @@ impl Store {
             out.options.scale = own.scale;
             out.options.quality = own.quality;
             out.options.win_keys = own.win_keys;
+            out.options.monitors = own.monitors;
         }
         out
     }

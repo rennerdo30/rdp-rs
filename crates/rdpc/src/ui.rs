@@ -150,6 +150,8 @@ pub enum Hit {
     /// Settings: update channel (index into CHANNELS) and Check now.
     UpdateChannel(usize),
     CheckNow,
+    /// Monitor map in the editor: toggle a monitor (index into `local_monitors`).
+    FormMonitor(usize),
     /// Microphone device: index into `mics` + 1 (0 = default); form and panel.
     FormMic(usize),
     TabMic(u64, usize),
@@ -456,6 +458,8 @@ pub struct Ui {
     pub speakers: Vec<String>,
     /// Local microphones (the app fills it in).
     pub mics: Vec<String>,
+    /// This PC's monitors (the app fills it in).
+    pub local_monitors: Vec<crate::monitors::LocalMonitor>,
     /// Connection editor page.
     form_page: u8,
     /// The Settings page is open (instead of the editor).
@@ -546,6 +550,7 @@ impl Ui {
             session_clip: None,
             speakers: Vec::new(),
             mics: Vec::new(),
+            local_monitors: Vec::new(),
             form_page: 0,
             settings_open: false,
             auto_lock: 15,
@@ -1385,6 +1390,17 @@ impl Ui {
                 self.form_page = i;
                 self.home_scroll = 0;
                 self.focus = None;
+            }
+            Hit::FormMonitor(i) => {
+                if let Some(m) = self.local_monitors.get(i) {
+                    let name = m.name.clone();
+                    let list = &mut self.opts.monitors;
+                    if let Some(at) = list.iter().position(|n| *n == name) {
+                        list.remove(at);
+                    } else {
+                        list.push(name);
+                    }
+                }
             }
             Hit::FormMic(i) => {
                 self.opts.mic = i.checked_sub(1).and_then(|i| self.mics.get(i).cloned());
@@ -3510,7 +3526,77 @@ impl Ui {
             })
             .collect();
         self.segmented(cv, te, f, Rect::new(x, y, w, p(34.0)), &items);
-        y + p(34.0)
+        y += p(34.0) + p(20.0);
+
+        self.caption(cv, te, f, x, y, w, "MONITORS");
+        y += p(24.0);
+        y = self.monitor_map(cv, te, f, x, y, w);
+        let n = self.opts.monitors.len();
+        let hint = match n {
+            0 => "None chosen: the session runs in this window. Click monitors to span the session over them.".to_string(),
+            1 => "Full screen on the chosen monitor.".to_string(),
+            n => format!("Full screen across the {n} chosen monitors."),
+        };
+        self.hint(cv, te, f, x, y + p(16.0), w, &hint);
+        y + p(24.0)
+    }
+
+    /// This PC's monitors in their real arrangement; chosen ones are lit.
+    #[allow(clippy::too_many_arguments)]
+    fn monitor_map(
+        &mut self,
+        cv: &mut Canvas,
+        te: &mut TextEngine,
+        f: &Fonts,
+        x: i32,
+        y: i32,
+        w: i32,
+    ) -> i32 {
+        let s = self.scale;
+        let p = |v: f32| (v * s).round() as i32;
+        let mons = self.local_monitors.clone();
+        let box_h = p(150.0);
+        let frame = Rect::new(x, y, w, box_h);
+        cv.round_border(frame, 8.0 * s, BORDER_SOFT, BG_BAR);
+        let Some((bl, bt, bw, bh)) = crate::monitors::bounds(&mons) else {
+            centered(cv, te, f.ui, 12.5 * s, frame, "No monitors found.", TEXT_3);
+            return y + box_h;
+        };
+        let pad = p(16.0) as f32;
+        let k = ((frame.w as f32 - 2.0 * pad) / bw as f32)
+            .min((frame.h as f32 - 2.0 * pad) / bh as f32);
+        let ox = frame.x as f32 + (frame.w as f32 - bw as f32 * k) / 2.0;
+        let oy = frame.y as f32 + (frame.h as f32 - bh as f32 * k) / 2.0;
+        for (i, m) in mons.iter().enumerate() {
+            let r = Rect::new(
+                (ox + (m.monitor.left - bl) as f32 * k) as i32 + p(3.0),
+                (oy + (m.monitor.top - bt) as f32 * k) as i32 + p(3.0),
+                (m.width() as f32 * k) as i32 - p(6.0),
+                (m.height() as f32 * k) as i32 - p(6.0),
+            );
+            let on = self.opts.monitors.contains(&m.name);
+            let hit = Hit::FormMonitor(i);
+            let (border, fill, color) = if on {
+                (ACCENT, BG_SELECT, TEXT)
+            } else if self.hover == Some(hit) {
+                (BORDER_HOVER, CONTROL_HOVER, TEXT_2)
+            } else {
+                (BORDER, BG, TEXT_3)
+            };
+            cv.round_border(r, 5.0 * s, border, fill);
+            let num = (i + 1).to_string();
+            let top = Rect::new(r.x, r.y + r.h / 2 - p(18.0), r.w, p(22.0));
+            centered(cv, te, f.semi, 16.0 * s, top, &num, color);
+            let size = if m.monitor.primary {
+                format!("{} × {} · main", m.width(), m.height())
+            } else {
+                format!("{} × {}", m.width(), m.height())
+            };
+            let bottom = Rect::new(r.x, r.y + r.h / 2 + p(4.0), r.w, p(16.0));
+            centered(cv, te, f.ui, 11.0 * s, bottom, &size, color);
+            self.hits.push((r, hit));
+        }
+        y + box_h
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -5442,6 +5528,17 @@ pub fn sample_form(page: u8) -> Ui {
         "Headset (USB Audio)".into(),
     ];
     m.mics = vec!["Headset microphone (USB Audio)".into()];
+    let mon =
+        |name: &str, left: i32, w: u32, h: u32, primary: bool| crate::monitors::LocalMonitor {
+            name: name.into(),
+            monitor: rdp::Monitor::new(left, 0, w, h, primary),
+        };
+    m.local_monitors = vec![
+        mon(r"\.\DISPLAY2", -1920, 1920, 1080, false),
+        mon(r"\.\DISPLAY1", 0, 2560, 1440, true),
+        mon(r"\.\DISPLAY3", 2560, 1920, 1080, false),
+    ];
+    m.opts.monitors = vec![r"\.\DISPLAY1".into(), r"\.\DISPLAY3".into()];
     m.opts.sound = true;
     m.opts.microphone = true;
     m.opts.clipboard = true;
