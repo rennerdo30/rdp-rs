@@ -1231,3 +1231,22 @@ fn device_is_announced_before_logon_and_removed_live() {
     assert_eq!(out.take(), vec![remove]);
     assert_eq!(mock.with(|s| (s.contexts.len(), s.released.len())), (0, 1));
 }
+
+#[test]
+fn releasing_a_context_disconnects_its_cards() {
+    let mut h = Harness::new();
+    let ctx = h.establish();
+    let card = connect(&mut h, &ctx);
+    let other = h.establish();
+    let _other_card = connect(&mut h, &other);
+    let c = h.now(SCARD_IOCTL_RELEASECONTEXT, &context_call(&ctx));
+    assert_eq!(return_code(&c), 0);
+    assert_eq!(h.dev.handle_count(), (1, 1));
+    assert_eq!(
+        h.mock.with(|s| s.cards.len()),
+        1,
+        "card of the released context leaked"
+    );
+    let c = h.now(SCARD_IOCTL_STATUSW, &status_call(&card));
+    assert_eq!(return_code(&c), SCARD_E_INVALID_HANDLE);
+}
