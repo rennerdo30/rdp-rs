@@ -159,7 +159,7 @@ impl App {
 
     fn spawn_worker(&self, id: u64, cfg: Config) -> (Worker, Controls) {
         let proxy = self.proxy.clone();
-        let (channels, controls) = Controls::build();
+        let (channels, controls) = Controls::build(&cfg.client_name);
         let worker = session::spawn(cfg, channels, move |ev| {
             let _ = proxy.send_event(UserEvent::Session(id, ev));
         });
