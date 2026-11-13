@@ -28,6 +28,8 @@ pub const CMDID_CAPSCONFIRM: u16 = 0x0013;
 /// RDPGFX_WIRE_TO_SURFACE_PDU_1.codecId values (2.2.2.1).
 pub const CODECID_UNCOMPRESSED: u16 = 0x0000;
 pub const CODECID_CAVIDEO: u16 = 0x0003;
+/// RDPGFX_WIRE_TO_SURFACE_PDU_2.codecId: RemoteFX Progressive (2.2.2.2).
+pub const CODECID_CAPROGRESSIVE: u16 = 0x0009;
 pub const CODECID_CLEARCODEC: u16 = 0x0008;
 pub const CODECID_PLANAR: u16 = 0x000A;
 pub const CODECID_AVC420: u16 = 0x000B;
@@ -116,6 +118,16 @@ pub enum ServerPdu<'a> {
         dest: Rect16,
         data: &'a [u8],
     },
+    /// RDPGFX_WIRE_TO_SURFACE_PDU_2 (2.2.2.2).
+    WireToSurface2 {
+        surface_id: u16,
+        codec_id: u16,
+        context_id: u32,
+        pixel_format: u8,
+        data: &'a [u8],
+    },
+    /// RDPGFX_DELETE_ENCODING_CONTEXT_PDU (2.2.2.3).
+    DeleteEncodingContext { surface_id: u16, context_id: u32 },
     /// RDPGFX_SOLIDFILL_PDU (2.2.2.4); `color` is 0x00RRGGBB.
     SolidFill {
         surface_id: u16,
@@ -240,6 +252,24 @@ fn parse_body(cmd: u16, body: &[u8]) -> Result<ServerPdu<'_>> {
                 data: r.bytes(n)?,
             }
         }
+        CMDID_WIRETOSURFACE_2 => {
+            let surface_id = r.u16()?;
+            let codec_id = r.u16()?;
+            let context_id = r.u32()?;
+            let pixel_format = r.u8()?;
+            let n = r.u32()? as usize;
+            ServerPdu::WireToSurface2 {
+                surface_id,
+                codec_id,
+                context_id,
+                pixel_format,
+                data: r.bytes(n)?,
+            }
+        }
+        CMDID_DELETEENCODINGCONTEXT => ServerPdu::DeleteEncodingContext {
+            surface_id: r.u16()?,
+            context_id: r.u32()?,
+        },
         CMDID_SOLIDFILL => {
             let surface_id = r.u16()?;
             let [b, g, red, _xa] = r.array()?;
