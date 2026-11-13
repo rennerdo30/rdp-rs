@@ -1,12 +1,17 @@
 //! TCP/TLS transport and message framing.
 //!
-//! The socket keeps a short read timeout, so every read is a bounded poll. A
-//! partial PDU stays in `buf` until the rest arrives, which lets the session
-//! loop interleave network reads with window events on one thread.
+//! A reader thread does plain blocking reads on the socket and hands the
+//! bytes over a channel; the session waits on that channel with its own
+//! timeout. The socket itself never gets a read timeout: on Windows an
+//! expired SO_RCVTIMEO can leave an overlapped receive behind ("os error
+//! 997") and the socket in an undefined state. A partial PDU stays in `buf`
+//! until the rest arrives, so the session loop interleaves network reads
+//! with window events on one thread.
 
 use std::io::{self, Read, Write};
-use std::net::TcpStream;
+use std::net::{Shutdown, TcpStream};
 use std::sync::Arc;
+use std::sync::mpsc::{Receiver, RecvTimeoutError, channel};
 use std::time::{Duration, Instant};
 
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
@@ -23,11 +28,6 @@ pub enum Frame {
     FastPath(Vec<u8>),
 }
 
-enum Stream {
-    Tcp(TcpStream),
-    Tls(Box<(ClientConnection, TcpStream)>),
-}
-
 fn is_reset(e: &io::Error) -> bool {
     matches!(
         e.kind(),
@@ -35,109 +35,185 @@ fn is_reset(e: &io::Error) -> bool {
     )
 }
 
-fn is_timeout(e: &io::Error) -> bool {
-    matches!(
-        e.kind(),
-        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
-    )
+/// What the reader thread sends.
+enum Incoming {
+    Data(Vec<u8>),
+    Closed,
+    Failed(io::Error),
 }
 
-impl Stream {
-    /// Reads whatever is available; Ok(0) means the read timed out.
-    fn read_some(&mut self, out: &mut Vec<u8>) -> Result<usize> {
-        let mut tmp = [0u8; 16 * 1024];
-        match self {
-            Stream::Tcp(s) => match s.read(&mut tmp) {
-                Ok(0) => Err(Error::ConnectionLost("connection closed by server".into())),
-                Ok(n) => {
-                    out.extend_from_slice(&tmp[..n]);
-                    Ok(n)
-                }
-                Err(e) if is_timeout(&e) => Ok(0),
-                Err(e) => Err(e.into()),
-            },
-            Stream::Tls(b) => {
-                let (conn, sock) = &mut **b;
+/// Bytes from the socket, read on a thread of their own.
+struct Reader {
+    rx: Receiver<Incoming>,
+    /// Received bytes not yet consumed (by TLS, which takes them in pieces).
+    pending: Vec<u8>,
+    closed: bool,
+}
+
+impl Reader {
+    fn spawn(sock: TcpStream) -> Reader {
+        let (tx, rx) = channel();
+        std::thread::Builder::new()
+            .name("rdp-socket-read".into())
+            .spawn(move || {
+                let mut sock = sock;
+                let mut tmp = vec![0u8; 64 * 1024];
                 loop {
-                    match conn.reader().read(&mut tmp) {
-                        Ok(0) => {
-                            return Err(Error::ConnectionLost(
-                                "TLS session closed by server".into(),
-                            ));
-                        }
-                        Ok(n) => {
-                            out.extend_from_slice(&tmp[..n]);
-                            return Ok(n);
-                        }
-                        Err(e) if e.kind() == io::ErrorKind::WouldBlock => {}
-                        Err(e) => return Err(e.into()),
-                    }
-                    match conn.read_tls(sock) {
-                        Ok(0) => {
-                            return Err(Error::ConnectionLost(
-                                "connection closed by server".into(),
-                            ));
-                        }
-                        Ok(_) => {
-                            conn.process_new_packets()?;
-                            while conn.wants_write() {
-                                conn.write_tls(sock)?;
-                            }
-                        }
-                        Err(e) if is_timeout(&e) => return Ok(0),
-                        Err(e) => return Err(e.into()),
+                    let msg = match sock.read(&mut tmp) {
+                        Ok(0) => Incoming::Closed,
+                        Ok(n) => Incoming::Data(tmp[..n].to_vec()),
+                        Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                        Err(e) => Incoming::Failed(e),
+                    };
+                    let last = !matches!(msg, Incoming::Data(_));
+                    if tx.send(msg).is_err() || last {
+                        return;
                     }
                 }
+            })
+            .expect("spawn socket reader");
+        Reader {
+            rx,
+            pending: Vec::new(),
+            closed: false,
+        }
+    }
+
+    /// Waits up to `wait` for bytes in `pending`. Ok(false): nothing came.
+    fn fill(&mut self, wait: Duration) -> Result<bool> {
+        if !self.pending.is_empty() {
+            return Ok(true);
+        }
+        if self.closed {
+            return Err(Error::ConnectionLost("connection closed by server".into()));
+        }
+        let msg = match self.rx.recv_timeout(wait) {
+            Ok(m) => m,
+            Err(RecvTimeoutError::Timeout) => return Ok(false),
+            Err(RecvTimeoutError::Disconnected) => Incoming::Closed,
+        };
+        match msg {
+            Incoming::Data(d) => {
+                self.pending = d;
+                // Take whatever else already arrived in the same go.
+                while let Ok(Incoming::Data(more)) = self.rx.try_recv() {
+                    self.pending.extend_from_slice(&more);
+                }
+                Ok(true)
+            }
+            Incoming::Closed => {
+                self.closed = true;
+                Err(Error::ConnectionLost("connection closed by server".into()))
+            }
+            Incoming::Failed(e) if is_reset(&e) => {
+                self.closed = true;
+                Err(Error::ConnectionLost("connection reset by server".into()))
+            }
+            Incoming::Failed(e) => {
+                self.closed = true;
+                Err(e.into())
             }
         }
     }
 
-    fn write_all(&mut self, data: &[u8]) -> Result<()> {
-        match self {
-            Stream::Tcp(s) => s.write_all(data)?,
-            Stream::Tls(b) => {
-                let (conn, sock) = &mut **b;
-                conn.writer().write_all(data)?;
-                while conn.wants_write() {
-                    conn.write_tls(sock)?;
-                }
-            }
-        }
+    /// Feeds pending bytes to TLS (it may take only part of them).
+    fn feed(&mut self, conn: &mut ClientConnection) -> Result<()> {
+        let mut rd = &self.pending[..];
+        let n = conn.read_tls(&mut rd)?;
+        self.pending.drain(..n);
+        conn.process_new_packets()?;
         Ok(())
-    }
-
-    fn socket(&self) -> &TcpStream {
-        match self {
-            Stream::Tcp(s) => s,
-            Stream::Tls(b) => &b.1,
-        }
     }
 }
 
 pub struct Framer {
-    stream: Option<Stream>,
+    /// The write side; the reader thread owns a clone for reading.
+    sock: TcpStream,
+    reader: Reader,
+    tls: Option<Box<ClientConnection>>,
+    /// How long one read waits for data (`set_read_timeout`).
+    wait: Duration,
     buf: Vec<u8>,
+}
+
+impl Drop for Framer {
+    fn drop(&mut self) {
+        // Ends the reader thread's blocking read.
+        let _ = self.sock.shutdown(Shutdown::Both);
+    }
 }
 
 impl Framer {
     pub fn new(sock: TcpStream) -> Self {
+        let read = sock
+            .try_clone()
+            .expect("clone socket for the reader thread");
         Self {
-            stream: Some(Stream::Tcp(sock)),
+            sock,
+            reader: Reader::spawn(read),
+            tls: None,
+            wait: Duration::from_millis(100),
             buf: Vec::new(),
         }
     }
 
-    fn stream(&mut self) -> &mut Stream {
-        self.stream.as_mut().expect("stream present")
+    /// How long one read waits for data before reporting none.
+    pub fn set_read_timeout(&mut self, t: Duration) -> Result<()> {
+        self.wait = t;
+        Ok(())
     }
 
-    pub fn set_read_timeout(&mut self, t: Duration) -> Result<()> {
-        self.stream().socket().set_read_timeout(Some(t))?;
+    fn flush_tls(&mut self) -> Result<()> {
+        if let Some(conn) = &mut self.tls {
+            while conn.wants_write() {
+                conn.write_tls(&mut self.sock)?;
+            }
+        }
         Ok(())
     }
 
     pub fn write(&mut self, data: &[u8]) -> Result<()> {
-        self.stream().write_all(data)
+        match &mut self.tls {
+            None => self.sock.write_all(data)?,
+            Some(conn) => {
+                conn.writer().write_all(data)?;
+                self.flush_tls()?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Appends whatever is available to `buf`; Ok(0) means nothing came in time.
+    fn read_some(&mut self) -> Result<usize> {
+        let Some(conn) = &mut self.tls else {
+            if !self.reader.fill(self.wait)? {
+                return Ok(0);
+            }
+            let n = self.reader.pending.len();
+            self.buf.append(&mut self.reader.pending);
+            return Ok(n);
+        };
+        let mut tmp = [0u8; 16 * 1024];
+        loop {
+            match conn.reader().read(&mut tmp) {
+                Ok(0) => {
+                    return Err(Error::ConnectionLost("TLS session closed by server".into()));
+                }
+                Ok(n) => {
+                    self.buf.extend_from_slice(&tmp[..n]);
+                    return Ok(n);
+                }
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {}
+                Err(e) => return Err(e.into()),
+            }
+            if !self.reader.fill(self.wait)? {
+                return Ok(0);
+            }
+            self.reader.feed(conn)?;
+            while conn.wants_write() {
+                conn.write_tls(&mut self.sock)?;
+            }
+        }
     }
 
     /// Returns one message once `len_of(buf)` reports a complete one. With no
@@ -157,15 +233,7 @@ impl Framer {
                     return Ok(Some(self.buf.drain(..n).collect()));
                 }
             }
-            let mut tmp = std::mem::take(&mut self.buf);
-            let got = self.stream().read_some(&mut tmp).map_err(|e| match e {
-                Error::Io(io) if is_reset(&io) => {
-                    Error::ConnectionLost("connection reset by server".into())
-                }
-                other => other,
-            });
-            self.buf = tmp;
-            if got? == 0 {
+            if self.read_some()? == 0 {
                 match deadline {
                     None => return Ok(None),
                     Some(d) if Instant::now() >= d => return Err(Error::Timeout),
@@ -198,12 +266,12 @@ impl Framer {
 
     /// Upgrades the TCP stream to TLS and returns the server's end-entity certificate (DER).
     pub fn upgrade_tls(&mut self, host: &str, deadline: Instant) -> Result<Vec<u8>> {
-        if !self.buf.is_empty() {
+        if !self.buf.is_empty() || !self.reader.pending.is_empty() {
             return proto("unexpected data before TLS handshake");
         }
-        let Some(Stream::Tcp(mut sock)) = self.stream.take() else {
+        if self.tls.is_some() {
             return proto("TLS already active");
-        };
+        }
         let provider = Arc::new(rustls::crypto::ring::default_provider());
         let config = ClientConfig::builder_with_provider(provider.clone())
             .with_safe_default_protocol_versions()?
@@ -214,22 +282,31 @@ impl Framer {
             .map_err(|_| Error::Protocol(format!("invalid server name {host:?}")))?;
         let mut conn = ClientConnection::new(Arc::new(config), name)?;
         while conn.is_handshaking() {
-            match conn.complete_io(&mut sock) {
-                Ok(_) => {}
-                Err(e) if is_timeout(&e) => {
-                    if Instant::now() >= deadline {
-                        return Err(Error::Timeout);
-                    }
-                }
-                Err(e) => return Err(e.into()),
+            while conn.wants_write() {
+                conn.write_tls(&mut self.sock)?;
             }
+            if !conn.is_handshaking() {
+                break;
+            }
+            if conn.wants_read() {
+                let left = deadline.saturating_duration_since(Instant::now());
+                if left.is_zero() {
+                    return Err(Error::Timeout);
+                }
+                if self.reader.fill(left.min(self.wait))? {
+                    self.reader.feed(&mut conn)?;
+                }
+            }
+        }
+        while conn.wants_write() {
+            conn.write_tls(&mut self.sock)?;
         }
         let cert = conn
             .peer_certificates()
             .and_then(|c| c.first())
             .map(|c| c.as_ref().to_vec())
             .ok_or_else(|| Error::Protocol("server sent no certificate".into()))?;
-        self.stream = Some(Stream::Tls(Box::new((conn, sock))));
+        self.tls = Some(Box::new(conn));
         Ok(cert)
     }
 }
