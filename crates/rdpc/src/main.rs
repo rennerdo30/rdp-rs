@@ -13,6 +13,8 @@ mod app;
 mod audio;
 mod clipboard;
 mod controls;
+#[cfg(windows)]
+mod frame;
 mod icon;
 mod printing;
 mod session;
@@ -236,6 +238,7 @@ fn snapshot_ui(path: &str, scale: f32) -> Result<(), Box<dyn std::error::Error>>
     ] {
         let mut m = ui::sample(session);
         m.scale = scale;
+        m.custom_frame = cfg!(windows);
         let mut px = vec![0u32; w * h];
         m.paint(&mut Canvas::new(&mut px, w, h), &mut te, &fonts);
         write_png(&out, w, h, &px)?;

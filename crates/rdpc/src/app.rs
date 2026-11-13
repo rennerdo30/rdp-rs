@@ -33,6 +33,8 @@ use crate::ui::{self, Action, Fonts, Key, SharedDrive, TabState, Ui};
 
 pub enum UserEvent {
     Session(u64, session::Event),
+    /// The frame hook saw the maximise button or window state change.
+    Frame,
 }
 
 struct Gfx {
@@ -134,6 +136,10 @@ pub struct App {
     next_id: u64,
     direct: Option<(String, Config)>,
     mods: ModifiersState,
+    /// Set by the drawn close button; the event loop exits after the event.
+    quit: bool,
+    /// Title-row geometry last given to the frame hook.
+    caption_sent: Option<ui::TitleGeometry>,
     pub exit_code: i32,
 }
 
@@ -160,6 +166,8 @@ pub fn run(direct: Option<(String, Config)>) -> i32 {
         next_id: 1,
         direct,
         mods: ModifiersState::empty(),
+        quit: false,
+        caption_sent: None,
         exit_code: 0,
     };
     if let Err(e) = event_loop.run_app(&mut app) {
@@ -366,6 +374,12 @@ impl App {
                 }
             }
             Action::CtrlAltDel(id) => self.send(id, session::ctrl_alt_del()),
+            Action::WinMinimize => {
+                if let Some(m) = &self.win {
+                    m.gfx.window.set_minimized(true);
+                }
+            }
+            Action::WinClose => self.quit = true,
         }
     }
 
@@ -722,6 +736,8 @@ impl ApplicationHandler<UserEvent> for App {
                 });
             match made {
                 Ok(mut gfx) => {
+                    // Before reading the size: removing the caption grows the client area.
+                    let framed = self.install_frame(&gfx);
                     let scale = gfx.window.scale_factor() as f32;
                     let sz = gfx.window.inner_size();
                     if let (Some(w), Some(h)) =
@@ -732,7 +748,11 @@ impl ApplicationHandler<UserEvent> for App {
                     gfx.window.request_redraw();
                     self.win = Some(MainWin {
                         gfx,
-                        ui: Ui::new(Store::load(), scale),
+                        ui: {
+                            let mut ui = Ui::new(Store::load(), scale);
+                            ui.custom_frame = framed;
+                            ui
+                        },
                         shown: Vec::new(),
                         scratch: Vec::new(),
                         size: (sz.width as usize, sz.height as usize),
@@ -756,7 +776,19 @@ impl ApplicationHandler<UserEvent> for App {
     }
 
     fn user_event(&mut self, el: &ActiveEventLoop, event: UserEvent) {
-        let UserEvent::Session(id, ev) = event;
+        let (id, ev) = match event {
+            UserEvent::Session(id, ev) => (id, ev),
+            UserEvent::Frame => {
+                if let Some(m) = &mut self.win {
+                    #[cfg(windows)]
+                    {
+                        m.ui.max_state = crate::frame::max_button_state();
+                    }
+                    m.ui.maximized = m.gfx.window.is_maximized();
+                }
+                return self.dirty();
+            }
+        };
         let active = self.win.as_ref().and_then(|w| w.ui.active) == Some(id);
         match ev {
             session::Event::Connected(info) => {
@@ -836,22 +868,79 @@ impl ApplicationHandler<UserEvent> for App {
         }
     }
 
-    fn window_event(&mut self, el: &ActiveEventLoop, _wid: WindowId, event: WindowEvent) {
+    fn window_event(&mut self, el: &ActiveEventLoop, wid: WindowId, event: WindowEvent) {
+        self.window_event_inner(el, wid, event);
+        if std::mem::take(&mut self.quit) {
+            self.close_all(el);
+        }
+    }
+}
+
+impl App {
+    /// Disconnects every session and ends the event loop.
+    fn close_all(&mut self, el: &ActiveEventLoop) {
+        for s in self.sessions.values_mut() {
+            if let Some(w) = s.worker.as_mut() {
+                w.close();
+            }
+        }
+        el.exit();
+    }
+
+    /// Makes the tab strip the title row (Windows 11 look). False when the
+    /// hook is not available; the system caption then stays.
+    fn install_frame(&self, gfx: &Gfx) -> bool {
+        #[cfg(windows)]
+        {
+            use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+            let hwnd = match gfx.window.window_handle().map(|h| h.as_raw()) {
+                Ok(RawWindowHandle::Win32(h)) => h.hwnd.get(),
+                _ => return false,
+            };
+            let proxy = std::sync::Mutex::new(self.proxy.clone());
+            crate::frame::install(hwnd, move || {
+                if let Ok(p) = proxy.lock() {
+                    let _ = p.send_event(UserEvent::Frame);
+                }
+            })
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = gfx;
+            false
+        }
+    }
+
+    /// Tells the frame hook where the title row's controls are (on change).
+    fn send_caption(&mut self) {
+        let Some(m) = &self.win else { return };
+        if !m.ui.custom_frame {
+            return;
+        }
+        let geo = m.ui.title_geometry();
+        if self.caption_sent.as_ref() == Some(&geo) {
+            return;
+        }
+        #[cfg(windows)]
+        crate::frame::set_caption(crate::frame::Caption {
+            height: geo.height,
+            controls: geo.controls.clone(),
+            buttons_left: geo.buttons_left,
+            max_button: geo.max_button,
+        });
+        self.caption_sent = Some(geo);
+    }
+
+    fn window_event_inner(&mut self, el: &ActiveEventLoop, _wid: WindowId, event: WindowEvent) {
         if self.win.is_none() {
             return;
         }
         match event {
-            WindowEvent::CloseRequested => {
-                for s in self.sessions.values_mut() {
-                    if let Some(w) = s.worker.as_mut() {
-                        w.close();
-                    }
-                }
-                el.exit();
-            }
+            WindowEvent::CloseRequested => self.close_all(el),
             WindowEvent::Resized(sz) => {
                 let m = self.win.as_mut().unwrap();
                 m.size = (sz.width as usize, sz.height as usize);
+                m.ui.maximized = m.gfx.window.is_maximized();
                 if let (Some(w), Some(h)) = (NonZeroU32::new(sz.width), NonZeroU32::new(sz.height))
                 {
                     let _ = m.gfx.surface.resize(w, h);
@@ -866,6 +955,7 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::RedrawRequested => {
                 if self.win.as_ref().unwrap().chrome_dirty {
                     self.render_chrome();
+                    self.send_caption();
                     self.fit_active();
                     // Tabs and the drawer move the session area: re-pick the cursor.
                     self.apply_cursor();
@@ -873,10 +963,12 @@ impl ApplicationHandler<UserEvent> for App {
                     self.render_session_damage();
                 }
             }
-            WindowEvent::Focused(false) => {
-                if let Some((id, _)) = self.win.as_ref().unwrap().ui.session_area {
+            WindowEvent::Focused(focused) => {
+                self.win.as_mut().unwrap().ui.window_active = focused;
+                if !focused && let Some((id, _)) = self.win.as_ref().unwrap().ui.session_area {
                     self.send(id, session::release_modifiers());
                 }
+                self.dirty();
             }
             WindowEvent::CursorMoved { position, .. } => {
                 let (x, y) = (position.x as i32, position.y as i32);

@@ -105,6 +105,8 @@ pub enum Hit {
     RemoveDrive(u64, usize),
     CtrlAltDel(u64),
     Session(u64),
+    WinMinimize,
+    WinClose,
 }
 
 #[derive(Clone, PartialEq)]
@@ -165,6 +167,8 @@ pub enum Action {
     AddDrive(u64, String),
     RemoveDrive(u64, usize),
     CtrlAltDel(u64),
+    WinMinimize,
+    WinClose,
 }
 
 pub enum Key {
@@ -210,6 +214,27 @@ pub struct Ui {
     message: Option<(String, u32)>,
     pub scale: f32,
     pub renderer: String,
+    /// The tab strip is the window's title row (Windows 11 frame installed).
+    pub custom_frame: bool,
+    pub maximized: bool,
+    /// Maximise button (hover, pressed); it gets non-client messages, so the
+    /// frame hook reports its state.
+    pub max_state: (bool, bool),
+    /// The window has the focus (caption glyphs dim when it does not).
+    pub window_active: bool,
+    /// Title-row spans that are controls (clicks are ours, not window drags).
+    title_controls: Vec<(i32, i32)>,
+    caption: Rect,
+    title_height: i32,
+}
+
+/// Title-row geometry in physical pixels for the frame hook.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TitleGeometry {
+    pub height: i32,
+    pub controls: Vec<(i32, i32)>,
+    pub buttons_left: i32,
+    pub max_button: (i32, i32),
 }
 
 impl Ui {
@@ -232,6 +257,13 @@ impl Ui {
             message: None,
             scale,
             renderer: "CPU".into(),
+            custom_frame: false,
+            maximized: false,
+            max_state: (false, false),
+            window_active: true,
+            title_controls: Vec::new(),
+            caption: Rect::default(),
+            title_height: 0,
         };
         m.fields[Field::Password as usize] = TextField::secret();
         if m.store.connections.is_empty() {
@@ -556,6 +588,8 @@ impl Ui {
             Hit::RemoveDrive(id, i) => return Some(Action::RemoveDrive(id, i)),
             Hit::CtrlAltDel(id) => return Some(Action::CtrlAltDel(id)),
             Hit::Session(_) => {}
+            Hit::WinMinimize => return Some(Action::WinMinimize),
+            Hit::WinClose => return Some(Action::WinClose),
         }
         None
     }
@@ -672,6 +706,8 @@ impl Ui {
         self.hits.clear();
         self.field_rects.clear();
         self.session_area = None;
+        self.title_controls.clear();
+        self.caption = Rect::default();
         let s = self.scale;
         let p = |v: f32| (v * s).round() as i32;
         let (w, h) = (cv.width() as i32, cv.height() as i32);
@@ -743,6 +779,8 @@ impl Ui {
             Style::Ghost,
             Hit::New,
         );
+        // "+ New" sits in the title row: a control there, not a window drag.
+        self.title_controls.push((head.right() - nw, head.right()));
         self.text_input(
             cv,
             te,
@@ -873,6 +911,14 @@ impl Ui {
             Rect::new(strip.x, strip.bottom() - 1, strip.w, 1),
             BORDER_SOFT,
         );
+        self.title_height = strip.bottom();
+        let mut right = strip.right();
+        if self.custom_frame {
+            let cw = 3 * p(46.0);
+            self.caption = Rect::new(strip.right() - cw, strip.y, cw, strip.h - 1);
+            right = self.caption.x - p(8.0);
+            self.paint_caption(cv);
+        }
         let mut x = strip.x + p(6.0);
         let th = strip.h - p(6.0);
         let y = strip.y + p(6.0);
@@ -885,6 +931,7 @@ impl Ui {
         let color = if self.active.is_none() { TEXT } else { TEXT_2 };
         centered(cv, te, f.ui, 13.0 * s, r, label, color);
         self.hits.push((r, Hit::Home));
+        self.title_controls.push((r.x, r.right()));
         x += tw + p(2.0);
 
         let tabs: Vec<(u64, String, u32)> = self
@@ -892,17 +939,18 @@ impl Ui {
             .iter()
             .map(|t| (t.id, t.name.clone(), t.state.color()))
             .collect();
-        let avail = strip.right() - x - p(6.0);
+        let avail = right - x - p(6.0);
         let each = if tabs.is_empty() {
             0
         } else {
             (avail / tabs.len() as i32).clamp(p(90.0), p(220.0))
         };
         for (id, name, color) in tabs {
-            if x + p(60.0) > strip.right() {
+            if x + p(60.0) > right {
                 break;
             }
-            let r = Rect::new(x, y, each.min(strip.right() - x), th);
+            let r = Rect::new(x, y, each.min(right - x), th);
+            self.title_controls.push((r.x, r.right()));
             let active = self.active == Some(id);
             self.tab_shape(cv, r, active, self.hover == Some(Hit::Tab(id)));
             cv.fill_circle(
@@ -944,6 +992,77 @@ impl Ui {
             }
             self.hits.push((close, ch));
             x += r.w + p(2.0);
+        }
+    }
+
+    /// Windows 11 caption buttons (46 px each at 100 %), drawn like the
+    /// system's: minimise, maximise/restore, close with a red hover.
+    fn paint_caption(&mut self, cv: &mut Canvas) {
+        let r = self.caption;
+        let s = self.scale;
+        let bw = r.w / 3;
+        let line = (1.0 * s).round().max(1.0) as i32;
+        let g = (5.0 * s).round() as i32;
+        for i in 0..3 {
+            let x = r.x + i * bw;
+            let b = Rect::new(x, r.y, if i == 2 { r.right() - x } else { bw }, r.h);
+            let (hover, pressed) = match i {
+                1 => self.max_state,
+                0 => (
+                    self.hover == Some(Hit::WinMinimize),
+                    self.press == Some(Hit::WinMinimize),
+                ),
+                _ => (
+                    self.hover == Some(Hit::WinClose),
+                    self.press == Some(Hit::WinClose),
+                ),
+            };
+            let idle = if self.window_active { TEXT } else { TEXT_3 };
+            let (fill, glyph) = match (i, hover, pressed && hover) {
+                (2, true, true) => (CLOSE_PRESS, 0xffffff),
+                (2, true, false) => (CLOSE_HOVER, 0xffffff),
+                (_, true, true) => (BG_PRESS, TEXT),
+                (_, true, false) => (BG_HOVER, TEXT),
+                _ => (BG_SIDEBAR, idle),
+            };
+            cv.fill(b, fill);
+            let (cx, cy) = (b.x + b.w / 2, b.y + b.h / 2);
+            match i {
+                0 => cv.fill(Rect::new(cx - g, cy, 2 * g, line), glyph),
+                1 if self.maximized => {
+                    let k = (2.0 * s).round() as i32;
+                    // Back window: only its top and right edges show.
+                    cv.fill(Rect::new(cx - g + k, cy - g, 2 * g - k, line), glyph);
+                    cv.fill(Rect::new(cx + g - line, cy - g, line, 2 * g - k), glyph);
+                    let front = Rect::new(cx - g, cy - g + k, 2 * g - k, 2 * g - k);
+                    cv.fill(front, fill);
+                    cv.stroke_rect(front, glyph);
+                }
+                1 => cv.stroke_rect(Rect::new(cx - g, cy - g, 2 * g, 2 * g), glyph),
+                _ => {
+                    let (fx, fy, fs) = (cx as f32, cy as f32, g as f32);
+                    let w = s.max(1.0);
+                    cv.stroke(&[(fx - fs, fy - fs), (fx + fs, fy + fs)], w, glyph);
+                    cv.stroke(&[(fx - fs, fy + fs), (fx + fs, fy - fs)], w, glyph);
+                }
+            }
+            match i {
+                0 => self.hits.push((b, Hit::WinMinimize)),
+                2 => self.hits.push((b, Hit::WinClose)),
+                _ => {}
+            }
+        }
+    }
+
+    /// Where the title row's controls are, for the frame hook.
+    pub fn title_geometry(&self) -> TitleGeometry {
+        let c = self.caption;
+        let bw = c.w / 3;
+        TitleGeometry {
+            height: self.title_height,
+            controls: self.title_controls.clone(),
+            buttons_left: if c.is_empty() { i32::MAX } else { c.x },
+            max_button: (c.x + bw, c.x + 2 * bw),
         }
     }
 

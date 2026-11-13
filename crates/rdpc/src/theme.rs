@@ -32,3 +32,5 @@ pub const OK: u32 = 0x7bc68f;
 pub const WARN: u32 = 0xd9b25a;
 pub const ERR: u32 = 0xe48080;
 pub const DANGER_BORDER: u32 = 0x5c3237;
+pub const CLOSE_HOVER: u32 = 0xc42b1c;
+pub const CLOSE_PRESS: u32 = 0x9e2a1f;
