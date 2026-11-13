@@ -12,6 +12,7 @@
 mod app;
 mod clipboard;
 mod controls;
+mod icon;
 mod session;
 mod store;
 mod text_field;
@@ -32,6 +33,7 @@ struct Args {
     size: Option<(u16, u16)>,
     screenshot: Option<String>,
     snapshot_ui: Option<String>,
+    icon_png: Option<String>,
     scale: f32,
     wait: u64,
     verbose: bool,
@@ -71,6 +73,7 @@ fn parse_args() -> Args {
             }
             "--screenshot" => a.screenshot = Some(val()),
             "--snapshot-ui" => a.snapshot_ui = Some(val()),
+            "--icon-png" => a.icon_png = Some(val()),
             "--scale" => a.scale = val().parse().unwrap_or_else(|_| usage()),
             "--wait" => a.wait = val().parse().unwrap_or_else(|_| usage()),
             "-v" | "--verbose" => a.verbose = true,
@@ -115,6 +118,24 @@ fn main() {
     let args = parse_args();
     rdp::set_verbose(args.verbose);
 
+    if let Some(path) = &args.icon_png {
+        // The app icon as a 256 px PNG with transparency (packaging, README).
+        let size = 256;
+        let write = || -> Result<(), Box<dyn std::error::Error>> {
+            let file = std::io::BufWriter::new(std::fs::File::create(path)?);
+            let mut enc = png::Encoder::new(file, size as u32, size as u32);
+            enc.set_color(png::ColorType::Rgba);
+            enc.set_depth(png::BitDepth::Eight);
+            enc.write_header()?.write_image_data(&icon::rgba(size))?;
+            Ok(())
+        };
+        if let Err(e) = write() {
+            eprintln!("error: {e}");
+            std::process::exit(1);
+        }
+        eprintln!("saved {size}x{size} icon to {path}");
+        return;
+    }
     if let Some(path) = &args.snapshot_ui {
         if let Err(e) = snapshot_ui(path, args.scale) {
             eprintln!("error: {e}");

@@ -617,7 +617,14 @@ impl ApplicationHandler<UserEvent> for App {
             let attrs = Window::default_attributes()
                 .with_title("rdpc")
                 .with_inner_size(LogicalSize::new(1320.0, 860.0))
-                .with_min_inner_size(LogicalSize::new(900.0, 560.0));
+                .with_min_inner_size(LogicalSize::new(900.0, 560.0))
+                .with_window_icon(crate::icon::window_icon(64));
+            // The taskbar (and Alt+Tab) uses the large icon; give it full resolution.
+            #[cfg(windows)]
+            let attrs = {
+                use winit::platform::windows::WindowAttributesExtWindows;
+                attrs.with_taskbar_icon(crate::icon::window_icon(256))
+            };
             let made = el
                 .create_window(attrs)
                 .map_err(|e| e.to_string())

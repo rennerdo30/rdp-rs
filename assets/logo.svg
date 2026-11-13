@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <title>rdp-rs</title>
+  <!-- Keep in sync with crates/rdpc/src/icon.rs, which draws the same geometry. -->
+  <rect x="8" y="8" width="240" height="240" rx="56" fill="#4fb8c9"/>
+  <rect x="48" y="60" width="160" height="112" rx="18" fill="#0b1a1e"/>
+  <rect x="114" y="170" width="28" height="22" fill="#0b1a1e"/>
+  <rect x="80" y="188" width="96" height="16" rx="8" fill="#0b1a1e"/>
+  <path d="M106 98 L124 116 L106 134 M134 98 L152 116 L134 134" fill="none" stroke="#4fb8c9" stroke-width="14" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

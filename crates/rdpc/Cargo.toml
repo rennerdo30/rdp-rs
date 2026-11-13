@@ -7,10 +7,9 @@ license.workspace = true
 
 [dependencies]
 rdp = { path = "../rdp" }
-# CPU canvas and text, shared with ffwd (decision ffwd 0001). Absolute path so
-# agent worktrees (nested under .claude/worktrees) resolve it too; RDP-2 tracks
-# moving it into a crate both projects use.
-ffwd-render = { path = "E:/Development/ffwd/crates/ffwd-render" }
+# CPU canvas and text from ffwd (https://github.com/rennerdo30/ffwd, its
+# decision 0001), pinned to a published commit.
+ffwd-render = { git = "https://github.com/rennerdo30/ffwd", rev = "c79ee208e0763bb639ffde4ee69422a04eaef615" }
 winit = "0.30.13"
 softbuffer = "0.4.8"
 png = "0.18.1"

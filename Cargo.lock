@@ -410,6 +410,7 @@ dependencies = [
 [[package]]
 name = "ffwd-render"
 version = "0.2.0-beta.1"
+source = "git+https://github.com/rennerdo30/ffwd?rev=c79ee208e0763bb639ffde4ee69422a04eaef615#c79ee208e0763bb639ffde4ee69422a04eaef615"
 dependencies = [
  "fontdue",
 ]
