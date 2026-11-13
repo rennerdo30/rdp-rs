@@ -1,8 +1,9 @@
 //! rdpc: prototype RDP client.
 //!
 //!   rdpc                                     connection manager
-//!   rdpc <host[:port]> -u <[DOMAIN\]user> [-d domain] [--size WxH] [-v]
-//!                                            one session window
+//!   rdpc <host[:port]> -u <[DOMAIN\]user> [-d domain] [--size WxH] [--gfx] [-v]
+//!                                            one session window; --gfx uses the
+//!                                            graphics pipeline (MS-RDPEGFX)
 //!   rdpc <host> -u <user> --screenshot out.png [--wait SECONDS]
 //!                                            headless: save the desktop as PNG
 //!   rdpc --snapshot-ui out.png [--scale 1.5] render the manager offscreen
@@ -17,6 +18,8 @@ mod clipboard;
 mod controls;
 #[cfg(windows)]
 mod frame;
+#[cfg(windows)]
+mod h264_mf;
 mod icon;
 mod printing;
 mod session;
@@ -47,12 +50,13 @@ struct Args {
     scale: f32,
     wait: u64,
     verbose: bool,
+    gfx: bool,
 }
 
 fn usage() -> ! {
     eprintln!(
         "usage: rdpc                                   (connection manager)\n\
-         \x20      rdpc <host[:port]> -u <[DOMAIN\\]user> [-d domain] [--size WxH] [-v]\n\
+         \x20      rdpc <host[:port]> -u <[DOMAIN\\]user> [-d domain] [--size WxH] [--gfx] [-v]\n\
          \x20      rdpc <host> -u <user> --screenshot out.png [--wait SECONDS]\n\
          \x20      rdpc --snapshot-ui out.png [--scale 1.5]\n\
          \x20      rdpc --icon-png out.png [--icon-size N]\n\
@@ -98,6 +102,7 @@ fn parse_args() -> Args {
             "--scale" => a.scale = val().parse().unwrap_or_else(|_| usage()),
             "--wait" => a.wait = val().parse().unwrap_or_else(|_| usage()),
             "-v" | "--verbose" => a.verbose = true,
+            "--gfx" => a.gfx = true,
             "-h" | "--help" => usage(),
             s if s.starts_with('-') => usage(),
             s => {
@@ -192,6 +197,13 @@ fn main() {
     if let Some((w, h)) = args.size {
         cfg.width = w;
         cfg.height = h;
+    }
+    if args.gfx {
+        cfg.graphics = rdp::Graphics::Gfx;
+        #[cfg(windows)]
+        {
+            cfg.h264 = Some(h264_mf::factory());
+        }
     }
 
     match &args.screenshot {

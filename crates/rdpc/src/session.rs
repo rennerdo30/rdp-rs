@@ -92,13 +92,19 @@ fn copy_rect(src: &Framebuffer, dst: &mut Framebuffer, d: Damage) {
 }
 
 fn run(
-    cfg: Config,
+    mut cfg: Config,
     channels: Vec<Box<dyn StaticChannel>>,
     rx: Receiver<Cmd>,
     shared: Arc<Mutex<Shared>>,
     notified: Arc<AtomicBool>,
     emit: impl Fn(Event),
 ) {
+    // The graphics pipeline decodes AVC420 with Media Foundation; the
+    // client asks for a decoder only when cfg.graphics is Gfx.
+    #[cfg(windows)]
+    if cfg.h264.is_none() {
+        cfg.h264 = Some(crate::h264_mf::factory());
+    }
     let mut client = match Client::connect_with(&cfg, channels) {
         Ok(c) => c,
         Err(e) => return emit(Event::Failed(e.to_string())),
