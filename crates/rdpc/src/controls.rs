@@ -4,7 +4,9 @@
 //! Every session declares all channels at connect time (the protocol cannot
 //! add them later); sharing itself starts off and follows the drawer toggles.
 
-use rdp::{AudioHandle, ClipboardHandle, DisplayHandle, Drdynvc, RdpdrHandle, StaticChannel};
+use rdp::{
+    AudioHandle, ClipboardHandle, DisplayHandle, Drdynvc, RdpdrHandle, StaticChannel, StaticOverDvc,
+};
 
 use crate::audio::WaveOut;
 
@@ -18,7 +20,8 @@ pub struct Controls {
     display: DisplayHandle,
     clipboard: ClipboardHandle,
     devices: RdpdrHandle,
-    audio: AudioHandle,
+    /// Sound over `rdpsnd` and over `AUDIO_PLAYBACK_DVC`; the server uses one.
+    audio: [AudioHandle; 2],
     /// Device ids of the printers currently shared.
     printers: Mutex<Vec<u32>>,
     /// Device id of the shared smart card subsystem, while shared.
@@ -32,14 +35,23 @@ impl Controls {
         let (display_channel, display) = rdp::display_control();
         let (cliprdr, clipboard) = rdp::cliprdr(Box::new(WindowsClipboard { owner }));
         let (rdpdr, devices) = rdp::rdpdr(client_name);
-        // Windows servers only use rdpsnd when rdpdr is also declared (MS-RDPEA 2.1).
-        let (rdpsnd, audio) = rdp::rdpsnd(Box::new(WaveOut::default()));
+        // Windows 8+ opens audio as the AUDIO_PLAYBACK_DVC dynamic channel and
+        // falls back to the static rdpsnd channel, which also needs rdpdr
+        // declared (MS-RDPEA 2.1). Offer both; whichever opens plays.
+        let (rdpsnd, audio_static) = rdp::rdpsnd(Box::new(WaveOut::default()));
+        let (audio_dvc_channel, audio_dvc) = rdp::rdpsnd(Box::new(WaveOut::default()));
+        let dynamic: Vec<Box<dyn rdp::DynamicChannel>> = vec![
+            Box::new(display_channel),
+            Box::new(StaticOverDvc::new("AUDIO_PLAYBACK_DVC", audio_dvc_channel)),
+        ];
+        // Same channels and order as mstsc: rdpdr, rdpsnd, cliprdr, drdynvc.
         let channels: Vec<Box<dyn StaticChannel>> = vec![
-            Box::new(Drdynvc::new(vec![Box::new(display_channel)])),
-            Box::new(cliprdr),
             Box::new(rdpdr),
             Box::new(rdpsnd),
+            Box::new(cliprdr),
+            Box::new(Drdynvc::new(dynamic)),
         ];
+        let audio = [audio_static, audio_dvc];
         (
             channels,
             Controls {
@@ -61,7 +73,9 @@ impl Controls {
 
     /// Plays the session's sound locally; off drops the audio (no renegotiation).
     pub fn set_sound(&self, on: bool) -> Result<(), String> {
-        self.audio.set_enabled(on);
+        for a in &self.audio {
+            a.set_enabled(on);
+        }
         Ok(())
     }
 

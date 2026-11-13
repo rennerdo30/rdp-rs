@@ -3,9 +3,7 @@
 
 use super::fscc::STATUS_NOT_SUPPORTED;
 use super::{Device, IoCompletion, IoRequest, Op, RdpdrHandle};
-use crate::channel::{
-    CHANNEL_OPTION_ENCRYPT_RDP, CHANNEL_OPTION_INITIALIZED, ChannelOut, StaticChannel,
-};
+use crate::channel::{CHANNEL_OPTION_INITIALIZED, ChannelOut, StaticChannel};
 use crate::cursor::{Put, Reader, utf16le_z};
 use crate::error::Result;
 use crate::trace;
@@ -307,7 +305,8 @@ impl StaticChannel for Rdpdr {
     }
 
     fn options(&self) -> u32 {
-        CHANNEL_OPTION_INITIALIZED | CHANNEL_OPTION_ENCRYPT_RDP
+        // mstsc: 0x80800000 (no bulk compression is negotiated, see cliprdr).
+        CHANNEL_OPTION_INITIALIZED | crate::channel::CHANNEL_OPTION_COMPRESS_RDP
     }
 
     fn process(&mut self, msg: &[u8], out: &mut ChannelOut) -> Result<()> {

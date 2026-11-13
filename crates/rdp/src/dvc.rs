@@ -262,7 +262,10 @@ impl StaticChannel for Drdynvc {
     }
 
     fn options(&self) -> u32 {
-        CHANNEL_OPTION_INITIALIZED | CHANNEL_OPTION_ENCRYPT_RDP
+        // mstsc: 0xC0800000.
+        CHANNEL_OPTION_INITIALIZED
+            | CHANNEL_OPTION_ENCRYPT_RDP
+            | crate::channel::CHANNEL_OPTION_COMPRESS_RDP
     }
 
     fn process(&mut self, msg: &[u8], out: &mut ChannelOut) -> Result<()> {
@@ -438,6 +441,45 @@ pub fn encode_data(id: u32, msg: &[u8], out: &mut ChannelOut) -> Result<()> {
         out.send(v);
     }
     Ok(())
+}
+
+/// Runs a static-channel handler over a dynamic virtual channel. Some
+/// extensions are carried either way with the same messages, for example
+/// audio output: Windows 8 and later open `AUDIO_PLAYBACK_DVC` first and use
+/// the static `rdpsnd` channel only as a fallback (MS-RDPEA 2.1).
+pub struct StaticOverDvc<C: crate::channel::StaticChannel> {
+    name: &'static str,
+    inner: C,
+}
+
+impl<C: crate::channel::StaticChannel> StaticOverDvc<C> {
+    pub fn new(name: &'static str, inner: C) -> Self {
+        Self { name, inner }
+    }
+}
+
+impl<C: crate::channel::StaticChannel> DynamicChannel for StaticOverDvc<C> {
+    fn name(&self) -> &str {
+        self.name
+    }
+
+    fn process(&mut self, msg: &[u8], out: &mut DvcOut) -> Result<()> {
+        let mut o = ChannelOut::default();
+        let r = self.inner.process(msg, &mut o);
+        for m in o.take() {
+            out.send(m);
+        }
+        r
+    }
+
+    fn tick(&mut self, out: &mut DvcOut) -> Result<()> {
+        let mut o = ChannelOut::default();
+        let r = self.inner.tick(&mut o);
+        for m in o.take() {
+            out.send(m);
+        }
+        r
+    }
 }
 
 #[cfg(test)]

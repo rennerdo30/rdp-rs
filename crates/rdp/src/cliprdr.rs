@@ -257,7 +257,12 @@ impl StaticChannel for Cliprdr {
     }
 
     fn options(&self) -> u32 {
-        CHANNEL_OPTION_INITIALIZED | CHANNEL_OPTION_ENCRYPT_RDP | CHANNEL_OPTION_SHOW_PROTOCOL
+        // mstsc: 0xC0A00000. COMPRESS_RDP only matters when bulk compression is
+        // negotiated (it is not), so channel data still arrives uncompressed.
+        CHANNEL_OPTION_INITIALIZED
+            | CHANNEL_OPTION_ENCRYPT_RDP
+            | crate::channel::CHANNEL_OPTION_COMPRESS_RDP
+            | CHANNEL_OPTION_SHOW_PROTOCOL
     }
 
     fn process(&mut self, msg: &[u8], out: &mut ChannelOut) -> Result<()> {
@@ -578,7 +583,8 @@ mod tests {
     fn channel_definition() {
         let (c, h, _) = setup();
         assert_eq!(c.name(), "cliprdr");
-        assert_eq!(c.options(), 0xC020_0000);
+        // Same as mstsc (INITIALIZED | ENCRYPT_RDP | COMPRESS_RDP | SHOW_PROTOCOL).
+        assert_eq!(c.options(), 0xC0A0_0000);
         assert!(!h.enabled(), "sharing starts off");
         fn send_sync<T: Send + Sync + Clone>(_: &T) {}
         send_sync(&h);

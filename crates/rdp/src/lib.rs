@@ -43,7 +43,7 @@ pub use channel::{ChannelOut, StaticChannel};
 pub use client::{Client, Config, ConnectionInfo, PollOutcome};
 pub use cliprdr::{ClipboardBackend, ClipboardHandle, Cliprdr, cliprdr};
 pub use disp::{DisplayControl, DisplayHandle, display_control};
-pub use dvc::{Drdynvc, DvcOut, DynamicChannel};
+pub use dvc::{Drdynvc, DvcOut, DynamicChannel, StaticOverDvc};
 pub use error::{Error, Result};
 pub use framebuffer::{Damage, Framebuffer};
 pub use input::InputEvent;

@@ -22,6 +22,9 @@ const RNS_UD_15BPP_SUPPORT: u16 = 0x0004;
 const RNS_UD_32BPP_SUPPORT: u16 = 0x0008;
 const RNS_UD_CS_SUPPORT_ERRINFO_PDU: u16 = 0x0001;
 const RNS_UD_CS_WANT_32BPP_SESSION: u16 = 0x0002;
+const RNS_UD_CS_STRONG_ASYMMETRIC_KEYS: u16 = 0x0008;
+const RNS_UD_CS_VALID_CONNECTION_TYPE: u16 = 0x0020;
+const CONNECTION_TYPE_LAN: u8 = 0x06;
 
 pub struct ClientSettings<'a> {
     pub width: u16,
@@ -50,13 +53,15 @@ pub fn client_data_blocks(s: &ClientSettings) -> Vec<u8> {
     let mut out = Vec::new();
 
     let mut core = Vec::new();
-    core.put_u32(0x0008_0004); // RDP 5.0+
+    // Announce a current client (RDP 10.12): Windows decides which in-session
+    // services to start (clipboard, audio) partly from how modern the client is.
+    core.put_u32(0x0008_0011); // RDP_VERSION_10_12
     core.put_u16(s.width);
     core.put_u16(s.height);
     core.put_u16(RNS_UD_COLOR_8BPP);
     core.put_u16(RNS_UD_SAS_DEL);
     core.put_u32(s.keyboard_layout);
-    core.put_u32(2600); // clientBuild
+    core.put_u32(22621); // clientBuild
     core.put_bytes(&fixed_utf16(s.client_name, 32));
     core.put_u32(4); // keyboardType: IBM enhanced (101/102)
     core.put_u32(0); // keyboardSubType
@@ -69,9 +74,14 @@ pub fn client_data_blocks(s: &ClientSettings) -> Vec<u8> {
     core.put_u16(
         RNS_UD_24BPP_SUPPORT | RNS_UD_16BPP_SUPPORT | RNS_UD_15BPP_SUPPORT | RNS_UD_32BPP_SUPPORT,
     );
-    core.put_u16(RNS_UD_CS_SUPPORT_ERRINFO_PDU | RNS_UD_CS_WANT_32BPP_SESSION);
+    core.put_u16(
+        RNS_UD_CS_SUPPORT_ERRINFO_PDU
+            | RNS_UD_CS_WANT_32BPP_SESSION
+            | RNS_UD_CS_STRONG_ASYMMETRIC_KEYS
+            | RNS_UD_CS_VALID_CONNECTION_TYPE,
+    );
     core.put_zeros(64); // clientDigProductId
-    core.put_u8(0); // connectionType
+    core.put_u8(CONNECTION_TYPE_LAN); // connectionType (valid per the flag above)
     core.put_u8(0); // pad1octet
     core.put_u32(s.selected_protocol);
     block(&mut out, CS_CORE, &core);
