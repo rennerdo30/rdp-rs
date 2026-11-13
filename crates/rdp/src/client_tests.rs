@@ -23,6 +23,7 @@ fn session() -> (Client, TcpStream) {
         color_depth: 32,
         fb: Framebuffer::new(4, 4),
         fastpath: Reassembler::default(),
+        bulk: Decompressor::default(),
         info: ConnectionInfo {
             protocol: x224::PROTOCOL_HYBRID,
             certificate_sha256: [0; 32],
@@ -176,5 +177,26 @@ fn error_is_network_drop() {
 
 #[test]
 fn config_defaults_to_a_fresh_logon() {
-    assert!(Config::new("h", "u", "p").auto_reconnect.is_none());
+    let cfg = Config::new("h", "u", "p");
+    assert!(cfg.auto_reconnect.is_none());
+    assert_eq!(cfg.compression, Compression::Off);
+}
+
+/// A slow-path Set Error Info PDU whose payload is bulk-compressed
+/// (TS_SHAREDATAHEADER compressedType = PACKET_COMPRESSED | 64K).
+#[test]
+fn compressed_share_data_is_decompressed() {
+    let (mut client, _server) = session();
+    client.bulk = Decompressor::new(Compression::Rdp5);
+    // shareId, pad1, streamId, uncompressedLength, pduType2 = 47,
+    // compressedType, compressedLength; then MPPC "A" + <1,3> (RDP 5.0).
+    let mut body = vec![
+        0xea, 0x03, 0x01, 0x00, 0x00, 0x01, 0x08, 0x00, 47, 0x21, 0x03, 0x00,
+    ];
+    body.extend_from_slice(&[0x41, 0xF8, 0x20]);
+    let mut out = PollOutcome::default();
+    client.handle_data(&body, &mut out).unwrap();
+    assert_eq!(client.last_error_info, 0x4141_4141);
+    client.bulk = Decompressor::default();
+    assert!(client.handle_data(&body, &mut out).is_err());
 }

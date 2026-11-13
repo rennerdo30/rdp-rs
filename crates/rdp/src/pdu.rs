@@ -36,6 +36,9 @@ pub struct ClientInfo<'a> {
     pub auto_reconnect: Option<[u8; ARC_PACKET_LEN]>,
     /// performanceFlags (see `Experience::performance_flags`).
     pub performance_flags: u32,
+    /// Highest bulk compression type (PACKET_COMPR_TYPE_*), sent as
+    /// INFO_COMPRESSION plus CompressionTypeMask (2.2.1.11.1.1); `None` sends neither.
+    pub compression: Option<u8>,
 }
 
 /// Client Info PDU (TS_INFO_PACKET with extended info), preceded by the basic security header.
@@ -47,6 +50,8 @@ pub fn client_info(ci: &ClientInfo) -> Vec<u8> {
     const INFO_MAXIMIZESHELL: u32 = 0x0020;
     const INFO_LOGONNOTIFY: u32 = 0x0040;
     const INFO_ENABLEWINDOWSKEY: u32 = 0x0100;
+    const INFO_COMPRESSION: u32 = 0x0080;
+    const COMPRESSION_TYPE_SHIFT: u32 = 9; // CompressionTypeMask 0x00001E00
 
     let mut out = Vec::new();
     out.put_u16(SEC_INFO_PKT);
@@ -60,7 +65,10 @@ pub fn client_info(ci: &ClientInfo) -> Vec<u8> {
             | INFO_UNICODE
             | INFO_MAXIMIZESHELL
             | INFO_LOGONNOTIFY
-            | INFO_ENABLEWINDOWSKEY,
+            | INFO_ENABLEWINDOWSKEY
+            | ci.compression.map_or(0, |t| {
+                INFO_COMPRESSION | (u32::from(t & 0x0F) << COMPRESSION_TYPE_SHIFT)
+            }),
     );
     let fields = [ci.domain, ci.user, ci.password, "", ""];
     for f in fields {
@@ -331,9 +339,7 @@ pub fn parse_share_data(body: &[u8]) -> Result<(u8, &[u8])> {
     if body.len() < 12 {
         return proto("truncated share data header");
     }
-    if body[9] & 0x20 != 0 {
-        return Err(Error::Unsupported("bulk-compressed slow-path PDU".into()));
-    }
+    // body[9] is compressedType: the caller decompresses (crate::compress).
     Ok((body[8], &body[12..]))
 }
 
@@ -404,7 +410,13 @@ fn cap(out: &mut Vec<u8>, count: &mut u16, ty: u16, body: &[u8]) {
     *count += 1;
 }
 
-fn capabilities(width: u16, height: u16, keyboard_layout: u32, bpp: u16) -> (u16, Vec<u8>) {
+fn capabilities(
+    width: u16,
+    height: u16,
+    keyboard_layout: u32,
+    bpp: u16,
+    vc_compression: bool,
+) -> (u16, Vec<u8>) {
     let mut out = Vec::new();
     let mut n = 0;
 
@@ -513,7 +525,9 @@ fn capabilities(width: u16, height: u16, keyboard_layout: u32, bpp: u16) -> (u16
     cap(&mut out, &mut n, CAPSTYPE_OFFSCREENCACHE, &[0; 8]);
 
     let mut b = Vec::new();
-    b.put_u32(0);
+    // VCCAPS_COMPR_SC (2.2.7.1.10): server-to-client channel data may be
+    // bulk-compressed, up to the type in the Client Info PDU.
+    b.put_u32(u32::from(vc_compression));
     b.put_u32(1600);
     cap(&mut out, &mut n, CAPSTYPE_VIRTUALCHANNEL, &b);
 
@@ -548,8 +562,9 @@ pub fn confirm_active(
     height: u16,
     keyboard_layout: u32,
     bpp: u16,
+    vc_compression: bool,
 ) -> Vec<u8> {
-    let (count, caps) = capabilities(width, height, keyboard_layout, bpp);
+    let (count, caps) = capabilities(width, height, keyboard_layout, bpp, vc_compression);
     let source = b"RDPRS\0";
     let mut b = Vec::new();
     b.put_u32(share_id);
@@ -622,8 +637,34 @@ mod tests {
     use super::*;
 
     #[test]
+    fn compression_is_advertised() {
+        let info = |compression| {
+            client_info(&ClientInfo {
+                domain: "",
+                user: "u",
+                password: "",
+                auto_reconnect: None,
+                performance_flags: 0,
+                compression,
+            })
+        };
+        let flags = |pdu: &[u8]| u32::from_le_bytes(pdu[8..12].try_into().unwrap());
+        // INFO_COMPRESSION (0x80) with PACKET_COMPR_TYPE_RDP61 in 0x1E00.
+        assert_eq!(flags(&info(Some(3))) & 0x1E80, 0x0680);
+        assert_eq!(flags(&info(None)) & 0x1E80, 0);
+        // TS_VIRTUALCHANNEL_CAPABILITYSET flags: VCCAPS_COMPR_SC when on.
+        let vc_flags = |on| {
+            let pdu = confirm_active(1, 2, 640, 480, 0x409, 32, on);
+            let at = pdu.windows(4).position(|w| w == [20, 0, 12, 0]).unwrap();
+            u32::from_le_bytes(pdu[at + 4..at + 8].try_into().unwrap())
+        };
+        assert_eq!(vc_flags(true), 1);
+        assert_eq!(vc_flags(false), 0);
+    }
+
+    #[test]
     fn confirm_active_lengths_are_consistent() {
-        let pdu = confirm_active(0x1234, 1007, 1280, 800, 0x409, 32);
+        let pdu = confirm_active(0x1234, 1007, 1280, 800, 0x409, 32, false);
         let total = u16::from_le_bytes([pdu[0], pdu[1]]) as usize;
         assert_eq!(total, pdu.len());
         let combined = u16::from_le_bytes([pdu[14], pdu[15]]) as usize;

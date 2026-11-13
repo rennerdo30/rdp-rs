@@ -9,13 +9,16 @@
 //! features that should toggle live (clipboard, drives, printers, smart cards)
 //! keep their channel open and gate sharing inside the handler.
 
+use crate::compress::Decompressor;
 use crate::cursor::{Put, Reader};
-use crate::error::{Error, Result};
+use crate::error::Result;
 
 pub const CHANNEL_FLAG_FIRST: u32 = 0x0000_0001;
 pub const CHANNEL_FLAG_LAST: u32 = 0x0000_0002;
 pub const CHANNEL_FLAG_SHOW_PROTOCOL: u32 = 0x0000_0010;
-const CHANNEL_PACKET_COMPRESSED: u32 = 0x0020_0000;
+/// CHANNEL_PACKET_COMPRESSED, _AT_FRONT, _FLUSHED and the CompressionTypeMask
+/// (2.2.6.1.1) are the bulk compression flags shifted left by 16.
+const CHANNEL_COMPRESSION_SHIFT: u32 = 16;
 
 pub const CHANNEL_OPTION_INITIALIZED: u32 = 0x8000_0000;
 pub const CHANNEL_OPTION_ENCRYPT_RDP: u32 = 0x4000_0000;
@@ -110,19 +113,18 @@ pub struct Defragmenter {
 }
 
 impl Defragmenter {
-    pub fn feed(&mut self, chunk: &[u8]) -> Result<Option<Vec<u8>>> {
+    /// Adds one chunk, bulk-decompressing it with `bulk` (the connection's
+    /// server-to-client state) when its header carries compression flags.
+    pub fn feed(&mut self, chunk: &[u8], bulk: &mut Decompressor) -> Result<Option<Vec<u8>>> {
         let mut r = Reader::new(chunk);
         let total = r.u32()? as usize;
         let flags = r.u32()?;
-        if flags & CHANNEL_PACKET_COMPRESSED != 0 {
-            return Err(Error::Unsupported("compressed virtual channel data".into()));
-        }
-        let data = r.rest();
+        let data = bulk.decompress(r.rest(), (flags >> CHANNEL_COMPRESSION_SHIFT) as u8)?;
         if flags & CHANNEL_FLAG_FIRST != 0 {
             self.buf.clear();
             self.total = total;
         }
-        self.buf.extend_from_slice(data);
+        self.buf.extend_from_slice(&data);
         if flags & CHANNEL_FLAG_LAST != 0 {
             if self.buf.len() != self.total {
                 crate::trace!(
@@ -156,9 +158,10 @@ mod tests {
         let chunks = chunk(&msg, false);
         assert_eq!(chunks.len(), 3);
         let mut d = Defragmenter::default();
-        assert!(d.feed(&chunks[0]).unwrap().is_none());
-        assert!(d.feed(&chunks[1]).unwrap().is_none());
-        assert_eq!(d.feed(&chunks[2]).unwrap().unwrap(), msg);
+        let mut bulk = Decompressor::default();
+        assert!(d.feed(&chunks[0], &mut bulk).unwrap().is_none());
+        assert!(d.feed(&chunks[1], &mut bulk).unwrap().is_none());
+        assert_eq!(d.feed(&chunks[2], &mut bulk).unwrap().unwrap(), msg);
     }
 
     #[test]
@@ -171,6 +174,21 @@ mod tests {
             CHANNEL_FLAG_FIRST | CHANNEL_FLAG_LAST | CHANNEL_FLAG_SHOW_PROTOCOL
         );
         let mut d = Defragmenter::default();
-        assert_eq!(d.feed(&c[0]).unwrap().unwrap(), b"hello");
+        let mut bulk = Decompressor::default();
+        assert_eq!(d.feed(&c[0], &mut bulk).unwrap().unwrap(), b"hello");
+    }
+
+    #[test]
+    fn compressed_chunk_is_decompressed() {
+        // CHANNEL_FLAG_FIRST | LAST | CHANNEL_PACKET_COMPRESSED, type 8K:
+        // MPPC "A", "B", <2,3>.
+        let mut c = Vec::new();
+        c.put_u32(5);
+        c.put_u32(0x0020_0003);
+        c.put_bytes(&[0x41, 0x42, 0xF0, 0x80]);
+        let mut d = Defragmenter::default();
+        let mut bulk = Decompressor::new(crate::compress::Compression::Rdp4);
+        assert_eq!(d.feed(&c, &mut bulk).unwrap().unwrap(), b"ABABA");
+        assert!(d.feed(&c, &mut Decompressor::default()).is_err());
     }
 }

@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 
 use crate::channel::{self, ChannelOut, Slot, StaticChannel};
 use crate::codec;
+use crate::compress::{Compression, Decompressor};
 use crate::credssp;
 use crate::crypto::sha256;
 use crate::der;
@@ -46,6 +47,8 @@ pub struct Config {
     pub connection_type: crate::ConnectionType,
     /// Desktop features (wallpaper, font smoothing, …); fixed at logon.
     pub experience: crate::Experience,
+    /// Highest bulk compression type to advertise (MS-RDPBCGR 3.1.8).
+    pub compression: Compression,
 }
 
 impl Config {
@@ -66,6 +69,7 @@ impl Config {
             color_depth: 32,
             connection_type: crate::ConnectionType::Lan,
             experience: crate::Experience::default(),
+            compression: Compression::Off,
         }
     }
 }
@@ -154,6 +158,9 @@ pub struct Client {
     color_depth: u16,
     fb: Framebuffer,
     fastpath: Reassembler,
+    /// Server-to-client bulk decompression, shared by slow-path, fast-path
+    /// and virtual channel data.
+    bulk: Decompressor,
     info: ConnectionInfo,
     active: bool,
     last_error_info: u32,
@@ -365,6 +372,7 @@ impl Client {
                 .as_ref()
                 .map(|c| c.client_packet(&pdu::ENHANCED_SECURITY_CLIENT_RANDOM)),
             performance_flags: cfg.experience.performance_flags(),
+            compression: cfg.compression.type_code(),
         });
         trace!(
             "experience: {:?}, {} bpp, {:?} (performance flags {:#x})",
@@ -409,6 +417,7 @@ impl Client {
             color_depth: crate::experience::valid_color_depth(cfg.color_depth),
             fb: Framebuffer::new(demand.width as usize, demand.height as usize),
             fastpath: Reassembler::default(),
+            bulk: Decompressor::new(cfg.compression),
             info: ConnectionInfo {
                 protocol,
                 certificate_sha256,
@@ -448,6 +457,7 @@ impl Client {
             demand.height,
             self.keyboard_layout,
             self.color_depth,
+            self.bulk.max() != Compression::Off,
         );
         send_io(&mut self.f, self.user_id, self.io_channel, &confirm)?;
         self.send_data(pdu::PDUTYPE2_SYNCHRONIZE, &pdu::synchronize())?;
@@ -599,6 +609,9 @@ impl Client {
 
     fn handle_data(&mut self, body: &[u8], out: &mut PollOutcome) -> Result<()> {
         let (ty, payload) = pdu::parse_share_data(body)?;
+        let compressed_type = body.get(9).copied().unwrap_or(0);
+        let payload = self.bulk.decompress(payload, compressed_type)?;
+        let payload = &payload[..];
         match ty {
             pdu::PDUTYPE2_UPDATE => {
                 codec::draw_bitmap_update(payload, &mut self.fb, &mut out.damage)?;
@@ -631,7 +644,7 @@ impl Client {
     }
 
     fn handle_fastpath(&mut self, frame: &[u8], out: &mut PollOutcome) -> Result<()> {
-        for (code, data) in self.fastpath.feed(frame)? {
+        for (code, data) in self.fastpath.feed(frame, &mut self.bulk)? {
             match code {
                 fastpath::UPDATETYPE_BITMAP => {
                     codec::draw_bitmap_update(&data, &mut self.fb, &mut out.damage)?;
@@ -660,7 +673,7 @@ impl Client {
         if slot.failed {
             return Ok(());
         }
-        let msg = match slot.defrag.feed(chunk) {
+        let msg = match slot.defrag.feed(chunk, &mut self.bulk) {
             Ok(Some(m)) => m,
             Ok(None) => return Ok(()),
             Err(e) => {
