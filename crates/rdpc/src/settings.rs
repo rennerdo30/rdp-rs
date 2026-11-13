@@ -11,7 +11,16 @@ pub struct AppSettings {
     pub check_updates: bool,
     /// Protocol tracing into the log file (see [`log_path`]).
     pub diagnostic_log: bool,
+    /// Update channel: "auto" (follows the installed version), "stable", "beta".
+    pub update_channel: String,
 }
+
+/// Update channel choices offered in Settings: (setting, label).
+pub const CHANNELS: [(&str, &str); 3] = [
+    ("auto", "Automatic"),
+    ("stable", "Stable"),
+    ("beta", "Beta"),
+];
 
 /// The diagnostic log: `%LOCALAPPDATA%\rdp-rs\logs\rdpc.log`, rewritten
 /// at each start.
@@ -41,6 +50,7 @@ impl Default for AppSettings {
             auto_lock_minutes: 15,
             check_updates: true,
             diagnostic_log: false,
+            update_channel: "auto".into(),
         }
     }
 }

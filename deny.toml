@@ -1,0 +1,22 @@
+# cargo-deny configuration. rdp-rs ships only permissively licensed
+# dependencies (the same list as about.toml); CI enforces it.
+# For "A OR B" expressions one allowed side is enough.
+
+[graph]
+# Only rdpc for Windows is packaged today (docs/RELEASING.md); the protocol
+# library builds everywhere, so all targets are checked.
+all-features = false
+
+[licenses]
+version = 2
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "Zlib",
+    "ISC",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+]

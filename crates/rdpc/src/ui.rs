@@ -147,6 +147,9 @@ pub enum Hit {
     SetupVault,
     DiagnosticLog,
     OpenLogFolder,
+    /// Settings: update channel (index into CHANNELS) and Check now.
+    UpdateChannel(usize),
+    CheckNow,
     /// Microphone device: index into `mics` + 1 (0 = default); form and panel.
     FormMic(usize),
     TabMic(u64, usize),
@@ -363,6 +366,8 @@ pub enum Action {
     SetCheckUpdates(bool),
     SetDiagnosticLog(bool),
     OpenLogFolder,
+    SetUpdateChannel(String),
+    CheckUpdatesNow,
     SetRemember(bool),
     ChangeMaster {
         current: zeroize::Zeroizing<String>,
@@ -460,6 +465,7 @@ pub struct Ui {
     pub check_updates: bool,
     pub remembered: bool,
     pub diagnostic_log: bool,
+    pub update_channel: String,
     /// Settings: the change-master form is open; a backup waits for its password.
     change_master: bool,
     pub import_file: Option<std::path::PathBuf>,
@@ -546,6 +552,7 @@ impl Ui {
             check_updates: true,
             remembered: false,
             diagnostic_log: false,
+            update_channel: "auto".into(),
             change_master: false,
             import_file: None,
             settings_note: None,
@@ -1339,6 +1346,12 @@ impl Ui {
             Hit::AutoLock(i) => return Some(Action::SetAutoLock(crate::settings::AUTO_LOCK[i])),
             Hit::CheckUpdates => return Some(Action::SetCheckUpdates(!self.check_updates)),
             Hit::DiagnosticLog => return Some(Action::SetDiagnosticLog(!self.diagnostic_log)),
+            Hit::UpdateChannel(i) => {
+                return Some(Action::SetUpdateChannel(
+                    crate::settings::CHANNELS[i].0.to_string(),
+                ));
+            }
+            Hit::CheckNow => return Some(Action::CheckUpdatesNow),
             Hit::OpenLogFolder => return Some(Action::OpenLogFolder),
             Hit::RememberKey => return Some(Action::SetRemember(!self.remembered)),
             Hit::ChangeMasterOpen => {
@@ -2895,7 +2908,7 @@ impl Ui {
         // Updates
         self.caption(cv, te, f, x, y, w, "UPDATES");
         y += p(24.0);
-        let cells = self.card(cv, x, y, w, &[p(58.0)]);
+        let cells = self.card(cv, x, y, w, &[p(58.0), p(58.0)]);
         let check = self.check_updates;
         self.card_switch(
             cv,
@@ -2903,11 +2916,45 @@ impl Ui {
             f,
             cells[0],
             "Check for updates daily",
-            "Installed copies offer new releases in the status bar",
+            "Ctrl+Shift+U or the status bar installs an offered update",
             check,
             Hit::CheckUpdates,
         );
-        y += p(58.0) + p(24.0);
+        let version = format!("Installed: rdpc {}", env!("CARGO_PKG_VERSION"));
+        self.card_action(
+            cv,
+            te,
+            f,
+            cells[1],
+            "Check now",
+            &version,
+            "Check",
+            Hit::CheckNow,
+        );
+        y += p(116.0) + p(12.0);
+        let items: Vec<(String, bool, Hit)> = crate::settings::CHANNELS
+            .iter()
+            .enumerate()
+            .map(|(i, (key, name))| {
+                (
+                    name.to_string(),
+                    self.update_channel == *key,
+                    Hit::UpdateChannel(i),
+                )
+            })
+            .collect();
+        self.segmented(cv, te, f, Rect::new(x, y, w, p(34.0)), &items);
+        y += p(34.0);
+        self.hint(
+            cv,
+            te,
+            f,
+            x,
+            y + p(16.0),
+            w,
+            "Automatic follows the installed version: beta builds get betas, stable builds stable releases.",
+        );
+        y += p(24.0) + p(24.0);
 
         // Troubleshooting
         self.caption(cv, te, f, x, y, w, "TROUBLESHOOTING");

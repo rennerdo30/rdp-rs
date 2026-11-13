@@ -52,6 +52,8 @@ pub enum UserEvent {
     Certificate(u64, ui::CertPrompt, std::sync::mpsc::Sender<bool>),
     /// The update check found a newer release.
     UpdateAvailable(rdpc_update::Candidate),
+    /// "Check now" finished without an update (or failed: the reason).
+    UpToDate(Result<(), String>),
     /// Installing an update: the setup started (rdpc closes), or it failed.
     UpdateStarted(Result<(), String>),
 }
@@ -750,6 +752,42 @@ impl App {
                 }
                 self.dirty();
             }
+            Action::SetUpdateChannel(ch) => {
+                self.settings.update_channel = ch.clone();
+                let _ = self.settings.save();
+                if let Some(m) = &mut self.win {
+                    m.ui.update_channel = ch;
+                }
+                self.dirty();
+            }
+            Action::CheckUpdatesNow => {
+                if !rdpc_update::is_installed_copy() {
+                    if let Some(m) = &mut self.win {
+                        m.ui.settings_done(
+                            false,
+                            format!(
+                                "This copy was not installed by the setup; new versions are on {}",
+                                rdpc_update::RELEASE_PAGE
+                            ),
+                        );
+                    }
+                    return self.dirty();
+                }
+                let proxy = self.proxy.clone();
+                let channel = self.settings.update_channel.clone();
+                std::thread::spawn(move || {
+                    let ev = match run_update_check(&channel) {
+                        Ok(Some(c)) => UserEvent::UpdateAvailable(c),
+                        Ok(None) => UserEvent::UpToDate(Ok(())),
+                        Err(e) => UserEvent::UpToDate(Err(e)),
+                    };
+                    let _ = proxy.send_event(ev);
+                });
+                if let Some(m) = &mut self.win {
+                    m.ui.settings_note = Some(("Checking for updates…".into(), theme::TEXT_2));
+                }
+                self.dirty();
+            }
             Action::SetDiagnosticLog(on) => {
                 self.settings.diagnostic_log = on;
                 let _ = self.settings.save();
@@ -1074,6 +1112,17 @@ impl App {
     }
 
     fn keyboard(&mut self, ev: winit::event::KeyEvent) {
+        // Ctrl+Shift+U installs an offered update (as in the other apps).
+        let session_has_keys = self.win.as_ref().is_some_and(|m| m.ui.session_focus);
+        if !session_has_keys
+            && ev.state.is_pressed()
+            && self.mods.control_key()
+            && self.mods.shift_key()
+            && matches!(&ev.logical_key, WKey::Character(c) if c.eq_ignore_ascii_case("u"))
+            && self.update.is_some()
+        {
+            return self.handle_action(Action::InstallUpdate);
+        }
         // Ctrl+Alt+Break switches full screen (as in mstsc), also from inside a session.
         if ev.state.is_pressed()
             && self.mods.control_key()
@@ -1468,8 +1517,12 @@ impl ApplicationHandler<UserEvent> for App {
                             ui.check_updates = self.settings.check_updates;
                             ui.diagnostic_log = rdp::log::verbose();
                             ui.remembered = remembered_exists(&mut ui);
+                            ui.update_channel = self.settings.update_channel.clone();
                             if self.settings.check_updates {
-                                check_for_update(self.proxy.clone());
+                                check_for_update(
+                                    self.proxy.clone(),
+                                    self.settings.update_channel.clone(),
+                                );
                             }
                             ui.custom_frame = framed;
                             ui
@@ -1508,8 +1561,29 @@ impl ApplicationHandler<UserEvent> for App {
                 rdp::trace!("ui: update {} available", c.version);
                 if let Some(m) = &mut self.win {
                     m.ui.update = Some(c.version.to_string());
+                    m.ui.settings_note = Some((
+                        format!(
+                            "rdpc {} is available: Ctrl+Shift+U or Update in the status bar.",
+                            c.version
+                        ),
+                        theme::OK,
+                    ));
                 }
                 self.update = Some(c);
+                return self.dirty();
+            }
+            UserEvent::UpToDate(r) => {
+                if let Some(m) = &mut self.win {
+                    match r {
+                        Ok(()) => m.ui.settings_done(
+                            true,
+                            format!("rdpc {} is the newest version.", env!("CARGO_PKG_VERSION")),
+                        ),
+                        Err(e) => {
+                            m.ui.settings_done(false, format!("Update check failed: {e}"))
+                        }
+                    }
+                }
                 return self.dirty();
             }
             UserEvent::UpdateStarted(Ok(())) => {
@@ -1947,7 +2021,7 @@ fn remembered_unlock(ui: &mut Ui) {
 
 /// Once a day, an installed copy asks GitHub for a newer release (off the UI
 /// thread). Portable copies and development builds never check.
-fn check_for_update(proxy: EventLoopProxy<UserEvent>) {
+fn check_for_update(proxy: EventLoopProxy<UserEvent>, channel: String) {
     if !rdpc_update::is_installed_copy() {
         return;
     }
@@ -1961,9 +2035,7 @@ fn check_for_update(proxy: EventLoopProxy<UserEvent>) {
     std::thread::spawn(move || {
         // A failed check also waits a day.
         let _ = rdpc_update::write_stamp(&stamp, now);
-        let found = rdpc_update::current_version()
-            .and_then(|v| rdpc_update::check(&v, rdpc_update::Channel::for_version(&v)));
-        match found {
+        match run_update_check(&channel) {
             Ok(Some(c)) => {
                 let _ = proxy.send_event(UserEvent::UpdateAvailable(c));
             }
@@ -1971,6 +2043,13 @@ fn check_for_update(proxy: EventLoopProxy<UserEvent>) {
             Err(e) => rdp::trace!("ui: update check failed: {e}"),
         }
     });
+}
+
+/// Asks GitHub for a newer release on the chosen channel.
+fn run_update_check(channel: &str) -> Result<Option<rdpc_update::Candidate>, String> {
+    let v = rdpc_update::current_version().map_err(|e| e.to_string())?;
+    let ch = rdpc_update::Channel::from_setting(Some(channel), &v);
+    rdpc_update::check(&v, ch).map_err(|e| e.to_string())
 }
 
 /// Trust on first use: a known, unchanged certificate connects; a new or

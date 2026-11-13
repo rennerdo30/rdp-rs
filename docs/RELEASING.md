@@ -40,7 +40,8 @@ The setup's file name `rdpc-<version>-setup.exe` and `SHA256SUMS.txt` are the co
 Updates need two things: a **published** release (drafts are invisible) and a copy **installed by the setup** (`%LOCALAPPDATA%\Programs\rdpc`). Portable copies and development builds only name the release page.
 
 - The check runs on a worker thread, never on the UI thread, at most once a day, when the connection manager opens. The time of the last check is kept in `%LOCALAPPDATA%\rdp-rs\update-check`; a failed check also waits a day.
-- A newer release shows as an **Update to X.Y.Z** button in the status bar. Nothing downloads until it is clicked. With sessions open, the first click says how many will close; the second click goes ahead. There is no setting to switch the check off yet; portable copies never check.
+- A newer release shows as an **Update to X.Y.Z** button in the status bar; **Ctrl+Shift+U** does the same. Nothing downloads until then. With sessions open, the first request says how many will close; the second goes ahead.
+- **Settings → Updates:** switch the daily check off, **Check now**, and the channel: **Automatic** (the default: follows the installed version), **Stable** or **Beta**. Settings live in `%APPDATA%\rdp-rs\settings.json`. Portable copies and development builds never check; **Check now** names the release page instead.
 - Installing an update:
   1. rdpc downloads `SHA256SUMS.txt` and the setup;
   2. it checks the setup's SHA-256 and writes it into a fresh temporary folder, checks it again on disk, and starts it with `/S /UPDATE`;
