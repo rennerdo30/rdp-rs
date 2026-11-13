@@ -324,5 +324,6 @@ fn ntlm_package_rejects_out_of_order_rounds() {
     let mut p = NtlmPackage::new(&params());
     assert!(!p.step(None).unwrap().done);
     assert!(p.step(Some(&ntlm_challenge())).unwrap().done);
-    assert!(p.step(Some(b"again")).is_err());
+    // A second CHALLENGE, even a valid one, is not answered.
+    assert!(p.step(Some(&ntlm_challenge())).is_err());
 }
