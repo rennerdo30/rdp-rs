@@ -132,6 +132,10 @@ pub enum Hit {
     FormCompression(usize),
     /// Enter or leave full screen.
     FullScreen,
+    /// Quit confirmation: quit, stay, and the dimmed rest of the window.
+    ExitConfirm,
+    ExitCancel,
+    Modal,
     /// Server certificate prompt: trust (and remember) or refuse.
     CertTrust(u64),
     CertRefuse(u64),
@@ -304,6 +308,8 @@ pub enum Action {
     /// A session's quality for its next logon.
     SetQuality(u64, Quality),
     SetFullscreen(bool),
+    /// Quit now (confirmed).
+    Quit,
     /// The user's answer about a server certificate.
     CertAnswer(u64, bool),
     /// Open the folder picker; None: for the connection form.
@@ -369,6 +375,8 @@ pub struct Ui {
     pub fullscreen: bool,
     /// Local sound output devices (the app fills it in).
     pub speakers: Vec<String>,
+    /// Asking whether to quit while this many sessions are open.
+    pub confirm_exit: Option<usize>,
     /// Keyboard goes to the active session (set by clicking into it).
     pub session_focus: bool,
     /// Where the active session's picture goes, set by `paint`.
@@ -439,6 +447,7 @@ impl Ui {
             drawer_area: Rect::default(),
             fullscreen: false,
             speakers: Vec::new(),
+            confirm_exit: None,
             session_focus: false,
             session_area: None,
             hover: None,
@@ -1195,6 +1204,9 @@ impl Ui {
                 self.drawer_scroll = 0;
             }
             Hit::FullScreen => return Some(Action::SetFullscreen(!self.fullscreen)),
+            Hit::ExitConfirm => return Some(Action::Quit),
+            Hit::ExitCancel => self.confirm_exit = None,
+            Hit::Modal => {}
             Hit::TabWinKeys(id, i) => {
                 let t = self.tab_mut(id)?;
                 t.win_keys = WinKeys::ALL[i];
@@ -1484,6 +1496,14 @@ impl Ui {
     }
 
     pub fn key(&mut self, k: Key) -> Option<Action> {
+        if self.confirm_exit.is_some() {
+            match k {
+                Key::Esc => self.confirm_exit = None,
+                Key::Enter => return Some(Action::Quit),
+                _ => {}
+            }
+            return None;
+        }
         match k {
             Key::Enter if self.focus == Some(Field::DrivePath) => {
                 return self.active.and_then(|id| self.add_drive(id));
@@ -1577,6 +1597,83 @@ impl Ui {
     }
 
     pub fn paint(&mut self, cv: &mut Canvas, te: &mut TextEngine, f: &Fonts) {
+        self.paint_window(cv, te, f);
+        if let Some(n) = self.confirm_exit {
+            self.paint_exit_confirm(cv, te, f, n);
+        }
+    }
+
+    /// "Quit rdpc?" over the dimmed window; nothing else takes clicks.
+    fn paint_exit_confirm(&mut self, cv: &mut Canvas, te: &mut TextEngine, f: &Fonts, n: usize) {
+        let s = self.scale;
+        let p = |v: f32| (v * s).round() as i32;
+        let (w, h) = (cv.width() as i32, cv.height() as i32);
+        let all = Rect::new(0, 0, w, h);
+        // The session picture is not drawn under the dialog.
+        self.session_area = None;
+        cv.fill_alpha(all, 0x000000, 150);
+        self.hits.clear();
+        self.title_controls.clear();
+        self.hits.push((all, Hit::Modal));
+        let cw = p(420.0).min(w - p(32.0));
+        let ch = p(170.0);
+        let r = Rect::new((w - cw) / 2, (h - ch) / 2, cw, ch);
+        cv.round_border(r, 10.0 * s, BORDER, BG_BAR);
+        let x = r.x + p(24.0);
+        let tw = (r.w - p(48.0)) as f32;
+        te.draw(
+            cv,
+            f.semi,
+            16.0 * s,
+            x as f32,
+            (r.y + p(40.0)) as f32,
+            "Quit rdpc?",
+            TEXT,
+            tw,
+        );
+        let line = if n == 1 {
+            "1 session is open and will be disconnected.".to_string()
+        } else {
+            format!("{n} sessions are open and will be disconnected.")
+        };
+        te.draw(
+            cv,
+            f.ui,
+            13.0 * s,
+            x as f32,
+            (r.y + p(68.0)) as f32,
+            &line,
+            TEXT_2,
+            tw,
+        );
+        let by = r.bottom() - p(24.0) - p(34.0);
+        let qw = p(150.0);
+        self.button(
+            cv,
+            te,
+            f,
+            Rect::new(r.right() - p(24.0) - qw, by, qw, p(34.0)),
+            "Disconnect and quit",
+            Style::Danger,
+            Hit::ExitConfirm,
+        );
+        self.button(
+            cv,
+            te,
+            f,
+            Rect::new(
+                r.right() - p(24.0) - qw - p(8.0) - p(96.0),
+                by,
+                p(96.0),
+                p(34.0),
+            ),
+            "Cancel",
+            Style::Secondary,
+            Hit::ExitCancel,
+        );
+    }
+
+    fn paint_window(&mut self, cv: &mut Canvas, te: &mut TextEngine, f: &Fonts) {
         self.hits.clear();
         self.field_rects.clear();
         self.session_area = None;
@@ -4452,6 +4549,32 @@ mod tests {
         assert_eq!(
             parse_gateway("https://rdg:8443/"),
             Some(("rdg".into(), 8443))
+        );
+    }
+
+    #[test]
+    fn quit_question_blocks_everything_else() {
+        let mut te = TextEngine::new();
+        let Some(fonts) = load_fonts(&mut te) else {
+            return;
+        };
+        let mut m = sample(true);
+        m.confirm_exit = Some(2);
+        let (w, h) = (1000usize, 700usize);
+        let mut px = vec![0u32; w * h];
+        m.paint(&mut Canvas::new(&mut px, w, h), &mut te, &fonts);
+        assert!(
+            m.session_area.is_none(),
+            "no session picture under the dialog"
+        );
+        assert!(
+            m.hits
+                .iter()
+                .all(|(_, h)| matches!(h, Hit::Modal | Hit::ExitConfirm | Hit::ExitCancel))
+        );
+        assert!(
+            matches!(m.key(Key::Esc), None) && m.confirm_exit.is_none(),
+            "Esc stays"
         );
     }
 }

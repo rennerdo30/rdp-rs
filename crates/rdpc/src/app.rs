@@ -213,6 +213,31 @@ pub fn run(direct: Option<(String, Config)>) -> i32 {
 }
 
 impl App {
+    /// Quits, but asks first while sessions are open or connecting.
+    fn request_quit(&mut self) {
+        let open = self.win.as_ref().map_or(0, |m| {
+            m.ui.tabs
+                .iter()
+                .filter(|t| matches!(t.state, TabState::Connected { .. } | TabState::Connecting))
+                .count()
+        });
+        match &mut self.win {
+            Some(m) if open > 0 => {
+                if m.ui.fullscreen {
+                    // The question must be visible: leave full screen first.
+                    m.gfx.window.set_fullscreen(None);
+                    m.ui.fullscreen = false;
+                    m.shown.clear();
+                }
+                m.ui.confirm_exit = Some(open);
+                m.ui.session_focus = false;
+                m.gfx.window.focus_window();
+                self.dirty();
+            }
+            _ => self.quit = true,
+        }
+    }
+
     fn set_fullscreen(&mut self, on: bool) {
         let Some(m) = &mut self.win else { return };
         if on && m.ui.active.is_none() {
@@ -617,7 +642,8 @@ impl App {
                     m.gfx.window.set_minimized(true);
                 }
             }
-            Action::WinClose => self.quit = true,
+            Action::WinClose => self.request_quit(),
+            Action::Quit => self.quit = true,
             Action::Unlock { master, remember } => {
                 let params = self
                     .win
@@ -1145,6 +1171,8 @@ impl ApplicationHandler<UserEvent> for App {
                             let mut ui = Ui::new(Store::load(), scale);
                             remembered_unlock(&mut ui);
                             ui.speakers = crate::audio::output_devices();
+                            // Loads the folder picker's shell components early.
+                            crate::picker::prewarm();
                             check_for_update(self.proxy.clone());
                             ui.custom_frame = framed;
                             ui
@@ -1406,12 +1434,12 @@ impl App {
         self.caption_sent = Some(geo);
     }
 
-    fn window_event_inner(&mut self, el: &ActiveEventLoop, _wid: WindowId, event: WindowEvent) {
+    fn window_event_inner(&mut self, _el: &ActiveEventLoop, _wid: WindowId, event: WindowEvent) {
         if self.win.is_none() {
             return;
         }
         match event {
-            WindowEvent::CloseRequested => self.close_all(el),
+            WindowEvent::CloseRequested => self.request_quit(),
             WindowEvent::Resized(sz) => {
                 let m = self.win.as_mut().unwrap();
                 m.size = (sz.width as usize, sz.height as usize);
