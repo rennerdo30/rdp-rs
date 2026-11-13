@@ -15,9 +15,9 @@ MD4, MD5, HMAC-MD5, RC4 and the ASN.1 DER/BER/PER encodings. Only TLS
 > path; the graphics pipeline (GFX, H.264) is experimental. Expect rough edges
 > and please report them.
 
-## RDP coverage: about 61 %
+## RDP coverage: about 62 %
 
-Of the 38 features a full RDP client offers (below), 21 are done and 4 partly (61 %, counting a partial one as half). That covers the everyday desktop: logon with NLA, the picture, keyboard and mouse, clipboard, drives, printers, smart cards and sound. The missing ones are mostly special cases and enterprise features.
+Of the 38 features a full RDP client offers (below), 22 are done and 3 partly (62 %, counting a partial one as half). That covers the everyday desktop: logon with NLA, the picture, keyboard and mouse, clipboard, drives, printers, smart cards and sound. The missing ones are mostly special cases and enterprise features.
 
 <details>
 <summary>Feature list</summary>
@@ -60,7 +60,7 @@ Of the 38 features a full RDP client offers (below), 21 are done and 4 partly (6
 | Audio and video | Audio playback | ✅ | MS-RDPEA: PCM, ADPCM, AAC, MP3 |
 |  | Microphone | ✅ | MS-RDPEAI |
 |  | Video redirection | — | MS-RDPEVOR, MS-RDPEV |
-| Remote apps and collaboration | RemoteApp (seamless windows) | ◐ | MS-RDPERP: protocol and window model; no seamless windows yet |
+| Remote apps and collaboration | RemoteApp (seamless windows) | ✅ | MS-RDPERP: apps per connection, one window each, taskbar |
 |  | Multiparty and shadowing | — | MS-RDPEMC |
 
 </details>
