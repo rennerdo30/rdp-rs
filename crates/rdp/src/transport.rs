@@ -29,11 +29,17 @@ enum Stream {
 }
 
 fn is_reset(e: &io::Error) -> bool {
-    matches!(e.kind(), io::ErrorKind::ConnectionReset | io::ErrorKind::ConnectionAborted)
+    matches!(
+        e.kind(),
+        io::ErrorKind::ConnectionReset | io::ErrorKind::ConnectionAborted
+    )
 }
 
 fn is_timeout(e: &io::Error) -> bool {
-    matches!(e.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut)
+    matches!(
+        e.kind(),
+        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+    )
 }
 
 impl Stream {
@@ -54,7 +60,9 @@ impl Stream {
                 let (conn, sock) = &mut **b;
                 loop {
                     match conn.reader().read(&mut tmp) {
-                        Ok(0) => return Err(Error::Disconnected("TLS session closed by server".into())),
+                        Ok(0) => {
+                            return Err(Error::Disconnected("TLS session closed by server".into()));
+                        }
                         Ok(n) => {
                             out.extend_from_slice(&tmp[..n]);
                             return Ok(n);
@@ -63,7 +71,9 @@ impl Stream {
                         Err(e) => return Err(e.into()),
                     }
                     match conn.read_tls(sock) {
-                        Ok(0) => return Err(Error::Disconnected("connection closed by server".into())),
+                        Ok(0) => {
+                            return Err(Error::Disconnected("connection closed by server".into()));
+                        }
                         Ok(_) => {
                             conn.process_new_packets()?;
                             while conn.wants_write() {
@@ -107,7 +117,10 @@ pub struct Framer {
 
 impl Framer {
     pub fn new(sock: TcpStream) -> Self {
-        Self { stream: Some(Stream::Tcp(sock)), buf: Vec::new() }
+        Self {
+            stream: Some(Stream::Tcp(sock)),
+            buf: Vec::new(),
+        }
     }
 
     fn stream(&mut self) -> &mut Stream {
@@ -160,11 +173,18 @@ impl Framer {
 
     pub fn read_frame(&mut self, deadline: Option<Instant>) -> Result<Option<Frame>> {
         let raw = self.read_with(frame_len, deadline)?;
-        Ok(raw.map(|r| if r[0] == 0x03 { Frame::X224(r) } else { Frame::FastPath(r) }))
+        Ok(raw.map(|r| {
+            if r[0] == 0x03 {
+                Frame::X224(r)
+            } else {
+                Frame::FastPath(r)
+            }
+        }))
     }
 
     pub fn read_exact(&mut self, n: usize, deadline: Instant) -> Result<Vec<u8>> {
-        self.read_with(|_| Ok(Some(n)), Some(deadline)).map(|o| o.expect("deadline given"))
+        self.read_with(|_| Ok(Some(n)), Some(deadline))
+            .map(|o| o.expect("deadline given"))
     }
 
     pub fn read_der(&mut self, deadline: Instant) -> Result<Vec<u8>> {
@@ -212,7 +232,9 @@ impl Framer {
 
 /// Length of the TPKT or fast-path PDU at the start of `b`, once known.
 fn frame_len(b: &[u8]) -> Result<Option<usize>> {
-    let Some(&first) = b.first() else { return Ok(None) };
+    let Some(&first) = b.first() else {
+        return Ok(None);
+    };
     if first == 0x03 {
         if b.len() < 4 {
             return Ok(None);
@@ -255,7 +277,12 @@ impl ServerCertVerifier for AcceptAnyCert {
         cert: &CertificateDer<'_>,
         dss: &DigitallySignedStruct,
     ) -> std::result::Result<HandshakeSignatureValid, rustls::Error> {
-        rustls::crypto::verify_tls12_signature(message, cert, dss, &self.0.signature_verification_algorithms)
+        rustls::crypto::verify_tls12_signature(
+            message,
+            cert,
+            dss,
+            &self.0.signature_verification_algorithms,
+        )
     }
 
     fn verify_tls13_signature(
@@ -264,7 +291,12 @@ impl ServerCertVerifier for AcceptAnyCert {
         cert: &CertificateDer<'_>,
         dss: &DigitallySignedStruct,
     ) -> std::result::Result<HandshakeSignatureValid, rustls::Error> {
-        rustls::crypto::verify_tls13_signature(message, cert, dss, &self.0.signature_verification_algorithms)
+        rustls::crypto::verify_tls13_signature(
+            message,
+            cert,
+            dss,
+            &self.0.signature_verification_algorithms,
+        )
     }
 
     fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {

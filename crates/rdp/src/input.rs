@@ -13,19 +13,38 @@ pub const PTRFLAGS_DOWN: u16 = 0x8000;
 #[derive(Debug, Clone, Copy)]
 pub enum InputEvent {
     /// Set-1 scancode; `extended` adds the E0 prefix.
-    Key { scancode: u8, extended: bool, down: bool },
-    Unicode { code: u16, down: bool },
-    Mouse { flags: u16, x: u16, y: u16 },
+    Key {
+        scancode: u8,
+        extended: bool,
+        down: bool,
+    },
+    Unicode {
+        code: u16,
+        down: bool,
+    },
+    Mouse {
+        flags: u16,
+        x: u16,
+        y: u16,
+    },
 }
 
 impl InputEvent {
     pub fn mouse_move(x: u16, y: u16) -> Self {
-        InputEvent::Mouse { flags: PTRFLAGS_MOVE, x, y }
+        InputEvent::Mouse {
+            flags: PTRFLAGS_MOVE,
+            x,
+            y,
+        }
     }
 
     /// `button`: PTRFLAGS_BUTTON1 (left), BUTTON2 (right) or BUTTON3 (middle).
     pub fn mouse_button(button: u16, down: bool, x: u16, y: u16) -> Self {
-        InputEvent::Mouse { flags: button | if down { PTRFLAGS_DOWN } else { 0 }, x, y }
+        InputEvent::Mouse {
+            flags: button | if down { PTRFLAGS_DOWN } else { 0 },
+            x,
+            y,
+        }
     }
 
     /// Vertical wheel; positive is away from the user. One notch is 120.
@@ -41,7 +60,11 @@ impl InputEvent {
 
     fn encode(&self, out: &mut Vec<u8>) {
         match *self {
-            InputEvent::Key { scancode, extended, down } => {
+            InputEvent::Key {
+                scancode,
+                extended,
+                down,
+            } => {
                 let flags = (!down as u8) | if extended { 0x02 } else { 0 };
                 out.put_u8(flags);
                 out.put_u8(scancode);
@@ -86,8 +109,16 @@ mod tests {
     #[test]
     fn key_down_up() {
         let pdu = fastpath_input(&[
-            InputEvent::Key { scancode: 0x1E, extended: false, down: true },
-            InputEvent::Key { scancode: 0x48, extended: true, down: false },
+            InputEvent::Key {
+                scancode: 0x1E,
+                extended: false,
+                down: true,
+            },
+            InputEvent::Key {
+                scancode: 0x48,
+                extended: true,
+                down: false,
+            },
         ]);
         assert_eq!(pdu, vec![2 << 2, 6, 0x00, 0x1E, 0x03, 0x48]);
     }
@@ -104,7 +135,9 @@ mod tests {
 
     #[test]
     fn wheel_down_uses_nine_bit_negative() {
-        let InputEvent::Mouse { flags, .. } = InputEvent::wheel(-120, 0, 0) else { unreachable!() };
+        let InputEvent::Mouse { flags, .. } = InputEvent::wheel(-120, 0, 0) else {
+            unreachable!()
+        };
         assert_eq!(flags, PTRFLAGS_WHEEL | PTRFLAGS_WHEEL_NEGATIVE | 0x88);
     }
 }

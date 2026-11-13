@@ -44,7 +44,8 @@ fn run_length(code: u8, h: u8, r: &mut Reader) -> Result<usize> {
             0 => r.u8()? as usize + 1,
             n => n as usize * 8,
         },
-        REGULAR_BG_RUN | REGULAR_FG_RUN | REGULAR_COLOR_RUN | REGULAR_COLOR_IMAGE => match h & 0x1F {
+        REGULAR_BG_RUN | REGULAR_FG_RUN | REGULAR_COLOR_RUN | REGULAR_COLOR_IMAGE => match h & 0x1F
+        {
             0 => r.u8()? as usize + 32,
             n => n as usize,
         },
@@ -103,10 +104,17 @@ pub fn decode(src: &[u8], w: usize, h: usize, bpp: u16) -> Result<Vec<u32>> {
     };
     let read_px = |r: &mut Reader| -> Result<u32> {
         let b = r.bytes(bytes)?;
-        Ok(b.iter().enumerate().fold(0u32, |v, (i, &x)| v | (x as u32) << (8 * i)))
+        Ok(b.iter()
+            .enumerate()
+            .fold(0u32, |v, (i, &x)| v | (x as u32) << (8 * i)))
     };
 
-    let mut o = Out { px: Vec::with_capacity(w * h), w, total: w * h, first_line: true };
+    let mut o = Out {
+        px: Vec::with_capacity(w * h),
+        w,
+        total: w * h,
+        first_line: true,
+    };
     let mut r = Reader::new(src);
     let mut fg = white;
     let mut insert_fg = false;
@@ -160,7 +168,10 @@ pub fn decode(src: &[u8], w: usize, h: usize, bpp: u16) -> Result<Vec<u32>> {
                     o.push(c)?;
                 }
             }
-            REGULAR_FGBG_IMAGE | MEGA_MEGA_FGBG_IMAGE | LITE_SET_FG_FGBG_IMAGE | MEGA_MEGA_SET_FGBG_IMAGE => {
+            REGULAR_FGBG_IMAGE
+            | MEGA_MEGA_FGBG_IMAGE
+            | LITE_SET_FG_FGBG_IMAGE
+            | MEGA_MEGA_SET_FGBG_IMAGE => {
                 if code == LITE_SET_FG_FGBG_IMAGE || code == MEGA_MEGA_SET_FGBG_IMAGE {
                     fg = read_px(&mut r)?;
                 }
@@ -189,7 +200,11 @@ pub fn decode(src: &[u8], w: usize, h: usize, bpp: u16) -> Result<Vec<u32>> {
         }
     }
     if o.px.len() != o.total {
-        return proto(format!("interleaved RLE produced {} of {} pixels", o.px.len(), o.total));
+        return proto(format!(
+            "interleaved RLE produced {} of {} pixels",
+            o.px.len(),
+            o.total
+        ));
     }
     Ok(super::to_rgb_top_down(&o.px, w, h, bpp))
 }

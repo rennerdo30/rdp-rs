@@ -8,8 +8,8 @@ use crate::cursor::utf16le;
 use crate::der::{self, DerReader, ctx, integer, octet, seq};
 use crate::error::{Error, Result, proto};
 use crate::ntlm::Ntlm;
-use crate::transport::Framer;
 use crate::trace;
+use crate::transport::Framer;
 
 const CLIENT_VERSION: u32 = 6;
 const CLIENT_SERVER_MAGIC: &[u8] = b"CredSSP Client-To-Server Binding Hash\0";
@@ -89,12 +89,17 @@ fn ntstatus_name(code: u32) -> &'static str {
 
 fn read_request(f: &mut Framer, deadline: Instant) -> Result<TsRequest> {
     let raw = f.read_der(deadline).map_err(|e| match e {
-        Error::Disconnected(_) => Error::Auth("server closed the connection during NLA (wrong credentials?)".into()),
+        Error::Disconnected(_) => {
+            Error::Auth("server closed the connection during NLA (wrong credentials?)".into())
+        }
         other => other,
     })?;
     let req = TsRequest::decode(&raw)?;
     if let Some(code) = req.error_code {
-        return Err(Error::Auth(format!("server error {code:#010x} {}", ntstatus_name(code))));
+        return Err(Error::Auth(format!(
+            "server error {code:#010x} {}",
+            ntstatus_name(code)
+        )));
     }
     Ok(req)
 }
@@ -129,7 +134,10 @@ pub fn authenticate(
 
     let challenge = read_request(f, deadline)?;
     let version = challenge.version.min(CLIENT_VERSION);
-    trace!("CredSSP: server version {}, using {version}", challenge.version);
+    trace!(
+        "CredSSP: server version {}, using {version}",
+        challenge.version
+    );
     let token = challenge
         .nego_token
         .ok_or_else(|| Error::Protocol("CredSSP challenge without negoToken".into()))?;

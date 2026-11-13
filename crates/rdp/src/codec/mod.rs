@@ -89,7 +89,9 @@ pub fn draw_bitmap_update(data: &[u8], fb: &mut Framebuffer) -> Result<usize> {
         let mut body = r.bytes(len)?;
         let pixels = if flags & BITMAP_COMPRESSION != 0 {
             if flags & NO_BITMAP_COMPRESSION_HDR == 0 {
-                body = body.get(8..).ok_or_else(|| Error::Protocol("short TS_CD_HEADER".into()))?;
+                body = body
+                    .get(8..)
+                    .ok_or_else(|| Error::Protocol("short TS_CD_HEADER".into()))?;
             }
             if bpp == 32 {
                 planar::decode(body, w, h)

@@ -73,11 +73,19 @@ pub fn compute_v2(
     let lm_response = if zero_lm {
         vec![0u8; 24]
     } else {
-        let lm = hmac_md5(response_key, &[&server_challenge[..], &client_challenge[..]].concat());
+        let lm = hmac_md5(
+            response_key,
+            &[&server_challenge[..], &client_challenge[..]].concat(),
+        );
         [&lm[..], &client_challenge[..]].concat()
     };
     let session_base_key = hmac_md5(response_key, &nt_proof);
-    V2Responses { nt_proof, nt_response, lm_response, session_base_key }
+    V2Responses {
+        nt_proof,
+        nt_response,
+        lm_response,
+        session_base_key,
+    }
 }
 
 fn filetime_now() -> [u8; 8] {
@@ -180,7 +188,9 @@ impl Ntlm {
             .ok_or_else(|| Error::Protocol("NTLM target info out of range".into()))?;
 
         if flags & NEGOTIATE_EXTENDED_SESSIONSECURITY == 0 {
-            return Err(Error::Unsupported("NTLM without extended session security".into()));
+            return Err(Error::Unsupported(
+                "NTLM without extended session security".into(),
+            ));
         }
 
         let mut pairs = parse_av_pairs(target_info)?;
@@ -274,12 +284,16 @@ impl Ntlm {
     /// Seals a message the way SSPI EncryptMessage does for CredSSP:
     /// 16-byte signature followed by the RC4-encrypted payload.
     pub fn encrypt(&mut self, data: &[u8]) -> Result<Vec<u8>> {
-        let s = self.session.as_mut().ok_or_else(|| Error::Auth("NTLM not established".into()))?;
+        let s = self
+            .session
+            .as_mut()
+            .ok_or_else(|| Error::Auth("NTLM not established".into()))?;
         let seq = s.client_seq.to_le_bytes();
         let mut sealed = data.to_vec();
         s.client_seal.process(&mut sealed);
-        let mut checksum: [u8; 8] =
-            hmac_md5(&s.client_sign, &[&seq[..], data].concat())[..8].try_into().unwrap();
+        let mut checksum: [u8; 8] = hmac_md5(&s.client_sign, &[&seq[..], data].concat())[..8]
+            .try_into()
+            .unwrap();
         if s.key_exch {
             s.client_seal.process(&mut checksum);
         }
@@ -293,7 +307,10 @@ impl Ntlm {
     }
 
     pub fn decrypt(&mut self, data: &[u8]) -> Result<Vec<u8>> {
-        let s = self.session.as_mut().ok_or_else(|| Error::Auth("NTLM not established".into()))?;
+        let s = self
+            .session
+            .as_mut()
+            .ok_or_else(|| Error::Auth("NTLM not established".into()))?;
         if data.len() < 16 {
             return proto("sealed NTLM message too short");
         }
@@ -324,7 +341,10 @@ mod tests {
     #[test]
     fn nt_hash_of_password() {
         // MS-NLMP 4.2.2.1.2 NTOWFv1("Password")
-        assert_eq!(hex(&md4(&utf16le("Password"))), "a4f49c406510bdcab6824ee7c30fd852");
+        assert_eq!(
+            hex(&md4(&utf16le("Password"))),
+            "a4f49c406510bdcab6824ee7c30fd852"
+        );
     }
 
     /// MS-NLMP 4.2.4 NTLMv2 authentication test vectors.
@@ -335,14 +355,24 @@ mod tests {
 
         let server_challenge = [0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef];
         let client_challenge = [0xaa; 8];
-        let target_info = write_av_pairs(&[
-            (2, utf16le("Domain")),
-            (1, utf16le("Server")),
-        ]);
-        let v2 = compute_v2(&key, &server_challenge, &client_challenge, &[0; 8], &target_info, false);
-        assert_eq!(hex(&v2.lm_response), "86c35097ac9cec102554764a57cccc19aaaaaaaaaaaaaaaa");
+        let target_info = write_av_pairs(&[(2, utf16le("Domain")), (1, utf16le("Server"))]);
+        let v2 = compute_v2(
+            &key,
+            &server_challenge,
+            &client_challenge,
+            &[0; 8],
+            &target_info,
+            false,
+        );
+        assert_eq!(
+            hex(&v2.lm_response),
+            "86c35097ac9cec102554764a57cccc19aaaaaaaaaaaaaaaa"
+        );
         assert_eq!(hex(&v2.nt_proof), "68cd0ab851e51c96aabc927bebef6a1c");
-        assert_eq!(hex(&v2.session_base_key), "8de40ccadbc14a82f15cb0ad0de95ca3");
+        assert_eq!(
+            hex(&v2.session_base_key),
+            "8de40ccadbc14a82f15cb0ad0de95ca3"
+        );
         let encrypted = rc4_once(&v2.session_base_key, &[0x55; 16]);
         assert_eq!(hex(&encrypted), "c5dad2544fc9799094ce1ce90bc9d03e");
     }

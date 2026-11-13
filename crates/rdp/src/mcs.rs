@@ -52,14 +52,18 @@ pub fn put_per_len(out: &mut Vec<u8>, n: usize) {
 }
 
 pub fn read_per_len(d: &[u8], at: usize) -> Result<(usize, usize)> {
-    let b = *d.get(at).ok_or_else(|| crate::Error::Protocol("truncated PER length".into()))?;
+    let b = *d
+        .get(at)
+        .ok_or_else(|| crate::Error::Protocol("truncated PER length".into()))?;
     if b & 0x80 == 0 {
         return Ok((b as usize, 1));
     }
     if b & 0x40 != 0 {
         return proto("fragmented PER length not supported");
     }
-    let lo = *d.get(at + 1).ok_or_else(|| crate::Error::Protocol("truncated PER length".into()))?;
+    let lo = *d
+        .get(at + 1)
+        .ok_or_else(|| crate::Error::Protocol("truncated PER length".into()))?;
     Ok(((((b & 0x3F) as usize) << 8) | lo as usize, 2))
 }
 
@@ -96,7 +100,11 @@ pub fn parse_channel_join_confirm(d: &[u8]) -> Result<u16> {
         return proto(format!("channel join failed, result {}", d[1]));
     }
     let requested = u16::from_be_bytes([d[4], d[5]]);
-    Ok(if d.len() >= 8 { u16::from_be_bytes([d[6], d[7]]) } else { requested })
+    Ok(if d.len() >= 8 {
+        u16::from_be_bytes([d[6], d[7]])
+    } else {
+        requested
+    })
 }
 
 pub fn send_data_request(user_id: u16, channel: u16, data: &[u8]) -> Vec<u8> {
@@ -121,7 +129,9 @@ pub enum DomainPdu<'a> {
 }
 
 pub fn parse_domain_pdu(d: &[u8]) -> Result<DomainPdu<'_>> {
-    let Some(&first) = d.first() else { return proto("empty MCS PDU") };
+    let Some(&first) = d.first() else {
+        return proto("empty MCS PDU");
+    };
     match first >> 2 {
         26 => {
             if d.len() < 6 {
@@ -130,9 +140,9 @@ pub fn parse_domain_pdu(d: &[u8]) -> Result<DomainPdu<'_>> {
             let channel = u16::from_be_bytes([d[3], d[4]]);
             let (len, n) = read_per_len(d, 6)?;
             let start = 6 + n;
-            let data = d
-                .get(start..start + len)
-                .ok_or_else(|| crate::Error::Protocol("Send Data Indication length exceeds PDU".into()))?;
+            let data = d.get(start..start + len).ok_or_else(|| {
+                crate::Error::Protocol("Send Data Indication length exceeds PDU".into())
+            })?;
             Ok(DomainPdu::SendDataIndication { channel, data })
         }
         8 => {

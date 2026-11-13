@@ -143,7 +143,10 @@ pub fn split_share_control(mut data: &[u8]) -> Result<Vec<(u16, &[u8])>> {
             break; // flow control PDU
         }
         if total < 6 || total > data.len() {
-            return proto(format!("bad share control length {total} (have {})", data.len()));
+            return proto(format!(
+                "bad share control length {total} (have {})",
+                data.len()
+            ));
         }
         let ty = u16::from_le_bytes([data[2], data[3]]) & 0x0F;
         out.push((ty, &data[6..total]));
@@ -179,7 +182,12 @@ pub fn parse_demand_active(body: &[u8]) -> Result<DemandActive> {
     r.skip(src_len)?;
     let count = r.u16()?;
     r.u16()?;
-    let mut da = DemandActive { share_id, width: 0, height: 0, bpp: 0 };
+    let mut da = DemandActive {
+        share_id,
+        width: 0,
+        height: 0,
+        bpp: 0,
+    };
     for _ in 0..count {
         let ty = r.u16()?;
         let len = r.u16()? as usize;
@@ -206,6 +214,7 @@ const CAPSTYPE_BITMAPCACHE: u16 = 4;
 const CAPSTYPE_CONTROL: u16 = 5;
 const CAPSTYPE_ACTIVATION: u16 = 7;
 const CAPSTYPE_POINTER: u16 = 8;
+const CAPSTYPE_COLORCACHE: u16 = 10;
 const CAPSTYPE_SHARE: u16 = 9;
 const CAPSTYPE_SOUND: u16 = 12;
 const CAPSTYPE_INPUT: u16 = 13;
@@ -267,7 +276,8 @@ fn capabilities(width: u16, height: u16, keyboard_layout: u32) -> (u16, Vec<u8>)
     b.put_u16(0);
     b.put_u16(1); // maximumOrderLevel
     b.put_u16(0); // numberFonts
-    b.put_u16(0x0022); // NEGOTIATEORDERSUPPORT | COLORINDEXSUPPORT
+    // NEGOTIATEORDERSUPPORT | ZEROBOUNDSDELTASSUPPORT | COLORINDEXSUPPORT (the first two are MUST)
+    b.put_u16(0x002A);
     b.put_zeros(32); // orderSupport: no drawing orders, bitmaps only
     b.put_u16(0);
     b.put_u16(0);
@@ -307,8 +317,23 @@ fn capabilities(width: u16, height: u16, keyboard_layout: u32) -> (u16, Vec<u8>)
     cap(&mut out, &mut n, CAPSTYPE_BRUSH, &[0, 0, 0, 0]);
 
     let mut b = Vec::new();
-    b.put_zeros(40);
-    b.put_u32(0);
+    // Ten TS_CACHE_DEFINITIONs; cell sizes MUST be powers of two (MS-RDPBCGR 2.2.7.1.8).
+    for (entries, cell) in [
+        (254u16, 4u16),
+        (254, 4),
+        (254, 8),
+        (254, 8),
+        (254, 16),
+        (254, 32),
+        (254, 64),
+        (254, 128),
+        (254, 256),
+        (64, 2048),
+    ] {
+        b.put_u16(entries);
+        b.put_u16(cell);
+    }
+    b.put_u32(0x0100_0100); // FragCache: 256 entries of 256 bytes
     b.put_u16(0); // GLYPH_SUPPORT_NONE
     b.put_u16(0);
     cap(&mut out, &mut n, CAPSTYPE_GLYPHCACHE, &b);
@@ -329,6 +354,7 @@ fn capabilities(width: u16, height: u16, keyboard_layout: u32) -> (u16, Vec<u8>)
     b.put_u16(2);
     cap(&mut out, &mut n, CAPSTYPE_CONTROL, &b);
 
+    cap(&mut out, &mut n, CAPSTYPE_COLORCACHE, &[6, 0, 0, 0]);
     cap(&mut out, &mut n, CAPSTYPE_ACTIVATION, &[0; 8]);
     cap(&mut out, &mut n, CAPSTYPE_SHARE, &[0; 4]);
     cap(&mut out, &mut n, CAPSTYPE_FONT, &[1, 0, 0, 0]);
@@ -340,7 +366,13 @@ fn capabilities(width: u16, height: u16, keyboard_layout: u32) -> (u16, Vec<u8>)
     (n, out)
 }
 
-pub fn confirm_active(share_id: u32, user_id: u16, width: u16, height: u16, keyboard_layout: u32) -> Vec<u8> {
+pub fn confirm_active(
+    share_id: u32,
+    user_id: u16,
+    width: u16,
+    height: u16,
+    keyboard_layout: u32,
+) -> Vec<u8> {
     let (count, caps) = capabilities(width, height, keyboard_layout);
     let source = b"RDPRS\0";
     let mut b = Vec::new();

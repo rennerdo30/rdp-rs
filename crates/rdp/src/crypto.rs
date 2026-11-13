@@ -55,23 +55,64 @@ pub fn md4(data: &[u8]) -> [u8; 16] {
         let [mut a, mut b, mut c, mut d] = s;
         for &i in &[0usize, 4, 8, 12] {
             a = a.wrapping_add(f(b, c, d)).wrapping_add(x[i]).rotate_left(3);
-            d = d.wrapping_add(f(a, b, c)).wrapping_add(x[i + 1]).rotate_left(7);
-            c = c.wrapping_add(f(d, a, b)).wrapping_add(x[i + 2]).rotate_left(11);
-            b = b.wrapping_add(f(c, d, a)).wrapping_add(x[i + 3]).rotate_left(19);
+            d = d
+                .wrapping_add(f(a, b, c))
+                .wrapping_add(x[i + 1])
+                .rotate_left(7);
+            c = c
+                .wrapping_add(f(d, a, b))
+                .wrapping_add(x[i + 2])
+                .rotate_left(11);
+            b = b
+                .wrapping_add(f(c, d, a))
+                .wrapping_add(x[i + 3])
+                .rotate_left(19);
         }
         const K2: u32 = 0x5A82_7999;
         for i in 0..4 {
-            a = a.wrapping_add(g(b, c, d)).wrapping_add(x[i]).wrapping_add(K2).rotate_left(3);
-            d = d.wrapping_add(g(a, b, c)).wrapping_add(x[i + 4]).wrapping_add(K2).rotate_left(5);
-            c = c.wrapping_add(g(d, a, b)).wrapping_add(x[i + 8]).wrapping_add(K2).rotate_left(9);
-            b = b.wrapping_add(g(c, d, a)).wrapping_add(x[i + 12]).wrapping_add(K2).rotate_left(13);
+            a = a
+                .wrapping_add(g(b, c, d))
+                .wrapping_add(x[i])
+                .wrapping_add(K2)
+                .rotate_left(3);
+            d = d
+                .wrapping_add(g(a, b, c))
+                .wrapping_add(x[i + 4])
+                .wrapping_add(K2)
+                .rotate_left(5);
+            c = c
+                .wrapping_add(g(d, a, b))
+                .wrapping_add(x[i + 8])
+                .wrapping_add(K2)
+                .rotate_left(9);
+            b = b
+                .wrapping_add(g(c, d, a))
+                .wrapping_add(x[i + 12])
+                .wrapping_add(K2)
+                .rotate_left(13);
         }
         const K3: u32 = 0x6ED9_EBA1;
         for &i in &[0usize, 2, 1, 3] {
-            a = a.wrapping_add(h(b, c, d)).wrapping_add(x[i]).wrapping_add(K3).rotate_left(3);
-            d = d.wrapping_add(h(a, b, c)).wrapping_add(x[i + 8]).wrapping_add(K3).rotate_left(9);
-            c = c.wrapping_add(h(d, a, b)).wrapping_add(x[i + 4]).wrapping_add(K3).rotate_left(11);
-            b = b.wrapping_add(h(c, d, a)).wrapping_add(x[i + 12]).wrapping_add(K3).rotate_left(15);
+            a = a
+                .wrapping_add(h(b, c, d))
+                .wrapping_add(x[i])
+                .wrapping_add(K3)
+                .rotate_left(3);
+            d = d
+                .wrapping_add(h(a, b, c))
+                .wrapping_add(x[i + 8])
+                .wrapping_add(K3)
+                .rotate_left(9);
+            c = c
+                .wrapping_add(h(d, a, b))
+                .wrapping_add(x[i + 4])
+                .wrapping_add(K3)
+                .rotate_left(11);
+            b = b
+                .wrapping_add(h(c, d, a))
+                .wrapping_add(x[i + 12])
+                .wrapping_add(K3)
+                .rotate_left(15);
         }
         s = [
             s[0].wrapping_add(a),
@@ -153,7 +194,8 @@ impl Rc4 {
             self.i = self.i.wrapping_add(1);
             self.j = self.j.wrapping_add(self.s[self.i as usize]);
             self.s.swap(self.i as usize, self.j as usize);
-            let k = self.s[(self.s[self.i as usize].wrapping_add(self.s[self.j as usize])) as usize];
+            let k =
+                self.s[(self.s[self.i as usize].wrapping_add(self.s[self.j as usize])) as usize];
             *b ^= k;
         }
     }
@@ -178,7 +220,9 @@ mod tests {
         assert_eq!(hex(&md4(b"")), "31d6cfe0d16ae931b73c59d7e0c089c0");
         assert_eq!(hex(&md4(b"abc")), "a448017aaf21d8525fc10ae87aa6729d");
         assert_eq!(
-            hex(&md4(b"12345678901234567890123456789012345678901234567890123456789012345678901234567890")),
+            hex(&md4(
+                b"12345678901234567890123456789012345678901234567890123456789012345678901234567890"
+            )),
             "e33b4ddc9c38f2199c3e7b164fcc0536"
         );
     }

@@ -7,7 +7,11 @@ pub struct Framebuffer {
 
 impl Framebuffer {
     pub fn new(width: usize, height: usize) -> Self {
-        Self { width, height, pixels: vec![0; width * height] }
+        Self {
+            width,
+            height,
+            pixels: vec![0; width * height],
+        }
     }
 
     pub fn resize(&mut self, width: usize, height: usize) {

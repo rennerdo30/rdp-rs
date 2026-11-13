@@ -102,7 +102,9 @@ pub fn client_data_blocks(s: &ClientSettings) -> Vec<u8> {
 /// GCC Conference Create Request wrapped in T.124 ConnectData.
 pub fn conference_create_request(s: &ClientSettings) -> Vec<u8> {
     let blocks = client_data_blocks(s);
-    let mut ccr = vec![0x00, 0x08, 0x00, 0x10, 0x00, 0x01, 0xC0, 0x00, b'D', b'u', b'c', b'a'];
+    let mut ccr = vec![
+        0x00, 0x08, 0x00, 0x10, 0x00, 0x01, 0xC0, 0x00, b'D', b'u', b'c', b'a',
+    ];
     put_per_len(&mut ccr, blocks.len());
     ccr.extend(blocks);
     let mut out = vec![0x00, 0x05, 0x00, 0x14, 0x7C, 0x00, 0x01];

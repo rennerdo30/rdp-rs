@@ -53,7 +53,10 @@ fn parse_args() -> Args {
             "--size" => {
                 let v = val();
                 let (w, h) = v.split_once('x').unwrap_or_else(|| usage());
-                a.size = (w.parse().unwrap_or_else(|_| usage()), h.parse().unwrap_or_else(|_| usage()));
+                a.size = (
+                    w.parse().unwrap_or_else(|_| usage()),
+                    h.parse().unwrap_or_else(|_| usage()),
+                );
             }
             "--screenshot" => a.screenshot = Some(val()),
             "--wait" => a.wait = val().parse().unwrap_or_else(|_| usage()),
@@ -89,7 +92,10 @@ fn strip_quotes(s: &str) -> String {
 }
 
 fn hex(b: &[u8]) -> String {
-    b.iter().map(|x| format!("{x:02X}")).collect::<Vec<_>>().join(":")
+    b.iter()
+        .map(|x| format!("{x:02X}"))
+        .collect::<Vec<_>>()
+        .join(":")
 }
 
 fn main() {
@@ -139,7 +145,11 @@ fn main() {
 }
 
 /// Headless mode: wait until the screen has settled, save a PNG and disconnect.
-fn screenshot(mut client: Client, path: &str, max_wait: Duration) -> Result<(), Box<dyn std::error::Error>> {
+fn screenshot(
+    mut client: Client,
+    path: &str,
+    max_wait: Duration,
+) -> Result<(), Box<dyn std::error::Error>> {
     let start = Instant::now();
     let mut last_update: Option<Instant> = None;
     let mut refreshed = false;
@@ -200,12 +210,20 @@ fn run_window(mut client: Client) -> Result<(), Box<dyn std::error::Error>> {
         let mut events = Vec::new();
         for key in win.get_keys_pressed(KeyRepeat::Yes) {
             if let Some((scancode, extended)) = keymap::scancode(key) {
-                events.push(InputEvent::Key { scancode, extended, down: true });
+                events.push(InputEvent::Key {
+                    scancode,
+                    extended,
+                    down: true,
+                });
             }
         }
         for key in win.get_keys_released() {
             if let Some((scancode, extended)) = keymap::scancode(key) {
-                events.push(InputEvent::Key { scancode, extended, down: false });
+                events.push(InputEvent::Key {
+                    scancode,
+                    extended,
+                    down: false,
+                });
             }
         }
         if let Some((mx, my)) = win.get_mouse_pos(MouseMode::Discard) {
@@ -229,10 +247,11 @@ fn run_window(mut client: Client) -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             if let Some((_, dy)) = win.get_scroll_wheel()
-                && dy != 0.0 {
-                    let delta = if dy > 0.0 { 120 } else { -120 };
-                    events.push(InputEvent::wheel(delta, pos.0, pos.1));
-                }
+                && dy != 0.0
+            {
+                let delta = if dy > 0.0 { 120 } else { -120 };
+                events.push(InputEvent::wheel(delta, pos.0, pos.1));
+            }
         }
         if !events.is_empty() {
             client.send_input(&events)?;
@@ -240,7 +259,10 @@ fn run_window(mut client: Client) -> Result<(), Box<dyn std::error::Error>> {
 
         let fb = client.framebuffer();
         win.update_with_buffer(&fb.pixels, fb.width, fb.height)?;
-        if win.is_key_down(Key::F12) && win.is_key_down(Key::LeftCtrl) && win.is_key_down(Key::LeftAlt) {
+        if win.is_key_down(Key::F12)
+            && win.is_key_down(Key::LeftCtrl)
+            && win.is_key_down(Key::LeftAlt)
+        {
             break; // local escape hatch: Ctrl+Alt+F12
         }
     }

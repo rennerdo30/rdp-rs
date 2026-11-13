@@ -12,13 +12,19 @@ pub fn decode(src: &[u8], w: usize, h: usize) -> Result<Vec<u32>> {
     let mut r = Reader::new(src);
     let header = r.u8()?;
     if header & 0x07 != 0 || header & FORMAT_CS != 0 {
-        return Err(Error::Unsupported("planar YCoCg / chroma subsampling".into()));
+        return Err(Error::Unsupported(
+            "planar YCoCg / chroma subsampling".into(),
+        ));
     }
     let rle = header & FORMAT_RLE != 0;
     let plane_count = if header & FORMAT_NA != 0 { 3 } else { 4 };
     let mut planes = Vec::with_capacity(plane_count);
     for _ in 0..plane_count {
-        planes.push(if rle { rle_plane(&mut r, w, h)? } else { r.bytes(w * h)?.to_vec() });
+        planes.push(if rle {
+            rle_plane(&mut r, w, h)?
+        } else {
+            r.bytes(w * h)?.to_vec()
+        });
     }
     let rgb = &planes[plane_count - 3..]; // alpha plane (if any) is ignored
     let mut out = vec![0u32; w * h];
@@ -26,8 +32,7 @@ pub fn decode(src: &[u8], w: usize, h: usize) -> Result<Vec<u32>> {
         let sy = h - 1 - y; // planes are stored bottom-up
         for x in 0..w {
             let i = sy * w + x;
-            out[y * w + x] =
-                (rgb[0][i] as u32) << 16 | (rgb[1][i] as u32) << 8 | rgb[2][i] as u32;
+            out[y * w + x] = (rgb[0][i] as u32) << 16 | (rgb[1][i] as u32) << 8 | rgb[2][i] as u32;
         }
     }
     Ok(out)
@@ -52,7 +57,9 @@ fn rle_plane(r: &mut Reader, w: usize, h: usize) -> Result<Vec<u8>> {
                 raw = 0;
             }
             if x + raw + run > w {
-                return Err(Error::Protocol("planar RLE segment overruns scanline".into()));
+                return Err(Error::Protocol(
+                    "planar RLE segment overruns scanline".into(),
+                ));
             }
             for _ in 0..raw {
                 let v = r.u8()?;

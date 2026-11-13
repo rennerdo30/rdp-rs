@@ -38,7 +38,9 @@ impl Reassembler {
             if (h >> 6) & 0x2 != 0 {
                 let flags = r.u8()?;
                 if flags & 0x20 != 0 {
-                    return Err(Error::Unsupported("bulk-compressed fast-path update".into()));
+                    return Err(Error::Unsupported(
+                        "bulk-compressed fast-path update".into(),
+                    ));
                 }
             }
             let size = r.u16()? as usize;

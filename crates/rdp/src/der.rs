@@ -156,7 +156,10 @@ mod tests {
         assert_eq!(integer(6), [2, 1, 6]);
         assert_eq!(integer(0x80), [2, 2, 0, 0x80]);
         assert_eq!(integer(65535), [2, 3, 0, 0xFF, 0xFF]);
-        assert_eq!(parse_integer(&[0xC0, 0, 0, 0x6D]).unwrap() as u32, 0xC000_006D);
+        assert_eq!(
+            parse_integer(&[0xC0, 0, 0, 0x6D]).unwrap() as u32,
+            0xC000_006D
+        );
     }
 
     #[test]

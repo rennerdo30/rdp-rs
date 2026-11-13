@@ -84,6 +84,15 @@ pub struct Client {
 }
 
 fn send_io(f: &mut Framer, user_id: u16, io: u16, data: &[u8]) -> Result<()> {
+    if crate::log::verbose() {
+        // The Client Info PDU (SEC_INFO_PKT) carries the password: never dump it.
+        if data.starts_with(&[0x40, 0x00]) {
+            trace!("send {} bytes on channel {io}: [client info, redacted]", data.len());
+        } else {
+            let hex: String = data.iter().map(|b| format!("{b:02x}")).collect();
+            trace!("send {} bytes on channel {io}: {hex}", data.len());
+        }
+    }
     f.write(&x224::data(&mcs::send_data_request(user_id, io, data)))
 }
 
@@ -107,7 +116,9 @@ fn read_channel(f: &mut Framer, deadline: Instant) -> Result<(u16, Vec<u8>)> {
         match mcs::parse_domain_pdu(&payload)? {
             DomainPdu::SendDataIndication { channel, data } => return Ok((channel, data.to_vec())),
             DomainPdu::DisconnectProviderUltimatum { reason } => {
-                return Err(Error::Disconnected(format!("MCS disconnect, reason {reason}")));
+                return Err(Error::Disconnected(format!(
+                    "MCS disconnect, reason {reason}"
+                )));
             }
             DomainPdu::Other(c) => trace!("ignoring MCS PDU choice {c}"),
         }
@@ -116,9 +127,10 @@ fn read_channel(f: &mut Framer, deadline: Instant) -> Result<(u16, Vec<u8>)> {
 
 fn split_user(cfg: &Config) -> (String, String) {
     if cfg.domain.is_empty()
-        && let Some((d, u)) = cfg.username.split_once('\\') {
-            return (u.to_string(), d.to_string());
-        }
+        && let Some((d, u)) = cfg.username.split_once('\\')
+    {
+        return (u.to_string(), d.to_string());
+    }
     (cfg.username.clone(), cfg.domain.clone())
 }
 
@@ -153,12 +165,22 @@ impl Client {
         let certificate_sha256 = sha256(&cert);
         if protocol & (x224::PROTOCOL_HYBRID | x224::PROTOCOL_HYBRID_EX) != 0 {
             let public_key = der::subject_public_key(&cert)?;
-            credssp::authenticate(&mut f, &public_key, &user, &domain, &cfg.password, &cfg.client_name, deadline)?;
+            credssp::authenticate(
+                &mut f,
+                &public_key,
+                &user,
+                &domain,
+                &cfg.password,
+                &cfg.client_name,
+                deadline,
+            )?;
             if protocol == x224::PROTOCOL_HYBRID_EX {
                 let result = f.read_exact(4, deadline)?;
                 let code = u32::from_le_bytes(result[..4].try_into().unwrap());
                 if code != 0 {
-                    return Err(Error::Auth(format!("early user authorization denied ({code:#x})")));
+                    return Err(Error::Auth(format!(
+                        "early user authorization denied ({code:#x})"
+                    )));
                 }
             }
         }
@@ -172,7 +194,9 @@ impl Client {
             selected_protocol: protocol,
             channels: &[],
         };
-        f.write(&x224::data(&mcs::connect_initial(&gcc::conference_create_request(&settings))))?;
+        f.write(&x224::data(&mcs::connect_initial(
+            &gcc::conference_create_request(&settings),
+        )))?;
         let server = gcc::parse_conference_create_response(&mcs::parse_connect_response(
             &read_mcs(&mut f, deadline)?,
         )?)?;
@@ -262,8 +286,14 @@ impl Client {
         );
         send_io(&mut self.f, self.user_id, self.io_channel, &confirm)?;
         self.send_data(pdu::PDUTYPE2_SYNCHRONIZE, &pdu::synchronize())?;
-        self.send_data(pdu::PDUTYPE2_CONTROL, &pdu::control(pdu::CTRLACTION_COOPERATE))?;
-        self.send_data(pdu::PDUTYPE2_CONTROL, &pdu::control(pdu::CTRLACTION_REQUEST_CONTROL))?;
+        self.send_data(
+            pdu::PDUTYPE2_CONTROL,
+            &pdu::control(pdu::CTRLACTION_COOPERATE),
+        )?;
+        self.send_data(
+            pdu::PDUTYPE2_CONTROL,
+            &pdu::control(pdu::CTRLACTION_REQUEST_CONTROL),
+        )?;
         self.send_data(pdu::PDUTYPE2_FONTLIST, &pdu::font_list())
     }
 
@@ -326,7 +356,8 @@ impl Client {
                 Ok(())
             }
             DomainPdu::DisconnectProviderUltimatum { reason } => {
-                out.closed = Some(self.close_reason(&format!("server disconnected (MCS reason {reason})")));
+                out.closed =
+                    Some(self.close_reason(&format!("server disconnected (MCS reason {reason})")));
                 Ok(())
             }
             DomainPdu::Other(_) => Ok(()),
@@ -335,12 +366,21 @@ impl Client {
 
     fn handle_share(&mut self, data: &[u8], out: &mut PollOutcome) -> Result<()> {
         for (ty, body) in pdu::split_share_control(data)? {
+            if !self.active {
+                let ty2 = if ty == pdu::PDUTYPE_DATA {
+                    body.get(8).copied()
+                } else {
+                    None
+                };
+                trace!("received share PDU type {ty} (data type {ty2:?})");
+            }
             match ty {
                 pdu::PDUTYPE_DEMANDACTIVE => {
                     let demand = pdu::parse_demand_active(body)?;
                     trace!("reactivation: {demand:?}");
                     if demand.width != self.info.width || demand.height != self.info.height {
-                        self.fb.resize(demand.width as usize, demand.height as usize);
+                        self.fb
+                            .resize(demand.width as usize, demand.height as usize);
                         out.resized = true;
                     }
                     self.info.width = demand.width;
@@ -424,6 +464,8 @@ impl Client {
 
     /// Sends MCS Disconnect Provider Ultimatum; the session stays logged on.
     pub fn disconnect(mut self) {
-        let _ = self.f.write(&x224::data(&mcs::disconnect_provider_ultimatum()));
+        let _ = self
+            .f
+            .write(&x224::data(&mcs::disconnect_provider_ultimatum()));
     }
 }
