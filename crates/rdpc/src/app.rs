@@ -186,12 +186,12 @@ impl App {
         (worker, controls)
     }
 
-    fn start_session(&mut self, name: String, cfg: Config) {
+    fn start_session(&mut self, name: String, cfg: Config, fit: bool) {
         let id = self.next_id;
         self.next_id += 1;
         let (worker, controls) = self.spawn_worker(id, cfg.clone());
         if let Some(w) = &mut self.win {
-            w.ui.open_tab(id, name, cfg.host.clone());
+            w.ui.open_tab(id, name, cfg.host.clone(), fit);
         }
         self.sessions.insert(
             id,
@@ -248,7 +248,15 @@ impl App {
 
     fn handle_action(&mut self, action: Action) {
         match action {
-            Action::Connect { name, cfg } => self.start_session(name, *cfg),
+            Action::Connect { name, mut cfg, fit } => {
+                if fit && let Some(m) = &self.win {
+                    let (w, h) = m.ui.session_size_for(m.size.0 as i32, m.size.1 as i32);
+                    // Desktop widths must be even; sizes between 200 and 8192.
+                    cfg.width = ((w.clamp(200, 8192) as u16) & !1).max(200);
+                    cfg.height = h.clamp(200, 8192) as u16;
+                }
+                self.start_session(name, *cfg, fit);
+            }
             Action::Disconnect(id) => {
                 if let Some(w) = self.sessions.get_mut(&id).and_then(|s| s.worker.as_mut()) {
                     w.close();
@@ -728,7 +736,7 @@ impl ApplicationHandler<UserEvent> for App {
             }
         }
         if let Some((name, cfg)) = self.direct.take() {
-            self.start_session(name, cfg);
+            self.start_session(name, cfg, false);
         }
     }
 

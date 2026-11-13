@@ -58,6 +58,8 @@ pub fn load_fonts(te: &mut TextEngine) -> Option<Fonts> {
     Some(Fonts { ui, semi })
 }
 
+/// Fixed starting sizes. The Display choice before them, "Fit window", is
+/// stored as 0 x 0 and sizes the desktop to the session tab.
 pub const SIZES: [(u16, u16); 4] = [(1280, 800), (1600, 900), (1920, 1080), (2560, 1440)];
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -144,7 +146,12 @@ pub struct Tab {
 }
 
 pub enum Action {
-    Connect { name: String, cfg: Box<rdp::Config> },
+    /// `fit`: size the desktop to the tab (the app fills in the size) and follow resizes.
+    Connect {
+        name: String,
+        cfg: Box<rdp::Config>,
+        fit: bool,
+    },
     Disconnect(u64),
     Reconnect(u64),
     CloseTab(u64),
@@ -244,6 +251,19 @@ impl Ui {
         self.message = Some((text.into(), color));
     }
 
+    /// The physical size the session picture gets in a window of `w` x `h`
+    /// pixels: the same layout as `paint` (sidebar, tab strip, toolbar, drawer).
+    pub fn session_size_for(&self, w: i32, h: i32) -> (i32, i32) {
+        let p = |v: f32| (v * self.scale).round() as i32;
+        let side_w = p(260.0).min(w / 3);
+        let mut aw = w - side_w - 1;
+        let ah = h - p(28.0) - p(38.0) - p(40.0);
+        if self.drawer {
+            aw -= p(290.0).min(aw / 2) + 1;
+        }
+        (aw.max(1), ah.max(1))
+    }
+
     pub fn tab_mut(&mut self, id: u64) -> Option<&mut Tab> {
         self.tabs.iter_mut().find(|t| t.id == id)
     }
@@ -253,7 +273,7 @@ impl Ui {
             .and_then(|id| self.tabs.iter().find(|t| t.id == id))
     }
 
-    pub fn open_tab(&mut self, id: u64, name: String, host: String) {
+    pub fn open_tab(&mut self, id: u64, name: String, host: String, fit: bool) {
         self.tabs.push(Tab {
             id,
             name,
@@ -262,7 +282,7 @@ impl Ui {
             clipboard: false,
             printers: false,
             smart_cards: false,
-            fit: true,
+            fit,
             drives: Vec::new(),
         });
         self.active = Some(id);
@@ -297,7 +317,7 @@ impl Ui {
         self.size = SIZES
             .iter()
             .position(|&s| s == (c.width, c.height))
-            .unwrap_or(0);
+            .map_or(0, |i| i + 1);
         self.focus = Some(Field::Password);
     }
 
@@ -330,7 +350,11 @@ impl Ui {
             "" => host.clone(),
             n => n.to_string(),
         };
-        let (width, height) = SIZES[self.size];
+        let (width, height) = if self.size == 0 {
+            (0, 0)
+        } else {
+            SIZES[self.size - 1]
+        };
         Ok(Connection {
             name,
             host,
@@ -385,12 +409,16 @@ impl Ui {
         };
         let mut cfg = rdp::Config::new(&c.host, &c.user, &self.field(Field::Password).text);
         cfg.port = c.port;
-        cfg.width = c.width;
-        cfg.height = c.height;
+        let fit = c.width == 0;
+        if !fit {
+            cfg.width = c.width;
+            cfg.height = c.height;
+        }
         self.set_message(format!("Connecting to {}…", c.host), TEXT_2);
         Some(Action::Connect {
             name: c.name,
             cfg: Box::new(cfg),
+            fit,
         })
     }
 
@@ -1040,8 +1068,9 @@ impl Ui {
         y += row;
         label(cv, te, y, "Display");
         let mut cx = fx;
-        for (i, (sw, sh)) in SIZES.iter().enumerate() {
-            let text = format!("{sw} × {sh}");
+        let choices = std::iter::once("Fit window".to_string())
+            .chain(SIZES.iter().map(|(sw, sh)| format!("{sw} × {sh}")));
+        for (i, text) in choices.enumerate() {
             let cw = te.measure(f.ui, 12.5 * s, &text) as i32 + p(24.0);
             let r = Rect::new(cx, y + p(2.0), cw, fh - p(4.0));
             let hit = Hit::Size(i);
@@ -1064,7 +1093,7 @@ impl Ui {
             11.5 * s,
             fx as f32,
             (y + p(12.0)) as f32,
-            "Starting size. Tabs fit the remote desktop to the window once connected.",
+            "Fit window matches the tab and follows resizes; a fixed size stays as chosen.",
             TEXT_4,
             fw as f32,
         );
@@ -1712,8 +1741,8 @@ pub fn sample(session_tab: bool) -> Ui {
             host: "10.0.0.15".into(),
             port: 3389,
             user: r"CORP\alex".into(),
-            width: 1280,
-            height: 800,
+            width: 0,
+            height: 0,
         },
         Connection {
             name: "Build server".into(),
@@ -1733,7 +1762,7 @@ pub fn sample(session_tab: bool) -> Ui {
         },
     ]);
     let mut m = Ui::new(store, 1.0);
-    m.open_tab(1, "Office workstation".into(), "10.0.0.15".into());
+    m.open_tab(1, "Office workstation".into(), "10.0.0.15".into(), true);
     m.tabs[0].state = TabState::Connected {
         width: 1280,
         height: 720,
@@ -1745,7 +1774,7 @@ pub fn sample(session_tab: bool) -> Ui {
         name: "Share".into(),
         path: r"D:\Share".into(),
     });
-    m.open_tab(2, "Build server".into(), "build-01.lab.local".into());
+    m.open_tab(2, "Build server".into(), "build-01.lab.local".into(), false);
     m.tabs[1].state = TabState::Failed(
         "authentication failed: server error 0xc000006d STATUS_LOGON_FAILURE".into(),
     );
