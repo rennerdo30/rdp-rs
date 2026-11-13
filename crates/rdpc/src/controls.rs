@@ -5,13 +5,15 @@
 //! add them later); sharing itself starts off and follows the drawer toggles.
 
 use rdp::{
-    AudioHandle, ClipboardHandle, DisplayHandle, Drdynvc, RdpdrHandle, StaticChannel, StaticOverDvc,
+    AudioHandle, AudioInputHandle, ClipboardHandle, DisplayHandle, Drdynvc, RdpdrHandle,
+    StaticChannel, StaticOverDvc,
 };
 
 use crate::audio::{DEFAULT_DEVICE, Speaker, WaveOut};
+use crate::mic::{DeviceChoice, WaveIn};
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::clipboard::WindowsClipboard;
 use crate::printing::WindowsSpooler;
@@ -24,6 +26,10 @@ pub struct Controls {
     /// Sound over `rdpsnd` and over `AUDIO_PLAYBACK_DVC`; the server uses one.
     audio: [AudioHandle; 2],
     speaker: Speaker,
+    /// Microphone over the `AUDIO_INPUT` dynamic channel (MS-RDPEAI).
+    microphone: AudioInputHandle,
+    /// Capture device for the microphone; read when capture starts.
+    mic_device: DeviceChoice,
     /// Device ids of the printers currently shared.
     printers: Mutex<Vec<u32>>,
     /// Device id of the shared smart card subsystem, while shared.
@@ -43,9 +49,12 @@ impl Controls {
         let speaker: Speaker = Arc::new(AtomicU32::new(DEFAULT_DEVICE));
         let (rdpsnd, audio_static) = rdp::rdpsnd(Box::new(WaveOut::new(speaker.clone())));
         let (audio_dvc_channel, audio_dvc) = rdp::rdpsnd(Box::new(WaveOut::new(speaker.clone())));
+        let mic_device: DeviceChoice = Arc::new(Mutex::new(None));
+        let (audin, microphone) = rdp::audin(Box::new(WaveIn::new(mic_device.clone())));
         let dynamic: Vec<Box<dyn rdp::DynamicChannel>> = vec![
             Box::new(display_channel),
             Box::new(StaticOverDvc::new("AUDIO_PLAYBACK_DVC", audio_dvc_channel)),
+            Box::new(audin),
         ];
         // Same channels and order as mstsc: rdpdr, rdpsnd, cliprdr, drdynvc.
         let channels: Vec<Box<dyn StaticChannel>> = vec![
@@ -55,18 +64,22 @@ impl Controls {
             Box::new(Drdynvc::new(dynamic)),
         ];
         let audio = [audio_static, audio_dvc];
-        (
-            channels,
-            Controls {
-                display,
-                clipboard,
-                devices,
-                audio,
-                speaker,
-                printers: Mutex::new(Vec::new()),
-                smart_card: Mutex::new(None),
-            },
-        )
+        let controls = Controls {
+            display,
+            clipboard,
+            devices,
+            audio,
+            speaker,
+            microphone,
+            mic_device,
+            printers: Mutex::new(Vec::new()),
+            smart_card: Mutex::new(None),
+        };
+        if let Some(&device) = CLI_MICROPHONE.get() {
+            controls.set_microphone_device(device);
+            let _ = controls.set_microphone(true);
+        }
+        (channels, controls)
     }
 
     /// Text clipboard sharing, both directions; applies on the next session poll.
@@ -88,6 +101,21 @@ impl Controls {
             a.set_enabled(on);
         }
         Ok(())
+    }
+
+    /// Sends this PC's microphone to the session when the server records;
+    /// off closes the local device and sends nothing (the channel stays open).
+    pub fn set_microphone(&self, on: bool) -> Result<(), String> {
+        self.microphone.set_enabled(on);
+        Ok(())
+    }
+
+    /// Capture device: an index into [`crate::mic::input_devices`], or None
+    /// for the system default. Takes effect on the next capture start (the
+    /// server opening the recording, a format change, or the microphone
+    /// being switched on).
+    pub fn set_microphone_device(&self, device: Option<u32>) {
+        *self.mic_device.lock().unwrap_or_else(|p| p.into_inner()) = device;
     }
 
     /// Shares every local printer (Easy Print: the server needs no drivers).
@@ -148,4 +176,12 @@ impl Controls {
     pub fn remove_drive(&self, device_id: u32) {
         self.devices.remove(device_id);
     }
+}
+
+/// `--microphone [index]` from the command line: every session starts with
+/// the microphone on, on that device (manual testing).
+static CLI_MICROPHONE: OnceLock<Option<u32>> = OnceLock::new();
+
+pub fn enable_microphone_for_all(device: Option<u32>) {
+    let _ = CLI_MICROPHONE.set(device);
 }
