@@ -40,7 +40,7 @@ pub mod transport;
 pub mod x224;
 
 pub use channel::{ChannelOut, StaticChannel};
-pub use client::{Client, Config, ConnectionInfo, PollOutcome};
+pub use client::{Client, CloseReason, Config, ConnectionInfo, PollOutcome};
 pub use cliprdr::{ClipboardBackend, ClipboardHandle, Cliprdr, cliprdr};
 pub use disp::{DisplayControl, DisplayHandle, display_control};
 pub use dvc::{Drdynvc, DvcOut, DynamicChannel, StaticOverDvc};
@@ -48,6 +48,7 @@ pub use error::{Error, Result};
 pub use framebuffer::{Damage, Framebuffer};
 pub use input::InputEvent;
 pub use log::set_verbose;
+pub use pdu::AutoReconnectCookie;
 pub use pointer::{PointerShape, PointerUpdate};
 pub use rdpdr::{
     Device, Drive, IoCompletion, IoRequest, PrintBackend, PrintFormat, Printer, PrinterInfo, Rdpdr,

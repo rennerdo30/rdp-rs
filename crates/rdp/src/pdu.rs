@@ -19,6 +19,8 @@ pub const PDUTYPE2_SAVE_SESSION_INFO: u8 = 38;
 pub const PDUTYPE2_FONTLIST: u8 = 39;
 pub const PDUTYPE2_FONTMAP: u8 = 40;
 pub const PDUTYPE2_SET_ERROR_INFO: u8 = 47;
+/// Server Auto-Reconnect Status PDU (MS-RDPBCGR 2.2.4.1.1): the cookie was rejected.
+pub const PDUTYPE2_ARC_STATUS_PDU: u8 = 50;
 
 pub const SERVER_CHANNEL_ID: u16 = 0x03EA;
 
@@ -29,6 +31,9 @@ pub struct ClientInfo<'a> {
     pub domain: &'a str,
     pub user: &'a str,
     pub password: &'a str,
+    /// ARC_CS_PRIVATE_PACKET (MS-RDPBCGR 2.2.4.3) for an auto-reconnect logon
+    /// (3.2.5.3.11, 5.5); `None` sends cbAutoReconnectCookie = 0.
+    pub auto_reconnect: Option<[u8; ARC_PACKET_LEN]>,
 }
 
 /// Client Info PDU (TS_INFO_PACKET with extended info), preceded by the basic security header.
@@ -74,8 +79,172 @@ pub fn client_info(ci: &ClientInfo) -> Vec<u8> {
     out.put_zeros(172); // TS_TIME_ZONE_INFORMATION (UTC)
     out.put_u32(0); // clientSessionId
     out.put_u32(0x0000_0007); // no wallpaper, full-window drag or menu animations
-    out.put_u16(0); // cbAutoReconnectCookie
+    // cbAutoReconnectCookie is zero or 0x001C (2.2.1.11.1.1.1). The credentials
+    // above stay in the PDU: if the server rejects the cookie it logs on with
+    // them instead (3.3.5.3.11).
+    match &ci.auto_reconnect {
+        Some(arc) => {
+            out.put_u16(ARC_PACKET_LEN as u16);
+            out.put_bytes(arc);
+        }
+        None => out.put_u16(0),
+    }
     out
+}
+
+/// Size of both auto-reconnect packets (cbLen, MS-RDPBCGR 2.2.4.2 and 2.2.4.3).
+pub const ARC_PACKET_LEN: usize = 28;
+const AUTO_RECONNECT_VERSION_1: u32 = 1;
+
+/// The client random that MS-RDPBCGR 5.5 step 4 prescribes under Enhanced RDP
+/// Security (TLS, CredSSP): no client random is generated (5.3.2), so the
+/// verifier is computed over "an array of 32 zero bytes". This crate only
+/// speaks Enhanced RDP Security, so this is the only client random it uses.
+pub const ENHANCED_SECURITY_CLIENT_RANDOM: [u8; 32] = [0; 32];
+
+/// The server's auto-reconnect cookie (ARC_SC_PRIVATE_PACKET, MS-RDPBCGR
+/// 2.2.4.2), received in the Save Session Info PDU (2.2.10.1.1.4). Keep it in
+/// memory only (5.5 step 2); `Debug` never prints the random bits.
+#[derive(Clone, PartialEq, Eq)]
+pub struct AutoReconnectCookie {
+    /// LogonId: the session to reconnect to.
+    pub logon_id: u32,
+    /// ArcRandomBits: the HMAC key for the security verifier (5.5).
+    pub random: [u8; 16],
+}
+
+impl std::fmt::Debug for AutoReconnectCookie {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AutoReconnectCookie")
+            .field("logon_id", &self.logon_id)
+            .field("random", &"[redacted]")
+            .finish()
+    }
+}
+
+impl AutoReconnectCookie {
+    /// Parses an ARC_SC_PRIVATE_PACKET (2.2.4.2): cbLen MUST be 28, Version 1.
+    pub fn parse(data: &[u8]) -> Result<Self> {
+        let mut r = Reader::new(data);
+        let len = r.u32()?;
+        if len as usize != ARC_PACKET_LEN {
+            return proto(format!("auto-reconnect cookie length {len}"));
+        }
+        let version = r.u32()?;
+        if version != AUTO_RECONNECT_VERSION_1 {
+            return proto(format!("auto-reconnect cookie version {version}"));
+        }
+        Ok(Self {
+            logon_id: r.u32()?,
+            random: r.array()?,
+        })
+    }
+
+    /// SecurityVerifier = HMAC-MD5(key = ArcRandomBits, data = client random)
+    /// (MS-RDPBCGR 5.5 step 4, [RFC2104]).
+    pub fn security_verifier(&self, client_random: &[u8; 32]) -> [u8; 16] {
+        crate::crypto::hmac_md5(&self.random, client_random)
+    }
+
+    /// Builds the ARC_CS_PRIVATE_PACKET (2.2.4.3) for the Client Info PDU.
+    pub fn client_packet(&self, client_random: &[u8; 32]) -> [u8; ARC_PACKET_LEN] {
+        let mut out = Vec::with_capacity(ARC_PACKET_LEN);
+        out.put_u32(ARC_PACKET_LEN as u32);
+        out.put_u32(AUTO_RECONNECT_VERSION_1);
+        out.put_u32(self.logon_id);
+        out.put_bytes(&self.security_verifier(client_random));
+        out.try_into().expect("28 bytes")
+    }
+}
+
+/// TS_LOGON_ERRORS_INFO (MS-RDPBCGR 2.2.10.1.1.4.1.1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LogonErrors {
+    /// ErrorNotificationType: an NTSTATUS or a LOGON_MSG_* value.
+    pub notification_type: u32,
+    /// ErrorNotificationData: a session id or a LOGON_FAILED_* value.
+    pub notification_data: u32,
+}
+
+/// TS_SAVE_SESSION_INFO_PDU_DATA (MS-RDPBCGR 2.2.10.1.1), by infoType.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SaveSessionInfo {
+    /// INFOTYPE_LOGON (0): TS_LOGON_INFO (2.2.10.1.1.1).
+    Logon { session_id: u32 },
+    /// INFOTYPE_LOGON_LONG (1): TS_LOGON_INFO_VERSION_2 (2.2.10.1.1.2).
+    LogonLong { session_id: u32 },
+    /// INFOTYPE_LOGON_PLAINNOTIFY (2): TS_PLAIN_NOTIFY (2.2.10.1.1.3).
+    PlainNotify,
+    /// INFOTYPE_LOGON_EXTENDED_INFO (3): TS_LOGON_INFO_EXTENDED (2.2.10.1.1.4).
+    Extended {
+        cookie: Option<AutoReconnectCookie>,
+        errors: Option<LogonErrors>,
+    },
+    /// An infoType this version of the spec does not define.
+    Unknown(u32),
+}
+
+/// Parses the payload of a PDUTYPE2_SAVE_SESSION_INFO share data PDU
+/// (after the share data header). Bounds-checked; never panics.
+pub fn parse_save_session_info(payload: &[u8]) -> Result<SaveSessionInfo> {
+    const LOGON_EX_AUTORECONNECTCOOKIE: u32 = 0x1;
+    const LOGON_EX_LOGONERRORS: u32 = 0x2;
+    let mut r = Reader::new(payload);
+    match r.u32()? {
+        0 => {
+            // cbDomain, Domain[52], cbUserName, UserName[512], SessionId
+            r.skip(4 + 52 + 4 + 512)?;
+            Ok(SaveSessionInfo::Logon {
+                session_id: r.u32()?,
+            })
+        }
+        1 => {
+            let version = r.u16()?;
+            if version != 1 {
+                return proto(format!("logon info version {version}"));
+            }
+            r.u32()?; // Size
+            let session_id = r.u32()?;
+            let cb_domain = r.u32()? as usize;
+            let cb_user = r.u32()? as usize;
+            r.skip(558)?; // Pad
+            r.skip(cb_domain)?;
+            r.skip(cb_user)?;
+            Ok(SaveSessionInfo::LogonLong { session_id })
+        }
+        2 => {
+            r.skip(576)?; // Pad
+            Ok(SaveSessionInfo::PlainNotify)
+        }
+        3 => {
+            r.u16()?; // Length; the fields carry their own sizes
+            let present = r.u32()?;
+            // LogonFields are TS_LOGON_INFO_FIELDs (2.2.10.1.1.4.1) in fixed
+            // order: cookie, then logon errors. The 570-byte Pad is ignored.
+            fn field<'a>(r: &mut Reader<'a>, present: bool) -> Result<Option<&'a [u8]>> {
+                if !present {
+                    return Ok(None);
+                }
+                let n = r.u32()? as usize;
+                r.bytes(n).map(Some)
+            }
+            let cookie = field(&mut r, present & LOGON_EX_AUTORECONNECTCOOKIE != 0)?
+                .map(AutoReconnectCookie::parse)
+                .transpose()?;
+            let errors = match field(&mut r, present & LOGON_EX_LOGONERRORS != 0)? {
+                Some(d) => {
+                    let mut e = Reader::new(d);
+                    Some(LogonErrors {
+                        notification_type: e.u32()?,
+                        notification_data: e.u32()?,
+                    })
+                }
+                None => None,
+            };
+            Ok(SaveSessionInfo::Extended { cookie, errors })
+        }
+        t => Ok(SaveSessionInfo::Unknown(t)),
+    }
 }
 
 /// Handles one server licensing PDU. With TLS the server normally answers the
@@ -467,3 +636,7 @@ mod tests {
         assert_eq!(parts[1].0, PDUTYPE_DEACTIVATEALL);
     }
 }
+
+#[cfg(test)]
+#[path = "arc_tests.rs"]
+mod arc_tests;

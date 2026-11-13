@@ -147,7 +147,7 @@ fn run(
             emit(Event::Pointer(p));
         }
         if let Some(reason) = out.closed {
-            return emit(Event::Closed(reason));
+            return emit(Event::Closed(reason.text));
         }
     }
 }
