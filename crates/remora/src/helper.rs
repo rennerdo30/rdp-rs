@@ -417,11 +417,8 @@ impl Core {
         match self.pin.clone() {
             Some(PinCheck::Known) => {
                 self.send(0, &Message::Pairing(PairingStatus::Known));
-                if let (Some(p), Some(id)) = (&self.pins_path, &self.server_id)
-                    && let Ok(mut s) = PinStore::load(p)
-                {
-                    s.touch(id, now_secs());
-                    let _ = s.save(p);
+                if let (Some(p), Some(id)) = (&self.pins_path, &self.server_id) {
+                    let _ = PinStore::update(p, |s| s.touch(id, now_secs()));
                 }
                 self.paired();
             }
@@ -843,11 +840,7 @@ impl HelperHandle {
         if let (Some(p), Some(id)) = (c.pins_path.clone(), c.server_id.clone()) {
             // An unreadable store is not overwritten (it may hold other
             // servers); the pairing then holds for this session only.
-            saved = PinStore::load(&p)
-                .and_then(|mut s| {
-                    s.pin(&id, &key, now_secs());
-                    s.save(&p)
-                })
+            saved = PinStore::update(&p, |s| s.pin(&id, &key, now_secs()))
                 .map_err(|e| format!("paired for this session only: {e}"));
         }
         c.send(0, &Message::Pairing(PairingStatus::Confirmed));

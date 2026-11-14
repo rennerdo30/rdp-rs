@@ -428,9 +428,10 @@ impl App {
     ) -> (Worker, Controls) {
         let proxy = self.proxy.clone();
         let (channels, controls) = Controls::build(&cfg.client_name, self.hwnd(), helper);
-        // The helper's key is pinned per server, like the certificate.
+        // The helper's key is pinned per server and user (each user of a
+        // server runs their own helper), like the certificate.
         controls.helper().set_server(
-            remora_link::server_id(&cfg.host, cfg.port),
+            remora_link::pin_id(&cfg.host, cfg.port, &account(&cfg.domain, &cfg.username)),
             crate::helper_app::pins_path(),
         );
         let worker = session::spawn(cfg, channels, move |ev| {
@@ -3119,4 +3120,15 @@ fn show_in_explorer(file: &std::path::Path) {
     }
     #[cfg(not(windows))]
     let _ = std::process::Command::new("xdg-open").arg(dir).spawn();
+}
+
+/// `DOMAIN\user`, or the user name alone when it already says where it
+/// belongs (`DOMAIN\user`, `user@domain`): the user part of a helper pin.
+fn account(domain: &str, user: &str) -> String {
+    let (d, u) = (domain.trim(), user.trim());
+    if u.is_empty() || d.is_empty() || u.contains(['\\', '@']) {
+        u.to_string()
+    } else {
+        format!("{d}\\{u}")
+    }
 }
