@@ -336,6 +336,11 @@ pub struct Tab {
     pub spanned: bool,
     /// A RemoteApp session: apps in their own windows, no desktop picture.
     pub remote_app: Option<RemoteAppView>,
+    /// The server the session was redirected to after logon (MS-RDPBCGR
+    /// 3.2.5.13), if any; `host` stays the one the user connected to.
+    pub redirected_to: Option<String>,
+    /// What network auto-detect measured ("RTT 12 ms · 48.0 Mbit/s").
+    pub network: Option<String>,
 }
 
 /// A server certificate to trust or refuse.
@@ -366,6 +371,8 @@ struct TabView {
     speaker: Option<String>,
     microphone: bool,
     mic: Option<String>,
+    redirected_to: Option<String>,
+    network: Option<String>,
 }
 
 pub enum Action {
@@ -731,6 +738,8 @@ impl Ui {
             recording: false,
             spanned: false,
             remote_app: None,
+            redirected_to: None,
+            network: None,
         });
         self.active = Some(id);
         self.session_focus = false;
@@ -4179,13 +4188,14 @@ impl Ui {
         self.caption(cv, te, f, x, y, w, "CONNECTION SPEED");
         y += p(24.0);
         let subs = [
+            "The server measures the link and adapts",
             "Everything on",
             "Everything on, for slower links",
             "No wallpaper or animations",
             "Visual styles only",
             "Plain desktop, least data",
         ];
-        let cells = self.card(cv, x, y, w, &[p(50.0); 5]);
+        let cells = self.card(cv, x, y, w, &[p(50.0); PRESETS.len()]);
         for (i, (r, ((c, name), sub))) in cells.iter().zip(PRESETS.iter().zip(subs)).enumerate() {
             self.card_choice(
                 cv,
@@ -4198,7 +4208,7 @@ impl Ui {
                 Hit::FormPreset(i),
             );
         }
-        y += 5 * p(50.0) + p(20.0);
+        y += PRESETS.len() as i32 * p(50.0) + p(20.0);
 
         self.caption(cv, te, f, x, y, w, "COLOURS");
         y += p(24.0);
@@ -5184,6 +5194,8 @@ impl Ui {
             speaker: tab.speaker.clone(),
             microphone: tab.microphone,
             mic: tab.mic.clone(),
+            redirected_to: tab.redirected_to.clone(),
+            network: tab.network.clone(),
         };
         let x = d.x + p(16.0);
         let w = d.w - p(32.0);
@@ -5528,13 +5540,14 @@ impl Ui {
         self.caption(cv, te, f, x, y, w, "CONNECTION SPEED");
         y += p(24.0);
         let subs = [
+            "The server measures the link and adapts",
             "Everything on",
             "Everything on, for slower links",
             "No wallpaper or animations",
             "Visual styles only",
             "Plain desktop, least data",
         ];
-        let cells = self.card(cv, x, y, w, &[p(48.0); 5]);
+        let cells = self.card(cv, x, y, w, &[p(48.0); PRESETS.len()]);
         for (i, (r, ((c, name), sub))) in cells.iter().zip(PRESETS.iter().zip(subs)).enumerate() {
             self.card_choice(
                 cv,
@@ -5547,7 +5560,7 @@ impl Ui {
                 Hit::TabPreset(id, i),
             );
         }
-        y += 5 * p(48.0) + p(20.0);
+        y += PRESETS.len() as i32 * p(48.0) + p(20.0);
 
         self.caption(cv, te, f, x, y, w, "COLOURS");
         y += p(24.0);
@@ -5651,14 +5664,23 @@ impl Ui {
             TabState::Ended(_) => ("Ended".into(), "–".into(), "–".into()),
             TabState::Failed(_) => ("Failed".into(), "–".into(), "–".into()),
         };
-        let rows = [
-            ("Host", t.host.clone()),
+        let mut rows = vec![("Host", t.host.clone())];
+        // The server moved the session after logon (MS-RDPBCGR 3.2.5.13).
+        if let Some(to) = &t.redirected_to {
+            rows.push(("Moved to", to.clone()));
+        }
+        rows.extend([
             ("Status", status),
             ("Desktop", desktop),
             ("Colours", colours),
             ("Speed", preset_name(t.quality_live.connection).to_string()),
-        ];
-        let cells = self.card(cv, x, y, w, &[p(38.0); 5]);
+        ]);
+        // Network auto-detect results, once the server sent some.
+        if let Some(n) = &t.network {
+            rows.push(("Network", n.clone()));
+        }
+        let count = rows.len();
+        let cells = self.card(cv, x, y, w, &vec![p(38.0); count]);
         for (r, (label, value)) in cells.iter().zip(rows) {
             te.draw(
                 cv,
@@ -5683,7 +5705,7 @@ impl Ui {
                 room as f32,
             );
         }
-        y += 5 * p(38.0) + p(20.0);
+        y += count as i32 * p(38.0) + p(20.0);
 
         self.caption(cv, te, f, x, y, w, "WINDOWS KEYS (WIN, ALT+TAB)");
         y += p(24.0);
@@ -6409,6 +6431,11 @@ pub fn sample_panel(page: u8, fullscreen: bool) -> Ui {
         t.speaker = Some("Headset (USB Audio)".into());
         if page == 2 {
             t.quality.wallpaper = false;
+        }
+        if page == 3 {
+            // Redirected after logon, with network auto-detect results.
+            t.redirected_to = Some("rdsh2.corp.example".into());
+            t.network = Some("RTT 14 ms · 50.0 Mbit/s".into());
         }
     }
     m

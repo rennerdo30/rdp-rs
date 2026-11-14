@@ -29,6 +29,12 @@ pub enum Event {
     RailReady(rdp::RailHandle),
     /// RemoteApp window and channel events, in order.
     Rail(Vec<rdp::RailEvent>),
+    /// The server redirected the running session (MS-RDPBCGR 3.2.5.13):
+    /// connect `cfg` (the next hop, from [`Client::follow_redirection`])
+    /// with new channel handlers. `to` names the target for the status line.
+    Redirected { cfg: Box<Config>, to: String },
+    /// New network auto-detect results (MS-RDPBCGR 2.2.14.1.5).
+    Network(rdp::NetworkCharacteristics),
     Failed(String),
 }
 
@@ -209,7 +215,23 @@ fn run(
         if !out.rail.is_empty() {
             emit(Event::Rail(out.rail));
         }
+        if let Some(n) = out.network {
+            emit(Event::Network(n));
+        }
         if let Some(reason) = out.closed {
+            // A Server Redirection PDU after logon: the next hop needs new
+            // channel handlers, so the UI starts it (same tab, same settings).
+            match client.follow_redirection(&cfg) {
+                Some(Ok(next)) => {
+                    let to = redirect_target(&next);
+                    return emit(Event::Redirected {
+                        cfg: Box::new(next),
+                        to,
+                    });
+                }
+                Some(Err(e)) => return emit(Event::Failed(e.to_string())),
+                None => {}
+            }
             if reason.reconnectable {
                 return emit(Event::Dropped {
                     why: reason.text,
@@ -219,6 +241,15 @@ fn run(
             return emit(Event::Closed(reason.text));
         }
     }
+}
+
+/// The server a redirection's next hop goes to, for the status line: its
+/// first target, or the sender when it names none (MS-RDPBCGR 1.3.8).
+fn redirect_target(next: &Config) -> String {
+    next.redirection
+        .as_ref()
+        .and_then(|r| r.targets().into_iter().next())
+        .unwrap_or_else(|| next.host.clone())
 }
 
 /// Unicode keyboard events (MS-RDPBCGR 2.2.8.1.2.2.2) for a key press that
