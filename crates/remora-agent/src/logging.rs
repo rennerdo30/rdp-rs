@@ -4,8 +4,8 @@
 //! the log never takes more than twice the cap.
 //!
 //! What is logged: lifecycle (start, channel open and close, session
-//! events), errors and sizes. Never message contents, URLs or file names
-//! from the protocol.
+//! events, pairing, transfer ids and sizes), errors and sizes. Never message
+//! contents, keys or URLs; file names only at debug level ([`set_debug`]).
 
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
@@ -150,6 +150,28 @@ pub fn log(level: &str, msg: &str) {
     if let Some(l) = logger {
         l.log(level, msg);
     }
+}
+
+static DEBUG: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Debug lines (file names of transfers) are off unless switched on
+/// (`REMORA_AGENT_DEBUG=1` in the agent's environment).
+pub fn set_debug(on: bool) {
+    DEBUG.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn debug_enabled() -> bool {
+    DEBUG.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Debug level: may name files; never contents, keys or links.
+#[macro_export]
+macro_rules! debug {
+    ($($t:tt)*) => {
+        if $crate::logging::debug_enabled() {
+            $crate::logging::log("DEBUG", &format!($($t)*))
+        }
+    };
 }
 
 #[macro_export]

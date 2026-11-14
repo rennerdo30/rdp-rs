@@ -1689,6 +1689,8 @@ dependencies = [
 name = "remora-agent"
 version = "0.1.0-beta.4"
 dependencies = [
+ "remora-link",
+ "windows",
  "windows-sys 0.61.2",
 ]
 

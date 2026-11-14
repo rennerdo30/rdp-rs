@@ -1,6 +1,7 @@
-//! Subcommands that change or inspect the user's setup: the scheduled task,
-//! the link registration, `open-url`, `session-info`. Each change has a
-//! `--dry-run` that prints the plan and touches nothing.
+//! Subcommands that change or inspect the user's setup: the scheduled task
+//! and the Send To shortcut, the link registration, `open-url`, `send`,
+//! `session-info`. Each change has a `--dry-run` that prints the plan and
+//! touches nothing.
 
 use std::io;
 use std::path::PathBuf;
@@ -16,7 +17,10 @@ use windows_sys::Win32::System::SystemInformation::GetSystemDirectoryW;
 use windows_sys::Win32::UI::Shell::{SHCNE_ASSOCCHANGED, SHCNF_IDLIST, SHChangeNotify};
 
 use super::pipe::{self, ForwardResult};
+use super::shortcut;
+use super::ui::MessageBoxNotifier;
 use super::{sys, wide};
+use crate::files::{self, Forwarded};
 use crate::links::{self, RegOp};
 use crate::task::{self, TaskSpec, TaskStatus};
 use crate::{info, warn};
@@ -149,10 +153,15 @@ pub fn install(dry_run: bool) -> i32 {
     };
     let xml_path = dir.join("remora-agent-task.xml");
     let args = task::create_args(&name, &xml_path.to_string_lossy());
+    let shortcut = sendto_plan(&spec.exe);
     if dry_run {
         println!("Would write {} (UTF-16) with:\n", xml_path.display());
         print!("{}", task::task_xml(&spec));
         println!("\nWould run: schtasks.exe {}", args.join(" "));
+        match &shortcut {
+            Some(s) => println!("Would create the Send To {s}"),
+            None => println!("No SendTo folder found; no Send To shortcut"),
+        }
         return 0;
     }
     let write = std::fs::create_dir_all(&dir)
@@ -163,11 +172,31 @@ pub fn install(dry_run: bool) -> i32 {
     }
     let code = report(schtasks(&args), "install");
     let _ = std::fs::remove_file(&xml_path);
-    if code == 0 {
-        info!("scheduled task installed");
-        println!("The agent now starts at logon and when a client reconnects.");
+    if code != 0 {
+        return code;
     }
-    code
+    info!("scheduled task installed");
+    println!("The agent now starts at logon and when a client reconnects.");
+    match shortcut.map(|s| shortcut::create(&s).map(|()| s)) {
+        Some(Ok(s)) => {
+            info!("Send To shortcut created");
+            println!("Send To: {s}");
+            0
+        }
+        Some(Err(e)) => {
+            eprintln!("Send To shortcut: {e}");
+            1
+        }
+        None => {
+            eprintln!("Send To shortcut: no SendTo folder found");
+            1
+        }
+    }
+}
+
+/// The Send To shortcut for this program, if the folder is known.
+fn sendto_plan(exe: &str) -> Option<files::Shortcut> {
+    super::files::sendto_folder().map(|d| files::sendto_shortcut(&d, exe))
 }
 
 pub fn uninstall(dry_run: bool) -> i32 {
@@ -179,8 +208,12 @@ pub fn uninstall(dry_run: bool) -> i32 {
         }
     };
     let args = task::delete_args(&task::task_name(&sid));
+    let shortcut = this_exe().ok().and_then(|exe| sendto_plan(&exe));
     if dry_run {
         println!("Would run: schtasks.exe {}", args.join(" "));
+        if let Some(s) = &shortcut {
+            println!("Would remove the Send To {s}");
+        }
         return unregister_links(true);
     }
     let task_code = match schtasks(&args) {
@@ -191,8 +224,18 @@ pub fn uninstall(dry_run: bool) -> i32 {
         }
         other => report(other, "task removal"),
     };
+    let shortcut_code = match shortcut.map(|s| shortcut::remove(&s)) {
+        Some(Err(e)) => {
+            eprintln!("Send To shortcut: {e}");
+            1
+        }
+        _ => {
+            println!("Send To shortcut: removed (or was not there)");
+            0
+        }
+    };
     let links_code = unregister_links(false);
-    task_code.max(links_code)
+    task_code.max(links_code).max(shortcut_code)
 }
 
 pub fn status() -> i32 {
@@ -398,6 +441,45 @@ pub fn open_url(raw: &str) -> i32 {
             3
         }
     }
+}
+
+/// Why a path cannot be sent, in the user's words.
+fn send_check(arg: &str) -> Result<String, String> {
+    let p = std::path::absolute(arg).map_err(|e| e.to_string())?;
+    let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    if files::reserved_name(name) {
+        return Err("transfer working files are not sent".into());
+    }
+    let s = p.to_str().ok_or("the name cannot be sent")?.to_string();
+    match std::fs::symlink_metadata(&p) {
+        Ok(m) if m.is_dir() => return Err("folders cannot be sent yet".into()),
+        Ok(m) if m.is_symlink() => return Err("links are not sent".into()),
+        Ok(_) => {}
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Err("not found".into()),
+        Err(e) => return Err(e.to_string()),
+    }
+    match super::files::open_regular(&p) {
+        Ok(_) => Ok(s),
+        Err(e) if e.kind() == io::ErrorKind::InvalidInput => Err(e.to_string()),
+        Err(e) if e.kind() == io::ErrorKind::PermissionDenied => Err("cannot be read".into()),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+/// `send <files>`: hands the files to the agent of this session, which
+/// offers them to Remora. Messages only when something went wrong.
+pub fn send_files(args: &[String]) -> i32 {
+    let mut forward = |req: &[u8]| match pipe::forward_send(req) {
+        Ok(Some(r)) => Forwarded::Reply(r),
+        Ok(None) => Forwarded::NoAgent,
+        Err(e) => {
+            warn!("send: pipe error: {e}");
+            Forwarded::Error(e.to_string())
+        }
+    };
+    let code = files::send_command(args, &mut send_check, &mut forward, &mut MessageBoxNotifier);
+    info!("send: {} item(s), exit code {code}", args.len());
+    code
 }
 
 pub fn print_session_info() -> i32 {

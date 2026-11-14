@@ -1,11 +1,11 @@
 //! The seam between the agent's plumbing and the helper protocol.
 //!
 //! The agent owns the Windows side: channels, session events, timers, the
-//! open-URL forwarder. It turns all of that into [`AgentEvent`]s and hands
-//! them, one at a time on a single thread, to a [`Protocol`]. The protocol
-//! answers with [`Action`]s that the agent carries out. `remora-link` (the
-//! Noise handshake, pairing, message types and file transfer) plugs in here
-//! by implementing [`Protocol`]; until then [`NullProtocol`] stands in.
+//! local pipe (`open-url`, `send`). It turns all of that into
+//! [`AgentEvent`]s and hands them, one at a time on a single thread, to a
+//! [`Protocol`]. The protocol answers with [`Action`]s that the agent
+//! carries out. [`crate::link::LinkProtocol`] (remora-link: Noise
+//! handshake, pairing, messages, file transfer) is the implementation.
 //!
 //! Contract for implementations:
 //! - One DVC message is one protocol message ([`AgentEvent::Message`] and
@@ -13,10 +13,21 @@
 //!   [`crate::framing::MAX_WIRE_MESSAGE_LEN`] bytes).
 //! - The agent is the Noise initiator: on [`AgentEvent::ChannelOpened`]
 //!   the protocol sends first.
+//! - The agent opens `Remora::Ctl` whenever a client connects.
+//!   `Remora::Bulk` is opened only when the protocol asks for it with
+//!   [`Action::OpenChannel`] (after `HelloAck`, HELPER-PROTOCOL.md 1).
 //! - A channel can close and reopen any number of times (client reconnects);
 //!   every [`AgentEvent::ChannelOpened`] starts a fresh handshake.
+//! - [`Action::Close`] closes a channel without an
+//!   [`AgentEvent::ChannelClosed`] coming back; the agent does not reopen
+//!   it before the next client connect (or, for Bulk, the next
+//!   [`Action::OpenChannel`]).
 //! - [`Action::Send`] on a closed channel is dropped and logged.
 //! - `on_event` must not block; the agent's event loop runs it inline.
+//!   [`Protocol::next_deadline`] asks for an [`AgentEvent::Timer`].
+
+use std::path::PathBuf;
+use std::time::Instant;
 
 use crate::info::SessionInfo;
 
@@ -34,16 +45,28 @@ impl Channel {
 
     /// The DVC name (ANSI, as `WTSVirtualChannelOpenEx` takes it).
     pub fn dvc_name(self) -> &'static str {
-        match self {
-            Channel::Ctl => "Remora::Ctl",
-            Channel::Bulk => "Remora::Bulk",
-        }
+        self.link().name()
     }
 
     pub fn index(self) -> usize {
         match self {
             Channel::Ctl => 0,
             Channel::Bulk => 1,
+        }
+    }
+
+    /// The same channel in remora-link's terms.
+    pub fn link(self) -> remora_link::Channel {
+        match self {
+            Channel::Ctl => remora_link::Channel::Ctl,
+            Channel::Bulk => remora_link::Channel::Bulk,
+        }
+    }
+
+    pub fn from_link(c: remora_link::Channel) -> Channel {
+        match c {
+            remora_link::Channel::Ctl => Channel::Ctl,
+            remora_link::Channel::Bulk => Channel::Bulk,
         }
     }
 }
@@ -58,81 +81,67 @@ pub enum AgentEvent {
     ChannelClosed(Channel),
     /// One whole message arrived.
     Message(Channel, Vec<u8>),
-    /// A fresh session snapshot, every few seconds while `Remora::Ctl` is
-    /// open. Doubles as the protocol's clock for heartbeats and timeouts.
+    /// A fresh session snapshot: right after `Remora::Ctl` opened, then
+    /// every few seconds while it is open.
     SessionInfoTick(SessionInfo),
     /// The user clicked a link in the session (already validated: http or
-    /// https, bounded length). Answer with [`Action::OpenUrlResult`].
-    OpenUrl(String),
+    /// https, bounded length). Answer with [`Action::OpenUrlResult`] and the
+    /// same `id`.
+    OpenUrl { id: u64, url: String },
+    /// `remora-agent send <files>` (Send To): offer these files to Remora.
+    /// Answer with [`Action::SendFilesResult`] and the same `id`.
+    SendFiles { id: u64, paths: Vec<PathBuf> },
+    /// The user answered the pairing dialog on the server (the `ticket`
+    /// that [`crate::link::PairingUi::show_sas`] got).
+    PairingAnswer { ticket: u64, confirmed: bool },
+    /// The deadline from [`Protocol::next_deadline`] passed.
+    Timer,
     /// The agent is exiting (logoff, `WM_ENDSESSION`). Last chance to send.
     Shutdown,
 }
 
 /// What the protocol wants done.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(
-    dead_code,
-    reason = "Send and Close come from remora-link once integrated"
-)]
 pub enum Action {
     /// Send one whole message on the channel.
     Send(Channel, Vec<u8>),
-    /// Close the channel (protocol error, failed authentication). The agent
-    /// reopens it only on the next client connect.
+    /// Close the channel (protocol error, failed authentication, rejected
+    /// pairing, or Bulk after Ctl closed).
     Close(Channel),
+    /// Open the channel now (Bulk after `HelloAck`).
+    OpenChannel(Channel),
     /// The answer to [`AgentEvent::OpenUrl`]; the `open-url` process waits
     /// for it and falls back to the local browser if it is not `Forwarded`.
-    OpenUrlResult(UrlOutcome),
+    OpenUrlResult { id: u64, outcome: UrlOutcome },
+    /// The answer to [`AgentEvent::SendFiles`].
+    SendFilesResult { id: u64, outcome: SendOutcome },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code, reason = "Forwarded comes from remora-link once integrated")]
 pub enum UrlOutcome {
-    /// Sent to the Remora client.
+    /// Remora took the link (opened it, is asking the user, or the user
+    /// declined it there): do not open it locally.
     Forwarded,
-    /// No paired Remora client is connected.
+    /// No paired Remora client with links enabled: the local fallback runs.
+    NoClient,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SendOutcome {
+    /// `offered` files were queued for Remora; `failed` could not be read.
+    Offered { offered: u16, failed: u16 },
+    /// No paired Remora client with "files to this PC" enabled.
     NoClient,
 }
 
 /// The helper protocol, driven by the agent's event loop.
 pub trait Protocol {
     fn on_event(&mut self, ev: AgentEvent) -> Vec<Action>;
-}
 
-/// Stand-in until `remora-link` is integrated: speaks nothing, so no URL is
-/// ever forwarded. It keeps the events it would have acted on, which lets
-/// the agent's plumbing be exercised end to end.
-#[derive(Debug, Default)]
-pub struct NullProtocol {
-    /// Links that would be sent as an `OpenUrl` message on `Remora::Ctl`.
-    pub outgoing: Vec<OutgoingEvent>,
-}
-
-/// A high-level message the protocol would send once it is real.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum OutgoingEvent {
-    OpenUrl(String),
-}
-
-/// How many pending events the stand-in keeps.
-const NULL_QUEUE_CAP: usize = 16;
-
-impl Protocol for NullProtocol {
-    fn on_event(&mut self, ev: AgentEvent) -> Vec<Action> {
-        match ev {
-            AgentEvent::OpenUrl(url) => {
-                if self.outgoing.len() >= NULL_QUEUE_CAP {
-                    self.outgoing.remove(0);
-                }
-                self.outgoing.push(OutgoingEvent::OpenUrl(url));
-                vec![Action::OpenUrlResult(UrlOutcome::NoClient)]
-            }
-            AgentEvent::ChannelOpened(_)
-            | AgentEvent::ChannelClosed(_)
-            | AgentEvent::Message(..)
-            | AgentEvent::SessionInfoTick(_)
-            | AgentEvent::Shutdown => Vec::new(),
-        }
+    /// When the protocol next wants an [`AgentEvent::Timer`] (heartbeats,
+    /// link answer timeouts, file transfer pacing). `None`: no timer.
+    fn next_deadline(&self) -> Option<Instant> {
+        None
     }
 }
 
@@ -148,28 +157,7 @@ mod tests {
         for c in Channel::ALL {
             assert!(c.dvc_name().is_ascii());
             assert_eq!(Channel::ALL[c.index()], c);
+            assert_eq!(Channel::from_link(c.link()), c);
         }
-    }
-
-    #[test]
-    fn null_protocol_never_forwards_and_stays_bounded() {
-        let mut p = NullProtocol::default();
-        assert!(
-            p.on_event(AgentEvent::ChannelOpened(Channel::Ctl))
-                .is_empty()
-        );
-        assert!(
-            p.on_event(AgentEvent::Message(Channel::Ctl, vec![1, 2]))
-                .is_empty()
-        );
-        for i in 0..40 {
-            let a = p.on_event(AgentEvent::OpenUrl(format!("https://e.example/{i}")));
-            assert_eq!(a, vec![Action::OpenUrlResult(UrlOutcome::NoClient)]);
-        }
-        assert_eq!(p.outgoing.len(), NULL_QUEUE_CAP);
-        assert_eq!(
-            p.outgoing.last(),
-            Some(&OutgoingEvent::OpenUrl("https://e.example/39".into()))
-        );
     }
 }

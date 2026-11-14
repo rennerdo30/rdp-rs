@@ -1,9 +1,11 @@
 //! The agent's event loop: one thread runs the [`Lifecycle`] and the
-//! [`Protocol`]; IO threads (channel open, reader, writer, session window,
-//! open-URL pipe) feed it through one mpsc channel.
+//! [`Protocol`] ([`LinkProtocol`]); IO threads (channel open, reader,
+//! writer, session window, local pipe, pairing dialog) feed it through one
+//! mpsc channel.
 
-use std::collections::VecDeque;
+use std::collections::BTreeMap;
 use std::io;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, SyncSender};
@@ -12,14 +14,20 @@ use std::time::{Duration, Instant};
 use windows_sys::Win32::Foundation::{ERROR_ALREADY_EXISTS, GetLastError};
 use windows_sys::Win32::System::Threading::CreateMutexW;
 
+use super::dpapi::Dpapi;
+use super::files::WinFiles;
+use super::ui::WinPairingUi;
 use super::wts::{self, WtsChunkIo};
 use super::{OwnedHandle, pipe, sys, wide, window};
 use crate::framing::{DvcPipe, MessagePipe};
 use crate::info::CpuTimes;
+use crate::keystore::{self, KeyOrigin};
 use crate::lifecycle::{LifeAction, Lifecycle, SessionChange};
+use crate::link::LinkProtocol;
 use crate::links;
-use crate::seam::{Action, AgentEvent, Channel, NullProtocol, Protocol, UrlOutcome};
+use crate::seam::{Action, AgentEvent, Channel, Protocol, SendOutcome, UrlOutcome};
 use crate::{info, warn};
+use remora_link::StaticKey;
 
 /// How often a session snapshot goes to the protocol while Ctl is open.
 const TICK: Duration = Duration::from_secs(5);
@@ -51,12 +59,18 @@ pub enum Input {
         url: String,
         reply: Sender<UrlOutcome>,
     },
+    /// `remora-agent send` over the pipe.
+    SendFiles {
+        paths: Vec<PathBuf>,
+        reply: Sender<SendOutcome>,
+    },
+    /// The user answered the pairing dialog.
+    PairingAnswer { ticket: u64, confirmed: bool },
     /// Exit; `done` is signalled once the loop has finished.
     Shutdown { done: Option<Sender<()>> },
 }
 
 struct OpenChannel {
-    generation: u64,
     file: Arc<OwnedHandle>,
     writer: SyncSender<Vec<u8>>,
     stop: Arc<AtomicBool>,
@@ -82,30 +96,76 @@ pub fn run() -> i32 {
         return 0;
     }
     let _mutex = OwnedHandle(mutex);
+    crate::logging::set_debug(std::env::var_os("REMORA_AGENT_DEBUG").is_some_and(|v| v == "1"));
     info!(
         "agent {} started in session {}",
         env!("CARGO_PKG_VERSION"),
         sys::current_session_id()
     );
-    let mut protocol = NullProtocol::default();
-    let code = event_loop(&mut protocol);
+    let Some(key) = load_key() else {
+        return 1;
+    };
+    let code = event_loop(key);
     info!("agent exiting");
     code
 }
 
-struct Loop<'p> {
+/// The user's agent key, DPAPI-protected in `%LOCALAPPDATA%`. Without a
+/// usable location the key lives for this process only (Remora then sees a
+/// changed key each start and asks to compare codes).
+fn load_key() -> Option<StaticKey> {
+    let generate = || StaticKey::generate().map_err(|e| io::Error::other(e.to_string()));
+    let Some(path) = keystore::default_key_path() else {
+        warn!("LOCALAPPDATA is not set; the agent key is not kept");
+        return generate()
+            .inspect_err(|e| warn!("cannot make a key: {e}"))
+            .ok();
+    };
+    match keystore::load_or_create(&path, &Dpapi, &generate) {
+        Ok(k) => {
+            match &k.origin {
+                KeyOrigin::Loaded => info!("agent key loaded"),
+                KeyOrigin::Created => info!("agent key created"),
+                KeyOrigin::Replaced(why) => {
+                    warn!("agent key replaced ({why}); Remora will ask to compare codes again")
+                }
+            }
+            if let Some(e) = &k.save_error {
+                warn!("agent key not saved ({e}); it lasts for this run only");
+            }
+            Some(k.key)
+        }
+        Err(e) => {
+            warn!("cannot make a key: {e}");
+            None
+        }
+    }
+}
+
+struct Loop {
     tx: Sender<Input>,
     life: Lifecycle,
-    protocol: &'p mut dyn Protocol,
+    protocol: Box<dyn Protocol>,
     open: [Option<OpenChannel>; 2],
-    pending_urls: VecDeque<Sender<UrlOutcome>>,
+    next_request: u64,
+    pending_urls: BTreeMap<u64, Sender<UrlOutcome>>,
+    pending_sends: BTreeMap<u64, Sender<SendOutcome>>,
     static_info: Option<sys::StaticInfo>,
     cpu_prev: Option<CpuTimes>,
     shutting_down: bool,
 }
 
-fn event_loop(protocol: &mut dyn Protocol) -> i32 {
+/// Pipe requests waiting for the protocol's answer at a time; an older one
+/// is dropped (its pipe client then sees "no client").
+const MAX_PENDING_REQUESTS: usize = 8;
+
+fn event_loop(key: StaticKey) -> i32 {
     let (tx, rx) = mpsc::channel::<Input>();
+    let protocol = Box::new(LinkProtocol::new(
+        key,
+        Box::new(WinPairingUi::new(tx.clone())),
+        Box::new(WinFiles),
+    ));
     let window = match window::spawn(tx.clone()) {
         Ok(w) => Some(w),
         Err(e) => {
@@ -127,7 +187,9 @@ fn event_loop(protocol: &mut dyn Protocol) -> i32 {
         life: Lifecycle::new(),
         protocol,
         open: [None, None],
-        pending_urls: VecDeque::new(),
+        next_request: 1,
+        pending_urls: BTreeMap::new(),
+        pending_sends: BTreeMap::new(),
         static_info: None,
         cpu_prev: None,
         shutting_down: false,
@@ -150,15 +212,20 @@ fn event_loop(protocol: &mut dyn Protocol) -> i32 {
     0
 }
 
-impl Loop<'_> {
+impl Loop {
     fn run(&mut self, rx: &Receiver<Input>) {
         let mut next_tick = Instant::now() + TICK;
         while !self.shutting_down {
             let now = Instant::now();
-            let deadline = self
-                .life
-                .next_deadline()
-                .map_or(next_tick, |d| d.min(next_tick));
+            let deadline = [
+                Some(next_tick),
+                self.life.next_deadline(),
+                self.protocol.next_deadline(),
+            ]
+            .into_iter()
+            .flatten()
+            .min()
+            .unwrap_or(next_tick);
             match rx.recv_timeout(deadline.saturating_duration_since(now)) {
                 Ok(input) => self.handle(input),
                 Err(RecvTimeoutError::Timeout) => {}
@@ -171,7 +238,16 @@ impl Loop<'_> {
                 next_tick = now + TICK;
                 self.tick();
             }
+            if self.protocol.next_deadline().is_some_and(|d| d <= now) {
+                self.feed(AgentEvent::Timer);
+            }
         }
+    }
+
+    fn request_id(&mut self) -> u64 {
+        let id = self.next_request;
+        self.next_request += 1;
+        id
     }
 
     fn handle(&mut self, input: Input) {
@@ -221,12 +297,25 @@ impl Loop<'_> {
             }
             Input::OpenUrl { url, reply } => {
                 info!("open-url request ({} bytes)", url.len());
-                self.pending_urls.push_back(reply);
-                // Bound the queue: an unanswered request times out anyway.
-                while self.pending_urls.len() > 8 {
-                    self.pending_urls.pop_front();
+                let id = self.request_id();
+                self.pending_urls.insert(id, reply);
+                // Bound the map: a dropped sender reads as "no client".
+                while self.pending_urls.len() > MAX_PENDING_REQUESTS {
+                    self.pending_urls.pop_first();
                 }
-                self.feed(AgentEvent::OpenUrl(url));
+                self.feed(AgentEvent::OpenUrl { id, url });
+            }
+            Input::SendFiles { paths, reply } => {
+                info!("send request ({} files)", paths.len());
+                let id = self.request_id();
+                self.pending_sends.insert(id, reply);
+                while self.pending_sends.len() > MAX_PENDING_REQUESTS {
+                    self.pending_sends.pop_first();
+                }
+                self.feed(AgentEvent::SendFiles { id, paths });
+            }
+            Input::PairingAnswer { ticket, confirmed } => {
+                self.feed(AgentEvent::PairingAnswer { ticket, confirmed });
             }
             Input::Shutdown { done } => {
                 self.shutdown();
@@ -287,7 +376,6 @@ impl Loop<'_> {
         let started = spawn_reader(ch, generation, file.clone(), stop.clone(), self.tx.clone())
             .and_then(|()| spawn_writer(ch, generation, file.clone(), wrx, self.tx.clone()));
         let oc = OpenChannel {
-            generation,
             file,
             writer: wtx,
             stop,
@@ -304,6 +392,10 @@ impl Loop<'_> {
             self.static_info = Some(sys::static_info());
         }
         self.feed(AgentEvent::ChannelOpened(ch));
+        if ch == Channel::Ctl {
+            // The protocol's Hello needs a snapshot; do not wait a tick.
+            self.tick();
+        }
     }
 
     fn detach(&mut self, ch: Channel) {
@@ -341,16 +433,24 @@ impl Loop<'_> {
                     ),
                 },
                 Action::Close(ch) => {
-                    if let Some(g) = self.open[ch.index()].as_ref().map(|o| o.generation) {
+                    // Also cancels a pending open (its result is dropped).
+                    self.life.close(ch);
+                    if let Some(oc) = self.open[ch.index()].take() {
                         info!("{} closed by the protocol", ch.dvc_name());
-                        self.life.on_closed(ch, g, Instant::now(), false);
-                        if let Some(oc) = self.open[ch.index()].take() {
-                            oc.close();
-                        }
+                        oc.close();
                     }
                 }
-                Action::OpenUrlResult(outcome) => {
-                    if let Some(reply) = self.pending_urls.pop_front() {
+                Action::OpenChannel(ch) => {
+                    let opens = self.life.request_open(ch);
+                    self.run_life(opens);
+                }
+                Action::OpenUrlResult { id, outcome } => {
+                    if let Some(reply) = self.pending_urls.remove(&id) {
+                        let _ = reply.send(outcome);
+                    }
+                }
+                Action::SendFilesResult { id, outcome } => {
+                    if let Some(reply) = self.pending_sends.remove(&id) {
                         let _ = reply.send(outcome);
                     }
                 }

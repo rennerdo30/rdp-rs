@@ -16,6 +16,8 @@ Usage:
   remora-agent unregister-links [--dry-run]
   remora-agent open-url <url>        Open a link on the local PC via Remora
                                      (what Windows runs for a link).
+  remora-agent send <file>...        Send files to the PC Remora connects from
+                                     (what \"Send to my PC (Remora)\" runs).
   remora-agent session-info          Print the session information the agent reports.
   remora-agent --version | --help
 
@@ -33,6 +35,7 @@ pub enum Command {
     RegisterLinks { dry_run: bool },
     UnregisterLinks { dry_run: bool },
     OpenUrl(String),
+    Send(Vec<String>),
     SessionInfo,
     Version,
     Help,
@@ -79,6 +82,11 @@ pub fn parse<S: AsRef<str>>(args: &[S]) -> Result<Command, String> {
             [url] => Ok(Command::OpenUrl((*url).to_string())),
             _ => Err("open-url takes exactly one URL".into()),
         },
+        // Explorer's Send To passes each selected item as one argument.
+        "send" => match rest {
+            [] => Err("send takes one or more files".into()),
+            files => Ok(Command::Send(files.iter().map(|f| f.to_string()).collect())),
+        },
         "session-info" => none(rest, Command::SessionInfo),
         "--version" | "-V" | "version" => none(rest, Command::Version),
         "--help" | "-h" | "/?" | "help" => Ok(Command::Help),
@@ -110,6 +118,14 @@ mod tests {
         );
         assert!(parse(&["open-url"]).is_err());
         assert!(parse(&["open-url", "a", "b"]).is_err());
+        assert_eq!(
+            parse(&["send", r"C:\a b.txt", "--dry-run"]),
+            Ok(Command::Send(vec![
+                r"C:\a b.txt".into(),
+                "--dry-run".into()
+            ]))
+        );
+        assert!(parse(&["send"]).is_err());
         assert!(parse(&["install", "--force"]).is_err());
         assert!(parse(&["run", "x"]).is_err());
         assert!(parse(&["bogus"]).is_err());

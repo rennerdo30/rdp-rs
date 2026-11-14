@@ -1,5 +1,8 @@
-//! The open-URL pipe between `remora-agent open-url` and the running agent
-//! in the same session (RDP-44). Local only, message mode.
+//! The local pipe between `remora-agent open-url` / `remora-agent send` and
+//! the running agent in the same session (RDP-44, RDP-43). Local only,
+//! message mode, one request and one answer per connection:
+//! - `RMU1` + URL (`links::encode_request`) → one byte;
+//! - `RMS1` + file paths (`files::encode_send_requests`) → five bytes.
 //!
 //! Server: `PIPE_REJECT_REMOTE_CLIENTS`, a DACL that admits only the
 //! current user, `FILE_FLAG_FIRST_PIPE_INSTANCE` (fails if someone else
@@ -33,13 +36,20 @@ use windows_sys::Win32::System::Pipes::{
 use super::agent::Input;
 use super::wts::{Event, Op, overlapped};
 use super::{OwnedHandle, sys, wide};
+use crate::files::{self, SendReply};
 use crate::links::{self, MAX_REQUEST_LEN, REPLY_FORWARDED, REPLY_NO_CLIENT, REPLY_REJECTED};
-use crate::seam::UrlOutcome;
+use crate::seam::{SendOutcome, UrlOutcome};
 use crate::{info, warn};
 
 const IO_TIMEOUT: Duration = Duration::from_secs(5);
 /// How long the server waits for the protocol's answer.
 const ANSWER_TIMEOUT: Duration = Duration::from_secs(3);
+/// Largest request of either kind.
+const MAX_IN: usize = if MAX_REQUEST_LEN > files::MAX_SEND_REQUEST_LEN {
+    MAX_REQUEST_LEN
+} else {
+    files::MAX_SEND_REQUEST_LEN
+};
 
 /// The pipe's security descriptor: protected DACL, full access for the
 /// user only.
@@ -74,7 +84,7 @@ pub fn spawn_server(name: &str, user_sid: &str, tx: Sender<Input>) -> io::Result
             PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
             1,
             16,
-            MAX_REQUEST_LEN as u32,
+            MAX_IN as u32,
             0,
             &sa,
         );
@@ -87,23 +97,21 @@ pub fn spawn_server(name: &str, user_sid: &str, tx: Sender<Input>) -> io::Result
     let pipe = OwnedHandle(handle);
     let session = sys::current_session_id();
     std::thread::Builder::new()
-        .name("open-url-pipe".into())
+        .name("agent-pipe".into())
         .spawn(move || serve(pipe, session, tx))?;
     Ok(())
 }
 
 fn serve(pipe: OwnedHandle, session: u32, tx: Sender<Input>) {
     let Ok(event) = Event::new() else { return };
-    let mut buf = vec![0u8; MAX_REQUEST_LEN + 1];
+    let mut buf = vec![0u8; MAX_IN + 1];
     loop {
         if let Err(e) = overlapped(pipe.0, &event, Op::Connect, None) {
-            warn!("open-url pipe: connect failed: {e}");
+            warn!("agent pipe: connect failed: {e}");
             return;
         }
-        // `None`: the event loop is gone (the agent is exiting).
-        let reply = handle_client(&pipe, &event, session, &mut buf, &tx);
-        let r = reply.unwrap_or(REPLY_NO_CLIENT);
-        if let Ok(Some(_)) = overlapped(pipe.0, &event, Op::Write(&[r]), Some(IO_TIMEOUT)) {
+        let (reply, alive) = handle_client(&pipe, &event, session, &mut buf, &tx);
+        if let Ok(Some(_)) = overlapped(pipe.0, &event, Op::Write(&reply), Some(IO_TIMEOUT)) {
             // DisconnectNamedPipe drops unread data. Instead of an unbounded
             // FlushFileBuffers, wait (bounded) for the client to read the
             // answer and close its end, which ends this read.
@@ -112,43 +120,66 @@ fn serve(pipe: OwnedHandle, session: u32, tx: Sender<Input>) {
         }
         // SAFETY: our pipe handle.
         unsafe { DisconnectNamedPipe(pipe.0) };
-        if reply.is_none() {
+        if !alive {
             return;
         }
     }
 }
 
+/// The answer to one client, and whether the event loop is still there.
 fn handle_client(
     pipe: &OwnedHandle,
     event: &Event,
     session: u32,
     buf: &mut [u8],
     tx: &Sender<Input>,
-) -> Option<u8> {
+) -> (Vec<u8>, bool) {
+    let rejected = vec![REPLY_REJECTED];
     let mut client_session = u32::MAX;
     // SAFETY: plain query on our pipe.
     let ok = unsafe { GetNamedPipeClientSessionId(pipe.0, &mut client_session) };
     if ok == 0 || client_session != session {
-        warn!("open-url pipe: client from another session refused");
-        return Some(REPLY_REJECTED);
+        warn!("agent pipe: client from another session refused");
+        return (rejected, true);
     }
     let n = match overlapped(pipe.0, event, Op::Read(buf), Some(IO_TIMEOUT)) {
         Ok(Some(n)) => n as usize,
         // Timeout, oversize (ERROR_MORE_DATA) or a broken client.
-        _ => return Some(REPLY_REJECTED),
+        _ => return (rejected, true),
     };
-    let Some(url) = links::decode_request(&buf[..n]) else {
-        warn!("open-url pipe: malformed request of {n} bytes");
-        return Some(REPLY_REJECTED);
+    let req = &buf[..n];
+    if files::is_send_request(req) {
+        let rejected = files::encode_send_reply(SendReply::Rejected).to_vec();
+        let Some(paths) = files::decode_send_request(req) else {
+            warn!("agent pipe: malformed send request of {n} bytes");
+            return (rejected, true);
+        };
+        let (rtx, rrx) = mpsc::channel();
+        if tx.send(Input::SendFiles { paths, reply: rtx }).is_err() {
+            return (
+                files::encode_send_reply(SendReply::NoClient).to_vec(),
+                false,
+            );
+        }
+        let r = match rrx.recv_timeout(ANSWER_TIMEOUT) {
+            Ok(SendOutcome::Offered { offered, failed }) => SendReply::Offered { offered, failed },
+            _ => SendReply::NoClient,
+        };
+        return (files::encode_send_reply(r).to_vec(), true);
+    }
+    let Some(url) = links::decode_request(req) else {
+        warn!("agent pipe: malformed request of {n} bytes");
+        return (rejected, true);
     };
     let (rtx, rrx) = mpsc::channel();
     if tx.send(Input::OpenUrl { url, reply: rtx }).is_err() {
-        return None;
+        return (vec![REPLY_NO_CLIENT], false);
     }
-    Some(match rrx.recv_timeout(ANSWER_TIMEOUT) {
+    let r = match rrx.recv_timeout(ANSWER_TIMEOUT) {
         Ok(UrlOutcome::Forwarded) => REPLY_FORWARDED,
         _ => REPLY_NO_CLIENT,
-    })
+    };
+    (vec![r], true)
 }
 
 /// What the running agent answered.
@@ -161,8 +192,9 @@ pub enum ForwardResult {
     NoAgent,
 }
 
-/// Sends one URL to the agent in this session.
-pub fn forward(url: &str) -> io::Result<ForwardResult> {
+/// Connects to the agent of this session and checks who serves the pipe.
+/// `None`: no agent.
+fn connect() -> io::Result<Option<OwnedHandle>> {
     let (sid, _) = sys::current_user()?;
     let session = sys::current_session_id();
     let name = wide(&links::pipe_name(session, &sid));
@@ -184,8 +216,8 @@ pub fn forward(url: &str) -> io::Result<ForwardResult> {
     if h == INVALID_HANDLE_VALUE {
         let e = io::Error::last_os_error();
         if e.raw_os_error() != Some(ERROR_PIPE_BUSY as i32) {
-            info!("open-url: no agent pipe ({e})");
-            return Ok(ForwardResult::NoAgent);
+            info!("no agent pipe ({e})");
+            return Ok(None);
         }
         // SAFETY: waits for the single instance to become free.
         unsafe { WaitNamedPipeW(name.as_ptr(), 2000) };
@@ -216,21 +248,41 @@ pub fn forward(url: &str) -> io::Result<ForwardResult> {
     let mode = PIPE_READMODE_MESSAGE;
     // SAFETY: our handle.
     unsafe { SetNamedPipeHandleState(pipe.0, &mode, std::ptr::null(), std::ptr::null()) };
+    Ok(Some(pipe))
+}
+
+/// One request, one answer of at most `reply.len()` bytes. `None`: no agent.
+fn exchange(req: &[u8], reply: &mut [u8]) -> io::Result<Option<usize>> {
+    let Some(pipe) = connect()? else {
+        return Ok(None);
+    };
     let event = Event::new()?;
-    let req = links::encode_request(url);
-    match overlapped(pipe.0, &event, Op::Write(&req), Some(IO_TIMEOUT))? {
+    match overlapped(pipe.0, &event, Op::Write(req), Some(IO_TIMEOUT))? {
         Some(n) if n as usize == req.len() => {}
         _ => return Err(io::Error::new(io::ErrorKind::TimedOut, "pipe write")),
     }
-    let mut reply = [0u8; 1];
     let answer_wait = ANSWER_TIMEOUT + IO_TIMEOUT;
-    Ok(
-        match overlapped(pipe.0, &event, Op::Read(&mut reply), Some(answer_wait))? {
-            Some(1) if reply[0] == REPLY_FORWARDED => ForwardResult::Forwarded,
-            Some(1) if reply[0] == REPLY_NO_CLIENT => ForwardResult::NoClient,
-            _ => ForwardResult::Rejected,
-        },
-    )
+    match overlapped(pipe.0, &event, Op::Read(reply), Some(answer_wait))? {
+        Some(n) => Ok(Some(n as usize)),
+        None => Err(io::Error::new(io::ErrorKind::TimedOut, "pipe read")),
+    }
+}
+
+/// Sends one URL to the agent in this session.
+pub fn forward(url: &str) -> io::Result<ForwardResult> {
+    let mut reply = [0u8; 1];
+    Ok(match exchange(&links::encode_request(url), &mut reply)? {
+        None => ForwardResult::NoAgent,
+        Some(1) if reply[0] == REPLY_FORWARDED => ForwardResult::Forwarded,
+        Some(1) if reply[0] == REPLY_NO_CLIENT => ForwardResult::NoClient,
+        Some(_) => ForwardResult::Rejected,
+    })
+}
+
+/// Sends one `RMS1` request; `None`: no agent.
+pub fn forward_send(req: &[u8]) -> io::Result<Option<SendReply>> {
+    let mut reply = [0u8; files::SEND_REPLY_LEN];
+    Ok(exchange(req, &mut reply)?.map(|n| files::decode_send_reply(&reply[..n])))
 }
 
 #[cfg(test)]

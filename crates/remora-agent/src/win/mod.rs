@@ -1,10 +1,15 @@
-//! The Windows side: transport, session events, open-URL pipe, start-up
-//! integration and the event loop.
+//! The Windows side: transport, session events, the local pipe, start-up
+//! integration (task, Send To), the key's DPAPI protection, the pairing
+//! dialog, the transfer folders and the event loop.
 
 mod agent;
 mod apply;
+mod dpapi;
+mod files;
 mod pipe;
+mod shortcut;
 mod sys;
+mod ui;
 mod window;
 mod wts;
 
@@ -119,6 +124,12 @@ pub fn main() -> i32 {
             open_log("open-url");
             apply::open_url(&url)
         }
+        // Started by Explorer (Send To): no console; problems go to a
+        // message box and the log.
+        Command::Send(files) => {
+            open_log("send");
+            apply::send_files(&files)
+        }
         other => {
             attach_parent_console();
             match other {
@@ -137,7 +148,7 @@ pub fn main() -> i32 {
                 Command::RegisterLinks { dry_run } => apply::register_links(dry_run),
                 Command::UnregisterLinks { dry_run } => apply::unregister_links(dry_run),
                 Command::SessionInfo => apply::print_session_info(),
-                Command::Run | Command::OpenUrl(_) => unreachable!(),
+                Command::Run | Command::OpenUrl(_) | Command::Send(_) => unreachable!(),
             }
         }
     }
