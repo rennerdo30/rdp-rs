@@ -1506,6 +1506,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "remora-agent"
+version = "0.1.0-beta.4"
+dependencies = [
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "remora-update"
 version = "0.1.0-beta.4"
 dependencies = [

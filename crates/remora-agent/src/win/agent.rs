@@ -1,0 +1,430 @@
+//! The agent's event loop: one thread runs the [`Lifecycle`] and the
+//! [`Protocol`]; IO threads (channel open, reader, writer, session window,
+//! open-URL pipe) feed it through one mpsc channel.
+
+use std::collections::VecDeque;
+use std::io;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, SyncSender};
+use std::time::{Duration, Instant};
+
+use windows_sys::Win32::Foundation::{ERROR_ALREADY_EXISTS, GetLastError};
+use windows_sys::Win32::System::Threading::CreateMutexW;
+
+use super::wts::{self, WtsChunkIo};
+use super::{OwnedHandle, pipe, sys, wide, window};
+use crate::framing::{DvcPipe, MessagePipe};
+use crate::info::CpuTimes;
+use crate::lifecycle::{LifeAction, Lifecycle, SessionChange};
+use crate::links;
+use crate::seam::{Action, AgentEvent, Channel, NullProtocol, Protocol, UrlOutcome};
+use crate::{info, warn};
+
+/// How often a session snapshot goes to the protocol while Ctl is open.
+const TICK: Duration = Duration::from_secs(5);
+/// Messages queued per channel writer before `Send` waits.
+const WRITE_QUEUE: usize = 64;
+/// How often a blocked reader checks whether its channel was closed.
+const READ_POLL: Duration = Duration::from_secs(1);
+
+/// Everything the event loop reacts to.
+pub enum Input {
+    /// `WM_WTSSESSION_CHANGE` code.
+    Session(u32),
+    Opened {
+        ch: Channel,
+        generation: u64,
+        result: io::Result<OwnedHandle>,
+    },
+    Message {
+        ch: Channel,
+        generation: u64,
+        data: Vec<u8>,
+    },
+    Closed {
+        ch: Channel,
+        generation: u64,
+        reason: String,
+    },
+    OpenUrl {
+        url: String,
+        reply: Sender<UrlOutcome>,
+    },
+    /// Exit; `done` is signalled once the loop has finished.
+    Shutdown { done: Option<Sender<()>> },
+}
+
+struct OpenChannel {
+    generation: u64,
+    file: Arc<OwnedHandle>,
+    writer: SyncSender<Vec<u8>>,
+    stop: Arc<AtomicBool>,
+}
+
+impl OpenChannel {
+    fn close(self) {
+        self.stop.store(true, Ordering::SeqCst);
+        drop(self.writer);
+        wts::cancel_all(&self.file);
+    }
+}
+
+/// `agent run`. Returns the exit code.
+pub fn run() -> i32 {
+    // One agent per session: `Local\` is the session's namespace.
+    let name = wide(r"Local\RemoraAgent.Run");
+    // SAFETY: named mutex, held (never released) for the process lifetime.
+    let mutex = unsafe { CreateMutexW(std::ptr::null(), 0, name.as_ptr()) };
+    // SAFETY: plain call.
+    if mutex.is_null() || unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
+        info!("another agent runs in this session; exiting");
+        return 0;
+    }
+    let _mutex = OwnedHandle(mutex);
+    info!(
+        "agent {} started in session {}",
+        env!("CARGO_PKG_VERSION"),
+        sys::current_session_id()
+    );
+    let mut protocol = NullProtocol::default();
+    let code = event_loop(&mut protocol);
+    info!("agent exiting");
+    code
+}
+
+struct Loop<'p> {
+    tx: Sender<Input>,
+    life: Lifecycle,
+    protocol: &'p mut dyn Protocol,
+    open: [Option<OpenChannel>; 2],
+    pending_urls: VecDeque<Sender<UrlOutcome>>,
+    static_info: Option<sys::StaticInfo>,
+    cpu_prev: Option<CpuTimes>,
+    shutting_down: bool,
+}
+
+fn event_loop(protocol: &mut dyn Protocol) -> i32 {
+    let (tx, rx) = mpsc::channel::<Input>();
+    let window = match window::spawn(tx.clone()) {
+        Ok(w) => Some(w),
+        Err(e) => {
+            warn!("no session window ({e}); reconnects will not reopen channels");
+            None
+        }
+    };
+    match sys::current_user() {
+        Ok((sid, _)) => {
+            let name = links::pipe_name(sys::current_session_id(), &sid);
+            if let Err(e) = pipe::spawn_server(&name, &sid, tx.clone()) {
+                warn!("open-url pipe unavailable: {e}");
+            }
+        }
+        Err(e) => warn!("cannot read the current user ({e}); open-url pipe off"),
+    }
+    let mut lp = Loop {
+        tx,
+        life: Lifecycle::new(),
+        protocol,
+        open: [None, None],
+        pending_urls: VecDeque::new(),
+        static_info: None,
+        cpu_prev: None,
+        shutting_down: false,
+    };
+    let remote = sys::remote_connected();
+    info!(
+        "session is {}",
+        if remote {
+            "remote-connected"
+        } else {
+            "not remote-connected; idle"
+        }
+    );
+    let actions = lp.life.start(remote);
+    lp.run_life(actions);
+    lp.run(&rx);
+    if let Some(w) = window {
+        w.close();
+    }
+    0
+}
+
+impl Loop<'_> {
+    fn run(&mut self, rx: &Receiver<Input>) {
+        let mut next_tick = Instant::now() + TICK;
+        while !self.shutting_down {
+            let now = Instant::now();
+            let deadline = self
+                .life
+                .next_deadline()
+                .map_or(next_tick, |d| d.min(next_tick));
+            match rx.recv_timeout(deadline.saturating_duration_since(now)) {
+                Ok(input) => self.handle(input),
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => break,
+            }
+            let now = Instant::now();
+            let due = self.life.poll(now);
+            self.run_life(due);
+            if now >= next_tick {
+                next_tick = now + TICK;
+                self.tick();
+            }
+        }
+    }
+
+    fn handle(&mut self, input: Input) {
+        let now = Instant::now();
+        match input {
+            Input::Session(code) => {
+                let ev = SessionChange::from_code(code);
+                info!("session event {ev:?}");
+                let actions = self.life.on_session(ev);
+                self.run_life(actions);
+                if matches!(ev, SessionChange::Lock | SessionChange::Unlock) {
+                    self.tick();
+                }
+            }
+            Input::Opened {
+                ch,
+                generation,
+                result,
+            } => {
+                let ok = result.is_ok();
+                let keep = self.life.on_open_result(ch, generation, ok, now);
+                match result {
+                    Ok(file) if keep => self.attach(ch, generation, file),
+                    Ok(_) => info!("{} opened late; dropped", ch.dvc_name()),
+                    // Expected under mstsc or without the Remora listener.
+                    Err(e) => info!("{} not opened: {e}", ch.dvc_name()),
+                }
+            }
+            Input::Message {
+                ch,
+                generation,
+                data,
+            } => {
+                if self.life.open_generation(ch) == Some(generation) {
+                    self.feed(AgentEvent::Message(ch, data));
+                }
+            }
+            Input::Closed {
+                ch,
+                generation,
+                reason,
+            } => {
+                if self.life.on_closed(ch, generation, now, true) {
+                    info!("{} closed: {reason}", ch.dvc_name());
+                    self.detach(ch);
+                }
+            }
+            Input::OpenUrl { url, reply } => {
+                info!("open-url request ({} bytes)", url.len());
+                self.pending_urls.push_back(reply);
+                // Bound the queue: an unanswered request times out anyway.
+                while self.pending_urls.len() > 8 {
+                    self.pending_urls.pop_front();
+                }
+                self.feed(AgentEvent::OpenUrl(url));
+            }
+            Input::Shutdown { done } => {
+                self.shutdown();
+                if let Some(d) = done {
+                    let _ = d.send(());
+                }
+            }
+        }
+    }
+
+    fn shutdown(&mut self) {
+        if self.shutting_down {
+            return;
+        }
+        info!("shutting down");
+        self.feed(AgentEvent::Shutdown);
+        for ch in Channel::ALL {
+            if let Some(oc) = self.open[ch.index()].take() {
+                oc.close();
+            }
+        }
+        self.shutting_down = true;
+    }
+
+    fn run_life(&mut self, actions: Vec<LifeAction>) {
+        for a in actions {
+            match a {
+                LifeAction::Open(ch, generation) => self.start_open(ch, generation),
+                LifeAction::Close(ch) => self.detach(ch),
+                LifeAction::Shutdown => self.shutdown(),
+            }
+        }
+    }
+
+    fn start_open(&self, ch: Channel, generation: u64) {
+        let tx = self.tx.clone();
+        // The open may block until the client answers; a stale result is
+        // ignored by generation.
+        let spawned = std::thread::Builder::new()
+            .name(format!("open-{}", ch.dvc_name()))
+            .spawn(move || {
+                let result = wts::open_channel(ch);
+                let _ = tx.send(Input::Opened {
+                    ch,
+                    generation,
+                    result,
+                });
+            });
+        if let Err(e) = spawned {
+            warn!("cannot start opener thread: {e}");
+        }
+    }
+
+    fn attach(&mut self, ch: Channel, generation: u64, file: OwnedHandle) {
+        let file = Arc::new(file);
+        let stop = Arc::new(AtomicBool::new(false));
+        let (wtx, wrx) = mpsc::sync_channel::<Vec<u8>>(WRITE_QUEUE);
+        let started = spawn_reader(ch, generation, file.clone(), stop.clone(), self.tx.clone())
+            .and_then(|()| spawn_writer(ch, generation, file.clone(), wrx, self.tx.clone()));
+        let oc = OpenChannel {
+            generation,
+            file,
+            writer: wtx,
+            stop,
+        };
+        if let Err(e) = started {
+            warn!("{}: cannot start IO threads: {e}", ch.dvc_name());
+            oc.close();
+            self.life.on_closed(ch, generation, Instant::now(), true);
+            return;
+        }
+        info!("{} open", ch.dvc_name());
+        self.open[ch.index()] = Some(oc);
+        if ch == Channel::Ctl {
+            self.static_info = Some(sys::static_info());
+        }
+        self.feed(AgentEvent::ChannelOpened(ch));
+    }
+
+    fn detach(&mut self, ch: Channel) {
+        if let Some(oc) = self.open[ch.index()].take() {
+            oc.close();
+            self.feed(AgentEvent::ChannelClosed(ch));
+        }
+    }
+
+    fn tick(&mut self) {
+        if !self.life.is_open(Channel::Ctl) {
+            return;
+        }
+        let s = self.static_info.get_or_insert_with(sys::static_info);
+        let snapshot = sys::collect(s, &mut self.cpu_prev);
+        self.feed(AgentEvent::SessionInfoTick(snapshot));
+    }
+
+    fn feed(&mut self, ev: AgentEvent) {
+        let actions = self.protocol.on_event(ev);
+        for a in actions {
+            match a {
+                Action::Send(ch, msg) => match &self.open[ch.index()] {
+                    // Blocks only while the writer's queue is full; the
+                    // writer never waits on this loop.
+                    Some(oc) => {
+                        if oc.writer.send(msg).is_err() {
+                            warn!("{}: writer gone; message dropped", ch.dvc_name());
+                        }
+                    }
+                    None => warn!(
+                        "{}: send of {} bytes on a closed channel dropped",
+                        ch.dvc_name(),
+                        msg.len()
+                    ),
+                },
+                Action::Close(ch) => {
+                    if let Some(g) = self.open[ch.index()].as_ref().map(|o| o.generation) {
+                        info!("{} closed by the protocol", ch.dvc_name());
+                        self.life.on_closed(ch, g, Instant::now(), false);
+                        if let Some(oc) = self.open[ch.index()].take() {
+                            oc.close();
+                        }
+                    }
+                }
+                Action::OpenUrlResult(outcome) => {
+                    if let Some(reply) = self.pending_urls.pop_front() {
+                        let _ = reply.send(outcome);
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn spawn_reader(
+    ch: Channel,
+    generation: u64,
+    file: Arc<OwnedHandle>,
+    stop: Arc<AtomicBool>,
+    tx: Sender<Input>,
+) -> io::Result<()> {
+    let io = WtsChunkIo::new(file)?;
+    std::thread::Builder::new()
+        .name(format!("read-{}", ch.dvc_name()))
+        .spawn(move || {
+            let mut pipe = DvcPipe::new(io);
+            loop {
+                if stop.load(Ordering::SeqCst) {
+                    return;
+                }
+                match pipe.recv(READ_POLL) {
+                    Ok(Some(data)) => {
+                        let msg = Input::Message {
+                            ch,
+                            generation,
+                            data,
+                        };
+                        if tx.send(msg).is_err() {
+                            return;
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(e) => {
+                        if !stop.load(Ordering::SeqCst) {
+                            let _ = tx.send(Input::Closed {
+                                ch,
+                                generation,
+                                reason: e.to_string(),
+                            });
+                        }
+                        return;
+                    }
+                }
+            }
+        })?;
+    Ok(())
+}
+
+fn spawn_writer(
+    ch: Channel,
+    generation: u64,
+    file: Arc<OwnedHandle>,
+    rx: Receiver<Vec<u8>>,
+    tx: Sender<Input>,
+) -> io::Result<()> {
+    let io = WtsChunkIo::new(file)?;
+    std::thread::Builder::new()
+        .name(format!("write-{}", ch.dvc_name()))
+        .spawn(move || {
+            let mut pipe = DvcPipe::new(io);
+            for msg in rx {
+                if let Err(e) = pipe.send(&msg) {
+                    let _ = tx.send(Input::Closed {
+                        ch,
+                        generation,
+                        reason: format!("write failed: {e}"),
+                    });
+                    return;
+                }
+            }
+        })?;
+    Ok(())
+}
