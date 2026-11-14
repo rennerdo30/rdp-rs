@@ -19,6 +19,7 @@ use crate::input::{InputEvent, fastpath_input};
 use crate::mcs::{self, DomainPdu};
 use crate::pdu::{self, AutoReconnectCookie, DemandActive, SaveSessionInfo};
 use crate::pointer::{PointerCache, PointerUpdate};
+use crate::progress::{ConnectStep, report};
 use crate::redirect::{self, Redirection};
 use crate::trace;
 use crate::transport::{Frame, Framer};
@@ -125,6 +126,9 @@ pub struct Config {
     /// Directory of the persistent bitmap cache (MS-RDPEGDI 3.2.1.4), one
     /// per server; None keeps no bitmaps between sessions.
     pub bitmap_cache_dir: Option<std::path::PathBuf>,
+    /// Told each step of the connection sequence as it starts (for a
+    /// progress display); None reports nothing.
+    pub progress: Option<crate::progress::ConnectProgress>,
 }
 
 impl Config {
@@ -159,6 +163,7 @@ impl Config {
             license_store: None,
             drawing_orders: true,
             bitmap_cache_dir: None,
+            progress: None,
         }
     }
 }
@@ -359,8 +364,10 @@ fn open(cfg: &Config, deadline: Instant) -> Result<(Framer, Option<[u8; 32]>, St
     if hosts.is_empty() {
         hosts.push(cfg.host.clone());
     }
+    let progress = cfg.progress.as_ref();
     if let Some(gw) = &cfg.gateway {
         // The gateway resolves and reaches the host itself.
+        report(progress, ConnectStep::Gateway);
         let host = hosts.swap_remove(0);
         let verify = cfg.verify_certificate.as_ref();
         let t = gateway::connect(gw, &host, cfg.port, &cfg.client_name, deadline, verify)?;
@@ -370,6 +377,7 @@ fn open(cfg: &Config, deadline: Instant) -> Result<(Framer, Option<[u8; 32]>, St
     }
     let mut last = None;
     for host in hosts {
+        report(progress, ConnectStep::Resolving);
         let attempt = (host.as_str(), cfg.port)
             .to_socket_addrs()
             .map_err(Error::from)
@@ -377,7 +385,10 @@ fn open(cfg: &Config, deadline: Instant) -> Result<(Framer, Option<[u8; 32]>, St
                 a.next()
                     .ok_or_else(|| Error::Protocol(format!("cannot resolve {host}")))
             })
-            .and_then(|addr| Ok(TcpStream::connect_timeout(&addr, cfg.timeout)?));
+            .and_then(|addr| {
+                report(progress, ConnectStep::Tcp);
+                Ok(TcpStream::connect_timeout(&addr, cfg.timeout)?)
+            });
         match attempt {
             Ok(sock) => {
                 sock.set_nodelay(true)?;
@@ -556,6 +567,8 @@ impl Client {
             match Self::connect_hop(&cfg, handlers, gfx.clone(), rail.clone())? {
                 Hop::Done(client) => return Ok(*client),
                 Hop::Redirect(to, from, back) => {
+                    let target = to.targets().into_iter().next().unwrap_or(from.clone());
+                    report(cfg.progress.as_ref(), ConnectStep::Redirected(target));
                     cfg = next_hop(&cfg, *to, from)?;
                     handlers = back;
                 }
@@ -600,6 +613,8 @@ impl Client {
 
         let (mut f, gateway_certificate_sha256, host) = open(cfg, deadline)?;
         f.set_read_timeout(Duration::from_millis(100))?;
+        let progress = cfg.progress.as_ref();
+        report(progress, ConnectStep::Tls);
 
         // 1. X.224 negotiation; a routing token replaces the cookie (3.2.5.3.1)
         let cookie: String = user.chars().take(9).collect();
@@ -646,6 +661,7 @@ impl Client {
             // The check may have waited for the user.
             deadline = Instant::now() + cfg.timeout;
         }
+        report(progress, ConnectStep::SignIn);
         if let Some(r) = rdstls.filter(|_| protocol == x224::PROTOCOL_RDSTLS) {
             // RDSTLS logon with the redirected credentials (5.4.5.3.1).
             let caps = f.read_exact(redirect::RDSTLS_CAPABILITIES_LEN, deadline)?;
@@ -678,6 +694,7 @@ impl Client {
         }
 
         // 3. MCS connect with GCC conference data
+        report(progress, ConnectStep::Licensing);
         let defs: Vec<(String, u32)> = handlers
             .iter()
             .map(|h| (h.name().to_string(), h.options()))
@@ -809,6 +826,7 @@ impl Client {
         }
 
         // 6. Capability exchange; a Server Redirection PDU may come instead (3.2.5.13.1)
+        report(progress, ConnectStep::Capabilities);
         let mut informational = None;
         let demand = loop {
             let data = match pending.take() {
@@ -899,6 +917,7 @@ impl Client {
                 .then(|| Box::new(crate::orders::Orders::new(cfg.bitmap_cache_dir.as_deref()))),
         };
         // 7. Finalization; the Font Map reply is handled by the session loop.
+        report(progress, ConnectStep::FirstPicture);
         client.activate(&demand)?;
         for (channel, data) in early.queued {
             client.channel_data(channel, &data)?;

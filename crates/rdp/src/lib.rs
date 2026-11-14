@@ -54,6 +54,7 @@ pub mod ntlm;
 pub mod orders;
 pub mod pdu;
 pub mod pointer;
+pub mod progress;
 pub mod rail;
 pub mod rdpdr;
 pub mod rdpei;
@@ -85,6 +86,7 @@ pub use log::set_verbose;
 pub use monitor::{Monitor, Orientation, VirtualDesktop};
 pub use pdu::AutoReconnectCookie;
 pub use pointer::{PointerShape, PointerUpdate};
+pub use progress::{ConnectProgress, ConnectStep};
 pub use rail::{RailEvent, RailHandle, RailState, RailWindow, RemoteApp};
 pub use rdpdr::{
     Device, Drive, IoCompletion, IoRequest, PrintBackend, PrintFormat, Printer, PrinterInfo, Rdpdr,
