@@ -614,7 +614,12 @@ fn follows_a_redirection_to_the_first_reachable_target() {
     });
 
     let checked = Arc::new(Mutex::new(Vec::new()));
-    let cfg = client_config(port, checked.clone());
+    let mut cfg = client_config(port, checked.clone());
+    let steps = Arc::new(Mutex::new(Vec::new()));
+    let s = steps.clone();
+    cfg.progress = Some(crate::ConnectProgress::new(move |step| {
+        s.lock().unwrap().push(step.clone())
+    }));
     let channels: Vec<Box<dyn StaticChannel>> =
         vec![Box::new(Named("chan1")), Box::new(Named("chan2"))];
     let err = Client::connect_with(&cfg, channels)
@@ -622,6 +627,21 @@ fn follows_a_redirection_to_the_first_reachable_target() {
         .expect("the target hangs up");
     let (seen1, seen2) = (s1.join().unwrap(), s2.join().unwrap());
     assert!(!err.to_string().contains("redirection"), "{err}");
+
+    // Progress: the first hop up to the capability exchange, the
+    // redirection to its first target, then the steps again from the start.
+    use crate::ConnectStep as S;
+    let steps = steps.lock().unwrap().clone();
+    let at = steps
+        .iter()
+        .position(|s| *s == S::Redirected("127.0.0.3".into()))
+        .expect("redirection reported");
+    assert_eq!(
+        steps[..at],
+        [S::Resolving, S::Tcp, S::Tls, S::SignIn, S::Licensing, S::Capabilities]
+    );
+    assert_eq!(steps[at + 1], S::Resolving, "{steps:?}");
+    assert!(steps[at + 1..].contains(&S::Tls), "{steps:?}");
 
     // First hop: the configured user's cookie, no session id.
     assert!(contains(

@@ -61,6 +61,14 @@ impl App {
                 Target {
                     handle,
                     accept: (visible.x, visible.y, visible.w, visible.h),
+                    // The toolbar floats over the picture: a tap on it (or
+                    // its handle) is the window's.
+                    holes: m
+                        .ui
+                        .touch_holes()
+                        .iter()
+                        .map(|r| (r.x, r.y, r.w, r.h))
+                        .collect(),
                     offset: (-area.x, -area.y),
                     screen: false,
                     fb,
@@ -75,6 +83,7 @@ impl App {
                     Target {
                         handle,
                         accept: sw.touch_area(),
+                        holes: sw.touch_holes(),
                         offset: sw.fb,
                         screen: false,
                         fb,
@@ -96,6 +105,7 @@ impl App {
                     Target {
                         handle: handle.clone(),
                         accept: (0, 0, w as i32, h as i32),
+                        holes: Vec::new(),
                         offset: (-rs.desk.0, -rs.desk.1),
                         screen: true,
                         fb,

@@ -13,10 +13,17 @@ use rdp::{Client, Config, ConnectionInfo, Damage, Framebuffer, InputEvent, Stati
 use crate::recorder::Recorder;
 
 pub enum Event {
+    /// A step of the connection sequence started (for the connecting screen).
+    Progress(rdp::ConnectStep),
     Connected(ConnectionInfo),
     /// New damage is waiting in `Shared`.
     Frame,
-    Closed(String),
+    /// The session ended: "disconnected" after [`Cmd::Close`], else the
+    /// server's reason with its Set Error Info code (0 = none).
+    Closed {
+        why: String,
+        error_info: u32,
+    },
     /// The network dropped the session; reconnecting may resume it (the
     /// cookie lets the server reattach without a new logon).
     Dropped {
@@ -32,11 +39,33 @@ pub enum Event {
     /// The server redirected the running session (MS-RDPBCGR 3.2.5.13):
     /// connect `cfg` (the next hop, from [`Client::follow_redirection`])
     /// with new channel handlers. `to` names the target for the status line.
-    Redirected { cfg: Box<Config>, to: String },
+    Redirected {
+        cfg: Box<Config>,
+        to: String,
+    },
     /// New network auto-detect results (MS-RDPBCGR 2.2.14.1.5).
     Network(rdp::NetworkCharacteristics),
-    Failed(String),
+    /// The connection or session failed: the technical text, and its cause
+    /// in plain terms with the connection step it happened in.
+    Failed {
+        why: String,
+        failure: crate::failure::Failure,
+    },
 }
+
+/// A failure event for `e`, which happened in connection step `step`.
+fn failed(e: &rdp::Error, step: Option<rdp::ConnectStep>) -> Event {
+    Event::Failed {
+        why: e.to_string(),
+        failure: crate::failure::Failure {
+            cause: crate::failure::classify(e, step.as_ref()),
+            step,
+        },
+    }
+}
+
+/// The event sink, shared by the worker loop and the progress callback.
+type Emit = Arc<Mutex<dyn Fn(Event) + Send>>;
 
 pub enum Cmd {
     Input(Vec<InputEvent>),
@@ -111,6 +140,9 @@ pub fn spawn(
     let notified = Arc::new(AtomicBool::new(false));
     let recorder = Arc::new(Mutex::new(None));
     let (s, n, r) = (shared.clone(), notified.clone(), recorder.clone());
+    // Shared with the connection's progress callback, which runs on the
+    // same thread while `connect_with` blocks.
+    let emit: Emit = Arc::new(Mutex::new(emit));
     let thread = std::thread::Builder::new()
         .name("rdp-session".into())
         .spawn(move || run(cfg, channels, rx, s, n, r, emit))
@@ -138,17 +170,35 @@ fn run(
     shared: Arc<Mutex<Shared>>,
     notified: Arc<AtomicBool>,
     recorder: Arc<Mutex<Option<Recorder>>>,
-    emit: impl Fn(Event),
+    shared_emit: Emit,
 ) {
+    let emit = |ev| (shared_emit.lock().unwrap_or_else(|p| p.into_inner()))(ev);
     // The graphics pipeline decodes AVC420 with Media Foundation; the
     // client asks for a decoder only when cfg.graphics is Gfx.
     #[cfg(windows)]
     if cfg.h264.is_none() {
         cfg.h264 = Some(crate::h264_mf::factory());
     }
+    // Steps go to the UI; the last one reached explains a failure.
+    let reached = Arc::new(Mutex::new(None::<rdp::ConnectStep>));
+    {
+        let (out, reached) = (shared_emit.clone(), reached.clone());
+        cfg.progress = Some(rdp::ConnectProgress::new(move |step| {
+            let mut r = reached.lock().unwrap_or_else(|p| p.into_inner());
+            *r = match step {
+                rdp::ConnectStep::Redirected(_) => None,
+                s => Some(s.clone()),
+            };
+            drop(r);
+            (out.lock().unwrap_or_else(|p| p.into_inner()))(Event::Progress(step.clone()));
+        }));
+    }
     let mut client = match Client::connect_with(&cfg, channels) {
         Ok(c) => c,
-        Err(e) => return emit(Event::Failed(e.to_string())),
+        Err(e) => {
+            let step = reached.lock().unwrap_or_else(|p| p.into_inner()).take();
+            return emit(failed(&e, step));
+        }
     };
     {
         let fb = client.framebuffer();
@@ -166,12 +216,15 @@ fn run(
             match rx.try_recv() {
                 Ok(Cmd::Input(ev)) => {
                     if let Err(e) = client.send_input(&ev) {
-                        return emit(Event::Failed(e.to_string()));
+                        return emit(failed(&e, None));
                     }
                 }
                 Ok(Cmd::Close) | Err(TryRecvError::Disconnected) => {
                     client.disconnect();
-                    return emit(Event::Closed("disconnected".into()));
+                    return emit(Event::Closed {
+                        why: "disconnected".into(),
+                        error_info: 0,
+                    });
                 }
                 Err(TryRecvError::Empty) => break,
             }
@@ -184,7 +237,7 @@ fn run(
                     cookie: client.auto_reconnect_cookie(),
                 });
             }
-            Err(e) => return emit(Event::Failed(e.to_string())),
+            Err(e) => return emit(failed(&e, None)),
         };
         if out.resized || !out.damage.is_empty() {
             let fb = client.framebuffer();
@@ -229,7 +282,7 @@ fn run(
                         to,
                     });
                 }
-                Some(Err(e)) => return emit(Event::Failed(e.to_string())),
+                Some(Err(e)) => return emit(failed(&e, None)),
                 None => {}
             }
             if reason.reconnectable {
@@ -238,7 +291,10 @@ fn run(
                     cookie: client.auto_reconnect_cookie(),
                 });
             }
-            return emit(Event::Closed(reason.text));
+            return emit(Event::Closed {
+                why: reason.text,
+                error_info: reason.error_info,
+            });
         }
     }
 }

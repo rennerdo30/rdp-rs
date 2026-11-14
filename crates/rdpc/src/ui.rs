@@ -24,6 +24,8 @@ mod home;
 mod summary;
 
 pub use home::ThumbDue;
+pub mod session_view;
+pub use session_view::Live;
 
 pub struct Fonts {
     pub ui: FontId,
@@ -85,7 +87,6 @@ const SAVED_MASK: &str =
 const SIDEBAR_W: f32 = 264.0;
 const STRIP_H: f32 = 40.0;
 const STATUS_H: f32 = 28.0;
-const TOOLBAR_H: f32 = 44.0;
 const DRAWER_W: f32 = 320.0;
 
 /// Text size of text fields (logical px); the caret maths uses it too.
@@ -292,6 +293,14 @@ pub enum Hit {
     Palette,
     /// The Home view's controls (see `home`).
     HomeView(home::HomeHit),
+    /// Session toolbar: its handle (shows the pill), its menu button, and
+    /// the pill's body between the buttons (takes the click, does nothing).
+    ToolbarHandle,
+    ToolbarMore,
+    ToolbarBody,
+    /// Error screen: open the connection's editor; copy the technical text.
+    EditConnection(u64),
+    CopyDetails(u64),
 }
 
 /// A RemoteApp session tab: the connection's apps and the open windows.
@@ -382,6 +391,8 @@ pub struct Tab {
     pub redirected_to: Option<String>,
     /// What network auto-detect measured ("RTT 12 ms · 48.0 Mbit/s").
     pub network: Option<String>,
+    /// Connection steps, timings, and why it failed or ended.
+    pub live: Live,
 }
 
 /// A server certificate to trust or refuse.
@@ -501,6 +512,8 @@ pub enum Action {
     /// A session's microphone on or off, and its device (None: default).
     SetMicrophone(u64, bool),
     SetMic(u64, Option<String>),
+    /// Put this text on the clipboard (error details).
+    CopyText(String),
 }
 
 pub enum Key {
@@ -639,6 +652,8 @@ pub struct Ui {
     palette: Option<palette::Palette>,
     /// The Home view: shown, quick connect, thumbnails, session clocks.
     home: home::HomeState,
+    /// The session toolbar's state and layout.
+    toolbar: session_view::Toolbar,
 }
 
 /// Title-row geometry in physical pixels for the frame hook.
@@ -721,6 +736,7 @@ impl Ui {
             home_area: Rect::default(),
             palette: None,
             home: home::HomeState::default(),
+            toolbar: Default::default(),
         };
         m.fields[Field::Password as usize] = TextField::secret();
         m.fields[Field::Master as usize] = TextField::secret();
@@ -749,21 +765,17 @@ impl Ui {
     }
 
     /// The physical size the session picture gets in a window of `w` x `h`
-    /// pixels: the same layout as `paint` (sidebar, tab strip, toolbar, drawer).
+    /// pixels: the same layout as `paint` (sidebar, tab strip, drawer; the
+    /// toolbar floats over the picture).
     pub fn session_size_for(&self, w: i32, h: i32) -> (i32, i32) {
         let p = |v: f32| (v * self.scale).round() as i32;
-        let (mut aw, ah) = if self.fullscreen && !self.bar_pinned {
+        let (mut aw, ah) = if self.fullscreen {
             (w, h)
-        } else if self.fullscreen {
-            (w, h - p(TOOLBAR_H))
         } else {
-            // Sidebar, the content panel's 1 px edges, tab strip, status
-            // bar and toolbar.
+            // Sidebar, the content panel's 1 px edges, tab strip and
+            // status bar.
             let side_w = p(SIDEBAR_W).min(w / 3);
-            (
-                w - side_w - 1,
-                h - p(STATUS_H) - p(STRIP_H) - 1 - p(TOOLBAR_H),
-            )
+            (w - side_w - 1, h - p(STATUS_H) - p(STRIP_H) - 1)
         };
         if self.drawer {
             aw -= p(DRAWER_W).min(aw / 2) + 1;
@@ -807,6 +819,7 @@ impl Ui {
             remote_app: None,
             redirected_to: None,
             network: None,
+            live: Live::default(),
         });
         self.active = Some(id);
         self.session_focus = false;
@@ -1561,6 +1574,9 @@ impl Ui {
     }
 
     fn hit_at(&self, x: i32, y: i32) -> Option<Hit> {
+        if let Some(h) = self.overlay_hit(x, y) {
+            return Some(h);
+        }
         self.hits
             .iter()
             .rev()
@@ -1569,32 +1585,22 @@ impl Ui {
     }
 
     /// Returns true when the hover target changed (needs a repaint).
+    /// Showing, hiding or hovering the session toolbar repaints only its
+    /// rectangle: see [`Ui::take_overlay_damage`].
     pub fn mouse_move(&mut self, x: i32, y: i32) -> bool {
         if self.palette.is_some() && self.confirm_exit.is_none() {
             return self.palette_mouse_move(x, y);
         }
-        // Full screen with a hiding bar: the top edge shows it, leaving hides it.
-        if self.fullscreen && !self.bar_pinned && self.active.is_some() {
-            let bar = (TOOLBAR_H * self.scale).round() as i32;
-            let want = if self.bar_revealed {
-                y >= 0 && y < bar + (12.0 * self.scale) as i32
-            } else {
-                (0..=2).contains(&y)
-            };
-            if want != self.bar_revealed {
-                self.bar_revealed = want;
-                self.hover = self.hit_at(x, y);
-                return true;
-            }
-        }
+        // The session toolbar: the top edge shows it, leaving hides it.
+        self.toolbar_pointer(x, y);
         let h = self.hit_at(x, y);
         let changed = h != self.hover
             && !matches!(
                 (h, self.hover),
                 (Some(Hit::Session(_)), Some(Hit::Session(_)))
             );
-        self.hover = h;
-        changed
+        let old = std::mem::replace(&mut self.hover, h);
+        changed && !self.overlay_hover(old, h)
     }
 
     pub fn cursor_is_text(&self) -> bool {
@@ -1630,7 +1636,10 @@ impl Ui {
                     tf.all = false;
                 }
             }
-            Some(Hit::Session(_)) => self.focus = None,
+            Some(Hit::Session(_)) => {
+                self.focus = None;
+                self.toolbar_reset();
+            }
             Some(_) => {}
             None => self.focus = None,
         }
@@ -1650,7 +1659,15 @@ impl Ui {
     }
 
     fn activate(&mut self, hit: Hit) -> Option<Action> {
+        if hit != Hit::ToolbarMore {
+            self.menu_done();
+        }
         match hit {
+            Hit::ToolbarHandle
+            | Hit::ToolbarMore
+            | Hit::ToolbarBody
+            | Hit::EditConnection(_)
+            | Hit::CopyDetails(_) => return self.activate_view(hit),
             Hit::Row(i) => {
                 self.select(i);
                 self.active = None;
@@ -2187,6 +2204,9 @@ impl Ui {
             Ok(done) => return done,
             Err(k) => k,
         };
+        if let Some(done) = self.toolbar_key(&k) {
+            return done;
+        }
         match k {
             Key::Palette => self.open_palette(None),
             Key::Enter if self.focus == Some(Field::DrivePath) => {
@@ -2309,6 +2329,9 @@ impl Ui {
         (caret_x - inner + 2.0).max(0.0)
     }
 
+    /// The whole window with no session picture (tests; the app and the
+    /// snapshots copy the picture in between, see `paint_snapshot`).
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn paint(&mut self, cv: &mut Canvas, te: &mut TextEngine, f: &Fonts) {
         self.paint_window(cv, te, f);
         self.paint_overlays(cv, te, f);
@@ -2318,8 +2341,12 @@ impl Ui {
     /// question. The app paints the window, copies the session picture in,
     /// then calls this, so a palette over a session dims its picture.
     pub fn paint_overlays(&mut self, cv: &mut Canvas, te: &mut TextEngine, f: &Fonts) {
+        // The session toolbar and reconnect card first: they float over
+        // the picture, under the palette.
+        self.paint_session_overlay(cv, te, f);
         if self.palette.is_some() && self.confirm_exit.is_none() {
             self.paint_palette(cv, te, f);
+            self.toolbar_clear();
         }
         if let Some(n) = self.confirm_exit {
             self.paint_exit_confirm(cv, te, f, n);
@@ -2333,8 +2360,9 @@ impl Ui {
         let c = pal();
         let (w, h) = (cv.width() as i32, cv.height() as i32);
         let all = Rect::new(0, 0, w, h);
-        // The session picture is not drawn under the dialog.
+        // The session picture and its toolbar are not drawn under the dialog.
         self.session_area = None;
+        self.toolbar_clear();
         self.hits.clear();
         self.title_controls.clear();
         self.hits.push((all, Hit::Modal));
@@ -5413,146 +5441,6 @@ impl Ui {
         changed
     }
 
-    fn paint_session(
-        &mut self,
-        cv: &mut Canvas,
-        te: &mut TextEngine,
-        f: &Fonts,
-        content: Rect,
-        id: u64,
-    ) {
-        let s = self.scale;
-        let p = |v: f32| (v * s).round() as i32;
-        let c = pal();
-        let Some(tab) = self.tabs.iter().find(|t| t.id == id) else {
-            return;
-        };
-        let (host, state, name) = (tab.host.clone(), tab.state.clone(), tab.name.clone());
-        let spanned = tab.spanned;
-        let apps = tab.remote_app.is_some();
-
-        // Toolbar: above the session, or in full screen with a hiding bar,
-        // over its top edge while revealed (drawn after the session area).
-        let overlay = self.fullscreen && !self.bar_pinned;
-        let tb = Rect::new(content.x, content.y, content.w, p(TOOLBAR_H));
-        if !overlay {
-            self.paint_toolbar(cv, te, f, tb, id, &host, &state, &name);
-        }
-
-        // Session area and drawer
-        let area_top = if overlay { content.y } else { tb.bottom() };
-        let mut area = Rect::new(content.x, area_top, content.w, content.bottom() - area_top);
-        if self.drawer {
-            let dw = p(DRAWER_W).min(area.w / 2);
-            let drawer = Rect::new(area.right() - dw, area.y, dw, area.h);
-            area.w -= dw + 1;
-            cv.fill(Rect::new(area.right(), area.y, 1, area.h), c.divider);
-            self.paint_drawer(cv, te, f, drawer, id);
-        }
-        let connected = matches!(state, TabState::Connected { .. });
-        cv.fill(
-            area,
-            if connected && !spanned && !apps {
-                c.bg_sidebar
-            } else {
-                c.bg
-            },
-        );
-        self.session_clip = None;
-        if overlay && self.bar_revealed {
-            let bar = Rect::new(area.x, area.y, area.w, tb.h);
-            self.session_clip = Some(Rect::new(area.x, bar.bottom(), area.w, area.h - bar.h));
-        }
-        match state.clone() {
-            TabState::Connected { .. } if spanned => {
-                let y = self.state_card(
-                    cv,
-                    te,
-                    f,
-                    area,
-                    Icon::Monitors,
-                    Tone::Accent,
-                    "This session is on its monitors",
-                    "Ctrl+Alt+Break or the bar at their top edge brings it back here.",
-                );
-                let b = Button::primary("Show it in this window").icon(Icon::Monitor);
-                let bw = self.btn_w(te, f, &b);
-                self.btn(
-                    cv,
-                    te,
-                    f,
-                    Rect::new(area.x + (area.w - bw) / 2, y, bw, p(36.0)),
-                    &b,
-                    Hit::Unspan(id),
-                );
-            }
-            TabState::Connected { .. } if apps => {
-                self.paint_apps_tab(cv, te, f, area, id);
-            }
-            TabState::Connected { .. } => {
-                self.session_area = Some((id, area));
-                self.hits
-                    .push((self.session_clip.unwrap_or(area), Hit::Session(id)));
-            }
-            TabState::Connecting => {
-                let cert = self
-                    .tabs
-                    .iter()
-                    .find(|t| t.id == id)
-                    .and_then(|t| t.cert.clone());
-                match cert {
-                    Some(cp) => self.paint_cert_prompt(cv, te, f, area, id, &cp.host.clone(), &cp),
-                    None => {
-                        self.state_card(
-                            cv,
-                            te,
-                            f,
-                            area,
-                            Icon::Network,
-                            Tone::Warning,
-                            &format!("Connecting to {name}…"),
-                            &host,
-                        );
-                    }
-                }
-            }
-            TabState::Ended(why) | TabState::Failed(why) => {
-                let failed = matches!(state, TabState::Failed(_));
-                let (icon, tone, title) = if failed {
-                    (Icon::Warning, Tone::Danger, "Connection failed")
-                } else {
-                    (Icon::Power, Tone::Muted, "Session ended")
-                };
-                let y = self.state_card(cv, te, f, area, icon, tone, title, &why);
-                let re = Button::primary("Reconnect").icon(Icon::Refresh);
-                let close = Button::secondary("Close tab").icon(Icon::Close);
-                let (rw, cw) = (self.btn_w(te, f, &re), self.btn_w(te, f, &close));
-                let x0 = area.x + (area.w - rw - cw - p(8.0)) / 2;
-                self.btn(
-                    cv,
-                    te,
-                    f,
-                    Rect::new(x0, y, rw, p(36.0)),
-                    &re,
-                    Hit::Reconnect(id),
-                );
-                self.btn(
-                    cv,
-                    te,
-                    f,
-                    Rect::new(x0 + rw + p(8.0), y, cw, p(36.0)),
-                    &close,
-                    Hit::CloseTab(id),
-                );
-            }
-        }
-        if overlay && self.bar_revealed {
-            let bar = Rect::new(area.x, area.y, area.w, tb.h);
-            cv.fill(bar, c.bg);
-            self.paint_toolbar(cv, te, f, bar, id, &host, &state, &name);
-        }
-    }
-
     /// A centred status: an icon tile in `tone`, a title and wrapped text.
     /// Returns the y for the buttons below it.
     #[allow(clippy::too_many_arguments)]
@@ -5811,141 +5699,6 @@ impl Ui {
         }
         self.clip_hits(first_hit, area);
         cv.set_clip(old);
-    }
-
-    /// The session toolbar: a state pill and the details, then Disconnect
-    /// or Reconnect, Record, full screen and the panel.
-    #[allow(clippy::too_many_arguments)]
-    fn paint_toolbar(
-        &mut self,
-        cv: &mut Canvas,
-        te: &mut TextEngine,
-        f: &Fonts,
-        tb: Rect,
-        id: u64,
-        host: &str,
-        state: &TabState,
-        name: &str,
-    ) {
-        let s = self.scale;
-        let p = |v: f32| (v * s).round() as i32;
-        let c = pal();
-        cv.fill(Rect::new(tb.x, tb.bottom() - 1, tb.w, 1), c.divider);
-        // RemoteApp: no picture here, so no full screen and no recording.
-        let apps = self
-            .tabs
-            .iter()
-            .any(|t| t.id == id && t.remote_app.is_some());
-        let (pill, info) = match &state {
-            TabState::Connecting => ("Connecting", host.to_string()),
-            TabState::Connected { width, height, .. } if apps => (
-                "Live",
-                format!("{host} · apps on this PC's desktop · {width} × {height}"),
-            ),
-            TabState::Connected { width, height, bpp } if self.fullscreen => (
-                "Live",
-                format!("{name} · {host} · {width} × {height} · {bpp}-bit"),
-            ),
-            TabState::Connected { width, height, bpp } => {
-                ("Live", format!("{host} · {width} × {height} · {bpp}-bit"))
-            }
-            TabState::Ended(why) => ("Ended", format!("{host} · {why}")),
-            TabState::Failed(why) => ("Failed", format!("{host} · {why}")),
-        };
-        let recording = self.tabs.iter().any(|t| t.id == id && t.recording);
-        // The command palette, as an icon button before the others.
-        let mut buttons: Vec<(Button, Hit)> =
-            vec![(Button::ghost("").icon(Icon::Command), Hit::Palette)];
-        match state {
-            TabState::Connected { .. } | TabState::Connecting => buttons.push((
-                Button::new("Disconnect", Variant::DangerGhost).icon(Icon::Power),
-                Hit::Disconnect(id),
-            )),
-            _ => buttons.push((
-                Button::primary("Reconnect").icon(Icon::Refresh),
-                Hit::Reconnect(id),
-            )),
-        }
-        if self.fullscreen {
-            let pin = if self.bar_pinned {
-                "Auto-hide bar"
-            } else {
-                "Pin bar"
-            };
-            buttons.push((Button::ghost(pin).icon(Icon::Pin), Hit::PinBar));
-        }
-        if matches!(state, TabState::Connected { .. }) && !apps {
-            buttons.push(if recording {
-                (
-                    Button::new("Stop recording", Variant::Danger).icon(Icon::Stop),
-                    Hit::Record(id),
-                )
-            } else {
-                (
-                    Button::secondary("Record")
-                        .icon(Icon::Record)
-                        .icon_color(c.danger),
-                    Hit::Record(id),
-                )
-            });
-        }
-        if !apps {
-            buttons.push(if self.fullscreen {
-                (
-                    Button::secondary("Exit full screen").icon(Icon::ExitFullscreen),
-                    Hit::FullScreen,
-                )
-            } else {
-                (
-                    Button::secondary("Full screen").icon(Icon::Fullscreen),
-                    Hit::FullScreen,
-                )
-            });
-        }
-        buttons.push((
-            Button::new(
-                if self.drawer { "Hide panel" } else { "Panel" },
-                if self.drawer {
-                    Variant::Secondary
-                } else {
-                    Variant::Ghost
-                },
-            )
-            .icon(Icon::PanelRight),
-            Hit::Drawer,
-        ));
-        let mut bx = tb.right() - p(8.0);
-        let bh = p(32.0);
-        for (b, hit) in buttons.iter().rev() {
-            let bw = self.btn_w(te, f, b);
-            bx -= bw;
-            self.btn(
-                cv,
-                te,
-                f,
-                Rect::new(bx, tb.y + (tb.h - bh) / 2, bw, bh),
-                b,
-                *hit,
-            );
-            bx -= p(6.0);
-        }
-        let mut k = Kit::new(cv, te, f, s);
-        let tone = state.tone();
-        let px = tb.x + p(14.0);
-        let pw = k.pill(px, tb.y + (tb.h - p(20.0)) / 2, pill, tone, Lead::Dot);
-        let ix = px + pw + p(10.0);
-        let color = if matches!(state, TabState::Failed(_)) {
-            c.danger
-        } else {
-            c.text_secondary
-        };
-        k.text_in(
-            Font::Regular,
-            12.5,
-            Rect::new(ix, tb.y, bx - ix - p(8.0), tb.h),
-            &info,
-            color,
-        );
     }
 
     /// Asks whether to trust the server certificate (first connection, or a
@@ -7613,6 +7366,15 @@ pub fn sample(session_tab: bool) -> Ui {
     m.tabs[1].state = TabState::Failed(
         "authentication failed: server error 0xc000006d STATUS_LOGON_FAILURE".into(),
     );
+    m.tabs[1].live = Live {
+        user: r"LAB\builder".into(),
+        port: 3389,
+        failure: Some(crate::failure::Failure {
+            cause: crate::failure::Cause::WrongPassword,
+            step: Some(rdp::ConnectStep::SignIn),
+        }),
+        ..Live::default()
+    };
     m.active = if session_tab { Some(1) } else { None };
     m.set_message("Connected to 10.0.0.15.", Tone::Muted);
     m
@@ -7763,6 +7525,7 @@ mod tests {
         };
         let mut m = sample_panel(0, true);
         m.drawer = false;
+        m.session_focus = true; // the session has the keyboard: bar hidden
         let (w, h) = (1000usize, 700usize);
         let mut px = vec![0u32; w * h];
         m.paint(&mut Canvas::new(&mut px, w, h), &mut te, &fonts);
@@ -7773,19 +7536,24 @@ mod tests {
             "the session gets the whole screen"
         );
         assert_eq!(m.session_size_for(w as i32, h as i32), (w as i32, h as i32));
-        assert!(m.session_clip.is_none());
-        assert!(m.mouse_move(500, 1), "the top edge reveals the bar");
+        assert!(m.overlay_hit(500, 30).is_none(), "hidden: the picture's");
+        // The bar floats over the picture: showing it repaints only its
+        // rectangle, never the window.
+        assert!(!m.mouse_move(500, 1), "the top edge reveals the bar");
+        assert!(m.take_overlay_damage().is_some());
+        assert!(m.over_overlay(500, 30), "the bar takes the pointer");
         m.paint(&mut Canvas::new(&mut px, w, h), &mut te, &fonts);
-        let clip = m.session_clip.expect("bar covers the top");
-        assert!(clip.y >= 40 && m.hits.iter().any(|(_, h)| *h == Hit::FullScreen));
         assert_eq!(
             m.session_area.unwrap().1,
             area,
             "the remote size does not change"
         );
-        assert!(m.mouse_move(500, 300), "leaving the bar hides it");
-        m.paint(&mut Canvas::new(&mut px, w, h), &mut te, &fonts);
-        assert!(m.session_clip.is_none());
+        m.mouse_move(500, 300);
+        assert!(
+            m.take_overlay_damage().is_some(),
+            "leaving the bar hides it"
+        );
+        assert!(!m.over_overlay(500, 30));
     }
 
     #[test]

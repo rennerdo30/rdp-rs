@@ -582,3 +582,26 @@ fn remote_app_config() {
         Err(Error::Protocol(m)) if m.contains("RemoteApp")
     ));
 }
+
+/// Progress reports the steps as they start: a refused port stops after
+/// the address lookup and the TCP connect, and nothing later is reported.
+#[test]
+fn progress_reports_the_steps_reached() {
+    let port = {
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        l.local_addr().unwrap().port()
+    }; // closed again: the connect is refused
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut cfg = Config::new("127.0.0.1", "user", "secret");
+    cfg.port = port;
+    cfg.timeout = Duration::from_secs(5);
+    let s = seen.clone();
+    cfg.progress = Some(crate::ConnectProgress::new(move |step| {
+        s.lock().unwrap().push(step.clone())
+    }));
+    assert!(Client::connect(&cfg).is_err());
+    assert_eq!(
+        *seen.lock().unwrap(),
+        [ConnectStep::Resolving, ConnectStep::Tcp]
+    );
+}

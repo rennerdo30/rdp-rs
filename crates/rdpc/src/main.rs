@@ -19,6 +19,7 @@ mod audio;
 mod audio_mf;
 mod clipboard;
 mod controls;
+mod failure;
 #[cfg(windows)]
 mod frame;
 mod fuzzy;
@@ -420,8 +421,13 @@ fn snapshot_ui(path: &str, scale: f32) -> Result<(), Box<dyn std::error::Error>>
     let fonts = ui::load_fonts(&mut te).ok_or("no usable UI font")?;
     let (w, h) = ((1320.0 * scale) as usize, (860.0 * scale) as usize);
     // Every screen, in the dark theme and again with "-light" in the name.
-    type Screen = (&'static str, fn() -> ui::Ui);
-    let screens: [Screen; 32] = [
+    use ui::session_view as sv;
+    type Screen<'a> = (&'a str, fn() -> ui::Ui);
+    let names: Vec<String> = sv::FAILURES
+        .iter()
+        .map(|f| format!("-failed-{}", f.0))
+        .collect();
+    let mut screens: Vec<Screen> = vec![
         ("", || ui::sample(false)),
         ("-session", || ui::sample(true)),
         ("-form-general", || ui::sample_form(0)),
@@ -458,6 +464,24 @@ fn snapshot_ui(path: &str, scale: f32) -> Result<(), Box<dyn std::error::Error>>
         ("-home-new-host", || {
             ui::sample_home_typed("alex@10.0.0.99:3390")
         }),
+        // The session screens and toolbar (RDP-31).
+        ("-connecting-steps", || sv::sample_connecting(false)),
+        ("-connecting-gateway", || sv::sample_connecting(true)),
+        ("-reconnecting", sv::sample_reconnecting),
+        ("-ended-signed-out", || {
+            sv::sample_ended(failure::EndReason::SignedOut)
+        }),
+        ("-ended-other-user", || {
+            sv::sample_ended(failure::EndReason::OtherConnection)
+        }),
+        ("-toolbar-shown", || sv::sample_toolbar(true, false, false)),
+        ("-toolbar-hidden", || {
+            sv::sample_toolbar(false, false, false)
+        }),
+        ("-toolbar-menu", || sv::sample_toolbar(true, true, false)),
+        ("-fullscreen-toolbar", || {
+            sv::sample_toolbar(true, false, true)
+        }),
     ];
     // The Home view and the editor at other window sizes (logical px).
     type SizedScreen = (&'static str, fn() -> ui::Ui, f32, f32);
@@ -468,14 +492,31 @@ fn snapshot_ui(path: &str, scale: f32) -> Result<(), Box<dyn std::error::Error>>
         ("-empty-1920", ui::sample_empty, 1920.0, 1080.0),
         ("-editor-1920", || ui::sample_form(0), 1920.0, 1080.0),
     ];
+    // One error screen per kind of failure.
+    let failures: [Screen; 10] = [
+        || sv::sample_failed(0),
+        || sv::sample_failed(1),
+        || sv::sample_failed(2),
+        || sv::sample_failed(3),
+        || sv::sample_failed(4),
+        || sv::sample_failed(5),
+        || sv::sample_failed(6),
+        || sv::sample_failed(7),
+        || sv::sample_failed(8),
+        || sv::sample_failed(9),
+    ]
+    .map(|f| ("", f));
+    for (i, (_, make)) in failures.into_iter().enumerate() {
+        screens.push((names[i].as_str(), make));
+    }
     for (light, theme) in [("", &theme::DARK), ("-light", &theme::LIGHT)] {
         theme::set(theme);
-        for (suffix, make) in screens {
+        for &(suffix, make) in &screens {
             let mut m = make();
             m.scale = scale;
             m.custom_frame = cfg!(windows);
             let mut px = vec![0u32; w * h];
-            m.paint(&mut Canvas::new(&mut px, w, h), &mut te, &fonts);
+            m.paint_snapshot(&mut Canvas::new(&mut px, w, h), &mut te, &fonts);
             let out = path.replace(".png", &format!("{suffix}{light}.png"));
             write_png(&out, w, h, &px)?;
             eprintln!("saved {w}x{h} snapshot to {out}");
@@ -497,22 +538,25 @@ fn snapshot_ui(path: &str, scale: f32) -> Result<(), Box<dyn std::error::Error>>
         let out = path.replace(".png", &format!("-kit{light}.png"));
         write_png(&out, w, h, &px)?;
         eprintln!("saved {w}x{h} snapshot to {out}");
-        // The bar over a session spread across monitors.
-        let bh = (40.0 * scale).round() as usize;
-        let mut px = vec![0u32; w * bh];
-        span::paint_bar(
-            &mut px,
-            w,
-            bh,
-            scale,
-            "Office workstation",
-            None,
-            &mut te,
-            &fonts,
-        );
-        let out = path.replace(".png", &format!("-span-bar{light}.png"));
-        write_png(&out, w, bh, &px)?;
-        eprintln!("saved {w}x{bh} snapshot to {out}");
+        // The toolbar of a session spread across monitors (top of the
+        // first monitor window): shown, and hidden to its handle.
+        let sh = h / 2;
+        for (suffix, shown) in [("-span-bar", true), ("-span-handle", false)] {
+            let mut px = vec![0u32; w * sh];
+            span::paint_sample(
+                &mut px,
+                w,
+                sh,
+                scale,
+                "Office workstation",
+                shown,
+                &mut te,
+                &fonts,
+            );
+            let out = path.replace(".png", &format!("{suffix}{light}.png"));
+            write_png(&out, w, sh, &px)?;
+            eprintln!("saved {w}x{sh} snapshot to {out}");
+        }
     }
     theme::set(&theme::DARK);
     Ok(())

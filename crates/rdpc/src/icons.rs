@@ -75,10 +75,16 @@ pub enum Icon {
     Clock,
     /// Quick connect.
     Bolt,
+    /// Copy to the clipboard.
+    Copy,
+    /// A text document (the diagnostic log).
+    FileText,
+    /// A connection that could not be made or was lost.
+    Unplug,
 }
 
 impl Icon {
-    pub const ALL: [Icon; 53] = [
+    pub const ALL: [Icon; 56] = [
         Icon::Plus,
         Icon::Search,
         Icon::Gear,
@@ -132,6 +138,9 @@ impl Icon {
         Icon::StarFilled,
         Icon::Clock,
         Icon::Bolt,
+        Icon::Copy,
+        Icon::FileText,
+        Icon::Unplug,
     ];
 }
 
@@ -605,6 +614,40 @@ pub fn draw(cv: &mut Canvas, icon: Icon, x: f32, y: f32, size: f32, color: u32) 
             p.arc((b + r, a - r), r, 180.0, 450.0);
             p.arc((a - r, b + r), r, 0.0, 270.0);
             p.arc((b + r, b + r), r, 270.0, 540.0);
+        }
+        Icon::Copy => {
+            p.rrect(5.6, 5.6, 8.4, 8.4, 1.6);
+            p.line(&[
+                (10.4, 3.4),
+                (10.4, 3.2),
+                (9.2, 2.0),
+                (3.2, 2.0),
+                (2.0, 3.2),
+                (2.0, 9.2),
+                (3.2, 10.4),
+                (3.4, 10.4),
+            ]);
+        }
+        Icon::FileText => {
+            p.shape(&[
+                (3.4, 1.8),
+                (9.4, 1.8),
+                (12.6, 5.0),
+                (12.6, 14.2),
+                (3.4, 14.2),
+            ]);
+            p.line(&[(9.2, 2.0), (9.2, 5.2), (12.4, 5.2)]);
+            p.line(&[(5.8, 8.4), (10.2, 8.4)]);
+            p.line(&[(5.8, 11.2), (10.2, 11.2)]);
+        }
+        Icon::Unplug => {
+            // A plug and its socket pulled apart: prongs, a gap, the holes.
+            p.rrect(1.6, 3.8, 4.6, 8.4, 1.4);
+            p.line(&[(6.2, 6.4), (8.4, 6.4)]);
+            p.line(&[(6.2, 9.6), (8.4, 9.6)]);
+            p.rrect(10.2, 3.8, 4.2, 8.4, 1.4);
+            p.dot((12.3, 6.4), 0.8);
+            p.dot((12.3, 9.6), 0.8);
         }
     }
 }
