@@ -953,6 +953,18 @@ impl App {
                 }
                 self.dirty();
             }
+            Action::SaveLayout => {
+                // The repaint that follows sizes a fitted session to the
+                // new area (`fit_active`), once the drag is over.
+                if let Some(m) = &self.win {
+                    let (collapsed, sidebar, panel) = m.ui.layout_settings();
+                    self.settings.sidebar_collapsed = collapsed;
+                    self.settings.sidebar_width = sidebar;
+                    self.settings.panel_width = panel;
+                    let _ = self.settings.save();
+                }
+                self.dirty();
+            }
             Action::SetAutoLock(min) => {
                 self.settings.auto_lock_minutes = min;
                 let _ = self.settings.save();
@@ -1372,6 +1384,10 @@ impl App {
         let Some((id, area)) = m.ui.session_area else {
             return;
         };
+        // A divider drags: one resize when it is let go, not one per move.
+        if m.ui.resizing() {
+            return;
+        }
         let fit = m.ui.active_tab().is_some_and(|t| t.fit);
         let Some(s) = self.sessions.get_mut(&id) else {
             return;
@@ -1413,6 +1429,7 @@ impl App {
                 "v" => Key::Paste(crate::clipboard::read_text()?),
                 "n" => Key::New,
                 "f" => Key::Find,
+                "b" => Key::ToggleSidebar,
                 "s" => Key::Save,
                 // The command palette (and the editor-style alias).
                 "k" => Key::Palette,
@@ -1756,6 +1773,8 @@ impl App {
         let Some(m) = &self.win else { return };
         let (x, y) = m.cursor;
         let want = match m.ui.session_area {
+            // A divider's grip, or one being dragged (over the picture too).
+            _ if m.ui.cursor_is_resize() => Shown::Icon(CursorIcon::ColResize),
             Some((id, area))
                 if area.contains(x, y) && !m.ui.over_overlay(x, y) && !m.ui.session_backdrop() =>
             {
@@ -1796,6 +1815,10 @@ impl App {
         let (id, area) = m.ui.session_area?;
         // The toolbar over the picture takes its own clicks.
         if m.ui.session_backdrop() || m.pressed_in != Some(id) && m.ui.over_overlay(x, y) {
+            return None;
+        }
+        // A divider's grip overlaps the picture's edge; a drag is not input.
+        if m.pressed_in != Some(id) && (m.ui.over_divider(x, y) || m.ui.resizing()) {
             return None;
         }
         let s = self.sessions.get(&id)?;
@@ -1973,6 +1996,11 @@ impl ApplicationHandler<UserEvent> for App {
                             ui.remembered = remembered_exists(&mut ui);
                             ui.update_channel = self.settings.update_channel.clone();
                             ui.theme = self.settings.theme;
+                            ui.set_layout(
+                                self.settings.sidebar_collapsed,
+                                self.settings.sidebar_width,
+                                self.settings.panel_width,
+                            );
                             if self.settings.check_updates {
                                 check_for_update(
                                     self.proxy.clone(),

@@ -111,6 +111,8 @@ pub enum Command {
     Panel,
     Theme(ThemeChoice),
     OpenSettings,
+    /// Fold or unfold the sidebar ("Toggle sidebar", Ctrl+B).
+    Sidebar,
     Lock,
     CheckUpdates,
     InstallUpdate,
@@ -160,6 +162,7 @@ impl Command {
                     .unwrap_or_default(),
             ),
             Command::OpenSettings => Hit::OpenSettings,
+            Command::Sidebar => Hit::SidebarToggle,
             Command::Lock => Hit::Lock,
             Command::CheckUpdates => Hit::CheckNow,
             Command::InstallUpdate => Hit::Update,
@@ -797,11 +800,9 @@ impl Ui {
                 );
             }
 
-            // RemoteApp apps.
+            // RemoteApp apps, of every connection that has any (what a
+            // connection opens only decides what Connect does).
             for (ci, c) in self.store.connections.iter().enumerate() {
-                if c.opens != Opens::Apps {
-                    continue;
-                }
                 for (ai, a) in c.apps.iter().enumerate() {
                     let running = self.tabs.iter().any(|t| {
                         t.name == c.name
@@ -943,6 +944,31 @@ impl Ui {
             Chip::None,
             "Open",
         );
+        if !self.fullscreen {
+            let (title, sub, verb) = if self.sidebar_collapsed {
+                (
+                    "Expand sidebar",
+                    "Connections with their names, search and groups",
+                    "Expand",
+                )
+            } else {
+                (
+                    "Collapse sidebar",
+                    "A narrow rail of icons: more room for the session",
+                    "Collapse",
+                )
+            };
+            push(
+                Command::Sidebar,
+                Section::Settings,
+                title.into(),
+                sub.into(),
+                "toggle sidebar rail hide show fold unfold menu hamburger",
+                Lead::Icon(Icon::Menu, Tone::Neutral),
+                Chip::Keys("Ctrl+B"),
+                verb,
+            );
+        }
         if self.store.is_vault() && !locked {
             push(
                 Command::Lock,

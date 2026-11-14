@@ -15,6 +15,12 @@ pub struct AppSettings {
     pub update_channel: String,
     /// Colour theme: dark (default), light, or the Windows app theme.
     pub theme: crate::theme::ThemeChoice,
+    /// The connections sidebar is folded to its icon rail.
+    pub sidebar_collapsed: bool,
+    /// Widths the user dragged the sidebar and the session side panel to,
+    /// in logical px (the UI clamps them to its limits).
+    pub sidebar_width: u32,
+    pub panel_width: u32,
 }
 
 /// Update channel choices offered in Settings: (setting, label).
@@ -80,6 +86,9 @@ impl Default for AppSettings {
             diagnostic_log: false,
             update_channel: "auto".into(),
             theme: crate::theme::ThemeChoice::Dark,
+            sidebar_collapsed: false,
+            sidebar_width: crate::ui::SIDEBAR_W as u32,
+            panel_width: crate::ui::DRAWER_W as u32,
         }
     }
 }
@@ -121,5 +130,21 @@ mod tests {
         assert_eq!(s.theme, crate::theme::ThemeChoice::Dark);
         let s: AppSettings = serde_json::from_str(r#"{"theme":"light"}"#).unwrap();
         assert_eq!(s.theme, crate::theme::ThemeChoice::Light);
+        // Settings from before the sidebar could fold or resize.
+        assert!(!s.sidebar_collapsed);
+        assert_eq!((s.sidebar_width, s.panel_width), (264, 320));
+    }
+
+    #[test]
+    fn sidebar_layout_round_trips() {
+        let s = AppSettings {
+            sidebar_collapsed: true,
+            sidebar_width: 400,
+            panel_width: 360,
+            ..AppSettings::default()
+        };
+        let json = serde_json::to_vec(&s).unwrap();
+        let back: AppSettings = serde_json::from_slice(&json).unwrap();
+        assert_eq!(back, s);
     }
 }

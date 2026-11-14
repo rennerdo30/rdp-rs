@@ -97,6 +97,17 @@ impl Ui {
                 from: None,
                 tone: Tone::Accent,
             });
+            // Its apps still start on their own from the sidebar.
+            if !r.apps.is_empty() {
+                let names: Vec<&str> = r.apps.iter().take(3).map(|a| a.name.as_str()).collect();
+                out.push(Line {
+                    icon: Icon::Apps,
+                    title: format!("{} in the sidebar", plural(r.apps.len(), "app", "apps")),
+                    detail: format!("Each starts in its own window: {}", and_list(&names)),
+                    from: None,
+                    tone: Tone::Accent,
+                });
+            }
         }
 
         // Size, monitors, scale.

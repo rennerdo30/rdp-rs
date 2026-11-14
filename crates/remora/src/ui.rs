@@ -21,7 +21,9 @@ use crate::theme::{self, ThemeChoice, Tone, pal, radius, size};
 mod palette;
 pub use palette::{SESSION_CHORD, sample as sample_palette};
 mod home;
+mod sidebar;
 mod summary;
+pub use sidebar::{Divider, sample_rail, sample_resized};
 
 pub use home::ThumbDue;
 pub mod session_view;
@@ -84,10 +86,12 @@ const SAVED_MASK: &str =
     "\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}";
 
 /// Main window layout in logical px; `session_size_for` uses the same.
-const SIDEBAR_W: f32 = 264.0;
+/// The sidebar and the session panel start at these widths; the user can
+/// drag both (see `sidebar`).
+pub const SIDEBAR_W: f32 = 264.0;
 const STRIP_H: f32 = 40.0;
 const STATUS_H: f32 = 28.0;
-const DRAWER_W: f32 = 320.0;
+pub const DRAWER_W: f32 = 320.0;
 
 /// Text size of text fields (logical px); the caret maths uses it too.
 const FIELD_TEXT: f32 = 13.0;
@@ -143,8 +147,9 @@ const FORM: [Field; 11] = [
     Field::AppDir,
 ];
 
-/// One sidebar row: a group, a connection, or one of an Apps connection's
-/// apps (connection, app); groups and connections with their tree depth.
+/// One sidebar row: a group, a connection, or one of a connection's
+/// RemoteApp apps (connection, app); groups and connections with their
+/// tree depth.
 #[derive(Clone, Copy)]
 enum Row {
     Group(usize, usize),
@@ -301,6 +306,12 @@ pub enum Hit {
     /// Error screen: open the connection's editor; copy the technical text.
     EditConnection(u64),
     CopyDetails(u64),
+    /// Folds the sidebar to its icon rail or unfolds it (the hamburger,
+    /// Ctrl+B, the palette); the rail's "+N" tile unfolds it too.
+    SidebarToggle,
+    RailMore,
+    /// The draggable edge of the sidebar or of the session panel.
+    Divider(Divider),
 }
 
 /// A RemoteApp session tab: the connection's apps and the open windows.
@@ -514,6 +525,9 @@ pub enum Action {
     SetMic(u64, Option<String>),
     /// Put this text on the clipboard (error details).
     CopyText(String),
+    /// The sidebar folded or unfolded, or a divider was dragged: keep the
+    /// layout ([`Ui::layout_settings`]) in the settings.
+    SaveLayout,
 }
 
 pub enum Key {
@@ -542,6 +556,8 @@ pub enum Key {
     Palette,
     PageUp,
     PageDown,
+    /// Ctrl+B: fold or unfold the sidebar.
+    ToggleSidebar,
 }
 
 pub struct Ui {
@@ -654,6 +670,16 @@ pub struct Ui {
     home: home::HomeState,
     /// The session toolbar's state and layout.
     toolbar: session_view::Toolbar,
+    /// The sidebar is folded to its icon rail.
+    pub sidebar_collapsed: bool,
+    /// The widths the sidebar and the session panel were dragged to
+    /// (logical px; painting clamps them).
+    pub sidebar_w: f32,
+    pub panel_w: f32,
+    /// Divider drags and where the dividers were painted.
+    dividers: sidebar::Dividers,
+    /// The tooltip of the rail item under the pointer.
+    tip: Option<sidebar::Tip>,
 }
 
 /// Title-row geometry in physical pixels for the frame hook.
@@ -737,6 +763,11 @@ impl Ui {
             palette: None,
             home: home::HomeState::default(),
             toolbar: Default::default(),
+            sidebar_collapsed: false,
+            sidebar_w: SIDEBAR_W,
+            panel_w: DRAWER_W,
+            dividers: Default::default(),
+            tip: None,
         };
         m.fields[Field::Password as usize] = TextField::secret();
         m.fields[Field::Master as usize] = TextField::secret();
@@ -774,11 +805,11 @@ impl Ui {
         } else {
             // Sidebar, the content panel's 1 px edges, tab strip and
             // status bar.
-            let side_w = p(SIDEBAR_W).min(w / 3);
+            let side_w = self.sidebar_px(w);
             (w - side_w - 1, h - p(STATUS_H) - p(STRIP_H) - 1)
         };
         if self.drawer {
-            aw -= p(DRAWER_W).min(aw / 2) + 1;
+            aw -= self.panel_px(aw) + 1;
         }
         (aw.max(1), ah.max(1))
     }
@@ -1423,13 +1454,13 @@ impl Ui {
         out
     }
 
-    /// A connection's row, and its apps' rows under it for an Apps connection.
+    /// A connection's row, and its apps' rows under it. Apps are listed
+    /// whatever the connection opens: "Opens" only decides what Connect
+    /// does, each app row always starts its own RemoteApp session.
     fn push_conn(&self, i: usize, depth: usize, out: &mut Vec<Row>) {
         out.push(Row::Conn(i, depth));
-        let c = &self.store.connections[i];
-        if c.opens == Opens::Apps {
-            out.extend((0..c.apps.len()).map(|a| Row::App(i, a)));
-        }
+        let n = self.store.connections[i].apps.len();
+        out.extend((0..n).map(|a| Row::App(i, a)));
     }
 
     fn tree_rows(&self, path: &str, depth: usize, out: &mut Vec<Row>) {
@@ -1554,7 +1585,8 @@ impl Ui {
             v.extend([Field::Host, Field::Port]);
         }
         v.push(Field::GroupPath);
-        if self.group_edit.is_none() && self.opens == Opens::Apps {
+        // The Apps card is on every connection's General page.
+        if self.group_edit.is_none() {
             v.extend([
                 Field::AppProgram,
                 Field::AppName,
@@ -1591,6 +1623,10 @@ impl Ui {
         if self.palette.is_some() && self.confirm_exit.is_none() {
             return self.palette_mouse_move(x, y);
         }
+        // A divider follows the pointer (leaving the window is not a move).
+        if self.resizing() {
+            return (x, y) != (-1, -1) && self.drag_to(x);
+        }
         // The session toolbar: the top edge shows it, leaving hides it.
         self.toolbar_pointer(x, y);
         let h = self.hit_at(x, y);
@@ -1612,6 +1648,10 @@ impl Ui {
             return self.palette_mouse_down(x, y);
         }
         self.press = self.hit_at(x, y);
+        if let Some(Hit::Divider(d)) = self.press {
+            // A drag or a double-click; the session keeps the keyboard.
+            return self.divider_press(d, x, std::time::Instant::now());
+        }
         self.session_focus = matches!(self.press, Some(Hit::Session(_)));
         match self.press {
             Some(Hit::Field(f)) => {
@@ -1650,6 +1690,9 @@ impl Ui {
             return self.palette_mouse_up(x, y);
         }
         let pressed = self.press.take();
+        if let Some(Hit::Divider(_)) = pressed {
+            return self.divider_release();
+        }
         let hit = self.hit_at(x, y);
         if pressed.is_some() && pressed == hit {
             self.activate(hit?)
@@ -1937,6 +1980,9 @@ impl Ui {
             Hit::Tab(id) => self.active = Some(id),
             Hit::CloseTab(id) => return Some(Action::CloseTab(id)),
             Hit::Drawer => self.drawer = !self.drawer,
+            Hit::SidebarToggle | Hit::RailMore => return self.toggle_sidebar(),
+            // Dividers drag (see `mouse_down`); a click does nothing.
+            Hit::Divider(_) => {}
             Hit::Reconnect(id) => return Some(Action::Reconnect(id)),
             Hit::Disconnect(id) => return Some(Action::Disconnect(id)),
             Hit::Sound(id) => {
@@ -2200,6 +2246,9 @@ impl Ui {
         if self.palette.is_some() {
             return self.palette_key(k);
         }
+        if let Key::ToggleSidebar = k {
+            return self.toggle_sidebar();
+        }
         let k = match self.home_key(k) {
             Ok(done) => return done,
             Err(k) => k,
@@ -2241,10 +2290,15 @@ impl Ui {
                 self.active = None;
             }
             Key::Find if !self.store.is_locked() && !self.fullscreen => {
+                // The rail has no filter: unfold the sidebar to show it.
+                let unfold = std::mem::take(&mut self.sidebar_collapsed);
                 self.focus = Some(Field::Filter);
                 let tf = self.field_mut(Field::Filter);
                 tf.caret = tf.text.chars().count();
                 tf.all = true;
+                if unfold {
+                    return Some(Action::SaveLayout);
+                }
             }
             Key::Find => {}
             Key::Save if self.active.is_none() => self.save(),
@@ -2438,6 +2492,8 @@ impl Ui {
         self.session_area = None;
         self.title_controls.clear();
         self.caption = Rect::default();
+        self.tip = None;
+        self.dividers.panel_x = None;
         let s = self.scale;
         let p = |v: f32| (v * s).round() as i32;
         let c = pal();
@@ -2454,7 +2510,7 @@ impl Ui {
         }
         let bar_h = p(STATUS_H);
         let body_h = h - bar_h;
-        let side_w = p(SIDEBAR_W).min(w / 3);
+        let side_w = self.sidebar_px(w);
         let strip_h = p(STRIP_H);
 
         // The content panel sits in the chrome with a rounded top-left
@@ -2470,7 +2526,11 @@ impl Ui {
         cv.set_clip(old);
         let content = Rect::new(panel.x + 1, panel.y + 1, panel.w - 1, panel.h - 1);
 
-        self.paint_sidebar(cv, te, f, Rect::new(0, 0, side_w, body_h));
+        if self.sidebar_collapsed {
+            self.paint_rail(cv, te, f, Rect::new(0, 0, side_w, body_h));
+        } else {
+            self.paint_sidebar(cv, te, f, Rect::new(0, 0, side_w, body_h));
+        }
         self.paint_tabs(cv, te, f, Rect::new(side_w, 0, w - side_w, strip_h));
         match self.active_tab().map(|t| t.id) {
             Some(id) => self.paint_session(cv, te, f, content, id),
@@ -2482,6 +2542,8 @@ impl Ui {
             None => self.paint_home(cv, te, f, content),
         }
         self.paint_status(cv, te, f, Rect::new(0, body_h, w, bar_h));
+        // Last, so its grip wins over the rows and the picture beside it.
+        self.paint_divider(cv, Divider::Sidebar, side_w, strip_h, body_h);
     }
 
     /// The status bar: the last message (with a tone dot), the update
@@ -2589,22 +2651,43 @@ impl Ui {
         let pad = p(12.0);
         let locked = self.store.is_locked();
 
-        // Header in the title row: the mark and the name; Lock at the right.
+        // Header in the title row: the hamburger (it folds the sidebar to
+        // its rail, where it stays in the same place), the mark and the
+        // name; Lock at the right.
+        let menu = self.menu_button_rect();
+        self.icon_btn(
+            cv,
+            te,
+            f,
+            menu,
+            Icon::Menu,
+            Variant::Ghost,
+            Hit::SidebarToggle,
+        );
+        self.title_controls.push((menu.x, menu.right()));
         {
             let mut k = Kit::new(cv, te, f, s);
-            k.logo(area.x + p(14.0), p(9.0), 22.0);
-            let row = Rect::new(area.x + p(44.0), 0, p(120.0), p(40.0));
+            k.logo(area.x + p(52.0), p(9.0), 22.0);
+            let row = Rect::new(area.x + p(82.0), 0, p(100.0), p(40.0));
             k.text_in(Font::Semi, size::HEADING, row, "Remora", c.text);
         }
         // The mark and the name lead Home.
-        let logo = Rect::new(area.x + p(8.0), p(4.0), p(96.0), p(32.0));
+        let logo = Rect::new(area.x + p(48.0), p(4.0), p(96.0), p(32.0));
         self.hits.push((logo, Hit::HomeView(home::HomeHit::Home)));
         self.title_controls.push((logo.x, logo.right()));
         if self.store.is_vault() && !locked {
+            // Narrow: the lock's icon only, clear of the name.
             let b = Button::ghost("Lock").icon(Icon::Lock);
             let bw = self.btn_w(te, f, &b);
-            let r = Rect::new(area.right() - pad - bw + p(4.0), p(6.0), bw, p(28.0));
-            self.btn(cv, te, f, r, &b, Hit::Lock);
+            let r = if area.w - pad - bw >= logo.right() {
+                let r = Rect::new(area.right() - pad - bw + p(4.0), p(6.0), bw, p(28.0));
+                self.btn(cv, te, f, r, &b, Hit::Lock);
+                r
+            } else {
+                let r = Rect::new(area.right() - pad - p(24.0), p(6.0), p(28.0), p(28.0));
+                self.icon_btn(cv, te, f, r, Icon::Lock, Variant::Ghost, Hit::Lock);
+                r
+            };
             self.title_controls.push((r.x, r.right()));
         }
 
@@ -4143,6 +4226,21 @@ impl Ui {
                     KitHint::Text("saves · click an app in the sidebar to start it"),
                 ],
             );
+        } else if !self.apps.is_empty() {
+            self.key_hints(
+                cv,
+                te,
+                f,
+                x,
+                cy,
+                w,
+                &[
+                    KitHint::Keys("Enter"),
+                    KitHint::Text("connects the desktop"),
+                    KitHint::Keys("Ctrl+S"),
+                    KitHint::Text("saves · click an app in the sidebar to start it"),
+                ],
+            );
         } else {
             self.key_hints(
                 cv,
@@ -4623,15 +4721,14 @@ impl Ui {
             y - p(2.0),
             w,
             if apps_mode {
-                "Each app opens in its own window on this PC, as if it ran here (RemoteApp)."
+                "Connect starts the first app below in its own window on this PC (RemoteApp)."
             } else {
-                "The whole remote desktop, in a tab, full screen or on chosen monitors."
+                "Connect opens the whole remote desktop: in a tab, full screen or on monitors."
             },
         );
         y += p(24.0);
-        if !apps_mode {
-            return y;
-        }
+        // The apps are the connection's whatever it opens: each one is
+        // listed under it in the sidebar and starts its own RemoteApp window.
         self.caption(cv, te, f, x, y, w, "Apps");
         y += p(26.0);
         let apps = self.apps.clone();
@@ -4644,7 +4741,7 @@ impl Ui {
                 Font::Regular,
                 size::BODY,
                 Rect::new(r.x + p(16.0), r.y, r.w - p(32.0), r.h),
-                "No apps yet: type a program below and press Add.",
+                "No apps yet. Add a program to start it on its own from the sidebar.",
                 c.text_muted,
             );
         }
@@ -7162,6 +7259,21 @@ pub fn sample_apps_form() -> Ui {
     m
 }
 
+/// A desktop connection ("Test VM") with an app of its own: the app is
+/// listed under it in the sidebar and in its editor, Connect still opens
+/// the desktop.
+pub fn sample_desktop_apps() -> Ui {
+    let mut m = sample(false);
+    m.store.connections[2].apps.push(AppEntry {
+        name: "Event viewer".into(),
+        program: "eventvwr.msc".into(),
+        ..Default::default()
+    });
+    m.select(2);
+    m.focus = None;
+    m
+}
+
 /// The RemoteApp session tab.
 pub fn sample_apps_tab() -> Ui {
     let mut m = sample(false);
@@ -7691,8 +7803,9 @@ mod tests {
         };
         let mut m = sample(false);
         m.select(2);
-        // Desktop: no apps card, no app fields in the tab order.
-        assert!(!m.form_order().contains(&Field::AppProgram));
+        // Desktop: the apps card is there too, its fields in the tab order
+        // (apps are the connection's whatever it opens).
+        assert!(m.form_order().contains(&Field::AppProgram));
         click(&mut m, &mut te, &fonts, Hit::FormOpens(1));
         assert_eq!(m.opens, Opens::Apps);
         assert!(m.form_order().contains(&Field::AppProgram));
@@ -7740,12 +7853,66 @@ mod tests {
             (c.opens, c.apps[0].program.as_str()),
             (Opens::Apps, "||calc")
         );
-        // Back to Desktop keeps the list for later, but connects a desktop.
+        // Back to Desktop keeps the list, but connects a desktop.
         click(&mut m, &mut te, &fonts, Hit::FormOpens(0));
         assert_eq!(m.opens, Opens::Desktop);
         m.field_mut(Field::Password).set("pw");
         match m.connect() {
             Some(Action::Connect { cfg, .. }) => assert!(cfg.remote_app.is_none()),
+            _ => panic!("expected Connect"),
+        }
+        // Saved that way, the app stays listed under it and starts.
+        m.save();
+        assert_eq!(m.store.connections[2].opens, Opens::Desktop);
+        assert!(m.rows().iter().any(|r| matches!(r, Row::App(2, 0))));
+        assert!(matches!(
+            click(&mut m, &mut te, &fonts, Hit::AppRow(2, 0)),
+            Some(Action::Connect { cfg, .. }) if cfg.remote_app.is_some()
+        ));
+    }
+
+    /// RDP-38: "Opens" decides only what Connect does. A desktop
+    /// connection with apps lists them (sidebar, palette) and each starts
+    /// its own RemoteApp session; Connect still opens the desktop.
+    #[test]
+    fn a_desktop_connection_lists_its_apps_and_connects_the_desktop() {
+        let mut m = sample(false);
+        let c = &mut m.store.connections[2];
+        assert_eq!(c.opens, Opens::Desktop);
+        c.password = Some("pw".into());
+        c.apps.push(AppEntry {
+            name: "Event viewer".into(),
+            program: "eventvwr.msc".into(),
+            ..Default::default()
+        });
+        assert!(m.rows().iter().any(|r| matches!(r, Row::App(2, 0))));
+        // While filtering too.
+        m.field_mut(Field::Filter).set("event");
+        assert!(matches!(
+            m.rows().as_slice(),
+            [Row::Conn(2, 0), Row::App(2, 0)]
+        ));
+        m.field_mut(Field::Filter).set("");
+        let cmds: Vec<_> = m.palette_entries().into_iter().map(|e| e.cmd).collect();
+        assert!(cmds.contains(&palette::Command::ConnectApp(2, 0)));
+        // The app row starts the app in a RemoteApp session.
+        match m.launch_app(2, 0) {
+            Some(Action::Connect { cfg, .. }) => assert_eq!(
+                cfg.remote_app.as_ref().map(|a| a.program.as_str()),
+                Some("eventvwr.msc")
+            ),
+            _ => panic!("expected a RemoteApp Connect"),
+        }
+        // Connect opens the desktop.
+        m.select(2);
+        match m.connect() {
+            Some(Action::Connect { cfg, .. }) => assert!(cfg.remote_app.is_none()),
+            _ => panic!("expected Connect"),
+        }
+        // Opens Apps: Connect starts the first app instead.
+        m.opens = Opens::Apps;
+        match m.connect() {
+            Some(Action::Connect { cfg, .. }) => assert!(cfg.remote_app.is_some()),
             _ => panic!("expected Connect"),
         }
     }

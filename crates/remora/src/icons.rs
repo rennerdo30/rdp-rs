@@ -81,10 +81,12 @@ pub enum Icon {
     FileText,
     /// A connection that could not be made or was lost.
     Unplug,
+    /// Folds or unfolds the sidebar (three bars).
+    Menu,
 }
 
 impl Icon {
-    pub const ALL: [Icon; 56] = [
+    pub const ALL: [Icon; 57] = [
         Icon::Plus,
         Icon::Search,
         Icon::Gear,
@@ -141,6 +143,7 @@ impl Icon {
         Icon::Copy,
         Icon::FileText,
         Icon::Unplug,
+        Icon::Menu,
     ];
 }
 
@@ -572,6 +575,11 @@ pub fn draw(cv: &mut Canvas, icon: Icon, x: f32, y: f32, size: f32, color: u32) 
         Icon::PanelRight => {
             p.rrect(1.8, 2.6, 12.4, 10.8, 1.6);
             p.line(&[(9.8, 2.6), (9.8, 13.4)]);
+        }
+        Icon::Menu => {
+            for y in [4.0, 8.0, 12.0] {
+                p.line(&[(2.5, y), (13.5, y)]);
+            }
         }
         Icon::StarFilled => {
             let pts: Vec<(f32, f32)> = (0..10)
