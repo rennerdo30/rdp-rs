@@ -2253,68 +2253,53 @@ impl Ui {
     fn paint_exit_confirm(&mut self, cv: &mut Canvas, te: &mut TextEngine, f: &Fonts, n: usize) {
         let s = self.scale;
         let p = |v: f32| (v * s).round() as i32;
+        let c = pal();
         let (w, h) = (cv.width() as i32, cv.height() as i32);
         let all = Rect::new(0, 0, w, h);
         // The session picture is not drawn under the dialog.
         self.session_area = None;
-        cv.fill_alpha(all, 0x000000, 150);
         self.hits.clear();
         self.title_controls.clear();
         self.hits.push((all, Hit::Modal));
-        let cw = p(420.0).min(w - p(32.0));
-        let ch = p(170.0);
+        let cw = p(440.0).min(w - p(32.0));
+        let ch = p(196.0);
         let r = Rect::new((w - cw) / 2, (h - ch) / 2, cw, ch);
-        cv.round_border(r, 10.0 * s, pal().border, pal().surface);
-        let x = r.x + p(24.0);
-        let tw = (r.w - p(48.0)) as f32;
-        te.draw(
-            cv,
-            f.semi,
-            16.0 * s,
-            x as f32,
-            (r.y + p(40.0)) as f32,
-            "Quit rdpc?",
-            pal().text,
-            tw,
-        );
         let line = if n == 1 {
             "1 session is open and will be disconnected.".to_string()
         } else {
             format!("{n} sessions are open and will be disconnected.")
         };
-        te.draw(
-            cv,
-            f.ui,
-            13.0 * s,
-            x as f32,
-            (r.y + p(68.0)) as f32,
-            &line,
-            pal().text_secondary,
-            tw,
-        );
-        let by = r.bottom() - p(24.0) - p(34.0);
-        let qw = p(150.0);
-        self.button(
+        {
+            let mut k = Kit::new(cv, te, f, s);
+            k.scrim(all);
+            k.dialog(r);
+            let d = p(44.0);
+            let tile = Rect::new(r.x + p(28.0), r.y + p(28.0), d, d);
+            k.cv.fill_round(tile, 12.0 * s, c.danger_subtle);
+            k.icon_in(Icon::Power, tile, 22.0, c.danger);
+            let tx = tile.right() + p(16.0);
+            let tw = r.right() - tx - p(28.0);
+            k.text(Font::Semi, size::HEADING + 2.0, tx, r.y + p(46.0), "Quit rdpc?", c.text, tw);
+            k.text(Font::Regular, 12.5, tx, r.y + p(68.0), &line, c.text_secondary, tw);
+            k.hints(
+                tx,
+                r.y + p(98.0),
+                tw,
+                &[KitHint::Keys("Esc"), KitHint::Text("stays")],
+            );
+        }
+        let by = r.bottom() - p(28.0) - p(36.0);
+        let quit = Button::new("Disconnect and quit", Variant::Danger).icon(Icon::Power);
+        let cancel = Button::secondary("Cancel");
+        let (qw, cw2) = (self.btn_w(te, f, &quit), self.btn_w(te, f, &cancel));
+        let qx = r.right() - p(28.0) - qw;
+        self.btn(cv, te, f, Rect::new(qx, by, qw, p(36.0)), &quit, Hit::ExitConfirm);
+        self.btn(
             cv,
             te,
             f,
-            Rect::new(r.right() - p(24.0) - qw, by, qw, p(34.0)),
-            "Disconnect and quit",
-            Variant::Danger,
-            Hit::ExitConfirm,
-        );
-        self.button(
-            cv,
-            te,
-            f,
-            Rect::new(
-                r.right() - p(24.0) - qw - p(8.0) - p(96.0),
-                by,
-                p(96.0),
-                p(34.0),
-            ),
-            "Cancel",
-            Variant::Secondary,
+            Rect::new(qx - p(8.0) - cw2, by, cw2, p(36.0)),
+            &cancel,
             Hit::ExitCancel,
         );
     }
@@ -2482,7 +2467,7 @@ impl Ui {
         let sr = Rect::new(pad, p(48.0), area.w - 2 * pad, p(32.0));
         let placeholder = if locked { "Locked" } else { "Search connections" };
         self.text_input_i(cv, te, f, sr, Some(Icon::Search), Field::Filter, placeholder);
-        if self.field(Field::Filter).text.is_empty() && self.focus != Some(Field::Filter) {
+        if !locked && self.field(Field::Filter).text.is_empty() && self.focus != Some(Field::Filter) {
             let mut k = Kit::new(cv, te, f, s);
             let kw = k.keys_width("Ctrl+F");
             k.keys(sr.right() - p(8.0) - kw, sr.y + (sr.h - p(18.0)) / 2, "Ctrl+F");
@@ -3205,63 +3190,81 @@ impl Ui {
         self.settings_note = Some((text, if ok { Tone::Success } else { Tone::Danger }));
     }
 
-    /// App settings: security, backup, updates, about.
+    /// App settings: appearance, security, backup, updates, troubleshooting.
     fn paint_settings(&mut self, cv: &mut Canvas, te: &mut TextEngine, f: &Fonts, area: Rect) {
         let s = self.scale;
         let p = |v: f32| (v * s).round() as i32;
+        let c = pal();
         let old = cv.set_clip(area);
         let first_hit = self.hits.len();
         self.home_area = area;
         let top = area.y - self.home_scroll;
         let x = area.x + p(40.0);
-        let w = p(620.0).min(area.w - p(80.0)).max(p(300.0));
-        te.draw(
-            cv,
-            f.semi,
-            20.0 * s,
-            x as f32,
-            (top + p(48.0)) as f32,
-            "Settings",
-            pal().text,
-            w as f32,
-        );
-        let version = format!("rdpc {}", env!("CARGO_PKG_VERSION"));
-        te.draw(
-            cv,
-            f.ui,
-            12.5 * s,
-            x as f32,
-            (top + p(70.0)) as f32,
-            &version,
-            pal().text_muted,
-            w as f32,
-        );
-        let mut y = top + p(100.0);
-        if let Some((note, color)) = self.settings_note.clone() {
-            te.draw(
-                cv,
-                f.ui,
-                12.5 * s,
-                x as f32,
-                (y + p(4.0)) as f32,
-                &note,
-                color.color(),
-                w as f32,
-            );
-            y += p(24.0);
+        let w = p(640.0).min(area.w - p(80.0)).max(p(300.0));
+        {
+            let mut k = Kit::new(cv, te, f, s);
+            let d = p(52.0);
+            let tile = Rect::new(x, top + p(28.0), d, d);
+            k.cv.round_border(tile, d as f32 * 0.28, c.border, c.surface_raised);
+            k.icon_in(Icon::Gear, tile, 24.0, c.accent);
+            let tx = x + d + p(16.0);
+            k.text(Font::Semi, size::TITLE, tx, top + p(52.0), "Settings", c.text, w);
+            let version = format!("rdpc {}", env!("CARGO_PKG_VERSION"));
+            k.text(Font::Regular, 12.5, tx, top + p(74.0), &version, c.text_muted, w);
+        }
+        let mut y = top + p(104.0);
+        if let Some((note, tone)) = self.settings_note.clone() {
+            let icon = match tone {
+                Tone::Danger | Tone::Warning => Icon::Warning,
+                Tone::Success => Icon::Check,
+                _ => Icon::Info,
+            };
+            let tone = if tone == Tone::Muted { Tone::Info } else { tone };
+            Kit::new(cv, te, f, s).banner(Rect::new(x, y, w, p(46.0)), tone, icon, &note, "");
+            y += p(46.0) + p(20.0);
         }
 
+        // Appearance
+        self.caption(cv, te, f, x, y, w, "Appearance");
+        y += p(26.0);
+        let items: Vec<(String, Option<Icon>, bool, Hit)> = ThemeChoice::ALL
+            .iter()
+            .enumerate()
+            .map(|(i, t)| {
+                let icon = match t {
+                    ThemeChoice::Dark => Icon::Moon,
+                    ThemeChoice::Light => Icon::Sun,
+                    ThemeChoice::System => Icon::Contrast,
+                };
+                (t.label().to_string(), Some(icon), self.theme == *t, Hit::Theme(i))
+            })
+            .collect();
+        self.segmented_i(cv, te, f, Rect::new(x, y, w, p(38.0)), &items);
+        y += p(38.0);
+        self.hint(
+            cv,
+            te,
+            f,
+            x,
+            y + p(20.0),
+            w,
+            "System follows the Windows app theme and switches with it.",
+        );
+        y += p(32.0) + p(20.0);
+
         // Security
-        self.caption(cv, te, f, x, y, w, "SECURITY");
-        y += p(24.0);
+        self.caption(cv, te, f, x, y, w, "Security");
+        y += p(26.0);
+        let row = p(60.0);
         if self.store.is_vault() {
-            let cells = self.card(cv, x, y, w, &[p(58.0), p(58.0)]);
+            let cells = self.card(cv, x, y, w, &[row, row]);
             let remembered = self.remembered;
-            self.card_switch(
+            self.card_switch_i(
                 cv,
                 te,
                 f,
                 cells[0],
+                Some(Icon::Key),
                 "Unlock automatically on this PC",
                 "Windows keeps the key for your user account (DPAPI)",
                 remembered,
@@ -3272,39 +3275,43 @@ impl Ui {
                 te,
                 f,
                 cells[1],
+                Icon::Lock,
                 "Master password",
                 "Encrypts saved passwords and backups",
                 "Change…",
                 Hit::ChangeMasterOpen,
             );
-            y += p(116.0) + p(16.0);
+            y += 2 * row + p(16.0);
             if self.change_master {
                 let rh = p(52.0);
-                let cells = self.card(cv, x, y, w, &[rh, rh, rh, p(56.0)]);
-                self.field_row(
+                let cells = self.card(cv, x, y, w, &[rh, rh, rh, p(60.0)]);
+                self.field_row_i(
                     cv,
                     te,
                     f,
                     cells[0],
                     "Current",
+                    Some(Icon::Key),
                     Field::Master,
                     "Current master password",
                 );
-                self.field_row(
+                self.field_row_i(
                     cv,
                     te,
                     f,
                     cells[1],
                     "New",
+                    Some(Icon::Key),
                     Field::NewMaster,
                     "At least 8 characters",
                 );
-                self.field_row(
+                self.field_row_i(
                     cv,
                     te,
                     f,
                     cells[2],
                     "Again",
+                    Some(Icon::Key),
                     Field::MasterConfirm,
                     "The new one once more",
                 );
@@ -3314,28 +3321,24 @@ impl Ui {
                 } else {
                     "Change password"
                 };
-                self.button(
+                let ok = Button::primary(label).icon(Icon::Check);
+                let ow = self.btn_w(te, f, &ok);
+                let by = r.y + (r.h - p(34.0)) / 2;
+                self.btn(cv, te, f, Rect::new(r.x + p(132.0), by, ow, p(34.0)), &ok, Hit::ChangeMasterOk);
+                let cancel = Button::secondary("Cancel");
+                let cw = self.btn_w(te, f, &cancel);
+                self.btn(
                     cv,
                     te,
                     f,
-                    Rect::new(r.x + p(16.0), r.y + p(11.0), p(150.0), p(34.0)),
-                    label,
-                    Variant::Primary,
-                    Hit::ChangeMasterOk,
-                );
-                self.button(
-                    cv,
-                    te,
-                    f,
-                    Rect::new(r.x + p(174.0), r.y + p(11.0), p(96.0), p(34.0)),
-                    "Cancel",
-                    Variant::Secondary,
+                    Rect::new(r.x + p(140.0) + ow, by, cw, p(34.0)),
+                    &cancel,
                     Hit::ChangeMasterCancel,
                 );
-                y += 3 * rh + p(56.0) + p(16.0);
+                y += 3 * rh + p(60.0) + p(16.0);
             }
-            self.caption(cv, te, f, x, y, w, "LOCK AUTOMATICALLY WHEN IDLE");
-            y += p(24.0);
+            self.caption(cv, te, f, x, y, w, "Lock automatically when idle");
+            y += p(26.0);
             let items: Vec<(String, bool, Hit)> = crate::settings::AUTO_LOCK
                 .iter()
                 .enumerate()
@@ -3348,32 +3351,34 @@ impl Ui {
                     (t, self.auto_lock == *m, Hit::AutoLock(i))
                 })
                 .collect();
-            self.segmented(cv, te, f, Rect::new(x, y, w, p(34.0)), &items);
-            y += p(34.0) + p(24.0);
+            self.segmented(cv, te, f, Rect::new(x, y, w, p(36.0)), &items);
+            y += p(36.0) + p(28.0);
         } else {
-            let cells = self.card(cv, x, y, w, &[p(58.0)]);
+            let cells = self.card(cv, x, y, w, &[row]);
             self.card_action(
                 cv,
                 te,
                 f,
                 cells[0],
+                Icon::Shield,
                 "Encrypt your connections",
                 "A master password lets rdpc save passwords and back up",
                 "Set up…",
                 Hit::SetupVault,
             );
-            y += p(58.0) + p(24.0);
+            y += row + p(28.0);
         }
 
         // Backup
-        self.caption(cv, te, f, x, y, w, "BACKUP");
-        y += p(24.0);
-        let cells = self.card(cv, x, y, w, &[p(58.0), p(58.0)]);
+        self.caption(cv, te, f, x, y, w, "Backup");
+        y += p(26.0);
+        let cells = self.card(cv, x, y, w, &[row, row]);
         self.card_action(
             cv,
             te,
             f,
             cells[0],
+            Icon::Download,
             "Export connections",
             "One encrypted file, opened with your master password",
             "Export…",
@@ -3384,34 +3389,38 @@ impl Ui {
             te,
             f,
             cells[1],
+            Icon::FolderOpen,
             "Import connections",
             "Adds the connections and groups of a backup",
             "Import…",
             Hit::Import,
         );
-        y += p(116.0) + p(16.0);
+        y += 2 * row + p(16.0);
         if let Some(path) = self.import_file.clone() {
             let name = path
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default();
-            let cells = self.card(cv, x, y, w, &[p(44.0), p(52.0), p(56.0)]);
-            te.draw(
-                cv,
-                f.ui,
-                12.5 * s,
-                (cells[0].x + p(16.0)) as f32,
-                (cells[0].y + p(27.0)) as f32,
-                &format!("Import from {name}"),
-                pal().text_secondary,
-                (w - p(32.0)) as f32,
-            );
-            self.field_row(
+            let cells = self.card(cv, x, y, w, &[p(46.0), p(52.0), p(60.0)]);
+            {
+                let mut k = Kit::new(cv, te, f, s);
+                let r = cells[0];
+                k.icon(Icon::FolderOpen, r.x + p(16.0), r.y + (r.h - p(16.0)) / 2, 16.0, c.accent);
+                k.text_in(
+                    Font::Regular,
+                    12.5,
+                    Rect::new(r.x + p(46.0), r.y, r.w - p(62.0), r.h),
+                    &format!("Import from {name}"),
+                    c.text_secondary,
+                );
+            }
+            self.field_row_i(
                 cv,
                 te,
                 f,
                 cells[1],
                 "Password",
+                Some(Icon::Key),
                 Field::ImportPass,
                 "Master password of the backup",
             );
@@ -3421,38 +3430,35 @@ impl Ui {
             } else {
                 "Import"
             };
-            self.button(
+            let ok = Button::primary(label).icon(Icon::Check);
+            let ow = self.btn_w(te, f, &ok);
+            let by = r.y + (r.h - p(34.0)) / 2;
+            self.btn(cv, te, f, Rect::new(r.x + p(132.0), by, ow, p(34.0)), &ok, Hit::ImportOk);
+            let cancel = Button::secondary("Cancel");
+            let cw = self.btn_w(te, f, &cancel);
+            self.btn(
                 cv,
                 te,
                 f,
-                Rect::new(r.x + p(16.0), r.y + p(11.0), p(120.0), p(34.0)),
-                label,
-                Variant::Primary,
-                Hit::ImportOk,
-            );
-            self.button(
-                cv,
-                te,
-                f,
-                Rect::new(r.x + p(144.0), r.y + p(11.0), p(96.0), p(34.0)),
-                "Cancel",
-                Variant::Secondary,
+                Rect::new(r.x + p(140.0) + ow, by, cw, p(34.0)),
+                &cancel,
                 Hit::ImportCancel,
             );
-            y += p(152.0) + p(16.0);
+            y += p(158.0) + p(16.0);
         }
-        y += p(8.0);
+        y += p(12.0);
 
         // Updates
-        self.caption(cv, te, f, x, y, w, "UPDATES");
-        y += p(24.0);
-        let cells = self.card(cv, x, y, w, &[p(58.0), p(58.0)]);
+        self.caption(cv, te, f, x, y, w, "Updates");
+        y += p(26.0);
+        let cells = self.card(cv, x, y, w, &[row, row]);
         let check = self.check_updates;
-        self.card_switch(
+        self.card_switch_i(
             cv,
             te,
             f,
             cells[0],
+            Some(Icon::Refresh),
             "Check for updates daily",
             "Ctrl+Shift+U or the status bar installs an offered update",
             check,
@@ -3464,12 +3470,13 @@ impl Ui {
             te,
             f,
             cells[1],
+            Icon::Download,
             "Check now",
             &version,
             "Check",
             Hit::CheckNow,
         );
-        y += p(116.0) + p(12.0);
+        y += 2 * row + p(12.0);
         let items: Vec<(String, bool, Hit)> = crate::settings::CHANNELS
             .iter()
             .enumerate()
@@ -3481,29 +3488,30 @@ impl Ui {
                 )
             })
             .collect();
-        self.segmented(cv, te, f, Rect::new(x, y, w, p(34.0)), &items);
-        y += p(34.0);
+        self.segmented(cv, te, f, Rect::new(x, y, w, p(36.0)), &items);
+        y += p(36.0);
         self.hint(
             cv,
             te,
             f,
             x,
-            y + p(16.0),
+            y + p(20.0),
             w,
             "Automatic follows the installed version: beta builds get betas, stable builds stable releases.",
         );
-        y += p(24.0) + p(24.0);
+        y += p(32.0) + p(24.0);
 
         // Troubleshooting
-        self.caption(cv, te, f, x, y, w, "TROUBLESHOOTING");
-        y += p(24.0);
-        let cells = self.card(cv, x, y, w, &[p(58.0), p(58.0)]);
+        self.caption(cv, te, f, x, y, w, "Troubleshooting");
+        y += p(26.0);
+        let cells = self.card(cv, x, y, w, &[row, row]);
         let log_on = self.diagnostic_log;
-        self.card_switch(
+        self.card_switch_i(
             cv,
             te,
             f,
             cells[0],
+            Some(Icon::Info),
             "Diagnostic log",
             "Protocol details to rdpc.log; never passwords",
             log_on,
@@ -3514,21 +3522,24 @@ impl Ui {
             te,
             f,
             cells[1],
+            Icon::Folder,
             "Log folder",
             r"%LOCALAPPDATA%\rdp-rs\logs",
             "Open",
             Hit::OpenLogFolder,
         );
-        y += p(116.0);
+        y += 2 * row;
 
         self.home_content = y + p(40.0) - top;
         let max = (self.home_content - area.h).max(0);
         self.home_scroll = self.home_scroll.min(max);
+        Kit::new(cv, te, f, s).scrollbar(area, self.home_content, self.home_scroll);
         self.clip_hits(first_hit, area);
         cv.set_clip(old);
     }
 
-    /// A card row with a label, a second line and a button on the right.
+    /// A card row with an icon, a label, a second line and a button on the
+    /// right.
     #[allow(clippy::too_many_arguments)]
     fn card_action(
         &mut self,
@@ -3536,6 +3547,7 @@ impl Ui {
         te: &mut TextEngine,
         f: &Fonts,
         r: Rect,
+        icon: Icon,
         label: &str,
         sub: &str,
         button: &str,
@@ -3543,36 +3555,15 @@ impl Ui {
     ) {
         let s = self.scale;
         let p = |v: f32| (v * s).round() as i32;
-        let bw = te.measure(f.ui, 13.0 * s, button) as i32 + p(32.0);
-        let mid = r.y + r.h / 2;
-        let tw = (r.w - bw - p(44.0)) as f32;
-        te.draw(
-            cv,
-            f.ui,
-            13.0 * s,
-            (r.x + p(16.0)) as f32,
-            (mid - p(2.0)) as f32,
-            label,
-            pal().text,
-            tw,
-        );
-        te.draw(
-            cv,
-            f.ui,
-            11.5 * s,
-            (r.x + p(16.0)) as f32,
-            (mid + p(14.0)) as f32,
-            sub,
-            pal().text_muted,
-            tw,
-        );
-        self.button(
+        let b = Button::secondary(button);
+        let bw = self.btn_w(te, f, &b);
+        self.row_text(cv, te, f, r, Some(icon), label, sub, false, bw + p(28.0));
+        self.btn(
             cv,
             te,
             f,
-            Rect::new(r.right() - p(14.0) - bw, mid - p(16.0), bw, p(32.0)),
-            button,
-            Variant::Secondary,
+            Rect::new(r.right() - p(14.0) - bw, r.y + (r.h - p(32.0)) / 2, bw, p(32.0)),
+            &b,
             hit,
         );
     }
@@ -4832,15 +4823,18 @@ impl Ui {
     ) {
         let s = self.scale;
         let p = |v: f32| (v * s).round() as i32;
+        let c = pal();
         let Some(tab) = self.tabs.iter().find(|t| t.id == id) else {
             return;
         };
         let (host, state, name) = (tab.host.clone(), tab.state.clone(), tab.name.clone());
+        let spanned = tab.spanned;
+        let apps = tab.remote_app.is_some();
 
         // Toolbar: above the session, or in full screen with a hiding bar,
         // over its top edge while revealed (drawn after the session area).
         let overlay = self.fullscreen && !self.bar_pinned;
-        let tb = Rect::new(content.x, content.y, content.w, p(40.0));
+        let tb = Rect::new(content.x, content.y, content.w, p(TOOLBAR_H));
         if !overlay {
             self.paint_toolbar(cv, te, f, tb, id, &host, &state, &name);
         }
@@ -4849,56 +4843,50 @@ impl Ui {
         let area_top = if overlay { content.y } else { tb.bottom() };
         let mut area = Rect::new(content.x, area_top, content.w, content.bottom() - area_top);
         if self.drawer {
-            let dw = p(320.0).min(area.w / 2);
+            let dw = p(DRAWER_W).min(area.w / 2);
             let drawer = Rect::new(area.right() - dw, area.y, dw, area.h);
             area.w -= dw + 1;
-            cv.fill(Rect::new(area.right(), area.y, 1, area.h), pal().divider);
+            cv.fill(Rect::new(area.right(), area.y, 1, area.h), c.divider);
             self.paint_drawer(cv, te, f, drawer, id);
         }
-        cv.fill(area, pal().bg_sidebar);
+        let connected = matches!(state, TabState::Connected { .. });
+        cv.fill(
+            area,
+            if connected && !spanned && !apps {
+                c.bg_sidebar
+            } else {
+                c.bg
+            },
+        );
         self.session_clip = None;
         if overlay && self.bar_revealed {
             let bar = Rect::new(area.x, area.y, area.w, tb.h);
             self.session_clip = Some(Rect::new(area.x, bar.bottom(), area.w, area.h - bar.h));
         }
         match state.clone() {
-            TabState::Connected { .. } if self.tabs.iter().any(|t| t.id == id && t.spanned) => {
-                let mid = area.y + area.h / 2;
-                centered(
-                    cv,
-                    te,
-                    f.semi,
-                    15.0 * s,
-                    Rect::new(area.x, mid - p(48.0), area.w, p(24.0)),
-                    "This session is on its monitors",
-                    pal().text,
-                );
-                centered(
-                    cv,
-                    te,
-                    f.ui,
-                    12.5 * s,
-                    Rect::new(area.x, mid - p(22.0), area.w, p(20.0)),
-                    "Ctrl+Alt+Break or the bar at their top edge brings it back here.",
-                    pal().text_muted,
-                );
-                let bw = p(190.0);
-                self.button(
+            TabState::Connected { .. } if spanned => {
+                let y = self.state_card(
                     cv,
                     te,
                     f,
-                    Rect::new(area.x + (area.w - bw) / 2, mid + p(10.0), bw, p(34.0)),
-                    "Show it in this window",
-                    Variant::Primary,
+                    area,
+                    Icon::Monitors,
+                    Tone::Accent,
+                    "This session is on its monitors",
+                    "Ctrl+Alt+Break or the bar at their top edge brings it back here.",
+                );
+                let b = Button::primary("Show it in this window").icon(Icon::Monitor);
+                let bw = self.btn_w(te, f, &b);
+                self.btn(
+                    cv,
+                    te,
+                    f,
+                    Rect::new(area.x + (area.w - bw) / 2, y, bw, p(36.0)),
+                    &b,
                     Hit::Unspan(id),
                 );
             }
-            TabState::Connected { .. }
-                if self
-                    .tabs
-                    .iter()
-                    .any(|t| t.id == id && t.remote_app.is_some()) =>
-            {
+            TabState::Connected { .. } if apps => {
                 self.paint_apps_tab(cv, te, f, area, id);
             }
             TabState::Connected { .. } => {
@@ -4913,72 +4901,92 @@ impl Ui {
                     .find(|t| t.id == id)
                     .and_then(|t| t.cert.clone());
                 match cert {
-                    Some(c) => self.paint_cert_prompt(cv, te, f, area, id, &c.host.clone(), &c),
-                    None => centered(
-                        cv,
-                        te,
-                        f.ui,
-                        14.0 * s,
-                        Rect::new(area.x, area.y, area.w, area.h - p(40.0)),
-                        &format!("Connecting to {name}…"),
-                        pal().text_secondary,
-                    ),
+                    Some(cp) => self.paint_cert_prompt(cv, te, f, area, id, &cp.host.clone(), &cp),
+                    None => {
+                        self.state_card(
+                            cv,
+                            te,
+                            f,
+                            area,
+                            Icon::Network,
+                            Tone::Warning,
+                            &format!("Connecting to {name}…"),
+                            &host,
+                        );
+                    }
                 }
             }
             TabState::Ended(why) | TabState::Failed(why) => {
-                let failed = matches!(
-                    self.tabs.iter().find(|t| t.id == id).map(|t| &t.state),
-                    Some(TabState::Failed(_))
-                );
-                let mid = area.y + area.h / 2;
-                centered(
-                    cv,
-                    te,
-                    f.semi,
-                    15.0 * s,
-                    Rect::new(area.x, mid - p(60.0), area.w, p(24.0)),
-                    if failed {
-                        "Connection failed"
-                    } else {
-                        "Session ended"
-                    },
-                    pal().text,
-                );
-                centered(
-                    cv,
-                    te,
-                    f.ui,
-                    12.5 * s,
-                    Rect::new(area.x + p(24.0), mid - p(32.0), area.w - p(48.0), p(20.0)),
-                    &why,
-                    if failed { pal().danger } else { pal().text_muted },
-                );
-                let bw = p(120.0);
-                self.button(
+                let failed = matches!(state, TabState::Failed(_));
+                let (icon, tone, title) = if failed {
+                    (Icon::Warning, Tone::Danger, "Connection failed")
+                } else {
+                    (Icon::Power, Tone::Muted, "Session ended")
+                };
+                let y = self.state_card(cv, te, f, area, icon, tone, title, &why);
+                let re = Button::primary("Reconnect").icon(Icon::Refresh);
+                let close = Button::secondary("Close tab").icon(Icon::Close);
+                let (rw, cw) = (self.btn_w(te, f, &re), self.btn_w(te, f, &close));
+                let x0 = area.x + (area.w - rw - cw - p(8.0)) / 2;
+                self.btn(cv, te, f, Rect::new(x0, y, rw, p(36.0)), &re, Hit::Reconnect(id));
+                self.btn(
                     cv,
                     te,
                     f,
-                    Rect::new(area.x + area.w / 2 - bw - p(4.0), mid + p(4.0), bw, p(34.0)),
-                    "Reconnect",
-                    Variant::Primary,
-                    Hit::Reconnect(id),
-                );
-                self.button(
-                    cv,
-                    te,
-                    f,
-                    Rect::new(area.x + area.w / 2 + p(4.0), mid + p(4.0), bw, p(34.0)),
-                    "Close tab",
-                    Variant::Secondary,
+                    Rect::new(x0 + rw + p(8.0), y, cw, p(36.0)),
+                    &close,
                     Hit::CloseTab(id),
                 );
             }
         }
         if overlay && self.bar_revealed {
             let bar = Rect::new(area.x, area.y, area.w, tb.h);
-            cv.fill(bar, pal().bg);
+            cv.fill(bar, c.bg);
             self.paint_toolbar(cv, te, f, bar, id, &host, &state, &name);
         }
+    }
+
+    /// A centred status: an icon tile in `tone`, a title and wrapped text.
+    /// Returns the y for the buttons below it.
+    #[allow(clippy::too_many_arguments)]
+    fn state_card(
+        &mut self,
+        cv: &mut Canvas,
+        te: &mut TextEngine,
+        f: &Fonts,
+        area: Rect,
+        icon: Icon,
+        tone: Tone,
+        title: &str,
+        text: &str,
+    ) -> i32 {
+        let s = self.scale;
+        let p = |v: f32| (v * s).round() as i32;
+        let c = pal();
+        let w = p(460.0).min(area.w - p(48.0));
+        let x = area.x + (area.w - w) / 2;
+        let mut k = Kit::new(cv, te, f, s);
+        let lines = k.wrap(Font::Regular, 12.5, text, w).len().min(4) as i32;
+        let total = p(56.0) + p(20.0) + p(26.0) + lines * p(19.0) + p(20.0) + p(36.0);
+        let mut y = area.y + (area.h - total) / 2;
+        let d = p(56.0);
+        let tile = Rect::new(area.x + (area.w - d) / 2, y, d, d);
+        let (fill, fg) = match tone {
+            Tone::Muted | Tone::Neutral => (c.surface_raised, c.text_secondary),
+            t => (t.subtle(), t.color()),
+        };
+        k.cv.fill_round(tile, 16.0 * s, fill);
+        k.icon_in(icon, tile, 26.0, fg);
+        y += d + p(20.0);
+        k.text_center(Font::Semi, size::HEADING + 1.0, Rect::new(area.x, y, area.w, p(24.0)), title, c.text);
+        y += p(26.0) + p(14.0);
+        let color = if tone == Tone::Danger {
+            c.danger
+        } else {
+            c.text_muted
+        };
+        let y = k.paragraph(Font::Regular, 12.5, x, y, w, text, color, true);
+        y + p(8.0)
     }
 
     /// A RemoteApp session tab: its open windows (Focus, Close) and its
@@ -4993,47 +5001,43 @@ impl Ui {
     ) {
         let s = self.scale;
         let p = |v: f32| (v * s).round() as i32;
+        let c = pal();
         let Some(t) = self.tabs.iter().find(|t| t.id == id) else {
             return;
         };
         let (host, name) = (t.host.clone(), t.name.clone());
         let view = t.remote_app.clone().unwrap_or_default();
+        let color = self.tab_color(&name, &host);
         let old = cv.set_clip(area);
         let first_hit = self.hits.len();
         let x = area.x + p(40.0);
-        let w = p(620.0).min(area.w - p(80.0)).max(p(300.0));
-        let mut y = area.y + p(30.0);
-        te.draw(
-            cv,
-            f.semi,
-            20.0 * s,
-            x as f32,
-            (y + p(18.0)) as f32,
-            &format!("Apps on {host}"),
-            pal().text,
-            w as f32,
-        );
+        let w = p(640.0).min(area.w - p(80.0)).max(p(300.0));
+        let mut y = area.y + p(28.0);
         let n = view.windows.len();
-        let sub = match n {
-            0 => format!("{name} · no app window open"),
-            1 => format!("{name} · 1 window open on this PC"),
-            n => format!("{name} · {n} windows open on this PC"),
-        };
-        te.draw(
-            cv,
-            f.ui,
-            12.5 * s,
-            x as f32,
-            (y + p(40.0)) as f32,
-            &sub,
-            pal().text_muted,
-            w as f32,
-        );
-        y += p(70.0);
+        {
+            let mut k = Kit::new(cv, te, f, s);
+            let d = p(52.0);
+            let tile = Rect::new(x, y, d, d);
+            let (fill, fg) = theme::group_tile(color);
+            k.cv.fill_round(tile, d as f32 * 0.28, fill);
+            k.icon_in(Icon::Apps, tile, 24.0, fg);
+            let tx = x + d + p(16.0);
+            let title = format!("Apps on {host}");
+            k.text(Font::Semi, size::TITLE, tx, y + p(24.0), &title, c.text, w - d - p(16.0));
+            let end = k.text(Font::Regular, 12.5, tx, y + p(46.0), &name, c.text_muted, w / 2);
+            let pill = match n {
+                0 => "No window open".to_string(),
+                1 => "1 window on this PC".to_string(),
+                n => format!("{n} windows on this PC"),
+            };
+            let tone = if n > 0 { Tone::Success } else { Tone::Muted };
+            k.pill(end + p(10.0), y + p(32.0), &pill, tone, Lead::Dot);
+        }
+        y += p(52.0) + p(28.0);
 
-        self.caption(cv, te, f, x, y, w, "OPEN WINDOWS");
-        y += p(24.0);
-        let rh = p(52.0);
+        self.caption(cv, te, f, x, y, w, "Open windows");
+        y += p(26.0);
+        let rh = p(56.0);
         let cells = self.card(cv, x, y, w, &vec![rh; n.max(1)]);
         if n == 0 {
             let r = cells[0];
@@ -5042,15 +5046,12 @@ impl Ui {
             } else {
                 "Starting…"
             };
-            te.draw(
-                cv,
-                f.ui,
-                13.0 * s,
-                (r.x + p(16.0)) as f32,
-                (r.y + r.h / 2 + p(5.0)) as f32,
+            Kit::new(cv, te, f, s).text_in(
+                Font::Regular,
+                size::BODY,
+                Rect::new(r.x + p(16.0), r.y, r.w - p(32.0), r.h),
                 text,
-                pal().text_muted,
-                (r.w - p(32.0)) as f32,
+                c.text_muted,
             );
         }
         for (r, win) in cells.iter().zip(&view.windows) {
@@ -5060,137 +5061,87 @@ impl Ui {
                 Some((iw, ih, rgba)) if rgba.len() == *iw as usize * *ih as usize * 4 => {
                     cv.draw_rgba_scaled(ir, *iw as usize, *ih as usize, rgba)
                 }
-                _ => app_glyph(cv, s, ir.x + p(3.0), ir.y + p(3.0), pal().text_muted),
+                _ => app_glyph(cv, s, ir.x + p(3.0), ir.y + p(3.0), c.text_muted),
             }
-            let (cw, fw) = (p(70.0), p(70.0));
-            let close = Rect::new(r.right() - p(12.0) - cw, r.y + p(10.0), cw, r.h - p(20.0));
-            let focus = Rect::new(close.x - p(8.0) - fw, close.y, fw, close.h);
-            let tw = (focus.x - r.x - p(60.0)) as f32;
+            let focus_b = Button::secondary("Focus").icon(Icon::Window);
+            let close_b = Button::new("Close", Variant::DangerGhost).icon(Icon::Close);
+            let (fw, cw) = (self.btn_w(te, f, &focus_b), self.btn_w(te, f, &close_b));
+            let close = Rect::new(r.right() - p(12.0) - cw, r.y + (r.h - p(32.0)) / 2, cw, p(32.0));
+            let focus = Rect::new(close.x - p(6.0) - fw, close.y, fw, close.h);
             let title = if win.title.is_empty() {
                 "(untitled)"
             } else {
                 &win.title
             };
-            let ty = if win.minimized {
-                p(22.0)
-            } else {
-                r.h / 2 + p(5.0)
-            };
-            te.draw(
-                cv,
-                f.ui,
-                13.5 * s,
-                (r.x + p(48.0)) as f32,
-                (r.y + ty) as f32,
-                title,
-                pal().text,
-                tw,
-            );
-            if win.minimized {
-                te.draw(
-                    cv,
-                    f.ui,
-                    12.0 * s,
-                    (r.x + p(48.0)) as f32,
-                    (r.y + p(40.0)) as f32,
-                    "Minimized",
-                    pal().text_muted,
-                    tw,
-                );
+            {
+                let mut k = Kit::new(cv, te, f, s);
+                let tx = r.x + p(50.0);
+                let tw = focus.x - tx - p(12.0);
+                if win.minimized {
+                    k.text(Font::Regular, size::BODY, tx, r.y + p(24.0), title, c.text, tw);
+                    k.pill(tx, r.y + p(31.0), "Minimized", Tone::Muted, Lead::None);
+                } else {
+                    k.text_in(Font::Regular, size::BODY, Rect::new(tx, r.y, tw, r.h), title, c.text);
+                }
             }
-            self.button(
-                cv,
-                te,
-                f,
-                focus,
-                "Focus",
-                Variant::Secondary,
-                Hit::RailFocus(id, win.id),
-            );
-            self.button(
-                cv,
-                te,
-                f,
-                close,
-                "Close",
-                Variant::Danger,
-                Hit::RailClose(id, win.id),
-            );
+            self.btn(cv, te, f, focus, &focus_b, Hit::RailFocus(id, win.id));
+            self.btn(cv, te, f, close, &close_b, Hit::RailClose(id, win.id));
         }
-        y += rh * n.max(1) as i32 + p(20.0);
+        y += rh * n.max(1) as i32 + p(24.0);
 
-        self.caption(cv, te, f, x, y, w, "LAUNCH");
-        y += p(24.0);
+        self.caption(cv, te, f, x, y, w, "Launch");
+        y += p(26.0);
         let cells = self.card(cv, x, y, w, &vec![rh; view.apps.len().max(1)]);
         if view.apps.is_empty() {
-            te.draw(
-                cv,
-                f.ui,
-                13.0 * s,
-                (cells[0].x + p(16.0)) as f32,
-                (cells[0].y + rh / 2 + p(5.0)) as f32,
+            Kit::new(cv, te, f, s).text_in(
+                Font::Regular,
+                size::BODY,
+                Rect::new(cells[0].x + p(16.0), cells[0].y, w - p(32.0), rh),
                 "This connection has no apps; add them in its editor.",
-                pal().text_muted,
-                (w - p(32.0)) as f32,
+                c.text_muted,
             );
         }
         let same =
             |l: &[String], prog: &str| l.iter().any(|p| crate::remoteapp::same_program(p, prog));
         for (i, (r, app)) in cells.iter().zip(&view.apps).enumerate() {
             let hit = Hit::TabLaunch(id, i);
-            if self.hover == Some(hit) {
-                cv.fill_round(
-                    Rect::new(r.x + p(3.0), r.y + p(3.0), r.w - p(6.0), r.h - p(6.0)),
-                    6.0 * s,
-                    pal().surface_hover,
-                );
-            }
-            app_glyph(cv, s, r.x + p(16.0), r.y + r.h / 2 - p(7.0), pal().accent);
-            let (state, color) = if same(&view.running, &app.program) {
-                ("Running · start another", pal().success)
+            self.row_hover(cv, *r, hit);
+            let hover = self.hover == Some(hit);
+            let mut k = Kit::new(cv, te, f, s);
+            let d = p(32.0);
+            let tile = Rect::new(r.x + p(12.0), r.y + (r.h - d) / 2, d, d);
+            k.cv.fill_round(tile, 8.0 * s, c.accent_subtle);
+            k.icon_in(Icon::Apps, tile, 16.0, c.accent);
+            let (state, tone) = if same(&view.running, &app.program) {
+                (Some("Running"), Tone::Success)
             } else if same(&view.starting, &app.program) {
-                ("Starting…", pal().warning)
+                (Some("Starting"), Tone::Warning)
             } else {
-                ("Start", pal().accent)
+                (None, Tone::Accent)
             };
-            let sw = te.measure(f.ui, 12.5 * s, state) as i32;
-            te.draw(
-                cv,
-                f.semi,
-                13.5 * s,
-                (r.x + p(42.0)) as f32,
-                (r.y + p(22.0)) as f32,
-                &app.name,
-                pal().text,
-                (r.w - p(80.0) - sw) as f32,
-            );
-            te.draw(
-                cv,
-                f.ui,
-                12.0 * s,
-                (r.x + p(42.0)) as f32,
-                (r.y + p(40.0)) as f32,
-                &app.program,
-                pal().text_muted,
-                (r.w - p(80.0) - sw) as f32,
-            );
-            te.draw(
-                cv,
-                f.ui,
-                12.5 * s,
-                (r.right() - p(18.0) - sw) as f32,
-                (r.y + r.h / 2 + p(5.0)) as f32,
-                state,
-                color,
-                (sw + p(2.0)) as f32,
-            );
+            let action = if state.is_some() { "Start another" } else { "Start" };
+            let aw = k.measure(Font::Semi, size::SMALL, action) + p(20.0);
+            let pw = state.map_or(0, |t| k.pill_width(t, Lead::Dot) + p(10.0));
+            let tx = r.x + p(56.0);
+            let tw = r.right() - tx - aw - pw - p(24.0);
+            k.text(Font::Semi, size::BODY, tx, r.y + p(24.0), &app.name, c.text, tw);
+            k.text(Font::Regular, 11.5, tx, r.y + p(41.0), &app.program, c.text_muted, tw);
+            let ar = Rect::new(r.right() - p(12.0) - aw, r.y + (r.h - p(28.0)) / 2, aw, p(28.0));
+            if hover {
+                k.cv.fill_round(ar, radius::CONTROL * s, c.accent_subtle);
+            }
+            k.text_center(Font::Semi, size::SMALL, ar, action, c.accent);
+            if let Some(t) = state {
+                k.pill(ar.x - pw, r.y + (r.h - p(20.0)) / 2, t, tone, Lead::Dot);
+            }
             self.hits.push((*r, hit));
         }
         self.clip_hits(first_hit, area);
         cv.set_clip(old);
     }
 
-    /// The session toolbar: state, and Disconnect/Reconnect, full screen and panel.
+    /// The session toolbar: a state pill and the details, then Disconnect
+    /// or Reconnect, Record, full screen and the panel.
     #[allow(clippy::too_many_arguments)]
     fn paint_toolbar(
         &mut self,
@@ -5205,60 +5156,39 @@ impl Ui {
     ) {
         let s = self.scale;
         let p = |v: f32| (v * s).round() as i32;
-        cv.fill(Rect::new(tb.x, tb.bottom() - 1, tb.w, 1), pal().divider);
-        cv.fill_circle(
-            (tb.x + p(18.0)) as f32,
-            (tb.y + tb.h / 2) as f32,
-            4.0 * s,
-            state.tone().color(),
-        );
+        let c = pal();
+        cv.fill(Rect::new(tb.x, tb.bottom() - 1, tb.w, 1), c.divider);
         // RemoteApp: no picture here, so no full screen and no recording.
         let apps = self
             .tabs
             .iter()
             .any(|t| t.id == id && t.remote_app.is_some());
-        let info = match &state {
-            TabState::Connecting => format!("{host} · connecting…"),
-            TabState::Connected { width, height, .. } if apps => {
-                format!("{host} · apps on this PC's desktop · {width} × {height}")
-            }
+        let (pill, info) = match &state {
+            TabState::Connecting => ("Connecting", host.to_string()),
+            TabState::Connected { width, height, .. } if apps => (
+                "Live",
+                format!("{host} · apps on this PC's desktop · {width} × {height}"),
+            ),
             TabState::Connected { width, height, bpp } if self.fullscreen => {
-                format!("{name} · {host} · {width} × {height} · {bpp}-bit")
+                ("Live", format!("{name} · {host} · {width} × {height} · {bpp}-bit"))
             }
             TabState::Connected { width, height, bpp } => {
-                format!("{host} · {width} × {height} · {bpp} bpp")
+                ("Live", format!("{host} · {width} × {height} · {bpp}-bit"))
             }
-            TabState::Ended(why) => format!("{host} · ended: {why}"),
-            TabState::Failed(why) => format!("{host} · failed: {why}"),
+            TabState::Ended(why) => ("Ended", format!("{host} · {why}")),
+            TabState::Failed(why) => ("Failed", format!("{host} · {why}")),
         };
-        let mut bx = tb.right() - p(8.0);
-        let mut buttons: Vec<(&str, Hit, Variant)> = vec![
-            (
-                if self.fullscreen {
-                    "Exit full screen"
-                } else {
-                    "Full screen"
-                },
-                Hit::FullScreen,
-                Variant::Secondary,
-            ),
-            (
-                if self.drawer { "Hide panel" } else { "Panel" },
-                Hit::Drawer,
-                Variant::Secondary,
-            ),
-        ];
-        if apps {
-            buttons.remove(0);
-        }
         let recording = self.tabs.iter().any(|t| t.id == id && t.recording);
-        if matches!(state, TabState::Connected { .. }) && !apps {
-            let (text, style) = if recording {
-                ("Stop recording", Variant::Danger)
-            } else {
-                ("Record", Variant::Secondary)
-            };
-            buttons.insert(0, (text, Hit::Record(id), style));
+        let mut buttons: Vec<(Button, Hit)> = Vec::new();
+        match state {
+            TabState::Connected { .. } | TabState::Connecting => buttons.push((
+                Button::new("Disconnect", Variant::DangerGhost).icon(Icon::Power),
+                Hit::Disconnect(id),
+            )),
+            _ => buttons.push((
+                Button::primary("Reconnect").icon(Icon::Refresh),
+                Hit::Reconnect(id),
+            )),
         }
         if self.fullscreen {
             let pin = if self.bar_pinned {
@@ -5266,37 +5196,67 @@ impl Ui {
             } else {
                 "Pin bar"
             };
-            buttons.insert(0, (pin, Hit::PinBar, Variant::Ghost));
+            buttons.push((Button::ghost(pin).icon(Icon::Pin), Hit::PinBar));
         }
-        match state {
-            TabState::Connected { .. } | TabState::Connecting => {
-                buttons.insert(0, ("Disconnect", Hit::Disconnect(id), Variant::Secondary))
-            }
-            _ => buttons.insert(0, ("Reconnect", Hit::Reconnect(id), Variant::Primary)),
+        if matches!(state, TabState::Connected { .. }) && !apps {
+            buttons.push(if recording {
+                (
+                    Button::new("Stop recording", Variant::Danger).icon(Icon::Stop),
+                    Hit::Record(id),
+                )
+            } else {
+                (
+                    Button::secondary("Record")
+                        .icon(Icon::Record)
+                        .icon_color(c.danger),
+                    Hit::Record(id),
+                )
+            });
         }
-        for (text, hit, style) in buttons.iter().rev() {
-            let bw = te.measure(f.ui, 13.0 * s, text) as i32 + p(26.0);
+        if !apps {
+            buttons.push(if self.fullscreen {
+                (
+                    Button::secondary("Exit full screen").icon(Icon::ExitFullscreen),
+                    Hit::FullScreen,
+                )
+            } else {
+                (
+                    Button::secondary("Full screen").icon(Icon::Fullscreen),
+                    Hit::FullScreen,
+                )
+            });
+        }
+        buttons.push((
+            Button::new(
+                if self.drawer { "Hide panel" } else { "Panel" },
+                if self.drawer {
+                    Variant::Secondary
+                } else {
+                    Variant::Ghost
+                },
+            )
+            .icon(Icon::PanelRight),
+            Hit::Drawer,
+        ));
+        let mut bx = tb.right() - p(8.0);
+        let bh = p(32.0);
+        for (b, hit) in buttons.iter().rev() {
+            let bw = self.btn_w(te, f, b);
             bx -= bw;
-            self.button(
-                cv,
-                te,
-                f,
-                Rect::new(bx, tb.y + p(6.0), bw, tb.h - p(12.0)),
-                text,
-                *style,
-                *hit,
-            );
+            self.btn(cv, te, f, Rect::new(bx, tb.y + (tb.h - bh) / 2, bw, bh), b, *hit);
             bx -= p(6.0);
         }
-        te.draw_in(
-            cv,
-            f.ui,
-            12.5 * s,
-            Rect::new(tb.x + p(30.0), tb.y, bx - tb.x - p(36.0), tb.h),
-            0.0,
-            &info,
-            pal().text_secondary,
-        );
+        let mut k = Kit::new(cv, te, f, s);
+        let tone = state.tone();
+        let px = tb.x + p(14.0);
+        let pw = k.pill(px, tb.y + (tb.h - p(20.0)) / 2, pill, tone, Lead::Dot);
+        let ix = px + pw + p(10.0);
+        let color = if matches!(state, TabState::Failed(_)) {
+            c.danger
+        } else {
+            c.text_secondary
+        };
+        k.text_in(Font::Regular, 12.5, Rect::new(ix, tb.y, bx - ix - p(8.0), tb.h), &info, color);
     }
 
     /// Asks whether to trust the server certificate (first connection, or a
@@ -5310,116 +5270,87 @@ impl Ui {
         area: Rect,
         id: u64,
         host: &str,
-        c: &CertPrompt,
+        cp: &CertPrompt,
     ) {
         let s = self.scale;
         let p = |v: f32| (v * s).round() as i32;
-        let w = p(460.0).min(area.w - p(32.0));
-        let h = p(250.0);
-        let r = Rect::new(area.x + (area.w - w) / 2, area.y + (area.h - h) / 2, w, h);
-        let (border, title, color) = if c.changed {
-            (pal().danger_border, "The server certificate changed", pal().danger)
+        let c = pal();
+        let w = p(480.0).min(area.w - p(32.0));
+        let h = p(316.0);
+        let r = Rect::new(area.x + (area.w - w) / 2, area.y + ((area.h - h) / 2).max(p(16.0)), w, h);
+        let (icon, tone, title) = if cp.changed {
+            (Icon::ShieldAlert, Tone::Danger, "The server certificate changed")
         } else {
-            (pal().border, "Verify the server", pal().text)
+            (Icon::ShieldCheck, Tone::Accent, "Verify the server")
         };
-        cv.round_border(r, 10.0 * s, border, pal().surface);
-        let x = r.x + p(22.0);
-        let tw = (r.w - p(44.0)) as f32;
-        te.draw(
-            cv,
-            f.semi,
-            16.0 * s,
-            x as f32,
-            (r.y + p(36.0)) as f32,
-            title,
-            color,
-            tw,
-        );
-        let line = if c.changed {
+        let line = if cp.changed {
             format!("{host} shows a different certificate than the one you trusted.")
         } else {
             format!("First connection to {host}. Check the fingerprint with its admin.")
         };
-        te.draw(
-            cv,
-            f.ui,
-            12.5 * s,
-            x as f32,
-            (r.y + p(62.0)) as f32,
-            &line,
-            pal().text_secondary,
-            tw,
-        );
-        let sub = if c.changed {
+        let sub = if cp.changed {
             "A reinstalled server does this, but so does an attack."
         } else {
             "Your password is sent only after you trust it."
         };
-        te.draw(
-            cv,
-            f.ui,
-            12.0 * s,
-            x as f32,
-            (r.y + p(82.0)) as f32,
-            sub,
-            pal().text_muted,
-            tw,
-        );
-        // The fingerprint, 16 bytes per line.
-        let fr = Rect::new(x, r.y + p(100.0), r.w - p(44.0), p(56.0));
-        cv.round_border(fr, 6.0 * s, pal().divider, pal().bg);
-        te.draw(
-            cv,
-            f.ui,
-            11.0 * s,
-            (fr.x + p(12.0)) as f32,
-            (fr.y + p(14.0)) as f32,
-            "SHA-256",
-            pal().text_faint,
-            tw,
-        );
-        let (a, b) = c.fingerprint.split_at(c.fingerprint.len().min(48));
-        for (i, part) in [a.trim_end_matches(':'), b].iter().enumerate() {
-            te.draw(
-                cv,
-                f.ui,
-                12.0 * s,
-                (fr.x + p(12.0)) as f32,
-                (fr.y + p(30.0) + i as i32 * p(16.0)) as f32,
-                part,
-                pal().text,
-                (fr.w - p(24.0)) as f32,
-            );
+        let x = r.x + p(28.0);
+        let tw = r.w - p(56.0);
+        {
+            let mut k = Kit::new(cv, te, f, s);
+            k.dialog(r);
+            let d = p(44.0);
+            let tile = Rect::new(x, r.y + p(28.0), d, d);
+            k.cv.fill_round(tile, 12.0 * s, tone.subtle());
+            k.icon_in(icon, tile, 22.0, tone.color());
+            let hx = x + d + p(14.0);
+            k.text(Font::Semi, size::HEADING + 1.0, hx, r.y + p(46.0), title, c.text, r.right() - hx - p(28.0));
+            k.text(Font::Regular, 12.0, hx, r.y + p(65.0), host, c.text_muted, r.right() - hx - p(28.0));
+            let mut y = r.y + p(102.0);
+            y = k.paragraph(Font::Regular, 12.5, x, y, tw, &line, c.text_secondary, false);
+            let color = if cp.changed { c.danger } else { c.text_muted };
+            k.text(Font::Regular, 12.0, x, y, sub, color, tw);
+            // The fingerprint, 16 bytes per line.
+            let fr = Rect::new(x, r.y + p(150.0), tw, p(72.0));
+            k.cv.round_border(fr, radius::CONTROL * s, c.border, c.field);
+            let cap_y = fr.y + p(20.0);
+            k.caption_text(fr.x + p(14.0), cap_y, "SHA-256 FINGERPRINT", c.text_faint);
+            let (a, b) = cp.fingerprint.split_at(cp.fingerprint.len().min(48));
+            for (i, part) in [a.trim_end_matches(':'), b].iter().enumerate() {
+                k.text(
+                    Font::Regular,
+                    12.0,
+                    fr.x + p(14.0),
+                    fr.y + p(40.0) + i as i32 * p(18.0),
+                    part,
+                    c.text,
+                    fr.w - p(28.0),
+                );
+            }
         }
-        let by = r.bottom() - p(22.0) - p(34.0);
-        let trust = if c.changed {
-            "Trust the new one"
+        // Footer: the safe choice is the loud one.
+        let by = r.bottom() - p(28.0) - p(36.0);
+        let (left, right) = if cp.changed {
+            (
+                (
+                    Button::new("Trust the new one", Variant::DangerGhost).icon(Icon::Unlock),
+                    Hit::CertTrust(id),
+                ),
+                (Button::primary("Don't connect").icon(Icon::Close), Hit::CertRefuse(id)),
+            )
         } else {
-            "Trust and connect"
+            (
+                (Button::secondary("Cancel"), Hit::CertRefuse(id)),
+                (
+                    Button::primary("Trust and connect").icon(Icon::ShieldCheck),
+                    Hit::CertTrust(id),
+                ),
+            )
         };
-        let tw2 = te.measure(f.semi, 13.0 * s, trust) as i32 + p(32.0);
-        self.button(
-            cv,
-            te,
-            f,
-            Rect::new(x, by, tw2, p(34.0)),
-            trust,
-            if c.changed {
-                Variant::Danger
-            } else {
-                Variant::Primary
-            },
-            Hit::CertTrust(id),
-        );
-        self.button(
-            cv,
-            te,
-            f,
-            Rect::new(x + tw2 + p(8.0), by, p(96.0), p(34.0)),
-            "Cancel",
-            Variant::Secondary,
-            Hit::CertRefuse(id),
-        );
+        let rw = self.btn_w(te, f, &right.0);
+        let lw = self.btn_w(te, f, &left.0);
+        let rx = r.right() - p(28.0) - rw;
+        self.btn(cv, te, f, Rect::new(rx, by, rw, p(36.0)), &right.0, right.1);
+        self.btn(cv, te, f, Rect::new(rx - p(8.0) - lw, by, lw, p(36.0)), &left.0, left.1);
     }
 
     /// The quick panel: four pages (Sharing, Display, Quality, Session) of
@@ -5427,7 +5358,7 @@ impl Ui {
     fn paint_drawer(&mut self, cv: &mut Canvas, te: &mut TextEngine, f: &Fonts, d: Rect, id: u64) {
         let s = self.scale;
         let p = |v: f32| (v * s).round() as i32;
-        cv.fill(d, pal().bg_sidebar);
+        cv.fill(d, pal().bg);
         let old = cv.set_clip(d);
         let Some(tab) = self.tabs.iter().find(|t| t.id == id) else {
             cv.set_clip(old);
@@ -5452,34 +5383,40 @@ impl Ui {
             redirected_to: tab.redirected_to.clone(),
             network: tab.network.clone(),
         };
-        let x = d.x + p(16.0);
-        let w = d.w - p(32.0);
+        let x = d.x + p(12.0);
+        let w = d.w - p(24.0);
 
         // Page switcher
-        let seg = Rect::new(x, d.y + p(14.0), w, p(32.0));
-        let pages: Vec<(String, bool, Hit)> = ["Sharing", "Display", "Quality", "Session"]
-            .iter()
-            .enumerate()
-            .map(|(i, n)| {
-                (
-                    n.to_string(),
-                    self.drawer_page == i as u8,
-                    Hit::DrawerPage(i as u8),
-                )
-            })
-            .collect();
-        self.segmented(cv, te, f, seg, &pages);
+        let seg = Rect::new(x, d.y + p(12.0), w, p(36.0));
+        let pages: Vec<(String, Option<Icon>, bool, Hit)> = [
+            ("Sharing", Icon::Folder),
+            ("Display", Icon::Monitor),
+            ("Quality", Icon::Sliders),
+            ("Session", Icon::Info),
+        ]
+        .iter()
+        .enumerate()
+        .map(|(i, (n, icon))| {
+            (
+                n.to_string(),
+                Some(*icon),
+                self.drawer_page == i as u8,
+                Hit::DrawerPage(i as u8),
+            )
+        })
+        .collect();
+        self.segmented_i(cv, te, f, seg, &pages);
 
         let body = Rect::new(
             d.x,
-            seg.bottom() + p(10.0),
+            seg.bottom() + p(8.0),
             d.w,
-            d.bottom() - seg.bottom() - p(10.0),
+            d.bottom() - seg.bottom() - p(8.0),
         );
         self.drawer_area = body;
         let inner = cv.set_clip(body);
         let first_hit = self.hits.len();
-        let top = body.y + p(6.0) - self.drawer_scroll;
+        let top = body.y + p(8.0) - self.drawer_scroll;
         let mut y = top;
         match self.drawer_page {
             0 => y = self.page_sharing(cv, te, f, x, y, w, id, &t),
@@ -5490,16 +5427,8 @@ impl Ui {
         self.drawer_content = y - top + p(16.0);
         let max = (self.drawer_content - body.h).max(0);
         self.drawer_scroll = self.drawer_scroll.min(max);
-        if max > 0 {
-            let track = body.h - p(8.0);
-            let bar = (track * body.h / self.drawer_content).max(p(24.0));
-            let by = body.y + p(4.0) + (track - bar) * self.drawer_scroll / max;
-            cv.fill_round(
-                Rect::new(body.right() - p(5.0), by, p(3.0), bar),
-                1.5 * s,
-                pal().border_strong,
-            );
-        }
+        let mut k = Kit::new(cv, te, f, s);
+        k.scrollbar(Rect::new(body.x, body.y, body.w + p(4.0), body.h), self.drawer_content, self.drawer_scroll);
         self.clip_hits(first_hit, body);
         cv.set_clip(inner);
         cv.set_clip(old);
@@ -5519,38 +5448,19 @@ impl Ui {
     ) -> i32 {
         let s = self.scale;
         let p = |v: f32| (v * s).round() as i32;
+        let c = pal();
         let rows = [
-            (
-                "Clipboard",
-                "Text and files, both ways",
-                t.clipboard,
-                Hit::Clipboard(id),
-            ),
-            ("Sound", "Remote audio on this PC", t.sound, Hit::Sound(id)),
-            (
-                "Microphone",
-                "This PC's microphone",
-                t.microphone,
-                Hit::Microphone(id),
-            ),
-            (
-                "Printers",
-                "Local printers in the session",
-                t.printers,
-                Hit::Printers(id),
-            ),
-            (
-                "Smart cards",
-                "Local readers and cards",
-                t.smart_cards,
-                Hit::SmartCards(id),
-            ),
+            (Icon::Clipboard, "Clipboard", "Text and files, both ways", t.clipboard, Hit::Clipboard(id)),
+            (Icon::Speaker, "Sound", "Remote audio on this PC", t.sound, Hit::Sound(id)),
+            (Icon::Mic, "Microphone", "This PC's microphone", t.microphone, Hit::Microphone(id)),
+            (Icon::Printer, "Printers", "Local printers in the session", t.printers, Hit::Printers(id)),
+            (Icon::SmartCard, "Smart cards", "Local readers and cards", t.smart_cards, Hit::SmartCards(id)),
         ];
-        let cells = self.card(cv, x, y, w, &[p(52.0); 5]);
-        for (r, (label, sub, on, hit)) in cells.iter().zip(rows) {
-            self.card_switch(cv, te, f, *r, label, sub, on, hit);
+        let cells = self.card(cv, x, y, w, &[p(56.0); 5]);
+        for (r, (icon, label, sub, on, hit)) in cells.iter().zip(rows) {
+            self.card_switch_i(cv, te, f, *r, Some(icon), label, sub, on, hit);
         }
-        y += 5 * p(52.0) + p(20.0);
+        y += 5 * p(56.0) + p(24.0);
         if t.microphone {
             let mics = self.mics.clone();
             y = self.device_card_tab(
@@ -5560,7 +5470,7 @@ impl Ui {
                 x,
                 y,
                 w,
-                "RECORD FROM",
+                "Record from",
                 "Default microphone",
                 &mics,
                 t.mic.as_deref(),
@@ -5568,96 +5478,63 @@ impl Ui {
                 Hit::TabMic,
             );
         }
-
         if t.sound {
-            self.caption(cv, te, f, x, y, w, "PLAY SOUND ON");
-            y += p(24.0);
-            let names: Vec<String> = std::iter::once("Default output".to_string())
-                .chain(self.speakers.iter().cloned())
-                .collect();
-            let chosen = t
-                .speaker
-                .as_ref()
-                .and_then(|s| self.speakers.iter().position(|d| d == s))
-                .map_or(0, |i| i + 1);
-            let cells = self.card(cv, x, y, w, &vec![p(40.0); names.len()]);
-            for (i, (r, name)) in cells.iter().zip(&names).enumerate() {
-                self.card_radio(cv, te, f, *r, name, chosen == i, Hit::TabSpeaker(id, i));
-            }
-            y += names.len() as i32 * p(40.0) + p(20.0);
+            let speakers = self.speakers.clone();
+            y = self.device_card_tab(
+                cv,
+                te,
+                f,
+                x,
+                y,
+                w,
+                "Play sound on",
+                "Default output",
+                &speakers,
+                t.speaker.as_deref(),
+                id,
+                Hit::TabSpeaker,
+            );
         }
 
-        self.caption(cv, te, f, x, y, w, "SHARED FOLDERS");
-        y += p(24.0);
+        self.caption(cv, te, f, x, y, w, "Shared folders");
+        y += p(26.0);
         if t.drives.is_empty() {
-            let cells = self.card(cv, x, y, w, &[p(44.0)]);
-            te.draw_in(
-                cv,
-                f.ui,
-                12.0 * s,
-                Rect::new(
-                    cells[0].x + p(14.0),
-                    cells[0].y,
-                    cells[0].w - p(28.0),
-                    cells[0].h,
-                ),
-                0.0,
-                "None yet. Shared folders show in the remote Explorer.",
-                pal().text_muted,
+            let cells = self.card(cv, x, y, w, &[p(48.0)]);
+            Kit::new(cv, te, f, s).text_in(
+                Font::Regular,
+                size::SMALL,
+                Rect::new(cells[0].x + p(14.0), cells[0].y, cells[0].w - p(28.0), cells[0].h),
+                "None yet; they show in the remote Explorer.",
+                c.text_muted,
             );
-            y += p(44.0);
+            y += p(48.0);
         } else {
             let n = t.drives.len();
-            let cells = self.card(cv, x, y, w, &vec![p(50.0); n]);
+            let cells = self.card(cv, x, y, w, &vec![p(54.0); n]);
             for (i, (r, drv)) in cells.iter().zip(&t.drives).enumerate() {
-                let close = Rect::new(r.right() - p(38.0), r.y + p(13.0), p(24.0), p(24.0));
-                te.draw(
-                    cv,
-                    f.semi,
-                    12.5 * s,
-                    (r.x + p(14.0)) as f32,
-                    (r.y + p(21.0)) as f32,
-                    &drv.name,
-                    pal().text,
-                    (close.x - r.x - p(20.0)) as f32,
-                );
-                te.draw(
-                    cv,
-                    f.ui,
-                    11.5 * s,
-                    (r.x + p(14.0)) as f32,
-                    (r.y + p(38.0)) as f32,
-                    &drv.path,
-                    pal().text_muted,
-                    (close.x - r.x - p(20.0)) as f32,
-                );
-                let hit = Hit::RemoveDrive(id, i);
-                if self.hover == Some(hit) {
-                    cv.fill_round(close, 5.0 * s, pal().surface_hover);
-                }
-                let (cx, cy, dd) = (
-                    (close.x + close.w / 2) as f32,
-                    (close.y + close.h / 2) as f32,
-                    4.0 * s,
-                );
-                cv.stroke(&[(cx - dd, cy - dd), (cx + dd, cy + dd)], 1.4 * s, pal().text_secondary);
-                cv.stroke(&[(cx - dd, cy + dd), (cx + dd, cy - dd)], 1.4 * s, pal().text_secondary);
-                self.hits.push((close, hit));
+                let close = Rect::new(r.right() - p(40.0), r.y + (r.h - p(28.0)) / 2, p(28.0), p(28.0));
+                let mut k = Kit::new(cv, te, f, s);
+                k.icon(Icon::Folder, r.x + p(14.0), r.y + (r.h - p(16.0)) / 2, 16.0, c.accent);
+                let tx = r.x + p(42.0);
+                let tw = close.x - tx - p(6.0);
+                k.text(Font::Semi, 12.5, tx, r.y + p(23.0), &drv.name, c.text, tw);
+                k.text(Font::Regular, 11.5, tx, r.y + p(40.0), &drv.path, c.text_muted, tw);
+                self.icon_btn(cv, te, f, close, Icon::Close, Variant::DangerGhost, Hit::RemoveDrive(id, i));
             }
-            y += n as i32 * p(50.0);
+            y += n as i32 * p(54.0);
         }
-        y += p(10.0);
-        self.button(
+        y += p(12.0);
+        self.btn(
             cv,
             te,
             f,
             Rect::new(x, y, w, p(34.0)),
-            "Browse for a folder…",
-            Variant::Secondary,
+            &Button::secondary("Browse for a folder…").icon(Icon::FolderOpen),
             Hit::BrowseDrive(id),
         );
         y += p(42.0);
-        let add_w = p(60.0);
+        let add = Button::secondary("Add").icon(Icon::Plus);
+        let add_w = self.btn_w(te, f, &add);
         self.text_input(
             cv,
             te,
@@ -5666,18 +5543,10 @@ impl Ui {
             Field::DrivePath,
             r"or type a path, e.g. C:\Share",
         );
-        self.button(
-            cv,
-            te,
-            f,
-            Rect::new(x + w - add_w, y, add_w, p(32.0)),
-            "Add",
-            Variant::Secondary,
-            Hit::AddDrive(id),
-        );
+        self.btn(cv, te, f, Rect::new(x + w - add_w, y, add_w, p(32.0)), &add, Hit::AddDrive(id));
         y += p(32.0);
-        self.hint(cv, te, f, x, y + p(10.0), w, "Sharing switches apply live.");
-        y + p(30.0)
+        self.hint(cv, te, f, x, y + p(20.0), w, "Sharing switches apply live.");
+        y + p(32.0)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -5695,31 +5564,33 @@ impl Ui {
         let s = self.scale;
         let p = |v: f32| (v * s).round() as i32;
         let full = self.fullscreen;
-        let cells = self.card(cv, x, y, w, &[p(52.0); 2]);
-        self.card_switch(
+        let cells = self.card(cv, x, y, w, &[p(56.0); 2]);
+        self.card_switch_i(
             cv,
             te,
             f,
             cells[0],
+            Some(Icon::Fullscreen),
             "Full screen",
             "Ctrl+Alt+Break switches it",
             full,
             Hit::FullScreen,
         );
-        self.card_switch(
+        self.card_switch_i(
             cv,
             te,
             f,
             cells[1],
+            Some(Icon::Monitor),
             "Fit to window",
             "The remote desktop follows the window",
             t.fit,
             Hit::Fit(id),
         );
-        y += 2 * p(52.0) + p(20.0);
+        y += 2 * p(56.0) + p(24.0);
 
-        self.caption(cv, te, f, x, y, w, "SCALE");
-        y += p(24.0);
+        self.caption(cv, te, f, x, y, w, "Scale");
+        y += p(26.0);
         let items: Vec<(String, bool, Hit)> = std::iter::once("Auto".to_string())
             .chain(SCALES.iter().map(|v| format!("{v} %")))
             .enumerate()
@@ -5732,14 +5603,14 @@ impl Ui {
                 (text, chosen, Hit::Scale(id, i))
             })
             .collect();
-        self.segmented(cv, te, f, Rect::new(x, y, w, p(32.0)), &items);
-        y += p(32.0);
+        self.segmented(cv, te, f, Rect::new(x, y, w, p(34.0)), &items);
+        y += p(34.0);
         let auto = format!(
             "Auto follows this PC's scaling ({} %). Applies live.",
             (self.scale * 100.0).round() as u32
         );
-        self.hint(cv, te, f, x, y + p(10.0), w, &auto);
-        y + p(30.0)
+        self.hint(cv, te, f, x, y + p(20.0), w, &auto);
+        y + p(32.0)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -5763,42 +5634,27 @@ impl Ui {
             ..q
         };
         if fixed != t.quality_live {
-            let r = Rect::new(x, y, w, p(96.0));
-            cv.round_border(r, 8.0 * s, pal().accent_border, pal().selected);
-            te.draw(
-                cv,
-                f.semi,
-                13.0 * s,
-                (r.x + p(14.0)) as f32,
-                (r.y + p(24.0)) as f32,
+            let r = Rect::new(x, y, w, p(108.0));
+            Kit::new(cv, te, f, s).banner(
+                r,
+                Tone::Accent,
+                Icon::Refresh,
                 "Reconnect to apply",
-                pal().text,
-                (r.w - p(28.0)) as f32,
-            );
-            te.draw(
-                cv,
-                f.ui,
-                11.5 * s,
-                (r.x + p(14.0)) as f32,
-                (r.y + p(42.0)) as f32,
                 "Quality is fixed when the session logs on.",
-                pal().text_secondary,
-                (r.w - p(28.0)) as f32,
             );
-            self.button(
+            self.btn(
                 cv,
                 te,
                 f,
-                Rect::new(r.x + p(14.0), r.y + p(54.0), p(132.0), p(30.0)),
-                "Reconnect now",
-                Variant::Primary,
+                Rect::new(r.x + p(42.0), r.y + p(62.0), p(150.0), p(32.0)),
+                &Button::primary("Reconnect now").icon(Icon::Refresh),
                 Hit::Reconnect(id),
             );
-            y += p(96.0) + p(16.0);
+            y += p(108.0) + p(20.0);
         }
 
-        self.caption(cv, te, f, x, y, w, "CONNECTION SPEED");
-        y += p(24.0);
+        self.caption(cv, te, f, x, y, w, "Connection speed");
+        y += p(26.0);
         let subs = [
             "The server measures the link and adapts",
             "Everything on",
@@ -5807,7 +5663,7 @@ impl Ui {
             "Visual styles only",
             "Plain desktop, least data",
         ];
-        let cells = self.card(cv, x, y, w, &[p(48.0); PRESETS.len()]);
+        let cells = self.card(cv, x, y, w, &[p(50.0); PRESETS.len()]);
         for (i, (r, ((c, name), sub))) in cells.iter().zip(PRESETS.iter().zip(subs)).enumerate() {
             self.card_choice(
                 cv,
@@ -5820,10 +5676,10 @@ impl Ui {
                 Hit::TabPreset(id, i),
             );
         }
-        y += PRESETS.len() as i32 * p(48.0) + p(20.0);
+        y += PRESETS.len() as i32 * p(50.0) + p(24.0);
 
-        self.caption(cv, te, f, x, y, w, "COLOURS");
-        y += p(24.0);
+        self.caption(cv, te, f, x, y, w, "Colours");
+        y += p(26.0);
         let items: Vec<(String, bool, Hit)> = DEPTHS
             .iter()
             .enumerate()
@@ -5835,11 +5691,11 @@ impl Ui {
                 )
             })
             .collect();
-        self.segmented(cv, te, f, Rect::new(x, y, w, p(32.0)), &items);
-        y += p(32.0) + p(20.0);
+        self.segmented(cv, te, f, Rect::new(x, y, w, p(34.0)), &items);
+        y += p(34.0) + p(24.0);
 
-        self.caption(cv, te, f, x, y, w, "SHOW");
-        y += p(24.0);
+        self.caption(cv, te, f, x, y, w, "Show");
+        y += p(26.0);
         let rows = [
             ("Desktop background", q.wallpaper),
             ("Font smoothing", q.font_smoothing),
@@ -5848,7 +5704,7 @@ impl Ui {
             ("Menu and window animations", q.animations),
             ("Visual styles", q.visual_styles),
         ];
-        let cells = self.card(cv, x, y, w, &[p(42.0); 6]);
+        let cells = self.card(cv, x, y, w, &[p(44.0); 6]);
         for (i, (r, (label, on))) in cells.iter().zip(rows).enumerate() {
             self.card_switch(
                 cv,
@@ -5861,35 +5717,36 @@ impl Ui {
                 Hit::TabExperience(id, i as u8),
             );
         }
-        y += 6 * p(42.0) + p(20.0);
+        y += 6 * p(44.0) + p(24.0);
 
-        self.caption(cv, te, f, x, y, w, "INPUT");
-        y += p(24.0);
+        self.caption(cv, te, f, x, y, w, "Input");
+        y += p(26.0);
         let cells = self.card(cv, x, y, w, &[p(58.0)]);
-        self.card_switch(
+        self.card_switch_i(
             cv,
             te,
             f,
             cells[0],
+            Some(Icon::Edit),
             "Touch and pen",
             TOUCH_HINT,
             q.touch,
             Hit::TabExperience(id, 6),
         );
-        y += p(58.0) + p(20.0);
+        y += p(58.0) + p(24.0);
 
-        self.caption(cv, te, f, x, y, w, "GRAPHICS");
-        y += p(24.0);
+        self.caption(cv, te, f, x, y, w, "Graphics");
+        y += p(26.0);
         let items: Vec<(String, bool, Hit)> = ["Bitmaps", "GFX (H.264)"]
             .iter()
             .enumerate()
             .map(|(i, n)| (n.to_string(), q.gfx == (i == 1), Hit::TabGraphics(id, i)))
             .collect();
-        self.segmented(cv, te, f, Rect::new(x, y, w, p(32.0)), &items);
-        y += p(32.0) + p(20.0);
+        self.segmented(cv, te, f, Rect::new(x, y, w, p(34.0)), &items);
+        y += p(34.0) + p(24.0);
 
-        self.caption(cv, te, f, x, y, w, "COMPRESSION");
-        y += p(24.0);
+        self.caption(cv, te, f, x, y, w, "Compression");
+        y += p(26.0);
         let items: Vec<(String, bool, Hit)> = COMPRESSION
             .iter()
             .enumerate()
@@ -5901,18 +5758,18 @@ impl Ui {
                 )
             })
             .collect();
-        self.segmented(cv, te, f, Rect::new(x, y, w, p(32.0)), &items);
-        y += p(32.0);
+        self.segmented(cv, te, f, Rect::new(x, y, w, p(34.0)), &items);
+        y += p(34.0);
         self.hint(
             cv,
             te,
             f,
             x,
-            y + p(14.0),
+            y + p(20.0),
             w,
             "Less data on slow links; costs a little CPU.",
         );
-        y + p(30.0)
+        y + p(32.0)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -5929,6 +5786,7 @@ impl Ui {
     ) -> i32 {
         let s = self.scale;
         let p = |v: f32| (v * s).round() as i32;
+        let c = pal();
         let (status, desktop, colours) = match &t.state {
             TabState::Connected { width, height, bpp } => (
                 "Connected".to_string(),
@@ -5939,51 +5797,52 @@ impl Ui {
             TabState::Ended(_) => ("Ended".into(), "–".into(), "–".into()),
             TabState::Failed(_) => ("Failed".into(), "–".into(), "–".into()),
         };
-        let mut rows = vec![("Host", t.host.clone())];
+        let mut rows = vec![(Icon::Monitor, "Host", t.host.clone())];
         // The server moved the session after logon (MS-RDPBCGR 3.2.5.13).
         if let Some(to) = &t.redirected_to {
-            rows.push(("Moved to", to.clone()));
+            rows.push((Icon::ChevronRight, "Moved to", to.clone()));
         }
         rows.extend([
-            ("Status", status),
-            ("Desktop", desktop),
-            ("Colours", colours),
-            ("Speed", preset_name(t.quality_live.connection).to_string()),
+            (Icon::Info, "Status", status),
+            (Icon::Fullscreen, "Desktop", desktop),
+            (Icon::Star, "Colours", colours),
+            (
+                Icon::Sliders,
+                "Speed",
+                preset_name(t.quality_live.connection).to_string(),
+            ),
         ]);
         // Network auto-detect results, once the server sent some.
         if let Some(n) = &t.network {
-            rows.push(("Network", n.clone()));
+            rows.push((Icon::Network, "Network", n.clone()));
         }
         let count = rows.len();
-        let cells = self.card(cv, x, y, w, &vec![p(38.0); count]);
-        for (r, (label, value)) in cells.iter().zip(rows) {
-            te.draw(
-                cv,
-                f.ui,
-                12.5 * s,
-                (r.x + p(14.0)) as f32,
-                (r.y + r.h / 2 + p(5.0)) as f32,
-                label,
-                pal().text_muted,
-                p(80.0) as f32,
-            );
-            let vw = te.measure(f.ui, 12.5 * s, &value) as i32;
-            let room = r.w - p(110.0);
-            te.draw(
-                cv,
-                f.ui,
-                12.5 * s,
-                (r.right() - p(14.0) - vw.min(room)) as f32,
-                (r.y + r.h / 2 + p(5.0)) as f32,
-                &value,
-                pal().text,
-                room as f32,
-            );
+        let cells = self.card(cv, x, y, w, &vec![p(40.0); count]);
+        {
+            let mut k = Kit::new(cv, te, f, s);
+            for (r, (icon, label, value)) in cells.iter().zip(rows) {
+                k.icon(icon, r.x + p(14.0), r.y + (r.h - p(14.0)) / 2, 14.0, c.text_faint);
+                k.text_in(
+                    Font::Regular,
+                    12.5,
+                    Rect::new(r.x + p(36.0), r.y, p(80.0), r.h),
+                    label,
+                    c.text_muted,
+                );
+                let room = r.w - p(124.0);
+                k.text_right(
+                    Font::Regular,
+                    12.5,
+                    Rect::new(r.right() - p(14.0) - room, r.y, room, r.h),
+                    &value,
+                    c.text,
+                );
+            }
         }
-        y += count as i32 * p(38.0) + p(20.0);
+        y += count as i32 * p(40.0) + p(24.0);
 
-        self.caption(cv, te, f, x, y, w, "WINDOWS KEYS (WIN, ALT+TAB)");
-        y += p(24.0);
+        self.caption(cv, te, f, x, y, w, "Windows keys (Win, Alt+Tab)");
+        y += p(26.0);
         let items: Vec<(String, bool, Hit)> = WinKeys::ALL
             .iter()
             .enumerate()
@@ -5995,62 +5854,59 @@ impl Ui {
                 )
             })
             .collect();
-        self.segmented(cv, te, f, Rect::new(x, y, w, p(32.0)), &items);
-        y += p(32.0) + p(20.0);
+        self.segmented(cv, te, f, Rect::new(x, y, w, p(34.0)), &items);
+        y += p(34.0) + p(24.0);
 
-        self.caption(cv, te, f, x, y, w, "ACTIONS");
-        y += p(24.0);
-        self.button(
+        self.caption(cv, te, f, x, y, w, "Actions");
+        y += p(26.0);
+        self.btn(
             cv,
             te,
             f,
             Rect::new(x, y, w, p(34.0)),
-            "Send Ctrl+Alt+Del",
-            Variant::Secondary,
+            &Button::secondary("Send Ctrl+Alt+Del").icon(Icon::Keyboard),
             Hit::CtrlAltDel(id),
         );
         y += p(42.0);
         let half = (w - p(8.0)) / 2;
-        self.button(
+        self.btn(
             cv,
             te,
             f,
             Rect::new(x, y, half, p(34.0)),
-            "Reconnect",
-            Variant::Secondary,
+            &Button::secondary("Reconnect").icon(Icon::Refresh),
             Hit::Reconnect(id),
         );
         if matches!(t.state, TabState::Connected { .. } | TabState::Connecting) {
-            self.button(
+            self.btn(
                 cv,
                 te,
                 f,
                 Rect::new(x + w - half, y, half, p(34.0)),
-                "Disconnect",
-                Variant::Danger,
+                &Button::new("Disconnect", Variant::DangerGhost).icon(Icon::Power),
                 Hit::Disconnect(id),
             );
         }
         y += p(34.0);
-        self.hint(
+        self.key_hints(
             cv,
             te,
             f,
             x,
-            y + p(14.0),
+            y + p(24.0),
             w,
-            "Ctrl+Alt+Home gives the keyboard back.",
+            &[KitHint::Keys("Ctrl+Alt+Home"), KitHint::Text("gives the keyboard back")],
         );
-        self.hint(
+        self.key_hints(
             cv,
             te,
             f,
             x,
-            y + p(32.0),
+            y + p(50.0),
             w,
-            "Ctrl+Alt+Break switches full screen.",
+            &[KitHint::Keys("Ctrl+Alt+Break"), KitHint::Text("full screen")],
         );
-        y + p(50.0)
+        y + p(64.0)
     }
 
     /// The kit state of a hit target (hover, pressed).
@@ -6952,6 +6808,31 @@ mod tests {
         assert!(m.scroll_home(cx, cy, 100.0));
         assert_eq!(m.home_scroll, 0);
         assert!(!m.scroll_home(cx, cy, 5.0), "already at the top");
+    }
+
+    /// `session_size_for` (used to size the remote desktop before a paint)
+    /// matches the area `paint` gives the picture, with and without the
+    /// panel, at 100 and 150 %.
+    #[test]
+    fn session_size_matches_the_painted_area() {
+        let mut te = TextEngine::new();
+        let Some(fonts) = load_fonts(&mut te) else {
+            return;
+        };
+        for (scale, drawer) in [(1.0, true), (1.0, false), (1.5, true), (1.5, false)] {
+            let mut m = sample(true);
+            m.scale = scale;
+            m.drawer = drawer;
+            let (w, h) = (1500usize, 940usize);
+            let mut px = vec![0u32; w * h];
+            m.paint(&mut Canvas::new(&mut px, w, h), &mut te, &fonts);
+            let (_, area) = m.session_area.expect("connected tab shows the picture");
+            assert_eq!(
+                m.session_size_for(w as i32, h as i32),
+                (area.w, area.h),
+                "scale {scale}, panel {drawer}"
+            );
+        }
     }
 
     #[test]

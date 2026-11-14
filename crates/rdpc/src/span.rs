@@ -18,6 +18,8 @@ use ffwd_render::{Canvas, Rect, TextEngine};
 use softbuffer::{Context, Surface};
 use winit::window::Window;
 
+use crate::icons::Icon;
+use crate::kit::{Button, Font, Kit, State, Variant};
 use crate::theme::pal;
 use crate::ui::Fonts;
 
@@ -282,54 +284,37 @@ pub(crate) fn paint_bar(
     f: &Fonts,
 ) -> Vec<(Rect, BarButton)> {
     let p = |v: f32| (v * s).round() as i32;
+    let c = pal();
     let mut cv = Canvas::new(px, w, h);
     let bh = p(40.0);
-    cv.fill(Rect::new(0, 0, w as i32, bh), pal().surface);
-    cv.fill(Rect::new(0, bh - 1, w as i32, 1), pal().divider);
-    te.draw_in(
-        &mut cv,
-        f.ui,
-        12.5 * s,
-        Rect::new(p(14.0), 0, w as i32 / 2, bh),
-        0.0,
+    cv.fill(Rect::new(0, 0, w as i32, bh), c.bg_sidebar);
+    cv.fill(Rect::new(0, bh - 1, w as i32, 1), c.border);
+    let mut k = Kit::new(&mut cv, te, f, s);
+    let d = p(16.0);
+    k.icon(Icon::Monitors, p(14.0), (bh - d) / 2, 16.0, c.accent);
+    k.text_in(
+        Font::Semi,
+        12.5,
+        Rect::new(p(40.0), 0, w as i32 / 2, bh),
         title,
-        pal().text_secondary,
+        c.text,
     );
     let mut out = Vec::new();
     let mut x = w as i32 - p(8.0);
-    for (text, button) in [
-        ("Disconnect", BarButton::Disconnect),
-        ("Exit full screen", BarButton::Exit),
+    for (b, button) in [
+        (
+            Button::new("Disconnect", Variant::DangerGhost).icon(Icon::Power),
+            BarButton::Disconnect,
+        ),
+        (
+            Button::secondary("Exit full screen").icon(Icon::ExitFullscreen),
+            BarButton::Exit,
+        ),
     ] {
-        let tw = te.measure(f.ui, 13.0 * s, text) as i32;
-        let bw = tw + p(26.0);
+        let bw = k.button_width(&b);
         x -= bw;
-        let r = Rect::new(x, p(6.0), bw, bh - p(12.0));
-        let fill = if hover == Some(button) {
-            pal().surface_hover
-        } else {
-            pal().surface_raised
-        };
-        let border = if button == BarButton::Disconnect {
-            pal().danger_border
-        } else {
-            pal().border
-        };
-        cv.round_border(r, 6.0 * s, border, fill);
-        let color = if button == BarButton::Disconnect {
-            pal().danger
-        } else {
-            pal().text
-        };
-        te.draw_in(
-            &mut cv,
-            f.ui,
-            13.0 * s,
-            r,
-            ((r.w - tw) / 2) as f32,
-            text,
-            color,
-        );
+        let r = Rect::new(x, p(4.0), bw, bh - p(8.0));
+        k.button(r, &b, State::hover(hover == Some(button)));
         out.push((r, button));
         x -= p(6.0);
     }

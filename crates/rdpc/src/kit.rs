@@ -830,6 +830,14 @@ impl<'a, 'b> Kit<'a, 'b> {
         let n = items.len().max(1) as i32;
         let inner = r.w - 2 * pad;
         let mut out = Vec::with_capacity(items.len());
+        // Icons only when every segment has room for its icon and label
+        // (semibold, as when chosen), so the row stays consistent.
+        let cell_w = inner / n;
+        let icons = items.iter().all(|it| {
+            it.icon.is_some()
+                && self.p(15.0) + self.p(6.0) + self.measure(Font::Semi, size::SMALL, it.label) + self.p(8.0)
+                    <= cell_w
+        });
         for (i, it) in items.iter().enumerate() {
             let i = i as i32;
             let x0 = r.x + pad + inner * i / n;
@@ -852,9 +860,7 @@ impl<'a, 'b> Kit<'a, 'b> {
             let tw = self.measure(font, size::SMALL, it.label);
             let iw = if it.icon.is_some() { self.p(15.0) } else { 0 };
             let gap = if iw > 0 { self.p(6.0) } else { 0 };
-            // Icon and label when both fit, else the label alone.
-            let fits = iw + gap + tw + self.p(12.0) <= cell.w;
-            let (iw, gap) = if fits { (iw, gap) } else { (0, 0) };
+            let (iw, gap) = if icons { (iw, gap) } else { (0, 0) };
             let x = cell.x + (cell.w - iw - gap - tw).max(0) / 2;
             if let (Some(icon), true) = (it.icon, iw > 0) {
                 let ic = if it.on { p.accent } else { color };
