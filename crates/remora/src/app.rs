@@ -233,6 +233,11 @@ pub fn run(direct: Option<(String, Config)>) -> i32 {
         }
     };
     event_loop.set_control_flow(ControlFlow::Wait);
+    // No raw input: Remora uses no device events, and a process registered
+    // for raw keyboard input does not get its own low-level keyboard hook
+    // called while its window has the focus. The hook never saw the Windows
+    // key, so the local shell opened Start (RDP-53).
+    event_loop.listen_device_events(winit::event_loop::DeviceEvents::Never);
     let mut te = TextEngine::new();
     let Some(fonts) = ui::load_fonts(&mut te) else {
         eprintln!("remora: no usable UI font found");

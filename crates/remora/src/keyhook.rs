@@ -9,10 +9,10 @@
 //!
 //! The hook runs on its own thread with its own message loop, and like
 //! mstsc it is hooked afresh each time the session takes the keyboard and
-//! unhooked when it lets go. Hooked once at start, it was never called
-//! while Remora's window was in front (the log showed no hook call at all
-//! then), so the local shell kept the Windows key (RDP-53). A fresh hook is
-//! the newest, and the newest low-level hook is called first.
+//! unhooked when it lets go. It only works because Remora registers no raw
+//! input (`app::run`): Windows does not call a process's own low-level
+//! keyboard hook while that process, registered for raw keyboard input, has
+//! the focus, and winit registered it by default (RDP-53).
 
 #[cfg(windows)]
 mod imp {
