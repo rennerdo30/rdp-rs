@@ -411,6 +411,9 @@ pub struct DemandActive {
     /// The server sent the Frame Acknowledge Capability Set (MS-RDPRFX
     /// 2.2.1.3): it takes TS_FRAME_ACKNOWLEDGE_PDUs.
     pub frame_ack: bool,
+    /// The server sent the Bitmap Cache Host Support Capability Set
+    /// (2.2.7.2.1): it supports Revision 2 bitmap caches.
+    pub bitmap_cache_host: bool,
 }
 
 /// Window List Capability Set fields (MS-RDPERP 2.2.1.1.2).
@@ -454,6 +457,7 @@ pub fn parse_demand_active(body: &[u8]) -> Result<DemandActive> {
         rail_support_level: None,
         window_list: None,
         frame_ack: false,
+        bitmap_cache_host: false,
     };
     for _ in 0..count {
         let ty = r.u16()?;
@@ -469,6 +473,9 @@ pub fn parse_demand_active(body: &[u8]) -> Result<DemandActive> {
         }
         if ty == crate::surfcmd::CAPSETTYPE_FRAME_ACKNOWLEDGE {
             da.frame_ack = true;
+        }
+        if ty == crate::orders::CAPSTYPE_BITMAPCACHE_HOSTSUPPORT {
+            da.bitmap_cache_host = true;
         }
         if ty == CAPSTYPE_RAIL {
             da.rail_support_level = crate::cursor::le32(cap, 0);

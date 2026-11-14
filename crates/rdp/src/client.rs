@@ -117,6 +117,12 @@ pub struct Config {
     /// Directory for client licenses and the client hardware id
     /// (MS-RDPELE 3.3.1.8, 3.3.1.9); None keeps nothing on disk.
     pub license_store: Option<std::path::PathBuf>,
+    /// Advertise drawing orders, glyph, brush, offscreen and bitmap caches
+    /// (MS-RDPEGDI). Off, the server sends bitmap updates only.
+    pub drawing_orders: bool,
+    /// Directory of the persistent bitmap cache (MS-RDPEGDI 3.2.1.4), one
+    /// per server; None keeps no bitmaps between sessions.
+    pub bitmap_cache_dir: Option<std::path::PathBuf>,
 }
 
 impl Config {
@@ -149,6 +155,8 @@ impl Config {
             remote_app: None,
             surface_commands: true,
             license_store: None,
+            drawing_orders: true,
+            bitmap_cache_dir: None,
         }
     }
 }
@@ -287,6 +295,8 @@ pub struct Client {
     follow: bool,
     /// Surface command state, when [`Config::surface_commands`] is set.
     surface: Option<crate::surfcmd::SurfaceCommands>,
+    /// Drawing orders and their caches, when [`Config::drawing_orders`] is set.
+    orders: Option<Box<crate::orders::Orders>>,
 }
 
 /// Connection-sequence traffic that is not the I/O channel PDU being waited
@@ -870,6 +880,9 @@ impl Client {
             surface: cfg
                 .surface_commands
                 .then(crate::surfcmd::SurfaceCommands::default),
+            orders: cfg
+                .drawing_orders
+                .then(|| Box::new(crate::orders::Orders::new(cfg.bitmap_cache_dir.as_deref()))),
         };
         // 7. Finalization; the Font Map reply is handled by the session loop.
         client.activate(&demand)?;
@@ -916,6 +929,13 @@ impl Client {
             }
             None => confirm,
         };
+        let confirm = match &mut self.orders {
+            Some(o) => {
+                o.set_bpp(demand.bpp);
+                crate::orders::caps::patch_confirm_active(&confirm, &o.client_caps())?
+            }
+            None => confirm,
+        };
         send_io(&mut self.f, self.user_id, self.io_channel, &confirm)?;
         self.send_data(pdu::PDUTYPE2_SYNCHRONIZE, &pdu::synchronize())?;
         self.send_data(
@@ -926,6 +946,16 @@ impl Client {
             pdu::PDUTYPE2_CONTROL,
             &pdu::control(pdu::CTRLACTION_REQUEST_CONTROL),
         )?;
+        // Persistent Key List PDUs (2.2.1.17), first activation only.
+        let key_lists = self
+            .orders
+            .as_mut()
+            .map(|o| o.persistent_key_lists(demand.bitmap_cache_host))
+            .unwrap_or_default();
+        for body in key_lists {
+            let ty = crate::orders::persist::PDUTYPE2_BITMAPCACHE_PERSISTENT_LIST;
+            self.send_data(ty, &body)?;
+        }
         self.send_data(pdu::PDUTYPE2_FONTLIST, &pdu::font_list())
     }
 
@@ -1164,8 +1194,14 @@ impl Client {
         let payload = &payload[..];
         match ty {
             pdu::PDUTYPE2_UPDATE if crate::cursor::le16(payload, 0) == Some(0) => {
-                // UPDATETYPE_ORDERS (MS-RDPEGDI 2.2.2.1): RemoteApp window orders.
-                self.window_orders(crate::rail::orders::parse_slowpath_orders(payload));
+                // UPDATETYPE_ORDERS (MS-RDPEGDI 2.2.2.1): drawing orders and
+                // RemoteApp window orders.
+                let orders = match self.orders.as_mut() {
+                    Some(o) => o.slowpath(payload, &mut self.fb, &mut out.damage),
+                    None => crate::rail::orders::parse_slowpath_orders(payload),
+                };
+                out.updated |= !out.damage.is_empty();
+                self.window_orders(orders);
             }
             pdu::PDUTYPE2_UPDATE => {
                 codec::draw_bitmap_update(payload, &mut self.fb, &mut out.damage)?;
@@ -1216,7 +1252,12 @@ impl Client {
                     out.updated |= !out.damage.is_empty();
                 }
                 fastpath::UPDATETYPE_ORDERS => {
-                    self.window_orders(crate::rail::orders::parse_fastpath_orders(&data))
+                    let orders = match self.orders.as_mut() {
+                        Some(o) => o.fastpath(&data, &mut self.fb, &mut out.damage),
+                        None => crate::rail::orders::parse_fastpath_orders(&data),
+                    };
+                    out.updated |= !out.damage.is_empty();
+                    self.window_orders(orders)
                 }
                 crate::surfcmd::UPDATETYPE_SURFCMDS => self.surface_commands(&data, out)?,
                 0x5..=0xC => match self.pointers.fast_path(code, &data) {

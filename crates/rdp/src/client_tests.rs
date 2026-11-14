@@ -49,6 +49,7 @@ fn session() -> (Client, TcpStream) {
         host: "broker.example".into(),
         follow: false,
         surface: None,
+        orders: None,
     };
     (client, server)
 }
@@ -513,6 +514,39 @@ fn fastpath_window_orders_reach_the_poll_outcome() {
     assert_eq!(events, vec![crate::RailEvent::WindowCreated(42)]);
     assert_eq!(rail.window(42).unwrap().title, "Notepad");
     assert_eq!(client.rail().unwrap().state().windows.len(), 1);
+}
+
+/// With drawing orders on, a fast-path orders update draws into the
+/// framebuffer and reports the damage; window orders in the same update
+/// still reach the RemoteApp model (MS-RDPEGDI 2.2.2.2).
+#[test]
+fn fastpath_drawing_orders_reach_the_framebuffer() {
+    let (mut client, mut server, rail) = remote_app_session();
+    client.orders = Some(Box::new(crate::orders::Orders::new(None)));
+    // OpaqueRect (1, 1, 2, 2) in 0x102030, then a window order.
+    let opaque = [0x09, 0x0A, 0x7F, 1, 0, 1, 0, 2, 0, 2, 0, 0x10, 0x20, 0x30];
+    let mut update = vec![2, 0];
+    update.extend(opaque);
+    update.extend(new_window_order(42, "Notepad"));
+    let mut frame = vec![0x00, (2 + 3 + update.len()) as u8, 0x00];
+    frame.extend((update.len() as u16).to_le_bytes());
+    frame.extend(&update);
+    server.write_all(&frame).unwrap();
+    let mut damage = Vec::new();
+    let mut events = Vec::new();
+    for _ in 0..50 {
+        let out = client.poll(Duration::from_millis(20)).unwrap();
+        damage.extend(out.damage);
+        events.extend(out.rail);
+        if !damage.is_empty() {
+            break;
+        }
+    }
+    assert_eq!(damage, vec![Damage { x: 1, y: 1, w: 2, h: 2 }]);
+    assert_eq!(client.framebuffer().pixels[5], 0x102030);
+    assert_eq!(client.framebuffer().pixels[0], 0);
+    assert_eq!(events, vec![crate::RailEvent::WindowCreated(42)]);
+    assert!(rail.window(42).is_some());
 }
 
 /// Slow-path orders (PDUTYPE2_UPDATE, updateType UPDATETYPE_ORDERS) go to the

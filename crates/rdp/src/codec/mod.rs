@@ -42,7 +42,7 @@ pub fn to_rgb_top_down(raw: &[u32], w: usize, h: usize, bpp: u16) -> Vec<u32> {
     out
 }
 
-fn uncompressed(data: &[u8], w: usize, h: usize, bpp: u16) -> Result<Vec<u32>> {
+pub(crate) fn uncompressed(data: &[u8], w: usize, h: usize, bpp: u16) -> Result<Vec<u32>> {
     let bytes = match bpp {
         15 | 16 => 2,
         24 => 3,
