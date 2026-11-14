@@ -752,8 +752,10 @@ impl App {
         // both Start menus opened). If the hook should have taken it,
         // Windows dropped the hook: install it again.
         if input.scancode.is_some_and(crate::keyboard::is_win_key) {
+            let (calls, since) = crate::keyhook::calls();
             rdp::trace!(
-                "keyhook: a Windows key reached the window (hook active {})",
+                "keyhook: a Windows key {} reached the window (hook active {}, {calls} hook calls, last {since} ms ago)",
+                if input.down { "press" } else { "release" },
                 crate::keyhook::is_active()
             );
             if input.down && crate::keyhook::is_active() {
@@ -2602,6 +2604,7 @@ impl App {
                 }
             }
             WindowEvent::Focused(focused) => {
+                rdp::trace!("ui: window focus {focused}");
                 self.win.as_mut().unwrap().ui.window_active = focused;
                 // Alt+Tab away leaves no Alt release behind.
                 self.win.as_mut().unwrap().ui.alt_key(false);
@@ -2697,8 +2700,15 @@ impl App {
             }
             WindowEvent::DroppedFile(path) => self.dropped_file(path),
             WindowEvent::ModifiersChanged(mods) => self.mods = mods.state(),
-            WindowEvent::KeyboardInput { event, .. } => {
+            WindowEvent::KeyboardInput {
+                event,
+                is_synthetic,
+                ..
+            } => {
                 self.last_input = std::time::Instant::now();
+                if is_synthetic {
+                    rdp::trace!("keyhook: a synthetic key event (focus change)");
+                }
                 self.keyboard(event)
             }
             _ => {}
