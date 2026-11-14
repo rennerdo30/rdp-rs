@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **Experimental: Remora Host, our own RDP server (`remora-host`).** It serves a Windows desktop to Remora or another RDP client over TLS with a self-signed certificate and its own password (Argon2id hash, rate-limited): uncompressed bitmap updates of the changed tiles, keyboard and mouse, one client at a time on port 3390. `remora-host run --demo` serves an animated test pattern instead, on any platform, and shows the input it receives. No NLA, clipboard, audio or multi-monitor yet; not part of the release packages. See `crates/remora-host/README.md` and `docs/HOST.md`.
+
 ## 0.1.0-beta.6
 
 - **In-app updates start again after an update.** A Remora that the setup had started (after the previous update) failed to start the next setup with "could not start the setup: The request is not supported (os error 50)": it handed its stale standard handles on to the setup. Remora now starts the setup without them. Until you run this version, close Remora and start it from the Start menu before you click **Update**.

@@ -47,8 +47,9 @@ jobs:
           persist-credentials: false
       - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
       # remora-update too: its curl download path only compiles off Windows.
-      - run: cargo clippy -p rdp -p remora-update --all-targets --locked -- -D warnings
-      - run: cargo test -p rdp -p remora-update --locked
+      # remora-host: the core, the demo backend and the unsupported-platform stub.
+      - run: cargo clippy -p rdp -p remora-update -p remora-host --all-targets --locked -- -D warnings
+      - run: cargo test -p rdp -p remora-update -p remora-host --locked
   deny:
     name: cargo-deny (licenses)
     runs-on: ubuntu-latest
