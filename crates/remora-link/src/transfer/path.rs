@@ -20,16 +20,21 @@
 //!   CON, PRN, AUX, NUL, COM0..COM9, LPT0..LPT9 (also with superscript
 //!   digits ¹ ² ³), CONIN$, CONOUT$;
 //! - names over 255 UTF-16 units;
-//! - the engine's own working files: names ending in `.remora-part`,
-//!   `.remora-part.meta` or `.tmp` (any case), so a transfer can never
+//! - the engine's own working files ([`is_working_file`], any case):
+//!   `<name>.remora-part`, `<name>.remora-part.meta` and the sidecar's
+//!   temporary `<name>.remora-part.meta.<hex>.tmp`, so a transfer can never
 //!   deliver a part file or sidecar that a later transfer would resume.
+//!   Ordinary `.tmp` files are accepted.
 //!
-//! Accepted names of types the Windows shell acts on just by showing the
-//! folder (shortcuts, Internet shortcuts, Explorer command files, library
-//! and search connector descriptions, `desktop.ini`) are stored with
+//! Accepted names of types the Windows shell acts on just by showing,
+//! previewing or indexing the folder ([`SHELL_ACTIVE`]: shortcuts and
+//! Internet shortcuts, Explorer command files, library and search
+//! connector descriptions, themes, `desktop.ini`) are stored with
 //! `.download` appended ([`stored_name`]): Explorer then treats them as
-//! plain data and never resolves an icon or target from them (the NTLM
-//! leak class of `.url`/`.scf`/`.library-ms` files).
+//! plain data and never resolves an icon, target or resource from them
+//! (the NTLM leak class of `.url`/`.scf`/`.library-ms`/`.theme` files).
+//! Programs and scripts (`.exe`, `.cpl`, `.js`, ...) act only when opened;
+//! they keep their names and the Mark-of-the-Web guards them.
 
 use std::fmt;
 
@@ -43,7 +48,8 @@ pub enum NameError {
     TrailingDotOrSpace,
     Reserved,
     TooLong,
-    /// A transfer working file name (`.remora-part`, `.remora-part.meta`, `.tmp`).
+    /// A transfer working file name (`.remora-part`, `.remora-part.meta`,
+    /// the sidecar's temporary file).
     WorkingFile,
 }
 
@@ -103,18 +109,32 @@ pub fn check_name(name: &str) -> Result<(), NameError> {
 }
 
 /// Suffixes of the engine's working files (compared without case).
-pub const WORKING_SUFFIXES: [&str; 3] = [".remora-part", ".remora-part.meta", ".tmp"];
+pub const WORKING_SUFFIXES: [&str; 2] = [".remora-part", ".remora-part.meta"];
 
-/// A name the engine uses for its own files.
+/// A name the engine uses for its own files: the part file, its sidecar,
+/// or the sidecar's temporary file (`<sidecar>.<hex>.tmp`, written by
+/// `FsDir::write_small`).
 pub fn is_working_file(name: &str) -> bool {
     let l = name.to_lowercase();
-    WORKING_SUFFIXES.iter().any(|s| l.ends_with(s))
+    if WORKING_SUFFIXES.iter().any(|s| l.ends_with(s)) {
+        return true;
+    }
+    // `<name>.remora-part.meta.<hex>.tmp`
+    l.strip_suffix(".tmp")
+        .and_then(|rest| rest.rsplit_once('.'))
+        .is_some_and(|(head, hex)| {
+            head.ends_with(".remora-part.meta")
+                && !hex.is_empty()
+                && hex.bytes().all(|b| b.is_ascii_hexdigit())
+        })
 }
 
-/// Extensions the Windows shell acts on when it merely lists or previews
-/// a folder (compared without case).
-pub const SHELL_ACTIVE: [&str; 9] = [
+/// Extensions the Windows shell acts on when it merely lists, previews or
+/// indexes a folder, or that are shortcuts to something else (compared
+/// without case). HELPER-PROTOCOL.md 7.3 lists why each one is here.
+pub const SHELL_ACTIVE: [&str; 14] = [
     ".lnk",
+    ".pif",
     ".url",
     ".scf",
     ".website",
@@ -122,6 +142,10 @@ pub const SHELL_ACTIVE: [&str; 9] = [
     ".searchconnector-ms",
     ".appref-ms",
     ".settingcontent-ms",
+    ".wsh",
+    ".theme",
+    ".themepack",
+    ".deskthemepack",
     ".desktop.ini",
 ];
 
@@ -254,10 +278,22 @@ mod tests {
             "evil.exe.remora-part.meta",
             "x.REMORA-PART",
             "x.Remora-Part.Meta",
-            "notes.tmp",
-            "NOTES.TMP",
+            "a.remora-part.meta.0123456789abcdef.tmp",
+            "A.REMORA-PART.META.ABCDEF01.TMP",
         ] {
             assert_eq!(check_name(working), Err(WorkingFile), "{working:?}");
+        }
+        // Ordinary temporary files are ordinary files (review 2 item 14).
+        for ok in [
+            "notes.tmp",
+            "NOTES.TMP",
+            "~WRL0001.tmp",
+            "a.remora-part.tmp",
+            "a.remora-part.meta.tmp",
+            "a.remora-part.meta.xyz.tmp",
+            "a.meta.0123456789abcdef.tmp",
+        ] {
+            assert_eq!(check_name(ok), Ok(()), "{ok:?}");
         }
         let long = "a".repeat(256);
         assert_eq!(check_name(&long), Err(TooLong));
@@ -277,12 +313,20 @@ mod tests {
             ("s.searchConnector-ms", "s.searchConnector-ms.download"),
             ("app.appref-ms", "app.appref-ms.download"),
             ("c.SettingContent-ms", "c.SettingContent-ms.download"),
+            ("old.pif", "old.pif.download"),
+            ("run.WSH", "run.WSH.download"),
+            ("dark.theme", "dark.theme.download"),
+            ("pack.themepack", "pack.themepack.download"),
+            ("pack.deskthemepack", "pack.deskthemepack.download"),
             ("desktop.ini", "desktop.ini.download"),
             ("Desktop.INI", "Desktop.INI.download"),
             ("folder.desktop.ini", "folder.desktop.ini.download"),
             ("report.pdf", "report.pdf"),
             ("url.txt", "url.txt"),
             ("my.lnk.txt", "my.lnk.txt"),
+            ("theme.txt", "theme.txt"),
+            ("tool.exe", "tool.exe"),
+            ("panel.cpl", "panel.cpl"),
             ("notdesktop.ini", "notdesktop.ini"),
         ] {
             assert_eq!(stored_name(name), stored, "{name:?}");

@@ -68,6 +68,10 @@ pub const MAX_ACTIVE: usize = 32;
 pub const PART_SUFFIX: &str = ".remora-part";
 /// Suffix of the sidecar.
 pub const META_SUFFIX: &str = ".remora-part.meta";
+/// Why a transfer is refused when the receive folder cannot keep the
+/// Mark-of-the-Web (FAT, exFAT, some network shares).
+pub const NO_MARK: &str =
+    "the download folder's drive can't mark files from the internet; choose an NTFS folder";
 
 /// [`Message::FileReject`] and [`Message::FileCancel`] reasons.
 pub mod reason {
@@ -556,8 +560,13 @@ impl Engine {
     }
 
     pub fn reject(&mut self, id: TransferId) {
+        self.reject_with(id, reason::USER);
+    }
+
+    /// Rejects (or cancels) an incoming transfer with a [`reason`] code.
+    pub fn reject_with(&mut self, id: TransferId, code: u8) {
         if self.receiving.contains_key(&id) {
-            self.fail_receive(id, reason::USER, "rejected", true);
+            self.fail_receive(id, code, "rejected", true);
         }
     }
 
@@ -1073,6 +1082,9 @@ fn open_target(r: &mut Receiving, taken: &[String]) -> Result<(), (u8, String)> 
     let size = r.offer.size;
     // The name the file is stored under (dangerous types get ".download").
     let base = path::stored_name(&r.offer.name);
+    // Received files always get the Mark-of-the-Web: refuse a folder that
+    // cannot keep it before anything is written there.
+    dir.can_mark().map_err(|e| (reason::IO, e.to_string()))?;
     // A sidecar of this transfer under the stored name or one of its
     // numbered variants: resume. Any other sidecar is not this offer's,
     // whatever it says (it may have been planted by an earlier transfer).
@@ -1176,7 +1188,8 @@ fn finish(r: &mut Receiving) -> std::io::Result<String> {
     let base = path::stored_name(&r.offer.name);
     let dir = r.dir.as_mut().expect("receiving has a folder");
     let part_name = format!("{}{PART_SUFFIX}", r.name);
-    dir.mark(&part_name);
+    // An unmarked file is never stored (the failure deletes the part).
+    dir.mark(&part_name)?;
     let mut last = None;
     for n in 1..=1000u32 {
         let cand = if n == 1 {

@@ -8,9 +8,11 @@ use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
 use std::os::windows::io::AsRawHandle;
 use std::path::{Path, PathBuf};
 
+use remora_link::transfer::NO_MARK;
 use remora_link::transfer::io::{FsDir, Source, TargetDir};
 use windows_sys::Win32::Storage::FileSystem::{
     FILE_FLAG_OPEN_REPARSE_POINT, FILE_TYPE_DISK, GetDiskFreeSpaceExW, GetFileType,
+    GetVolumeInformationW, GetVolumePathNameW,
 };
 use windows_sys::Win32::System::Com::CoTaskMemFree;
 use windows_sys::Win32::UI::Shell::{FOLDERID_Downloads, FOLDERID_SendTo, SHGetKnownFolderPath};
@@ -73,6 +75,49 @@ pub fn mark_of_the_web(file: &Path) -> io::Result<()> {
     std::fs::write(files::zone_stream(file), files::ZONE_IDENTIFIER)
 }
 
+/// `FILE_NAMED_STREAMS`, a `GetVolumeInformationW` file system flag.
+const FILE_NAMED_STREAMS: u32 = 0x0004_0000;
+
+/// Whether the volume of `dir` keeps named streams (where the
+/// Mark-of-the-Web lives): NTFS and ReFS do, FAT and exFAT do not.
+pub fn named_streams(dir: &Path) -> io::Result<bool> {
+    let w = wide(&dir.to_string_lossy());
+    let mut root = [0u16; 1024];
+    // SAFETY: a NUL-terminated path and an output buffer of the given size.
+    if unsafe { GetVolumePathNameW(w.as_ptr(), root.as_mut_ptr(), root.len() as u32) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let mut flags = 0u32;
+    // SAFETY: `root` is NUL-terminated by the call above; the optional
+    // buffers are null with size 0.
+    let ok = unsafe {
+        GetVolumeInformationW(
+            root.as_ptr(),
+            std::ptr::null_mut(),
+            0,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &mut flags,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if ok == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(flags & FILE_NAMED_STREAMS != 0)
+}
+
+/// Refuses a receive folder whose volume cannot keep the Mark-of-the-Web.
+/// When the volume cannot be asked, the transfer goes ahead: the mark
+/// itself is then the check (a file that cannot be marked is not stored).
+pub fn check_marks(dir: &Path) -> io::Result<()> {
+    match named_streams(dir) {
+        Ok(false) => Err(io::Error::new(io::ErrorKind::Unsupported, NO_MARK)),
+        Ok(true) | Err(_) => Ok(()),
+    }
+}
+
 /// A file opened for sending.
 struct FileSource(File);
 
@@ -129,10 +174,10 @@ impl Files for WinFiles {
         Ok(Box::new(
             FsDir::new(dir)
                 .with_free_space(free_space)
+                .with_mark_check(check_marks)
                 .on_finished(|p| {
-                    if let Err(e) = mark_of_the_web(p) {
-                        warn!("received file not marked as downloaded: {e}");
-                    }
+                    mark_of_the_web(p)
+                        .inspect_err(|e| warn!("received file not marked as downloaded: {e}"))
                 }),
         ))
     }
@@ -185,6 +230,16 @@ mod tests {
         assert!(open_regular(&d).is_err(), "a folder");
         assert!(open_regular(&d.join("missing")).is_err());
         assert!(free_space(&d).is_some_and(|n| n > 0));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// The temporary folder is on NTFS (or ReFS) here: it keeps streams,
+    /// and the receive folder check lets it through.
+    #[test]
+    fn the_volume_check_reads_named_streams() {
+        let d = temp("streams");
+        assert_eq!(named_streams(&d).ok(), Some(true));
+        assert!(check_marks(&d).is_ok());
         let _ = std::fs::remove_dir_all(&d);
     }
 }

@@ -46,10 +46,11 @@ impl App {
             }
         });
         handle.set_received_file_hook(|path| {
-            if let Err(e) = helper_app::mark_of_the_web(path) {
+            helper_app::mark_of_the_web(path).inspect_err(|e| {
                 rdp::trace!("ui: no Mark-of-the-Web on {}: {e}", path.display());
-            }
+            })
         });
+        handle.set_mark_check(helper_app::check_marks);
         handle.set_free_space(helper_app::free_for_downloads);
         TabHelper { handle, pending }
     }
@@ -218,8 +219,18 @@ impl App {
         }
     }
 
-    /// Releases what a closing tab still reserved for its downloads.
+    /// The tab's connection ended (or dropped, or failed): a pairing that
+    /// waited for the user there counts as aborted now.
+    pub(super) fn helper_connection_ended(&mut self, id: u64) {
+        if let Some(h) = self.helper_of(id) {
+            h.connection_ended();
+        }
+    }
+
+    /// Releases what a closing tab still reserved for its downloads, and
+    /// counts a pairing it left unanswered.
     pub(super) fn helper_closed(&mut self, id: u64) {
+        self.helper_connection_ended(id);
         if let Some(t) = self
             .win
             .as_ref()
@@ -283,7 +294,7 @@ impl App {
                     .as_ref()
                     .and_then(|w| w.ui.tabs.iter().find(|t| t.id == id))
                     .and_then(|t| t.helper.transfers.iter().find(|r| r.id == tid))
-                    .map_or(0, |r| r.total);
+                    .map_or(0, |r| r.total.saturating_sub(r.done));
                 match r {
                     Ok(()) => helper_app::reserve(tid, &folder, size),
                     Err(e) => {

@@ -291,23 +291,34 @@ Enter and Esc both mean **Don't pair**, and only **Pair anyway** pairs.
 The helper remembers this PC too. A helper that does not know this PC yet
 (another PC of yours, a reinstalled Remora) shows its code on the server
 again, and Remora shows its code even for a helper it knows; until you
-confirm on the server, the helper sends no files or links here (the card
-says **Paired here, now confirm the code on the server**).
+confirm on the server, the helper sends no files or links here and takes
+none of yours (the card says **Paired here, now confirm the code on the
+server**).
 
 The code on the server reaches you inside the remote picture, which a
-machine in the middle could redraw. Where that matters, compare the
-**fingerprint** instead: Remora shows the helper's under the code and on the
-helper card; on the server, `remora-agent fingerprint` prints it. An
-administrator can enter it as the connection's **Fingerprint** under
-**Server helper** on the editor's Sharing page: Remora then accepts only
-that helper and asks no code. The other way round, *Settings > Security*
-shows this PC's fingerprint for `remora-agent trust-client` on the server.
+machine in the middle could redraw (and it could click the server's window
+too). Comparing **fingerprints** protects only when both sides are pinned,
+so that neither shows a code or a window to fall back on:
+
+- An administrator enters the helper's fingerprint (`remora-agent
+  fingerprint` on the server) as the connection's **Fingerprint** under
+  **Server helper** on the editor's Sharing page: Remora then accepts only
+  that helper and asks no code. Remora also shows the fingerprint under the
+  code and on the helper card, but comparing it there by eye does not help
+  against a redrawn picture.
+- *Settings > Security* shows this PC's fingerprint for `remora-agent
+  trust-client` on the server. That also turns on the helper's **pinned
+  clients only** mode: a PC it does not know is refused without a window
+  (`remora-agent strict on`, or the `PinnedClientsOnly` policy, turn it on
+  too).
 
 If pairing attempts keep ending before you answered (twice in one
-connection, or three times a day with one server), someone may be trying
-codes until one matches: Remora stops pairing and the helper card says
-**Pairing blocked**. **Retry pairing** there (or **Retry helper pairing**
-in the palette) allows it again; do that only if you expect the helper.
+connection, or three times a day with one server; a pairing that stalls
+for 30 seconds, or that is left open when the connection ends or the tab
+closes, counts too), someone may be trying codes until one matches: Remora
+stops pairing and the helper card says **Pairing blocked**. **Retry
+pairing** there (or **Retry helper pairing** in the palette) allows it
+again; do that only if you expect the helper.
 
 To forget a paired helper: **Forget…** on the editor's Sharing page, or
 **Forget paired helper** in the command palette. Its next session asks to
@@ -330,10 +341,13 @@ until you switch it on; a change applies from the next connection.
   each file. Files go only into **Save received files in** (default
   `Downloads\Remora`), are never written over (a second copy becomes
   `name (2).ext`), and are marked as downloaded from the Internet, so
-  Windows and Office treat them with care. Shortcuts and similar files
-  Explorer would act on (`.lnk`, `.url`, `.scf`, `desktop.ini` ...) are
-  saved with `.download` appended. With this switch off, an offered file is
-  refused and Remora says so once.
+  Windows and Office treat them with care. That mark needs a folder on an
+  NTFS drive: on a FAT or exFAT drive (many USB sticks) files are refused
+  with "the download folder's drive can't mark files from the internet",
+  and Remora warns when you pick such a folder. Shortcuts and similar files
+  Explorer would act on (`.lnk`, `.url`, `.scf`, `.theme`, `desktop.ini`
+  ...) are saved with `.download` appended. With this switch off, an
+  offered file is refused and Remora says so once.
 - **Send files to the server**: drop files onto the session (the drop target
   says where they go, or why it cannot take them), or **Send files to…** on
   the side panel's Sharing page or in the palette.

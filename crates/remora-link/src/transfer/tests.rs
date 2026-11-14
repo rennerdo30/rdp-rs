@@ -741,7 +741,11 @@ fn a_planted_sidecar_cannot_rename_the_stored_file() {
     });
     assert!(!dir.exists("evil.exe"));
     // And such names never arrive as files in the first place.
-    for planted in ["evil.exe.remora-part.meta", "evil.exe.remora-part", "x.TMP"] {
+    for planted in [
+        "evil.exe.remora-part.meta",
+        "evil.exe.remora-part",
+        "evil.exe.remora-part.meta.0123456789abcdef.TMP",
+    ] {
         let mut rx = receiver();
         rx.handle(&Message::FileOffer(offer(3, planted, 10)));
         assert_eq!(
@@ -886,4 +890,45 @@ fn an_offer_refused_unseen_is_reported_to_the_app() {
             .any(|e| matches!(e, TransferEvent::Offered { .. }))
     );
     assert_eq!(failed(&ev), Some((reason::DISABLED, false)));
+}
+
+/// Review 2 item 4: a folder that cannot keep the Mark-of-the-Web is
+/// refused before a part file exists, and a mark that fails at the end
+/// fails the transfer and removes its files instead of storing the file
+/// unmarked.
+#[test]
+fn received_files_are_never_stored_unmarked() {
+    let mut p = Pair::new();
+    p.dir = MemDir::new().without_marks();
+    p.tx.send("a.bin", Box::new(MemSource::new(data(1000, 3), 1)))
+        .unwrap();
+    p.run_all();
+    let ev = rx_events(&mut p);
+    assert_eq!(failed(&ev), Some((reason::IO, false)));
+    assert!(
+        ev.iter()
+            .any(|e| matches!(e, TransferEvent::Failed { detail, .. } if detail == NO_MARK)),
+        "{ev:?}"
+    );
+    assert!(
+        p.dir.names().is_empty(),
+        "nothing written: {:?}",
+        p.dir.names()
+    );
+
+    // Marks work when the transfer starts and fail when it ends.
+    let mut p = Pair::new();
+    let dir = p.dir.clone();
+    p.tx.send("b.bin", Box::new(MemSource::new(data(MIB + 7, 4), 1)))
+        .unwrap();
+    p.run(&mut |p| p.rx.active() > 0 && p.delivered > 0, &mut Some);
+    dir.set_marks(false);
+    p.run_all();
+    assert_eq!(failed(&rx_events(&mut p)), Some((reason::IO, false)));
+    assert!(
+        dir.names().is_empty(),
+        "part and sidecar removed: {:?}",
+        dir.names()
+    );
+    assert!(dir.marked_names().is_empty());
 }

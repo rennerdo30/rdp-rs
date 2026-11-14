@@ -26,15 +26,18 @@ Remora has a key of its own too. The first time Remora and the agent meet (or wh
 
 Confirm in **both** places only if the codes match. Reject (or closing the server window, or five minutes without an answer) ends the connection.
 
-After both confirmed, each side remembers the other and later sessions pair silently. The agent keeps the Remora PCs you confirmed in `%LOCALAPPDATA%\rdp-rs\agent-clients.json`. **Files and links go from the server to your PC only if the agent knows that PC's key**: a Remora it does not know (another PC, a reinstalled Remora, or a machine in the middle that ends TLS) gets the server window again, even if Remora itself already knows the agent, and nothing leaves the server before you confirm there.
+After both confirmed, each side remembers the other and later sessions pair silently. The agent keeps the Remora PCs you confirmed in `%LOCALAPPDATA%\rdp-rs\agent-clients.json`. **Nothing moves between the server and a PC until the agent knows that PC's key**: a Remora it does not know (another PC, a reinstalled Remora, or a machine in the middle that ends TLS) gets the server window again, even if Remora itself already knows the agent; no file or link leaves the server, and no file it sends is written to `Downloads\From Remora`, before you confirm there.
 
-**The code on the server travels in the remote picture.** A machine in the middle that rewrites the RDP connection could also draw a fake server window with a matching code. Where that matters, compare fingerprints over another path instead:
+If pairings with unknown PCs keep ending without an answer on the server (three within ten minutes), the agent refuses unknown PCs without showing a window for a minute, then for longer each time (at most an hour).
 
-- `remora-agent fingerprint` prints this agent's fingerprint (`3f9a 07c2 …`). Compare it with the one in Remora's pairing dialog or helper card, or have it set as the connection's **helper fingerprint** in Remora (editor, Sharing page): Remora then accepts only this agent and asks no code.
-- `remora-agent trust-client <fingerprint>` pairs a Remora PC by the fingerprint Remora shows in *Settings > Security*; that PC then gets no server window.
-- `remora-agent clients` lists the paired Remora PCs; `remora-agent forget-client <fingerprint>` unpairs one.
+**The code on the server travels in the remote picture.** A machine in the middle that rewrites the RDP connection could draw a fake server window with a matching code, and could even click the real one. Comparing fingerprints over another path protects only when **both** sides are pinned, so neither falls back to a code or a window:
 
-If the key file is damaged or cannot be decrypted (for example after an administrator reset your password), the agent makes a new key, keeps the old file as `agent-key.bin.old` and logs it; Remora then warns that the agent's key changed and asks you to compare codes again.
+- `remora-agent fingerprint` prints this agent's fingerprint (`3f9a 07c2 …`). Have it set as the connection's **helper fingerprint** in Remora (editor, Sharing page): Remora then accepts only this agent and asks no code. (Comparing it by eye with Remora's pairing dialog does not help against a faked picture.)
+- `remora-agent trust-client <fingerprint>` pairs a Remora PC by the fingerprint Remora shows in *Settings > Security*. It also switches the agent to **pinned clients only**: from then on a Remora PC the agent does not know is refused without any window, so there is nothing to click.
+- `remora-agent strict on` switches pinned clients only on without trusting a PC first (`strict off` switches it off again, unless a trusted PC or the policy keeps it on; `strict` shows the state). An administrator can turn it on for every user with the policy `HKLM\SOFTWARE\Policies\Remora\Agent`, DWORD `PinnedClientsOnly` = 1; the agent only reads it.
+- `remora-agent clients` lists the paired Remora PCs (and which were trusted by fingerprint); `remora-agent forget-client <fingerprint>` unpairs one.
+
+If the key file is damaged or cannot be decrypted (for example after an administrator reset your password), the agent makes a new key, keeps the old file as `agent-key.bin.old.1` (`.old.2` the next time, and so on) and logs it; Remora then warns that the agent's key changed and asks you to compare codes again. A key file that cannot be read for the moment (locked, no access) is not replaced: the agent tries again and then stops with an error in the log.
 
 ## Files
 
@@ -42,9 +45,9 @@ If the key file is damaged or cannot be decrypted (for example after an administ
 
 - An existing file is never replaced: the new one is saved as `name (2).ext`, and so on.
 - Files are written as `name.remora-part` with a `name.remora-part.meta` record and renamed when complete and verified (BLAKE3 per 4 MiB block). A dropped connection resumes from the last verified block after you reconnect, also after a restart of the agent.
-- Names ending in `.remora-part`, `.remora-part.meta` or `.tmp` are refused. Shortcuts and other files Explorer acts on when it shows a folder (`.lnk`, `.url`, `.scf`, `.website`, `.library-ms`, `.searchConnector-ms`, `.appref-ms`, `.settingcontent-ms`, `desktop.ini`) are saved with `.download` appended.
-- Free space is checked first.
-- Received files get the Mark-of-the-Web (`Zone.Identifier`, Internet zone), like a download: Windows warns before running them and Office opens them in Protected View.
+- The transfer's own working names (`name.remora-part`, `name.remora-part.meta` and its temporary files) are refused; other `.tmp` files are fine. Shortcuts and other files Explorer acts on when it shows, previews or indexes a folder (`.lnk`, `.pif`, `.url`, `.scf`, `.website`, `.library-ms`, `.searchConnector-ms`, `.appref-ms`, `.settingcontent-ms`, `.wsh`, `.theme`, `.themepack`, `.deskthemepack`, `desktop.ini`) are saved with `.download` appended.
+- Free space is checked first. One Remora PC can have at most 16 files coming in (running or paused) at a time.
+- Received files get the Mark-of-the-Web (`Zone.Identifier`, Internet zone), like a download: Windows warns before running them and Office opens them in Protected View. `Downloads` must be on an NTFS (or ReFS) drive: on a FAT or exFAT drive, which cannot hold the mark, files are refused rather than saved unmarked.
 
 **From the server to your PC:** select files in Explorer, then **Send To > Send to my PC (Remora)**, or run `remora-agent send <file>...`. Remora asks you where to save them. Only regular files are sent in this version: no folders, links or devices. If Remora is not connected, has not allowed files to your PC, or is not a paired PC (confirm the code on the server first), a short message says so.
 
@@ -106,5 +109,6 @@ These need a Windows RDP host and a Remora client with the matching listener:
 - RemoteApp detection (`rdpshell.exe` / `rdpinit.exe` in the session);
 - the pairing dialog (topmost, closes when Remora rejects or disconnects), the Send To shortcut, DPAPI key storage across logons;
 - client pinning end to end: first contact (both dialogs), a silent reconnect, a second Remora PC (server dialog again), `fingerprint`, `clients`, `forget-client`, `trust-client`;
+- pinned clients only: after `trust-client`, with `strict on` and with the `PinnedClientsOnly` policy, an unknown Remora PC gets no window and Remora shows that the helper refused it; that the refusal message arrives before the channel closes;
 - file transfer both ways, a transfer resumed after a disconnect, and the Mark-of-the-Web on received files;
 - the link registration in Default apps on Windows 10, Windows 11 and Windows Server.

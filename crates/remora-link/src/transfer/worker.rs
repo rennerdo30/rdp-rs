@@ -5,10 +5,12 @@
 //! send; it never waits for the disk.
 //!
 //! Bounded both ways:
-//! - **In:** chunk bytes posted but not yet written are counted; a peer
-//!   sending past its credit would exceed [`IN_CAP`] (every transfer's
-//!   window plus slack), and [`EngineWorker::post`] says so: the caller
-//!   closes the channel.
+//! - **In:** every posted message is charged until the worker handled it:
+//!   [`MSG_COST`] plus its payload (chunk data, an offered name). A peer
+//!   sending past its credit, or flooding small messages while the disk is
+//!   busy, would exceed [`IN_CAP`] (every transfer's window plus slack),
+//!   and [`EngineWorker::post`] says so: the caller closes the channel. An
+//!   empty `FileChunk` is refused outright (it carries nothing but cost).
 //! - **Out:** the worker reads ahead at most [`OUT_HIGH`] bytes of chunks
 //!   that the channel has not taken yet.
 //!
@@ -28,6 +30,10 @@ use crate::msg::{Message, TransferId};
 /// Incoming chunk bytes queued at most: every transfer's full window and
 /// 4 MiB of slack. A well-behaved peer never gets near it.
 pub const IN_CAP: usize = MAX_ACTIVE * WINDOW as usize + (4 << 20);
+/// What every queued inbound message costs on top of its payload: the
+/// queue node and the message itself, so a flood of small messages is
+/// bounded like chunk data.
+pub const MSG_COST: usize = 128;
 /// Outgoing chunk bytes the worker reads ahead of the channel.
 pub const OUT_HIGH: usize = 4 << 20;
 /// File bytes read per worker round.
@@ -43,7 +49,7 @@ enum Cmd {
     Permissions(bool, bool),
     Send(TransferId, String, Box<dyn Source>),
     Accept(TransferId, Box<dyn TargetDir>),
-    Reject(TransferId),
+    Reject(TransferId, u8),
     Cancel(TransferId),
     Sync(Sender<()>),
 }
@@ -70,15 +76,28 @@ fn chunk_len(m: &Message) -> usize {
     }
 }
 
+/// What a posted message is charged against [`IN_CAP`] until handled.
+fn in_cost(m: &Message) -> usize {
+    MSG_COST
+        + match m {
+            Message::FileChunk { data, .. } => data.len(),
+            Message::FileOffer(o) => o.name.len(),
+            _ => 0,
+        }
+}
+
 /// What [`EngineWorker::post`] did with a message.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Posted {
     Queued,
     /// Not a file-transfer message (answer `Unsupported`).
     NotFile,
-    /// The peer sent more than every credit together allows: close the
-    /// channel.
+    /// The peer sent more than every credit together allows (or more
+    /// messages than the worker can queue): close the channel.
     Overflow,
+    /// A message no well-behaved peer sends (an empty `FileChunk`): close
+    /// the channel.
+    Invalid,
 }
 
 /// An [`Engine`] on a worker thread. Every method returns at once.
@@ -172,13 +191,14 @@ impl EngineWorker {
         if !file {
             return Posted::NotFile;
         }
-        let n = chunk_len(m);
-        if n > 0 {
-            let queued = self.shared.in_bytes.fetch_add(n, Ordering::AcqRel) + n;
-            if queued > IN_CAP {
-                self.shared.in_bytes.fetch_sub(n, Ordering::AcqRel);
-                return Posted::Overflow;
-            }
+        if matches!(m, Message::FileChunk { data, .. } if data.is_empty()) {
+            return Posted::Invalid;
+        }
+        let n = in_cost(m);
+        let queued = self.shared.in_bytes.fetch_add(n, Ordering::AcqRel) + n;
+        if queued > IN_CAP {
+            self.shared.in_bytes.fetch_sub(n, Ordering::AcqRel);
+            return Posted::Overflow;
         }
         self.cmd(Cmd::Handle(m.clone()));
         Posted::Queued
@@ -203,7 +223,12 @@ impl EngineWorker {
     }
 
     pub fn reject(&self, id: TransferId) {
-        self.cmd(Cmd::Reject(id));
+        self.cmd(Cmd::Reject(id, super::reason::USER));
+    }
+
+    /// Rejects an offered file with a [`super::reason`] code (`BUSY`, ...).
+    pub fn refuse(&self, id: TransferId, reason: u8) {
+        self.cmd(Cmd::Reject(id, reason));
     }
 
     pub fn cancel(&self, id: TransferId) {
@@ -259,11 +284,9 @@ fn run(mut engine: Engine, rx: Receiver<Cmd>, shared: Arc<Shared>) {
         while let Some(c) = next.take() {
             match c {
                 Cmd::Handle(m) => {
-                    let len = chunk_len(&m);
+                    let cost = in_cost(&m);
                     engine.handle(&m);
-                    if len > 0 {
-                        shared.in_bytes.fetch_sub(len, Ordering::AcqRel);
-                    }
+                    shared.in_bytes.fetch_sub(cost, Ordering::AcqRel);
                 }
                 Cmd::Connected(up) => engine.set_connected(up),
                 Cmd::Permissions(s, r) => engine.set_permissions(s, r),
@@ -281,7 +304,7 @@ fn run(mut engine: Engine, rx: Receiver<Cmd>, shared: Arc<Shared>) {
                 Cmd::Accept(id, dir) => {
                     let _ = engine.accept(id, dir);
                 }
-                Cmd::Reject(id) => engine.reject(id),
+                Cmd::Reject(id, reason) => engine.reject_with(id, reason),
                 Cmd::Cancel(id) => engine.cancel(id),
                 Cmd::Sync(done) => syncs.push(done),
             }
@@ -440,7 +463,8 @@ mod tests {
             offset: 0,
             data: vec![0; super::super::CHUNK_SIZE as usize],
         };
-        let fits = IN_CAP / super::super::CHUNK_SIZE as usize;
+        // The offer is handled already; each chunk costs its data and MSG_COST.
+        let fits = IN_CAP / (super::super::CHUNK_SIZE as usize + MSG_COST);
         for i in 0..fits {
             assert_eq!(rx.post(&chunk), Posted::Queued, "chunk {i}");
         }
@@ -481,5 +505,73 @@ mod tests {
         tx.set_connected(false);
         assert!(tx.take_messages().is_empty());
         assert_eq!(tx.shared.out_bytes.load(Ordering::Acquire), 0);
+    }
+
+    /// Review 2 item 3: small messages (and empty chunks) are charged too.
+    /// While the worker is busy, a peer flooding offers and block hashes
+    /// hits the bound instead of growing the queue without end, and an
+    /// empty chunk is refused outright.
+    #[test]
+    fn small_messages_are_bounded_while_the_worker_is_busy() {
+        let rx = EngineWorker::default();
+        rx.set_permissions(false, true);
+        rx.set_connected(true);
+        rx.post(&Message::FileOffer(crate::msg::FileOffer {
+            id: [1; 16],
+            name: "x".into(),
+            size: 1 << 30,
+            mtime: 1,
+            block_size: super::super::BLOCK_SIZE,
+        }));
+        assert!(rx.sync(T));
+        let open = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
+        rx.accept(
+            [1; 16],
+            Box::new(Gate {
+                dir: MemDir::new(),
+                open: open.clone(),
+            }),
+        );
+        let empty = Message::FileChunk {
+            id: [2; 16],
+            epoch: 1,
+            offset: 0,
+            data: Vec::new(),
+        };
+        assert_eq!(rx.post(&empty), Posted::Invalid);
+        let name = "n".repeat(1024);
+        let (mut queued, mut overflow) = (0usize, false);
+        for i in 0..2_000_000u32 {
+            let m = if i % 2 == 0 {
+                Message::FileBlockHash {
+                    id: [2; 16],
+                    epoch: 1,
+                    index: i,
+                    hash: [0; 32],
+                }
+            } else {
+                Message::FileOffer(crate::msg::FileOffer {
+                    id: [3; 16],
+                    name: name.clone(),
+                    size: 1,
+                    mtime: 1,
+                    block_size: super::super::BLOCK_SIZE,
+                })
+            };
+            match rx.post(&m) {
+                Posted::Queued => queued += 1,
+                Posted::Overflow => {
+                    overflow = true;
+                    break;
+                }
+                other => panic!("{other:?}"),
+            }
+        }
+        assert!(overflow, "the flood hit the bound ({queued} queued)");
+        assert!(queued <= IN_CAP / MSG_COST, "{queued} queued");
+        *open.0.lock().unwrap() = true;
+        open.1.notify_all();
+        assert!(rx.sync(Duration::from_secs(60)));
+        assert_eq!(rx.shared.in_bytes.load(Ordering::Acquire), 0, "all handled");
     }
 }

@@ -34,8 +34,30 @@
 //! only to a client key pinned here
 //! ([`LinkProtocol::server_to_client_allowed`], the single gate), never on
 //! `Pairing{Known}` alone: a TLS-terminating proxy playing the client has
-//! another key and gets the dialog. Session info and files coming from
-//! Remora (`FILE_UP`) need only Remora's pairing.
+//! another key and gets the dialog. Session info needs only Remora's
+//! pairing.
+//!
+//! # Nothing touches the receive folder before the server user confirmed
+//!
+//! Files from Remora (`FILE_UP`) need the client confirmed here too: its
+//! key pinned, or the dialog answered in this session
+//! ([`LinkProtocol::client_trusted`]). File messages that arrive earlier
+//! are held (at most [`MAX_HELD`]) and handed to the engine only then; a
+//! session that ends unconfirmed drops them, so an unknown client never
+//! creates a part file or holds a transfer slot. File data on Bulk before
+//! that closes Bulk. One client holds at most [`MAX_PER_CLIENT`] incoming
+//! transfers (running or paused), so it cannot take every slot.
+//!
+//! # Pinned clients only
+//!
+//! With [`ClientPins::strict`] (an admin trusted a client by fingerprint,
+//! the `PinnedClientsOnly` policy, or `remora-agent strict on`), an
+//! unknown client key is refused without a dialog: a man in the middle
+//! that ends TLS can then not get a click on the server either. After
+//! [`MAX_UNANSWERED`] pairings with unknown keys that ended unanswered
+//! within [`UNANSWERED_WINDOW`], unknown keys are refused the same way for
+//! a back-off that doubles each time (from [`BACKOFF_MIN`] to
+//! [`BACKOFF_MAX`]).
 //!
 //! Any session error closes that channel (and Bulk with Ctl); the next
 //! open starts from scratch. The engine lives across channel sessions, so
@@ -71,6 +93,16 @@ pub const URL_ANSWER_WAIT: Duration = Duration::from_secs(2);
 pub const POLL_INTERVAL: Duration = Duration::from_millis(200);
 /// Links waiting for Remora's answer at a time (Remora queues 8 too).
 const MAX_PENDING_URLS: usize = 8;
+/// File messages held while the server user has not confirmed the client.
+pub const MAX_HELD: usize = 64;
+/// Incoming transfers (running or paused) one client key may hold.
+pub const MAX_PER_CLIENT: usize = remora_link::transfer::MAX_ACTIVE / 2;
+/// Unknown-key pairings that may end unanswered within
+/// [`UNANSWERED_WINDOW`] before unknown keys are refused for a while.
+pub const MAX_UNANSWERED: usize = 3;
+pub const UNANSWERED_WINDOW: Duration = Duration::from_secs(10 * 60);
+pub const BACKOFF_MIN: Duration = Duration::from_secs(60);
+pub const BACKOFF_MAX: Duration = Duration::from_secs(60 * 60);
 
 /// Shows the pairing code in the user's session and asks the user there.
 pub trait PairingUi {
@@ -89,21 +121,40 @@ pub trait ClientPins {
     fn is_pinned(&self, key: &[u8; 32]) -> bool;
     /// Pins it, with the client's name as a label.
     fn pin(&mut self, key: &[u8; 32], label: &str) -> io::Result<()>;
+    /// Pinned clients only: why, or None when unknown clients may pair
+    /// through the dialog.
+    fn strict(&self) -> Option<&'static str> {
+        None
+    }
 }
 
 /// [`ClientPins`] in `agent-clients.json` (read fresh each time, so a
-/// `trust-client` or `forget-client` takes effect on the next session).
-pub struct FileClients(pub Option<PathBuf>);
+/// `trust-client` or `forget-client` takes effect on the next session),
+/// with the pinned-clients-only switches ([`crate::clients::strict_mode`]).
+pub struct FileClients {
+    pub clients: Option<PathBuf>,
+    /// The per-user setting (`remora-agent strict on|off`).
+    pub setting: Option<PathBuf>,
+    /// The `PinnedClientsOnly` policy (HKLM), read each time.
+    pub policy: fn() -> Option<u32>,
+}
 
 impl ClientPins for FileClients {
     fn is_pinned(&self, key: &[u8; 32]) -> bool {
         // An unreadable store pins nobody (fail closed: the dialog shows).
-        self.0
+        self.clients
             .as_deref()
             .is_some_and(|p| remora_link::ClientStore::load(p).is_ok_and(|s| s.is_pinned(key)))
     }
+    fn strict(&self) -> Option<&'static str> {
+        crate::clients::strict_mode(
+            (self.policy)(),
+            self.setting.as_deref(),
+            self.clients.as_deref(),
+        )
+    }
     fn pin(&mut self, key: &[u8; 32], label: &str) -> io::Result<()> {
-        let Some(p) = &self.0 else {
+        let Some(p) = &self.clients else {
             return Err(io::Error::new(
                 io::ErrorKind::NotFound,
                 "no settings folder",
@@ -156,6 +207,14 @@ struct Ctl {
     ack: Option<(u32, [u8; 32])>,
     next_heartbeat: Option<Instant>,
     heartbeat_seq: u32,
+    /// The user here answered the dialog (either way).
+    answered: bool,
+    /// Refused without a dialog (pinned clients only, or back-off).
+    refused: bool,
+    /// File messages waiting for the client to be confirmed here.
+    held: Vec<Message>,
+    /// Incoming transfers this session started.
+    created: Vec<[u8; 16]>,
 }
 
 struct PendingUrl {
@@ -183,6 +242,14 @@ pub struct LinkProtocol {
     next_poll: Option<Instant>,
     /// The time of the event being handled.
     now: Instant,
+    /// Incoming transfers by the client key that started them.
+    owners: BTreeMap<[u8; 16], [u8; 32]>,
+    /// When unknown-key pairings ended unanswered (recent ones).
+    unanswered: Vec<Instant>,
+    /// Unknown keys are refused until then.
+    backoff_until: Option<Instant>,
+    /// The next back-off.
+    backoff: Duration,
 }
 
 /// Short transfer id for the log.
@@ -271,6 +338,10 @@ impl LinkProtocol {
             next_ticket: 1,
             next_poll: None,
             now: Instant::now(),
+            owners: BTreeMap::new(),
+            unanswered: Vec::new(),
+            backoff_until: None,
+            backoff: BACKOFF_MIN,
         }
     }
 
@@ -332,12 +403,21 @@ impl LinkProtocol {
             .is_some_and(|c| c.client_known && c.ticket.is_none() && c.session.is_ready())
     }
 
+    /// The client is confirmed here: its key is pinned, or the user here
+    /// confirmed the code in this session, and no dialog waits. Until then
+    /// nothing from it reaches the transfer engine or the receive folder.
+    pub fn client_trusted(&self) -> bool {
+        self.ctl.as_ref().is_some_and(|c| {
+            (c.client_known || c.local_confirmed) && c.ticket.is_none() && c.session.is_ready()
+        })
+    }
+
     /// (send, receive) file rights in force.
     fn file_rights(&self) -> (bool, bool) {
         let caps = self.acked().unwrap_or(0);
         (
             caps & cap::FILE_DOWN != 0 && self.server_to_client_allowed(),
-            caps & cap::FILE_UP != 0,
+            caps & cap::FILE_UP != 0 && self.client_trusted(),
         )
     }
 
@@ -349,26 +429,48 @@ impl LinkProtocol {
     }
 
     /// Applies the file rights to the engine and opens Bulk when one is
-    /// usable. Taking the send right away cancels outgoing transfers; while
-    /// the dialog waits, the send right is left as it is (a paused download
-    /// must not be cancelled just because the answer is not in yet).
+    /// usable. Taking a right away cancels that direction's transfers; until
+    /// the client is confirmed here the engine's rights are left as they
+    /// are (a paused transfer of a confirmed client must not be cancelled
+    /// because another session waits for its answer). Once confirmed, the
+    /// file messages held meanwhile go to the engine.
     fn apply_rights(&mut self, out: &mut Vec<Action>) {
-        if self.acked().is_none() {
+        let Some(caps) = self.acked() else {
             // Rights come with HelloAck; until then nothing changes.
             return;
-        }
-        let (send, receive) = self.file_rights();
-        let keep_send = if self.answer_pending() {
-            self.engine.permissions().0
-        } else {
-            send
         };
-        self.engine.set_permissions(keep_send, receive);
-        if (send || receive) && !self.bulk_wanted && self.ctl.is_some() {
+        let (send, receive) = self.file_rights();
+        if self.client_trusted() {
+            self.engine.set_permissions(send, receive);
+        }
+        // Bulk may open before the answer (it is bound to this session and
+        // carries nothing until then).
+        let usable = send || caps & cap::FILE_UP != 0;
+        if usable && !self.bulk_wanted && self.ctl.is_some() {
             self.bulk_wanted = true;
             out.push(Action::OpenChannel(Channel::Bulk));
         }
+        if self.client_trusted() {
+            let held = self
+                .ctl
+                .as_mut()
+                .map(|c| std::mem::take(&mut c.held))
+                .unwrap_or_default();
+            for m in held {
+                self.post_ctl(&m, out);
+            }
+        }
         self.update_link();
+    }
+
+    /// Hands a file message from Ctl to the engine; a flood closes Ctl.
+    fn post_ctl(&mut self, m: &Message, out: &mut Vec<Action>) {
+        match self.engine.post(m) {
+            Posted::Queued | Posted::NotFile => {}
+            Posted::Overflow | Posted::Invalid => {
+                self.fail(Channel::Ctl, "file messages beyond every limit", out)
+            }
+        }
     }
 
     /// Brings the engine's link up or down. Offers accepted while it was
@@ -392,9 +494,30 @@ impl LinkProtocol {
     }
 
     /// Forgets the Ctl session: closes the dialog, answers waiting links,
-    /// pauses transfers and closes Bulk. Does not close Ctl itself.
+    /// pauses transfers and closes Bulk. Does not close Ctl itself. A
+    /// session that ends with its client unconfirmed leaves nothing: its
+    /// held messages are dropped and any transfer it started is cancelled
+    /// (with its part files). An unknown key's pairing that ended without
+    /// an answer here counts towards the back-off.
     fn drop_ctl(&mut self, out: &mut Vec<Action>) {
-        self.ctl = None;
+        if let Some(c) = self.ctl.take() {
+            let trusted = c.client_known || c.local_confirmed;
+            if !trusted {
+                for id in &c.created {
+                    self.engine.cancel(*id);
+                    self.owners.remove(id);
+                }
+                if !c.held.is_empty() {
+                    info!(
+                        "{} file messages of an unconfirmed client dropped",
+                        c.held.len()
+                    );
+                }
+            }
+            if !trusted && !c.answered && !c.refused && c.sas.is_some() {
+                self.note_unanswered();
+            }
+        }
         self.close_ui();
         for (_, u) in std::mem::take(&mut self.urls) {
             out.push(Action::OpenUrlResult {
@@ -472,6 +595,34 @@ impl LinkProtocol {
         self.send(0, &m, out);
     }
 
+    /// An unknown key's pairing ended unanswered: too many in a while start
+    /// a back-off in which unknown keys are refused without a dialog.
+    fn note_unanswered(&mut self) {
+        let now = self.now;
+        self.unanswered
+            .retain(|&t| now.saturating_duration_since(t) < UNANSWERED_WINDOW);
+        self.unanswered.push(now);
+        if self.unanswered.len() >= MAX_UNANSWERED {
+            self.unanswered.clear();
+            self.backoff_until = Some(now + self.backoff);
+            warn!(
+                "{MAX_UNANSWERED} pairings ended unanswered; unknown Remora clients refused for {} s",
+                self.backoff.as_secs()
+            );
+            self.backoff = (self.backoff * 2).min(BACKOFF_MAX);
+        }
+    }
+
+    /// Why an unknown client key is refused without a dialog now, if it is.
+    fn refuse_unknown(&self) -> Option<&'static str> {
+        if let Some(why) = self.clients.strict() {
+            return Some(why);
+        }
+        self.backoff_until
+            .is_some_and(|t| self.now < t)
+            .then_some("too many pairings ended unanswered; try again later")
+    }
+
     // -------------------------------------------------------------- Ctl
 
     fn open_ctl(&mut self, out: &mut Vec<Action>) {
@@ -499,6 +650,10 @@ impl LinkProtocol {
                     ack: None,
                     next_heartbeat: None,
                     heartbeat_seq: 0,
+                    answered: false,
+                    refused: false,
+                    held: Vec::new(),
+                    created: Vec::new(),
                 });
                 out.push(Action::Send(Channel::Ctl, first));
             }
@@ -538,6 +693,9 @@ impl LinkProtocol {
                 Event::Sas(sas) => {
                     ctl.sas = Some(sas);
                     let known = ctl.client_known;
+                    if !known && let Some(why) = self.refuse_unknown() {
+                        return self.refuse_client(why, out);
+                    }
                     let st = if known {
                         PairingStatus::Known
                     } else {
@@ -553,6 +711,28 @@ impl LinkProtocol {
                 Event::Message { request_id, msg } => self.on_ctl_msg(request_id, msg, now, out),
             }
         }
+    }
+
+    /// Refuses an unknown client key without asking anyone here: Remora
+    /// hears why, and Ctl closes (its queued messages go out first).
+    fn refuse_client(&mut self, why: &'static str, out: &mut Vec<Action>) {
+        let fp = self
+            .ctl
+            .as_mut()
+            .and_then(|c| {
+                c.refused = true;
+                c.remora_key
+            })
+            .map(|k| remora_link::fingerprint(&k))
+            .unwrap_or_default();
+        warn!("unknown Remora client {fp} refused: {why}");
+        self.send(0, &Message::PeerPairing(PairingStatus::Rejected), out);
+        self.send_error(
+            err::PAIRING_REJECTED,
+            "this helper accepts paired Remora clients only",
+            out,
+        );
+        self.fail(Channel::Ctl, "client not paired here", out);
     }
 
     /// Sends `Hello` once the session is ready and a snapshot is known.
@@ -583,7 +763,8 @@ impl LinkProtocol {
             Message::Heartbeat { .. } => {}
             Message::ClientName { name } => {
                 if let Some(ctl) = self.ctl.as_mut() {
-                    ctl.client_name = name;
+                    // Untrusted text for the log and the client list.
+                    ctl.client_name = remora_link::pins::clean_label(&name);
                 }
             }
             Message::OpenUrlResult(status) => self.on_url_result(request_id, status, out),
@@ -604,10 +785,20 @@ impl LinkProtocol {
             | Message::FileCredit { .. }
             | Message::FileCancel { .. }
             | Message::FileComplete { .. }) => {
-                if self.acked().is_some() {
-                    self.engine.post(&m);
-                } else {
+                if self.acked().is_none() {
                     self.send_error(err::NOT_ALLOWED, "not paired", out);
+                } else if self.client_trusted() {
+                    self.post_ctl(&m, out);
+                } else if let Some(ctl) = self.ctl.as_mut() {
+                    // Held until the user here confirms this client.
+                    if ctl.held.len() >= MAX_HELD {
+                        return self.fail(
+                            Channel::Ctl,
+                            "too many file messages before the server user answered",
+                            out,
+                        );
+                    }
+                    ctl.held.push(m);
                 }
             }
             // Helper-to-Remora types coming back.
@@ -704,6 +895,7 @@ impl LinkProtocol {
         }
         ctl.ticket = None;
         ctl.local_confirmed = confirmed;
+        ctl.answered = true;
         self.close_ui();
         if confirmed {
             info!("pairing: confirmed on the server");
@@ -821,13 +1013,21 @@ impl LinkProtocol {
                     self.update_link();
                 }
                 Event::Sas(_) => {}
+                // Nothing was asked for before the client is confirmed.
+                Event::Message { .. } if !self.client_trusted() => {
+                    return self.fail(
+                        Channel::Bulk,
+                        "file data before the server user confirmed the client",
+                        out,
+                    );
+                }
                 Event::Message { msg, .. } => match self.engine.post(&msg) {
                     Posted::Queued => {}
                     // Unknown types only: the session refuses Ctl types.
                     Posted::NotFile => {
                         self.send(0, &Message::Unsupported { ty: msg.ty() }, out);
                     }
-                    Posted::Overflow => {
+                    Posted::Overflow | Posted::Invalid => {
                         return self.fail(Channel::Bulk, "file data beyond every credit", out);
                     }
                 },
@@ -931,6 +1131,31 @@ impl LinkProtocol {
             TransferEvent::Offered { id, name, size, .. } => {
                 info!("transfer {} from Remora: {size} bytes", tid(&id));
                 debug!("transfer {} name {name}", tid(&id));
+                // Only a confirmed client's offers reach the engine; the
+                // check stays here so nothing else can start a transfer.
+                let owner = self
+                    .ctl
+                    .as_ref()
+                    .filter(|_| self.client_trusted())
+                    .and_then(|c| c.remora_key);
+                let Some(owner) = owner else {
+                    warn!("transfer {}: no confirmed client; refused", tid(&id));
+                    self.engine
+                        .refuse(id, remora_link::transfer::reason::DISABLED);
+                    return;
+                };
+                if self.owners.values().filter(|k| **k == owner).count() >= MAX_PER_CLIENT {
+                    warn!(
+                        "transfer {}: this client holds {MAX_PER_CLIENT} transfers; refused",
+                        tid(&id)
+                    );
+                    self.engine.refuse(id, remora_link::transfer::reason::BUSY);
+                    return;
+                }
+                self.owners.insert(id, owner);
+                if let Some(c) = self.ctl.as_mut() {
+                    c.created.push(id);
+                }
                 match self.files.receive_dir() {
                     Ok(dir) => {
                         self.engine.accept(id, dir);
@@ -950,6 +1175,7 @@ impl LinkProtocol {
                 direction,
                 name,
             } => {
+                self.owners.remove(&id);
                 info!("transfer {} {} completed", tid(&id), dir_name(direction));
                 debug!("transfer {} stored as {name}", tid(&id));
             }
@@ -960,6 +1186,7 @@ impl LinkProtocol {
                 by_peer,
                 detail,
             } => {
+                self.owners.remove(&id);
                 warn!(
                     "transfer {} {} failed: reason {reason}{}",
                     tid(&id),

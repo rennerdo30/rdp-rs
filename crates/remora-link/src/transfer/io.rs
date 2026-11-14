@@ -50,10 +50,20 @@ pub trait TargetDir: Send {
     fn free_space(&self) -> Option<u64> {
         None
     }
+    /// Whether received files can be marked here (Mark-of-the-Web: the
+    /// volume keeps named streams). Checked before a transfer creates its
+    /// part file, so a folder on FAT or exFAT is refused at once with
+    /// [`super::NO_MARK`].
+    fn can_mark(&self) -> io::Result<()> {
+        Ok(())
+    }
     /// The verified part file `name` is about to be renamed to its final
     /// name: mark it (Mark-of-the-Web) now, so the stored file never exists
-    /// without it where the mark survives a rename (NTFS streams do).
-    fn mark(&mut self, _name: &str) {}
+    /// without it (an NTFS stream stays with the file through the rename).
+    /// An error fails the transfer: an unmarked file is never stored.
+    fn mark(&mut self, _name: &str) -> io::Result<()> {
+        Ok(())
+    }
     /// A file was stored under `name`. The app marks it with the
     /// Mark-of-the-Web here too (the fallback where [`TargetDir::mark`]
     /// could not carry over).
@@ -71,6 +81,8 @@ pub struct MemDir {
     marked: Arc<Mutex<Vec<String>>>,
     /// Fail every write after this many bytes (simulated full disk).
     fail_writes_after: Option<u64>,
+    /// Marking fails (a volume without named streams); shared by clones.
+    no_marks: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl MemDir {
@@ -81,6 +93,18 @@ impl MemDir {
     pub fn with_free_space(mut self, free: u64) -> MemDir {
         self.free = Some(free);
         self
+    }
+
+    /// A folder whose volume cannot keep the Mark-of-the-Web.
+    pub fn without_marks(self) -> MemDir {
+        self.set_marks(false);
+        self
+    }
+
+    /// Whether marking works (for this folder and all its clones).
+    pub fn set_marks(&self, ok: bool) {
+        self.no_marks
+            .store(!ok, std::sync::atomic::Ordering::SeqCst);
     }
 
     fn lock(&self) -> MutexGuard<'_, BTreeMap<String, Vec<u8>>> {
@@ -235,11 +259,19 @@ impl TargetDir for MemDir {
     fn free_space(&self) -> Option<u64> {
         self.free
     }
-    fn mark(&mut self, name: &str) {
+    fn can_mark(&self) -> io::Result<()> {
+        if self.no_marks.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(io::Error::new(io::ErrorKind::Unsupported, super::NO_MARK));
+        }
+        Ok(())
+    }
+    fn mark(&mut self, name: &str) -> io::Result<()> {
+        self.can_mark()?;
         self.marked
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .push(name.to_string());
+        Ok(())
     }
     fn finished(&mut self, name: &str) {
         self.finished
@@ -283,7 +315,9 @@ impl Source for MemSource {
 /// Free-space query for [`FsDir`].
 pub type FreeSpaceFn = Box<dyn Fn(&Path) -> Option<u64> + Send>;
 /// Called with each stored file's path (Mark-of-the-Web hook).
-pub type FinishedFn = Box<dyn FnMut(&Path) + Send>;
+pub type FinishedFn = Box<dyn FnMut(&Path) -> io::Result<()> + Send>;
+/// Whether a folder's volume keeps the Mark-of-the-Web (named streams).
+pub type MarkCheckFn = Box<dyn Fn(&Path) -> io::Result<()> + Send>;
 
 /// A real folder through `std::fs` (no platform APIs). The app supplies the
 /// free-space query and the Mark-of-the-Web hook.
@@ -291,6 +325,7 @@ pub struct FsDir {
     root: PathBuf,
     free_space: Option<FreeSpaceFn>,
     on_finished: Option<FinishedFn>,
+    mark_check: Option<MarkCheckFn>,
 }
 
 impl FsDir {
@@ -299,6 +334,7 @@ impl FsDir {
             root: root.into(),
             free_space: None,
             on_finished: None,
+            mark_check: None,
         }
     }
 
@@ -308,9 +344,21 @@ impl FsDir {
     }
 
     /// The Mark-of-the-Web hook: called with the full path of the verified
-    /// part file right before its rename, and of the stored file after it.
-    pub fn on_finished(mut self, f: impl FnMut(&Path) + Send + 'static) -> FsDir {
+    /// part file right before its rename (an error fails the transfer),
+    /// and of the stored file after it (best effort: the part's mark
+    /// carried over).
+    pub fn on_finished(mut self, f: impl FnMut(&Path) -> io::Result<()> + Send + 'static) -> FsDir {
         self.on_finished = Some(Box::new(f));
+        self
+    }
+
+    /// Checks the folder's volume before a transfer starts (named streams,
+    /// [`TargetDir::can_mark`]).
+    pub fn with_mark_check(
+        mut self,
+        f: impl Fn(&Path) -> io::Result<()> + Send + 'static,
+    ) -> FsDir {
+        self.mark_check = Some(Box::new(f));
         self
     }
 
@@ -442,20 +490,25 @@ impl TargetDir for FsDir {
     fn free_space(&self) -> Option<u64> {
         self.free_space.as_ref().and_then(|f| f(&self.root))
     }
-    fn mark(&mut self, name: &str) {
-        if let (Some(f), Ok(p)) = (
-            self.on_finished.as_mut(),
-            self.root.join(name).canonicalize(),
-        ) {
-            f(&p);
+    fn can_mark(&self) -> io::Result<()> {
+        match &self.mark_check {
+            Some(f) => f(&self.root),
+            None => Ok(()),
         }
+    }
+    fn mark(&mut self, name: &str) -> io::Result<()> {
+        let p = self.path(name)?.canonicalize()?;
+        let Some(f) = self.on_finished.as_mut() else {
+            return Ok(());
+        };
+        f(&p).map_err(|e| io::Error::new(e.kind(), format!("{} ({e})", super::NO_MARK)))
     }
     fn finished(&mut self, name: &str) {
         if let (Some(f), Ok(p)) = (
             self.on_finished.as_mut(),
             self.root.join(name).canonicalize(),
         ) {
-            f(&p);
+            let _ = f(&p);
         }
     }
 }
@@ -562,12 +615,31 @@ mod tests {
             s2.lock()
                 .unwrap()
                 .push(p.file_name().unwrap().to_string_lossy().into_owned());
+            Ok(())
         });
         d.create_new("r.pdf.remora-part").unwrap();
-        d.mark("r.pdf.remora-part");
+        d.mark("r.pdf.remora-part").unwrap();
         d.rename_new("r.pdf.remora-part", "r.pdf").unwrap();
         d.finished("r.pdf");
         assert_eq!(*seen.lock().unwrap(), ["r.pdf.remora-part", "r.pdf"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Review 2 item 4: a mark that cannot be written is an error (the
+    /// transfer then fails), and the volume check runs on the folder.
+    #[test]
+    fn a_failed_mark_is_an_error() {
+        let dir = std::env::temp_dir().join(format!("remora-link-nomark-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut d = FsDir::new(&dir)
+            .on_finished(|_| Err(io::Error::other("no streams")))
+            .with_mark_check(|_| Err(io::Error::other(super::super::NO_MARK)));
+        d.create_new("r.pdf.remora-part").unwrap();
+        let e = d.mark("r.pdf.remora-part").unwrap_err();
+        assert!(e.to_string().contains("NTFS"), "{e}");
+        assert!(d.can_mark().is_err());
+        assert!(FsDir::new(&dir).can_mark().is_ok(), "no check: no refusal");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

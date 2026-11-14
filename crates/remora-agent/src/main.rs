@@ -17,6 +17,7 @@
 
 mod cli;
 mod clients;
+mod closing;
 mod files;
 mod framing;
 mod info;

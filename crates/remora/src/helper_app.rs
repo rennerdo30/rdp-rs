@@ -71,6 +71,64 @@ pub fn mark_of_the_web(file: &Path) -> std::io::Result<()> {
     std::fs::write(PathBuf::from(ads), ZONE_IDENTIFIER)
 }
 
+/// Whether the volume of `dir` keeps named streams (where the
+/// Mark-of-the-Web lives): NTFS and ReFS do, FAT and exFAT do not. None
+/// when the volume cannot be asked.
+pub fn named_streams(dir: &Path) -> Option<bool> {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::Storage::FileSystem::{GetVolumeInformationW, GetVolumePathNameW};
+        /// `FILE_NAMED_STREAMS`, a `GetVolumeInformationW` flag.
+        const FILE_NAMED_STREAMS: u32 = 0x0004_0000;
+        let wide: Vec<u16> = dir
+            .as_os_str()
+            .to_string_lossy()
+            .encode_utf16()
+            .chain([0])
+            .collect();
+        let mut root = [0u16; 1024];
+        // SAFETY: a NUL-terminated path and an output buffer of its size.
+        if unsafe { GetVolumePathNameW(wide.as_ptr(), root.as_mut_ptr(), root.len() as u32) } == 0 {
+            return None;
+        }
+        let mut flags = 0u32;
+        // SAFETY: `root` is NUL-terminated by the call above; the optional
+        // buffers are null with size 0.
+        let ok = unsafe {
+            GetVolumeInformationW(
+                root.as_ptr(),
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                &mut flags,
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        (ok != 0).then_some(flags & FILE_NAMED_STREAMS != 0)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = dir;
+        None
+    }
+}
+
+/// The receive-folder check: a volume that cannot keep the Mark-of-the-Web
+/// is refused before a transfer writes anything there. When the volume
+/// cannot be asked the transfer goes ahead and the mark itself decides (a
+/// file that cannot be marked is not stored).
+pub fn check_marks(dir: &Path) -> std::io::Result<()> {
+    match named_streams(dir) {
+        Some(false) => Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            remora_link::transfer::NO_MARK,
+        )),
+        _ => Ok(()),
+    }
+}
+
 /// Bytes still to come for every accepted download, by transfer, with the
 /// folder it goes to: a new download must fit next to all of them, not
 /// just into today's free space.
@@ -99,17 +157,24 @@ fn volume(p: &Path) -> Option<std::path::Component<'_>> {
     p.components().next()
 }
 
-/// The free-space hook: what is free on the volume of `dir` minus what the
-/// downloads already accepted onto that volume still need.
-pub fn free_for_downloads(dir: &Path) -> Option<u64> {
-    Some(free_space(dir)?.saturating_sub(held_on(dir)))
+/// The free-space hook for download `id`: what is free on the volume of
+/// `dir` minus what the *other* downloads accepted onto that volume still
+/// need (its own reservation is what it checks against, not a debt).
+pub fn free_for_downloads(dir: &Path, id: TransferId) -> Option<u64> {
+    Some(net_free(free_space(dir)?, dir, id))
 }
 
-/// Bytes the accepted downloads onto `dir`'s volume still need.
-fn held_on(dir: &Path) -> u64 {
+/// `free` minus what downloads other than `id` onto `dir`'s volume need.
+fn net_free(free: u64, dir: &Path, id: TransferId) -> u64 {
+    free.saturating_sub(held_on(dir, Some(id)))
+}
+
+/// Bytes the accepted downloads onto `dir`'s volume still need, without
+/// `except`.
+fn held_on(dir: &Path, except: Option<TransferId>) -> u64 {
     reserved()
         .iter()
-        .filter(|e| volume(&e.1) == volume(dir))
+        .filter(|e| volume(&e.1) == volume(dir) && Some(e.0) != except)
         .map(|e| e.2)
         .sum()
 }
@@ -328,15 +393,42 @@ mod tests {
     fn downloads_reserve_space_on_their_volume() {
         let (a, b) = ([0xA1; 16], [0xB2; 16]);
         let q = Path::new(r"Q:\Other");
-        let base = held_on(q);
+        let base = held_on(q, None);
         reserve(a, Path::new(r"Q:\In"), 100);
         reserve(b, Path::new(r"R:\In"), 50);
-        assert_eq!(held_on(q), base + 100, "only the same volume counts");
+        assert_eq!(held_on(q, None), base + 100, "only the same volume counts");
         reserve(a, Path::new(r"Q:\In"), 40);
-        assert_eq!(held_on(q), base + 40, "progress lowers it");
+        assert_eq!(held_on(q, None), base + 40, "progress lowers it");
         release(a);
         release(b);
-        assert_eq!(held_on(q), base);
+        assert_eq!(held_on(q, None), base);
+    }
+
+    /// Review 2 item 6: a download's own reservation is not counted
+    /// against it (its check ran after the app reserved its size), only
+    /// the others' on the same volume.
+    #[test]
+    #[cfg(windows)]
+    fn a_download_is_not_charged_its_own_reservation() {
+        let (a, b) = ([0xC3; 16], [0xD4; 16]);
+        let v = Path::new(r"P:\In");
+        let base = held_on(v, None);
+        reserve(a, v, 700);
+        assert_eq!(net_free(base + 1000, v, a), 1000, "own size not held");
+        reserve(b, v, 200);
+        assert_eq!(net_free(base + 1000, v, a), 800, "the other one is");
+        assert_eq!(net_free(base + 1000, v, b), 300);
+        release(a);
+        release(b);
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn the_temp_volume_keeps_named_streams() {
+        let d = temp_dir("streams");
+        assert_eq!(named_streams(&d), Some(true));
+        assert!(check_marks(&d).is_ok());
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]

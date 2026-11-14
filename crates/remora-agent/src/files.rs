@@ -330,10 +330,21 @@ mod tests {
 
     #[test]
     fn reserved() {
-        for n in ["a.remora-part", "A.REMORA-PART.META", "x.tmp", "x.TMP"] {
+        for n in [
+            "a.remora-part",
+            "A.REMORA-PART.META",
+            "a.remora-part.meta.00ff00ff00ff00ff.tmp",
+        ] {
             assert!(reserved_name(n), "{n}");
         }
-        for n in ["a.txt", "remora-part", "a.tmpl", "a.remora-partx"] {
+        for n in [
+            "a.txt",
+            "remora-part",
+            "a.tmpl",
+            "a.remora-partx",
+            "x.tmp",
+            "x.TMP",
+        ] {
             assert!(!reserved_name(n), "{n}");
         }
     }

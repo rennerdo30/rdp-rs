@@ -159,6 +159,17 @@ pub fn main() -> i32 {
                         .map_or(0, |d| d.as_secs());
                     crate::clients::trust(p, &fp, now).map(|s| s + "\n")
                 }),
+                Command::Strict(set) => {
+                    let Some(setting) = crate::keystore::default_strict_path() else {
+                        eprintln!("remora-agent: LOCALAPPDATA is not set");
+                        return 1;
+                    };
+                    let policy = sys::pinned_clients_policy();
+                    clients_command(|p| match set {
+                        Some(on) => crate::clients::set_strict(on, &setting, policy, Some(p)),
+                        None => Ok(crate::clients::strict_status(&setting, policy, Some(p))),
+                    })
+                }
                 Command::Run | Command::OpenUrl(_) | Command::Send(_) => unreachable!(),
             }
         }

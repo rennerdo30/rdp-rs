@@ -143,10 +143,13 @@ middle playing the helper can therefore drop the channel whenever the code
 it would cause does not match the real helper's, and try again, silently
 (306 tries matched two digits in a test). So Remora counts every Ctl session
 that finished the handshake with an **unpinned or changed** helper key and
-ended (closed, failed, rejected by the helper, or cut off with the whole
-RDP connection) before **Remora's user**
-answered the code. The user's own answer, and sessions with a pinned key or
-an admin-set fingerprint, never count.
+ended (closed, failed, rejected by the helper, cut off with the whole RDP
+connection, or left when the connection ended or the tab closed) before
+**Remora's user** answered the code. A Ctl session that has not reached the
+code 30 s after it opened (handshake plus commit and reveal) is closed and
+counts the same way, so a helper cannot stall instead of aborting. The
+user's own answer, and sessions with a pinned key or an admin-set
+fingerprint, never count.
 
 - **Per RDP connection:** after 2 such aborts Remora refuses `Remora::Ctl`
   for the rest of the connection (`HelperState::PairingBlocked`).
@@ -155,6 +158,14 @@ an admin-set fingerprint, never count.
   unpinned key is refused right after the handshake, before any nonce is
   sent. The block stays until the user chooses **Retry pairing** (helper
   card) or **Retry helper pairing** (palette).
+- **Fails closed:** a log that cannot be read or parsed blocks every server
+  (and is never overwritten by a new abort); an abort that cannot be written
+  blocks. A retry on a damaged log keeps it as
+  `helper-attempts.json.damaged.<n>` and starts a new one.
+- **The helper side** counts too: after 3 pairings with unknown client keys
+  that ended without an answer on the server within 10 minutes, the helper
+  refuses unknown keys without a dialog for 1 minute, doubling up to 1 hour
+  (4.4).
 
 An attacker thus gets at most 3 tries per server and day before the user is
 told, so the chance of a matching code stays at most 3 × 10⁻⁶ per day and
@@ -170,8 +181,15 @@ server, and every failed try is visible.
   (`%APPDATA%\rdp-rs\link-client-key.bin`, DPAPI user scope; elsewhere a
   0600 file). Both use the `remora_link::keyfile` format: a 4-byte file
   magic (`RAK1` helper, `RCK1` client), a `u32` length and the protected
-  blob of a 4-byte magic and the private key. An unusable file is kept as
-  `.old` and a new key made; the peer then sees a changed or unknown key.
+  blob of a 4-byte magic and the private key. A key is replaced only when
+  its file is definitely unusable: it does not parse, or the platform
+  refuses to decrypt it on 3 tries. The file is then kept as
+  `<file>.old.<n>` (a new number each time, never overwritten) and a new
+  key made; the peer then sees a changed or unknown key. A file that
+  cannot be read right now (locked, no access) is retried and then an
+  error, never a new key. Creating or replacing a key happens under
+  `<file>.lock` and re-reads the file there, so two processes starting at
+  once end with one key.
 - **Fingerprint** of a key: the first 20 bytes of BLAKE3 of the 32-byte
   X25519 public key, shown as ten groups of four lower-case hex digits
   (`3f9a 07c2 b18e …`). `remora-agent fingerprint` prints the helper's;
@@ -191,8 +209,16 @@ key is per user on the server; `DOMAIN\user` from the connection, or
   the same pin; pinning writes the user's own entry and drops the plain one
   if it holds the same key. Forgetting a server removes it for every user.
 - Every change re-reads, merges and writes the file under a lock file
-  (`helpers.json.lock`, taken over when older than 10 s) through a unique
-  temporary file and a rename, so two Remora windows never lose a pin.
+  (`helpers.json.lock`) through a unique temporary file and a rename, so two
+  Remora windows never lose a pin. The lock file holds a random owner id
+  and the time it was taken: its holder removes it only while it still
+  names that owner; it is stale after 10 s by that time (or by its
+  modification time when unreadable), or when the time lies more than 60 s
+  in the future; a stale lock is taken over by renaming it aside and
+  checking the moved file is the one judged stale (a fresh lock moved by
+  mistake is put back). Every wait is bounded by elapsed time. Remora's
+  session thread waits at most 50 ms for another process's lock; past that
+  the write goes to a background writer.
 - A changed key is never accepted silently: Remora warns and asks again.
 - An unreadable pin store counts as "changed" (never as "new"), and Remora
   does not overwrite it.
@@ -220,10 +246,16 @@ that never sends `PeerPairing` needs Remora's confirmation only).
 The helper keeps the Remora clients its user confirmed in
 `%LOCALAPPDATA%\rdp-rs\agent-clients.json`, keyed by the client key's
 fingerprint (40 hex digits): `{ "<fp>": { "key": "<hex or empty>",
-"first_seen": <unix s>, "label": "<ClientName>" } }`, written like
-`helpers.json`. An entry without a key was added by fingerprint
-(`remora-agent trust-client <fingerprint>`, an admin pre-seeding a PC) and
-pins the key with that fingerprint.
+"first_seen": <unix s>, "label": "<ClientName>", "origin": "dialog" |
+"admin" } }`, written like `helpers.json`. `origin` says how the client got
+there: `dialog` (both users compared the code) or `admin` (`remora-agent
+trust-client <fingerprint>`, an admin pre-seeding a PC by its fingerprint;
+it pins the key with that fingerprint). Stores from before this field
+count an entry without a key as `admin`. The label is the client's own
+word: control characters, line separators and invisible or bidi format
+characters (U+061C, U+200B–200F, U+2028–202E, U+2066–2069, U+FEFF) are
+removed and it is cut to 64 characters, when received and again when
+printed.
 
 Right after the SAS, before `Hello`, the helper sends `PeerPairing`
 (`0x0106`, payload `u8 status`, same values):
@@ -244,8 +276,38 @@ Right after the SAS, before `Hello`, the helper sends `PeerPairing`
 - **Server→client data** (`FILE_DOWN` offers, `OpenUrl`) goes only to a
   client key the helper has pinned, and never while its dialog waits for an
   answer (`LinkProtocol::server_to_client_allowed`, the single gate).
+- **Client-to-server files** (`FILE_UP`) need the client confirmed on the
+  server too: its key pinned, or the dialog confirmed in this session.
+  File messages that arrive before that are held (at most 64; more closes
+  Ctl) and reach the transfer engine only then; a session that ends
+  unconfirmed drops them. So an unknown client never creates a part file in
+  the receive folder or holds a transfer slot. File data on Bulk before
+  that closes Bulk. One client key holds at most 16 incoming transfers
+  (running or paused); more offers get `FileReject{BUSY}`.
 - `remora-agent clients` lists the pinned clients, `remora-agent
   forget-client <fingerprint>` removes one (its next session asks again).
+
+### 4.4 Pinned clients only (helper)
+
+The dialog on the server can be clicked through by whoever controls the
+RDP picture (section 9). In **pinned-clients-only** mode the helper refuses
+an unknown client key without any dialog: right after the SAS it sends
+`PeerPairing{Rejected}` and `Error{PAIRING_REJECTED}`, logs the client's
+fingerprint and closes Ctl. A pinned client pairs as before. The mode is
+on when any of these holds:
+
+- an admin trusted a client by fingerprint (`trust-client`; an `admin`
+  entry in `agent-clients.json`), or that file cannot be read (fail
+  closed);
+- the policy `HKLM\SOFTWARE\Policies\Remora\Agent`, DWORD
+  `PinnedClientsOnly` = 1 (read only; an admin's setting for every user);
+- the user turned it on: `remora-agent strict on` (the file
+  `%LOCALAPPDATA%\rdp-rs\agent-strict`; `strict off` removes it, and says
+  when another reason keeps the mode on; a changed or unreadable file
+  counts as on).
+
+`remora-agent strict` shows the state and why. The same refusal applies
+during the helper's back-off after unanswered pairings (3.3).
 
 Until `HelloAck` is sent (paired and `Hello` received), Remora only accepts
 `Hello`, `Heartbeat`, `PeerPairing`, `Error`, `Unsupported` and unknown
@@ -364,9 +426,19 @@ sender                                     receiver
   the app a `Failed` event (Remora says once that receiving is off).
 - **Threads:** both ends run the engine on a worker thread
   (`transfer::worker::EngineWorker`): the channel's thread only posts and
-  takes messages. Incoming chunk bytes not yet written are capped at every
-  transfer's window plus 4 MiB (past it the Bulk channel closes); the worker
+  takes messages. Every posted message is charged until the worker handled
+  it: 128 bytes plus its payload (chunk data, an offered name); the total
+  is capped at every transfer's window plus 4 MiB, and past it the channel
+  that carried the message closes, so a flood of small messages is bounded
+  like chunk data. An empty `FileChunk` closes the channel too. The worker
   reads at most 4 MiB ahead of the channel.
+- **Mark-of-the-Web:** received files always get one. Before a transfer
+  writes anything the receiver checks that the folder's volume keeps named
+  streams (`GetVolumeInformationW`, `FILE_NAMED_STREAMS`): a FAT or exFAT
+  folder fails the transfer with reason 5 ("the download folder's drive
+  can't mark files from the internet; choose an NTFS folder"). If marking
+  the verified part still fails, the transfer fails and its files are
+  deleted: a file is never stored unmarked.
 - **Reasons** (`FileReject`, `FileCancel`): 1 user, 2 disabled, 3 bad name,
   4 no space, 5 I/O, 6 integrity, 7 source changed, 8 protocol, 9 busy.
 - **Limits:** 32 transfers per direction; 4 MiB blocks fixed in 1.x.
@@ -380,17 +452,35 @@ and invisible format characters (U+200B–200F, U+202A–202E, U+2066–2069,
 U+FEFF), trailing dots or spaces, reserved device names with or without
 extension in any case (CON, PRN, AUX, NUL, COM0–9, LPT0–9, COM¹²³, LPT¹²³,
 CONIN$, CONOUT$; "NUL .txt" counts), more than 255 UTF-16 units, and the
-engine's own working files: names ending in `.remora-part`,
-`.remora-part.meta` or `.tmp` in any case (a delivered sidecar must never
-steer a later resume). Files are written only into the folder the user
-chose; free space is checked first when the app provides a query.
+engine's own working files in any case: `<name>.remora-part`,
+`<name>.remora-part.meta` and the sidecar's temporary
+`<name>.remora-part.meta.<hex>.tmp` (a delivered sidecar must never steer a
+later resume). Other `.tmp` files are ordinary files. Files are written
+only into the folder the user chose; free space is checked first when the
+app provides a query (Remora: free space minus what its *other* accepted
+downloads onto that volume still need; a resume needs only the bytes not
+yet verified).
 
-Names the Windows shell acts on just by showing the folder are stored with
-`.download` appended, so Explorer treats them as data and never resolves an
-icon or target from them (the NTLM-leak class): `.lnk`, `.url`, `.scf`,
-`.website`, `.library-ms`, `.searchConnector-ms`, `.appref-ms`,
-`.settingcontent-ms`, and `desktop.ini` (also `*.desktop.ini`), in any
-case. `Completed` reports the stored name.
+Names the Windows shell acts on just by showing, previewing or indexing the
+folder are stored with `.download` appended (in any case), so Explorer
+treats them as data and never resolves an icon, target or resource from
+them (the NTLM-leak class). `Completed` reports the stored name.
+
+| Extension | Why |
+|-----------|-----|
+| `.lnk`, `.pif` | shortcuts: Explorer resolves the icon and target path (a UNC path leaks NTLM) |
+| `.url`, `.website` | Internet shortcuts: `IconFile` is fetched on display |
+| `.scf` | Explorer command file: `IconFile` is fetched on display |
+| `.library-ms`, `.searchConnector-ms` | library and search connector descriptions: locations are resolved when shown |
+| `.appref-ms` | ClickOnce shortcut |
+| `.settingcontent-ms` | Settings shortcut (ran commands on open in older Windows) |
+| `.wsh` | Windows Script Host settings: a shortcut to a script |
+| `.theme`, `.themepack`, `.deskthemepack` | themes: wallpaper and icon paths are fetched when previewed |
+| `desktop.ini` (also `*.desktop.ini`) | folder customisation: icon resources are resolved for the folder |
+
+Programs and scripts (`.exe`, `.cpl`, `.js`, `.hta`, ...) act only when
+opened: they keep their names, and the Mark-of-the-Web makes Windows warn
+before they run.
 
 ## 8. Resume
 
@@ -430,8 +520,11 @@ case. `Completed` reports the stored name.
   channel without affecting the RDP session.
 - **Client authentication (1.1):** Remora's key is persistent and the
   helper pins it (4.3). A TLS-terminating proxy playing Remora has another
-  key: the helper shows its dialog, and sends no file or link to it before
-  its user confirmed. `Pairing{Known}` alone proves nothing to the helper.
+  key: the helper shows its dialog, and sends no file or link to it and
+  takes no file from it before its user confirmed. `Pairing{Known}` alone
+  proves nothing to the helper. But that dialog is in the RDP picture too
+  (next point): only **pinned clients only** (4.4) keeps such a proxy out
+  without relying on the user.
 - **Design limit: the server-side code travels in the RDP picture.** The
   helper shows its code on the remote desktop, and the user reads it through
   the very RDP connection the pairing is meant to protect. A man in the
@@ -439,18 +532,24 @@ case. `Completed` reports the stored name.
   controls the picture: it can draw a fake server-side dialog showing
   whatever code Remora displays, and the user would see matching codes. The
   SAS then protects only against attackers who cannot rewrite the picture
-  (channel loggers, passive recorders). Where that matters, compare
-  **out of band**:
-  - run `remora-agent fingerprint` on the server through another trusted
-    path (console, management tool) and compare it with the fingerprint in
-    Remora's pairing dialog or helper card; better, set it as the
-    connection's **helper fingerprint** (admin pin, 4.2): Remora then accepts
-    only that key and never asks for a code;
-  - give the server the client's fingerprint the same way
+  (channel loggers, passive recorders). The same attacker can also inject
+  input and click the helper's own dialog. Comparing fingerprints **out of
+  band** protects only when nothing on either side falls back to a code
+  the attacker can fake or a dialog it can click, so pin **both** sides:
+  - Remora: run `remora-agent fingerprint` on the server through another
+    trusted path (console, management tool) and set it as the connection's
+    **helper fingerprint** (admin pin, 4.2): Remora then accepts only that
+    key and never asks for a code. Only comparing it by eye with Remora's
+    pairing dialog does not help when the picture is faked;
+  - the helper: give it the client's fingerprint the same way
     (`remora-agent trust-client <fingerprint>` with the value from Remora's
-    Settings → Security), so the helper never needs its dialog for that PC.
-- **Attempt limit:** SAS grinding by silent aborts is bounded per connection
-  and per server (3.3).
+    Settings → Security). That also switches the helper to **pinned
+    clients only** (4.4), so an unknown client key gets no dialog to click;
+    the `PinnedClientsOnly` policy or `remora-agent strict on` do the same
+    without a trusted client.
+- **Attempt limit:** SAS grinding by silent aborts or stalls is bounded per
+  connection and per server on Remora, and by a back-off on the helper
+  (3.3).
 - **At rest:** part files and sidecars use the folder's normal permissions;
   the pin stores hold public keys only.
 
@@ -508,9 +607,12 @@ contract.
   confirmed too (`Pairing` Known or Confirmed, or `HelloAck`), the client
   key is pinned with Remora's `ClientName` as its label. Reject (or closing
   the dialog) sends `PeerPairing{Rejected}` and `Error{PAIRING_REJECTED}`
-  and closes Ctl. While the answer is pending the transfer link stays down;
-  receiving rights apply, the send right is left as it was (a paused
-  download is not cancelled by a pending answer).
+  and closes Ctl. While the answer is pending the transfer link stays down
+  and the engine's rights are left as they were (a paused transfer is not
+  cancelled by a pending answer); file messages from the client are held
+  until it is confirmed (4.3). With pinned clients only (4.4), or during
+  the back-off after unanswered pairings, an unknown client key gets no
+  dialog: it is refused right after the SAS.
 - **Server-to-client data:** file offers to Remora (`FILE_DOWN`) and
   `OpenUrl` only when `server_to_client_allowed()`: a pinned client key and
   no dialog waiting. A paused download is never offered to an unpinned key.
@@ -532,10 +634,11 @@ contract.
   the server's own fallback browser opens it. Remora answers after its user
   decided, so after 2 s without an answer the link counts as handed over
   (never opened twice). At most 8 links wait at a time.
-- **Receiving:** every offer is accepted into `<Downloads>\From Remora`
-  (free space via `GetDiskFreeSpaceExW`); the part gets a `Zone.Identifier`
-  stream with `ZoneId=3` before its rename and the stored file again after
-  it.
+- **Receiving:** every offer of a confirmed client is accepted into
+  `<Downloads>\From Remora` (free space via `GetDiskFreeSpaceExW`), up to 16
+  per client key; the folder's volume must keep named streams, the part
+  gets a `Zone.Identifier` stream with `ZoneId=3` before its rename (or the
+  transfer fails) and the stored file again after it.
 - **Sending:** `remora-agent send <files>` (the Send To shortcut) passes
   absolute paths over the agent's per-session pipe (`RMS1` request, at most
   64 paths and 64 KiB per request). The agent opens each without following
@@ -544,5 +647,9 @@ contract.
 - **Unknown types** get `Unsupported`; client-bound types arriving at the
   helper get `Error{PROTOCOL}`; file messages before `HelloAck` get
   `Error{NOT_ALLOWED}`; none of these closes the channel.
+- **Closing:** a channel the agent closes first lets its writer send what
+  was queued (the last `PeerPairing` or `Error`), at most 2 s, then cancels
+  its I/O.
 - **Commands:** `fingerprint` (this helper's key), `clients`,
-  `forget-client <fingerprint>`, `trust-client <fingerprint>`.
+  `forget-client <fingerprint>`, `trust-client <fingerprint>`,
+  `strict [on|off]`.
