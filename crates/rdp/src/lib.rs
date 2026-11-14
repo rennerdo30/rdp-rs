@@ -74,7 +74,7 @@ pub use cliprdr::{ClipboardBackend, ClipboardHandle, Cliprdr, cliprdr};
 pub use compress::Compression;
 pub use credssp::{AuthFactory, AuthPackage, AuthParams, Step};
 pub use disp::{DisplayControl, DisplayHandle, display_control};
-pub use dvc::{Drdynvc, DvcOut, DynamicChannel, StaticOverDvc};
+pub use dvc::{Drdynvc, DvcOut, DynamicChannel, LocalClose, StaticOverDvc};
 pub use error::{Error, Result};
 pub use experience::{ConnectionType, Experience};
 pub use framebuffer::{Damage, Framebuffer};

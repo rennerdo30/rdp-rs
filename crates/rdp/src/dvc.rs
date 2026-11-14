@@ -12,6 +12,13 @@
 //!
 //! Not supported: compressed data (MS-RDPEDYC 2.2.3.3, 2.2.3.4) closes the
 //! channel it arrives on; Soft-Sync (2.2.5) is ignored.
+//!
+//! Limits: a reassembled message is at most
+//! [`DynamicChannel::max_message_size`] bytes ([`DEFAULT_MAX_MESSAGE`] unless
+//! the channel says otherwise); a larger DYNVC_DATA_FIRST closes that
+//! channel, never the session. A second DYNVC_CREATE_REQ for a name that is
+//! already open replaces the first binding unless the channel refuses it
+//! ([`DynamicChannel::allow_second_instance`]).
 
 use crate::channel::{
     CHANNEL_OPTION_ENCRYPT_RDP, CHANNEL_OPTION_INITIALIZED, ChannelOut, StaticChannel,
@@ -43,6 +50,13 @@ pub const CMD_SOFT_SYNC_REQUEST: u8 = 0x08;
 /// CreationStatus for a channel name the client does not know (an NTSTATUS
 /// carried as HRESULT, MS-RDPEDYC 2.2.2.2).
 pub const STATUS_NOT_FOUND: u32 = 0xC000_0225;
+
+/// CreationStatus for a create the client refuses: E_ACCESSDENIED (a
+/// negative HRESULT means failure, MS-RDPEDYC 2.2.2.2).
+pub const STATUS_REFUSED: u32 = 0x8007_0005;
+
+/// Default cap on one reassembled message (the DYNVC_DATA_FIRST Length).
+pub const DEFAULT_MAX_MESSAGE: usize = 16 << 20;
 
 /// Highest DVC protocol version the client speaks (MS-RDPEDYC 2.2.1.2).
 pub const MAX_VERSION: u16 = 3;
@@ -93,6 +107,37 @@ pub trait DynamicChannel: Send {
 
     /// The channel was closed by the server or after an error.
     fn closed(&mut self) {}
+
+    /// Largest reassembled message this channel accepts. A DYNVC_DATA_FIRST
+    /// announcing more closes the channel.
+    fn max_message_size(&self) -> usize {
+        DEFAULT_MAX_MESSAGE
+    }
+
+    /// The server asks to open this channel again while it is open (a
+    /// second server-side instance). `true` (the default) closes the open
+    /// binding and binds the new one; `false` refuses the new one with
+    /// [`STATUS_REFUSED`] and keeps the open one.
+    fn allow_second_instance(&mut self) -> bool {
+        true
+    }
+
+    /// The client is about to close the channel on its own for `why`;
+    /// [`Self::closed`] follows.
+    fn closing(&mut self, _why: LocalClose) {}
+}
+
+/// Why the client closed a dynamic channel on its own.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LocalClose {
+    /// The server sent compressed data (not supported).
+    Compressed,
+    /// A message larger than [`DynamicChannel::max_message_size`].
+    TooLarge,
+    /// Fragments that do not add up to the announced length.
+    Malformed,
+    /// The channel handler returned an error.
+    HandlerError,
 }
 
 /// Reassembly of DYNVC_DATA_FIRST + DYNVC_DATA (MS-RDPEDYC 3.1.5.2.2).
@@ -151,6 +196,14 @@ impl Drdynvc {
         self.channels.iter().position(|d| d.id == Some(id))
     }
 
+    /// Closes channel `i` on the client's initiative and tells the server.
+    fn close_local(&mut self, i: usize, why: LocalClose, out: &mut ChannelOut) {
+        if self.channels[i].id.is_some() {
+            self.channels[i].handler.closing(why);
+        }
+        self.close(i, true, out);
+    }
+
     /// Closes channel `i` locally; sends a DYNVC_CLOSE when `send` is set.
     fn close(&mut self, i: usize, send: bool, out: &mut ChannelOut) {
         let d = &mut self.channels[i];
@@ -183,7 +236,7 @@ impl Drdynvc {
                     "dvc {}: {e}; channel closed",
                     self.channels[i].handler.name()
                 );
-                self.close(i, true, out);
+                self.close_local(i, LocalClose::HandlerError, out);
             }
         }
     }
@@ -207,6 +260,19 @@ impl Drdynvc {
             out.send(create_response(id, STATUS_NOT_FOUND));
             return;
         };
+        // A second create for a name that is already open: the channel
+        // decides whether the new instance replaces the open one.
+        if let Some(open) = self.channels[i].id
+            && open != id
+            && !self.channels[i].handler.allow_second_instance()
+        {
+            trace!(
+                "dvc create {} ({id}): refused, already open as {open}",
+                self.channels[i].handler.name()
+            );
+            out.send(create_response(id, STATUS_REFUSED));
+            return;
+        }
         // A channel id reused by the server, or a second create for the same
         // name, replaces the earlier binding.
         if let Some(j) = self.find_open(id) {
@@ -228,7 +294,13 @@ impl Drdynvc {
         let total = total as usize;
         if data.len() > total {
             trace!("dvc {id}: DATA_FIRST carries more than its length");
-            self.close(i, true, out);
+            self.close_local(i, LocalClose::Malformed, out);
+            return;
+        }
+        let cap = self.channels[i].handler.max_message_size();
+        if total > cap {
+            trace!("dvc {id}: message of {total} bytes over the {cap}-byte cap; channel closed");
+            self.close_local(i, LocalClose::TooLarge, out);
             return;
         }
         if data.len() == total {
@@ -253,7 +325,7 @@ impl Drdynvc {
         };
         if r.buf.len() + data.len() > r.total {
             trace!("dvc {id}: reassembled data exceeds DATA_FIRST length");
-            self.close(i, true, out);
+            self.close_local(i, LocalClose::Malformed, out);
             return;
         }
         r.buf.extend_from_slice(data);
@@ -328,7 +400,7 @@ impl StaticChannel for Drdynvc {
                 let id = read_var(&mut r, cb_id)?;
                 trace!("dvc {id}: compressed data not supported; channel closed");
                 if let Some(i) = self.find_open(id) {
-                    self.close(i, true, out);
+                    self.close_local(i, LocalClose::Compressed, out);
                 }
             }
             CMD_SOFT_SYNC_REQUEST => trace!("dvc soft-sync request ignored"),
@@ -512,6 +584,8 @@ mod tests {
         log: Arc<Mutex<Log>>,
         fail_on: Option<u8>,
         tick_msg: Option<Vec<u8>>,
+        cap: Option<usize>,
+        single: bool,
     }
 
     impl DynamicChannel for Echo {
@@ -540,17 +614,45 @@ mod tests {
         fn closed(&mut self) {
             self.log.lock().unwrap().events.push("closed".into());
         }
+        fn max_message_size(&self) -> usize {
+            self.cap.unwrap_or(DEFAULT_MAX_MESSAGE)
+        }
+        fn allow_second_instance(&mut self) -> bool {
+            self.log.lock().unwrap().events.push("second".into());
+            !self.single
+        }
+        fn closing(&mut self, why: LocalClose) {
+            self.log.lock().unwrap().events.push(format!("{why:?}"));
+        }
     }
 
     fn echo(name: &'static str) -> (Box<dyn DynamicChannel>, Arc<Mutex<Log>>) {
+        capped(name, None, false)
+    }
+
+    fn capped(
+        name: &'static str,
+        cap: Option<usize>,
+        single: bool,
+    ) -> (Box<dyn DynamicChannel>, Arc<Mutex<Log>>) {
         let log = Arc::new(Mutex::new(Log::default()));
         let ch = Echo {
             name,
             log: log.clone(),
             fail_on: None,
             tick_msg: None,
+            cap,
+            single,
         };
         (Box::new(ch), log)
+    }
+
+    /// DYNVC_DATA_FIRST with a 4-byte Length field (Sp = 2).
+    fn data_first4(id: u8, total: u32, data: &[u8]) -> Vec<u8> {
+        let mut v = vec![0x28, id];
+        v.extend_from_slice(&total.to_le_bytes());
+        v.extend_from_slice(data);
+        v
     }
 
     fn feed(d: &mut Drdynvc, msg: &[u8]) -> Vec<Vec<u8>> {
@@ -661,7 +763,10 @@ mod tests {
         feed(&mut d, &[0x20, 0x03, 0x03, b'a', b'b']);
         let out = feed(&mut d, &[0x30, 0x03, b'c', b'd']);
         assert_eq!(out, vec![vec![0x40, 0x03]]);
-        assert_eq!(log.lock().unwrap().events, ["opened", "closed"]);
+        assert_eq!(
+            log.lock().unwrap().events,
+            ["opened", "Malformed", "closed"]
+        );
         assert!(log.lock().unwrap().msgs.is_empty());
     }
 
@@ -725,7 +830,10 @@ mod tests {
             feed(&mut d, &[0x70, 0x03, 0xE0, 0x00]),
             vec![vec![0x40, 0x03]]
         );
-        assert_eq!(log.lock().unwrap().events, ["opened", "closed"]);
+        assert_eq!(
+            log.lock().unwrap().events,
+            ["opened", "Compressed", "closed"]
+        );
         feed(&mut d, &create_req(3, "ECHO"));
         assert_eq!(
             feed(&mut d, &[0x60, 0x03, 0x10, 0xE0]),
@@ -741,13 +849,18 @@ mod tests {
             log: log_a.clone(),
             fail_on: Some(b'!'),
             tick_msg: None,
+            cap: None,
+            single: false,
         };
         let (b, log_b) = echo("B");
         let mut d = Drdynvc::new(vec![Box::new(a), b]);
         feed(&mut d, &create_req(1, "A"));
         feed(&mut d, &create_req(2, "B"));
         assert_eq!(feed(&mut d, &[0x30, 0x01, b'!']), vec![vec![0x40, 0x01]]);
-        assert_eq!(log_a.lock().unwrap().events, ["opened", "closed"]);
+        assert_eq!(
+            log_a.lock().unwrap().events,
+            ["opened", "HandlerError", "closed"]
+        );
         let out = feed(&mut d, &[0x30, 0x02, b'k']);
         assert_eq!(out, vec![vec![0x30, 0x02, b'r', b'e', b':', b'k']]);
         assert_eq!(log_b.lock().unwrap().events, ["opened"]);
@@ -761,6 +874,8 @@ mod tests {
             log,
             fail_on: None,
             tick_msg: Some(b"t".to_vec()),
+            cap: None,
+            single: false,
         };
         let mut d = Drdynvc::new(vec![Box::new(ch)]);
         let mut out = ChannelOut::default();
@@ -771,6 +886,105 @@ mod tests {
         assert_eq!(out.take(), vec![vec![0x30, 0x09, b't']]);
         d.tick(&mut out).unwrap();
         assert!(out.is_empty());
+    }
+
+    #[test]
+    fn reassembly_cap_closes_that_channel_only() {
+        let (a, log_a) = capped("A", Some(100), false);
+        let (b, log_b) = echo("B");
+        let mut d = Drdynvc::new(vec![a, b]);
+        feed(&mut d, &create_req(1, "A"));
+        feed(&mut d, &create_req(2, "B"));
+        // Exactly the cap is fine.
+        assert!(feed(&mut d, &data_first4(1, 100, &[1; 60])).is_empty());
+        feed(&mut d, &[&[0x30, 0x01][..], &[2; 40]].concat());
+        assert_eq!(log_a.lock().unwrap().msgs.len(), 1);
+        // One byte over: closed at DATA_FIRST, before anything is buffered.
+        let out = feed(&mut d, &data_first4(1, 101, &[1; 10]));
+        assert_eq!(out, vec![vec![0x40, 0x01]]);
+        assert_eq!(
+            log_a.lock().unwrap().events,
+            ["opened", "TooLarge", "closed"]
+        );
+        // The other channel keeps working.
+        let out = feed(&mut d, &[0x30, 0x02, b'k']);
+        assert_eq!(out, vec![vec![0x30, 0x02, b'r', b'e', b':', b'k']]);
+        assert_eq!(log_b.lock().unwrap().events, ["opened"]);
+    }
+
+    #[test]
+    fn default_cap_is_16_mib() {
+        let (ch, log) = echo("ECHO");
+        let mut d = Drdynvc::new(vec![ch]);
+        feed(&mut d, &create_req(3, "ECHO"));
+        let at_cap = data_first4(3, DEFAULT_MAX_MESSAGE as u32, &[0; 8]);
+        assert!(feed(&mut d, &at_cap).is_empty());
+        let over = data_first4(3, DEFAULT_MAX_MESSAGE as u32 + 1, &[0; 8]);
+        assert_eq!(feed(&mut d, &over), vec![vec![0x40, 0x03]]);
+        assert_eq!(log.lock().unwrap().events, ["opened", "TooLarge", "closed"]);
+        // A 4 GiB announcement is refused the same way.
+        feed(&mut d, &create_req(3, "ECHO"));
+        let huge = data_first4(3, u32::MAX, &[0; 8]);
+        assert_eq!(feed(&mut d, &huge), vec![vec![0x40, 0x03]]);
+    }
+
+    #[test]
+    fn compressed_data_mid_message_closes_cleanly_and_reopens_fresh() {
+        let (ch, log) = echo("ECHO");
+        let mut d = Drdynvc::new(vec![ch]);
+        feed(&mut d, &create_req(3, "ECHO"));
+        // Half a message, then compressed data.
+        feed(&mut d, &[0x20, 0x03, 0x06, b'a', b'b']);
+        assert_eq!(feed(&mut d, &[0x70, 0x03, 0xE0]), vec![vec![0x40, 0x03]]);
+        assert_eq!(
+            log.lock().unwrap().events,
+            ["opened", "Compressed", "closed"]
+        );
+        // Further fragments of the old message go nowhere.
+        assert!(feed(&mut d, &[0x30, 0x03, b'c', b'd']).is_empty());
+        // Reopened, the channel starts with no partial message.
+        feed(&mut d, &create_req(4, "ECHO"));
+        let out = feed(&mut d, &[0x30, 0x04, b'x']);
+        assert_eq!(out, vec![vec![0x30, 0x04, b'r', b'e', b':', b'x']]);
+        assert_eq!(log.lock().unwrap().msgs, vec![b"x".to_vec()]);
+    }
+
+    #[test]
+    fn second_create_replaces_by_default() {
+        let (ch, log) = echo("ECHO");
+        let mut d = Drdynvc::new(vec![ch]);
+        feed(&mut d, &create_req(3, "ECHO"));
+        let out = feed(&mut d, &create_req(4, "ECHO"));
+        assert_eq!(out[0], vec![0x10, 0x04, 0, 0, 0, 0]);
+        assert_eq!(
+            log.lock().unwrap().events,
+            ["opened", "second", "closed", "opened"]
+        );
+        // Old id is gone, new id works.
+        assert!(feed(&mut d, &[0x30, 0x03, b'x']).is_empty());
+        assert_eq!(feed(&mut d, &[0x30, 0x04, b'y']).len(), 1);
+    }
+
+    #[test]
+    fn second_create_refused_by_a_single_instance_channel() {
+        let (ch, log) = capped("ONE", None, true);
+        let mut d = Drdynvc::new(vec![ch]);
+        feed(&mut d, &create_req(3, "ONE"));
+        let out = feed(&mut d, &create_req(4, "ONE"));
+        // E_ACCESSDENIED, little-endian.
+        assert_eq!(out, vec![vec![0x10, 0x04, 0x05, 0x00, 0x07, 0x80]]);
+        assert_eq!(log.lock().unwrap().events, ["opened", "second"]);
+        // The first instance is untouched; the refused id goes nowhere.
+        assert_eq!(feed(&mut d, &[0x30, 0x03, b'x']).len(), 1);
+        assert!(feed(&mut d, &[0x30, 0x04, b'y']).is_empty());
+        // After the first closes, a new instance is welcome.
+        feed(&mut d, &[0x40, 0x03]);
+        let out = feed(&mut d, &create_req(5, "ONE"));
+        assert_eq!(out[0], vec![0x10, 0x05, 0, 0, 0, 0]);
+        // The same id again (the server reusing its id) is not a second
+        // instance and keeps the replace behaviour.
+        let out = feed(&mut d, &create_req(5, "ONE"));
+        assert_eq!(out[0], vec![0x10, 0x05, 0, 0, 0, 0]);
     }
 
     #[test]
