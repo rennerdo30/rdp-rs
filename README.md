@@ -15,9 +15,9 @@ MD4, MD5, HMAC-MD5, RC4 and the ASN.1 DER/BER/PER encodings. Only TLS
 > path; the graphics pipeline (GFX, H.264) is experimental. Expect rough edges
 > and please report them.
 
-## RDP coverage: about 62 %
+## RDP coverage: about 78 %
 
-Of the 38 features a full RDP client offers (below), 22 are done and 3 partly (62 %, counting a partial one as half). That covers the everyday desktop: logon with NLA, the picture, keyboard and mouse, clipboard, drives, printers, smart cards and sound. The missing ones are mostly special cases and enterprise features.
+Of the 38 features a full RDP client offers (below), 29 are done and 1 partly (78 %, counting a partial one as half). That covers the everyday desktop: logon with NLA, the picture, keyboard and mouse, clipboard, drives, printers, smart cards and sound. The missing ones are mostly special cases and enterprise features.
 
 <details>
 <summary>Feature list</summary>
@@ -48,7 +48,7 @@ Of the 38 features a full RDP client offers (below), 22 are done and 3 partly (6
 |  | Multiple monitors | ✅ | MS-RDPBCGR 2.2.1.3.6: any chosen monitors, one window each |
 | Input | Keyboard and mouse (fast-path) | ✅ | MS-RDPBCGR 2.2.8.1.2 |
 |  | Unicode keyboard input | ✅ | touch keyboard, emoji panel, injected text |
-|  | Touch and pen | — | MS-RDPEI |
+|  | Touch and pen | ✅ | MS-RDPEI: multi-touch and pen (pressure, tilt) from the session windows |
 | Device redirection | Clipboard: text and files | ✅ | MS-RDPECLIP |
 |  | Drives | ✅ | MS-RDPEFS |
 |  | Printers (Easy Print) | ✅ | MS-RDPEPC |
@@ -85,10 +85,10 @@ Windows: download the setup or the portable zip from
 
 ## Not yet
 
-Kerberos, server certificate validation (the fingerprint is printed), the
-graphics pipeline (RDPGFX / H.264), RemoteFX, drawing orders, bulk
-compression, audio input (microphone), RD Gateway, UDP transport,
-auto-reconnect, RDS licensing (LICENSE_REQUEST), legacy RDP security.
+UDP transport, RD Gateway over RPC/HTTP, legacy RDP security (no TLS),
+serial ports, USB, cameras, plug and play devices, video redirection and
+shadowing. Everything listed as done above is built and unit tested; most of
+it has not yet been tried against every kind of Windows server.
 
 ## Layout
 
