@@ -538,6 +538,8 @@ fn snapshot_ui(
         ("-helper-drop-off", || ui::sample_helper_drop(false)),
         ("-helper-panel-session", || ui::sample_helper_panel(3, true)),
         ("-helper-panel-failed", || ui::sample_helper_panel(3, false)),
+        ("-helper-panel-blocked", || ui::sample_helper_blocked(false)),
+        ("-helper-panel-pending", || ui::sample_helper_blocked(true)),
         ("-helper-panel-transfers", || {
             ui::sample_helper_panel(0, true)
         }),

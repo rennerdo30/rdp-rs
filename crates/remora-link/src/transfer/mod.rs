@@ -722,24 +722,33 @@ impl Engine {
             }
             return;
         }
-        let reject = |code| Message::FileReject {
-            id: o.id,
-            reason: code,
+        // Refused before the user sees it: the peer hears why, and the app
+        // gets a Failed event (no Offered came first) to say so once.
+        let refused = match () {
+            _ if !self.allow_receive => Some((reason::DISABLED, "receiving files is off")),
+            _ if o.block_size != BLOCK_SIZE => Some((reason::PROTOCOL, "unsupported block size")),
+            _ if self.receiving.len() >= MAX_ACTIVE => Some((reason::BUSY, "too many transfers")),
+            _ => None,
         };
-        if !self.allow_receive {
-            self.out.push(reject(reason::DISABLED));
-            return;
-        }
-        if o.block_size != BLOCK_SIZE {
-            self.out.push(reject(reason::PROTOCOL));
-            return;
-        }
-        if self.receiving.len() >= MAX_ACTIVE {
-            self.out.push(reject(reason::BUSY));
+        if let Some((code, detail)) = refused {
+            self.out.push(Message::FileReject {
+                id: o.id,
+                reason: code,
+            });
+            self.events.push_back(TransferEvent::Failed {
+                id: o.id,
+                direction: Direction::Receive,
+                reason: code,
+                by_peer: false,
+                detail: detail.into(),
+            });
             return;
         }
         if let Err(e) = path::check_name(&o.name) {
-            self.out.push(reject(reason::BAD_NAME));
+            self.out.push(Message::FileReject {
+                id: o.id,
+                reason: reason::BAD_NAME,
+            });
             self.events.push_back(TransferEvent::Failed {
                 id: o.id,
                 direction: Direction::Receive,

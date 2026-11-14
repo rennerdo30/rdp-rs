@@ -227,6 +227,15 @@ fn disabled_direction_rejects_and_send_refuses() {
             reason: reason::DISABLED
         }]
     );
+    // The user never sees the offer; the app hears of the refusal.
+    assert!(matches!(
+        rx.next_event(),
+        Some(TransferEvent::Failed {
+            reason: reason::DISABLED,
+            by_peer: false,
+            ..
+        })
+    ));
     assert!(rx.next_event().is_none());
     let mut tx = Engine::default();
     assert!(tx.send("x", Box::new(MemSource::new(vec![], 0))).is_err());
@@ -855,4 +864,26 @@ fn shell_active_files_are_stored_neutral_and_marked_twice() {
     assert_eq!(p.dir.get("intranet.url.download"), Some(file));
     assert_eq!(p.dir.marked_names(), ["intranet.url.download.remora-part"]);
     assert_eq!(p.dir.finished_names(), ["intranet.url.download"]);
+}
+
+/// An offer refused before the user saw it (direction off, too many
+/// transfers) is told to the app once, as a Failed event without an Offered.
+#[test]
+fn an_offer_refused_unseen_is_reported_to_the_app() {
+    let mut rx = Engine::default();
+    rx.set_connected(true);
+    rx.handle(&Message::FileOffer(offer(6, "a.txt", 1)));
+    assert_eq!(
+        rx.take_messages(),
+        [Message::FileReject {
+            id: [6; 16],
+            reason: reason::DISABLED
+        }]
+    );
+    let ev = events(&mut rx);
+    assert!(
+        !ev.iter()
+            .any(|e| matches!(e, TransferEvent::Offered { .. }))
+    );
+    assert_eq!(failed(&ev), Some((reason::DISABLED, false)));
 }

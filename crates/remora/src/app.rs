@@ -1226,7 +1226,8 @@ impl App {
             | Action::ShowInFolder(_)
             | Action::PickSendFiles(_)
             | Action::BrowseDownloads
-            | Action::ForgetHelper(_) => {}
+            | Action::ForgetHelper(_)
+            | Action::RetryHelperPairing(_) => {}
         }
     }
 
@@ -2082,6 +2083,7 @@ impl ApplicationHandler<UserEvent> for App {
                             );
                             ui.panel_pinned = self.settings.panel_pinned;
                             ui.helper_pins = crate::helper_app::pinned_servers();
+                            ui.client_fp = crate::link_key::fingerprint();
                             if self.settings.check_updates {
                                 check_for_update(
                                     self.proxy.clone(),

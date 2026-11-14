@@ -30,7 +30,8 @@ pub use sidebar::{Divider, sample_rail, sample_resized};
 
 pub use helper::{
     HelperView, sample_cards as sample_helper_cards, sample_drop as sample_helper_drop,
-    sample_helper_form, sample_helper_panel, sample_pairing as sample_helper_pairing,
+    sample_helper_blocked, sample_helper_form, sample_helper_panel,
+    sample_pairing as sample_helper_pairing,
 };
 pub use home::ThumbDue;
 pub mod session_view;
@@ -137,10 +138,12 @@ pub enum Field {
     AppDir,
     /// The Home view's quick connect field.
     Quick,
+    /// Editor, Sharing page: the admin-set helper fingerprint.
+    HelperFingerprint,
 }
 
 /// Fields cleared for a new connection or group.
-const FORM: [Field; 11] = [
+const FORM: [Field; 12] = [
     Field::Name,
     Field::Host,
     Field::Port,
@@ -152,6 +155,7 @@ const FORM: [Field; 11] = [
     Field::AppName,
     Field::AppArgs,
     Field::AppDir,
+    Field::HelperFingerprint,
 ];
 
 /// One sidebar row: a group, a connection, or one of a connection's
@@ -344,6 +348,8 @@ pub enum Hit {
     SendFiles(u64),
     ShowTransfers(u64),
     ForgetHelper(u64),
+    /// Pairing was blocked after aborted attempts: try again.
+    RetryHelperPairing(u64),
     /// Editor: a helper switch (0 links, 1 receive, 2 send, 3 links
     /// without asking), the download folder, Forget; the forget question.
     FormHelper(u8),
@@ -591,6 +597,8 @@ pub enum Action {
     BrowseDownloads,
     /// Forget the helper pinned for this server (`host:port`).
     ForgetHelper(String),
+    /// Lift a tab's "pairing blocked" (its helper's next open is answered).
+    RetryHelperPairing(u64),
 }
 
 pub enum Key {
@@ -649,7 +657,7 @@ pub struct Ui {
     /// Key derivation running.
     pub unlocking: bool,
     vault_error: Option<String>,
-    fields: [TextField; 19],
+    fields: [TextField; 20],
     size: usize,
     focus: Option<Field>,
     pub tabs: Vec<Tab>,
@@ -756,6 +764,9 @@ pub struct Ui {
     pub dropping: usize,
     /// Servers with a paired helper (`host:port`; the app fills it in).
     pub helper_pins: std::collections::HashSet<String>,
+    /// This PC's Remora-Link key fingerprint (Settings → Security), for
+    /// `remora-agent trust-client` on a server. Empty: not loaded.
+    pub client_fp: String,
     /// Asking to forget a paired helper: server id and host.
     pub forget: Option<(String, String)>,
 }
@@ -851,6 +862,7 @@ impl Ui {
             helper_ov: Default::default(),
             dropping: 0,
             helper_pins: Default::default(),
+            client_fp: String::new(),
             forget: None,
         };
         m.fields[Field::Password as usize] = TextField::secret();
@@ -976,6 +988,8 @@ impl Ui {
         self.field_mut(Field::Password).set("");
         self.field_mut(Field::GroupPath).set(&c.group);
         self.field_mut(Field::Gateway).set(&c.gateway);
+        self.field_mut(Field::HelperFingerprint)
+            .set(c.options.helper.fingerprint.as_deref().unwrap_or(""));
         self.kerberos = c.kerberos;
         self.size = size_index(c.width, c.height);
         self.opts = c.options.clone();
@@ -1150,6 +1164,13 @@ impl Ui {
                     .into(),
             );
         }
+        let fp = self.field(Field::HelperFingerprint).text.trim().to_string();
+        if !fp.is_empty() && remora_link::parse_fingerprint(&fp).is_none() {
+            return Err(
+                "The helper fingerprint is 40 hex digits, as `remora-agent fingerprint` prints it."
+                    .into(),
+            );
+        }
         let (width, height) = self.form_size();
         // Pin and history belong to the saved connection, not the form.
         let kept = self
@@ -1164,7 +1185,12 @@ impl Ui {
             user,
             width,
             height,
-            options: self.opts.clone(),
+            options: {
+                let mut o = self.opts.clone();
+                let fp = self.field(Field::HelperFingerprint).text.trim().to_string();
+                o.helper.fingerprint = (!fp.is_empty()).then_some(fp);
+                o
+            },
             password: self.form_password(inherit.credentials),
             group: normalize_path(&self.field(Field::GroupPath).text),
             gateway: self.field(Field::Gateway).text.trim().to_string(),
@@ -1667,7 +1693,13 @@ impl Ui {
         }
         match self.form_page {
             0 => {}
-            3 if !self.form_inherit().sharing => return vec![Field::FormDrive],
+            3 if !self.form_inherit().sharing => {
+                let mut v = vec![Field::FormDrive];
+                if self.group_edit.is_none() {
+                    v.push(Field::HelperFingerprint);
+                }
+                return v;
+            }
             _ => return Vec::new(),
         }
         let mut v = vec![Field::Name];
@@ -1985,6 +2017,7 @@ impl Ui {
             | Hit::SendFiles(_)
             | Hit::ShowTransfers(_)
             | Hit::ForgetHelper(_)
+            | Hit::RetryHelperPairing(_)
             | Hit::FormHelper(_)
             | Hit::FormDownloads
             | Hit::FormForgetHelper
@@ -3936,6 +3969,22 @@ impl Ui {
                 "A master password lets Remora save passwords and back up",
                 "Set up…",
                 Hit::SetupVault,
+            );
+            y += row + p(28.0);
+        }
+        if !self.client_fp.is_empty() {
+            let fp = self.client_fp.clone();
+            let cells = self.card(cv, x, y, w, &[row]);
+            self.row_text(
+                cv,
+                te,
+                f,
+                cells[0],
+                Some(Icon::ShieldCheck),
+                "This PC for server helpers",
+                &format!("Fingerprint {fp}"),
+                false,
+                p(12.0),
             );
             y += row + p(28.0);
         }
@@ -7281,6 +7330,7 @@ fn session_action(r: &Connection, password: &str, app: Option<&AppEntry>) -> Act
 pub fn sample_settings(vault: bool) -> Ui {
     let mut m = sample(false);
     m.settings_open = true;
+    m.client_fp = "8c41 d2e0 77b3 19fa 0e58 c6a2 4b9d 31e7 f05c a813".into();
     if vault {
         m.store.vault_sample();
         m.change_master = true;

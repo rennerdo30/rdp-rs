@@ -111,6 +111,8 @@ pub enum Command {
     SendFiles(u64),
     ShowTransfers(u64),
     ForgetHelper(u64),
+    /// Pairing was blocked after aborted attempts: allow it again.
+    RetryHelperPairing(u64),
     Record(u64),
     /// Show or hide the session panel (its toolbar button, Ctrl+Alt+P).
     Panel,
@@ -163,6 +165,7 @@ impl Command {
             Command::SendFiles(id) => Hit::SendFiles(id),
             Command::ShowTransfers(id) => Hit::ShowTransfers(id),
             Command::ForgetHelper(id) => Hit::ForgetHelper(id),
+            Command::RetryHelperPairing(id) => Hit::RetryHelperPairing(id),
             Command::Record(id) => Hit::Record(id),
             Command::Panel => Hit::Drawer,
             Command::PinPanel => Hit::PanelPin,
@@ -653,6 +656,18 @@ impl Ui {
                         Lead::Icon(Icon::Download, Tone::Neutral),
                         Chip::None,
                         "Show",
+                    );
+                }
+                if t.helper.status == super::helper::Status::Blocked {
+                    push(
+                        Command::RetryHelperPairing(id),
+                        s,
+                        "Retry helper pairing".into(),
+                        "Pairing was blocked after attempts ended unanswered".into(),
+                        "helper agent pairing retry blocked unblock",
+                        Lead::Icon(Icon::Refresh, Tone::Warning),
+                        Chip::None,
+                        "Retry",
                     );
                 }
                 if self
