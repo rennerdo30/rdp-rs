@@ -24,6 +24,11 @@ impl<'a> Reader<'a> {
         &self.buf[self.pos..]
     }
 
+    /// The buffer from offset `start` (at most the current position) on.
+    pub fn buf_from(&self, start: usize) -> &'a [u8] {
+        &self.buf[start.min(self.pos)..]
+    }
+
     pub fn bytes(&mut self, n: usize) -> Result<&'a [u8]> {
         if self.remaining() < n {
             return Err(Error::Protocol(format!(

@@ -263,6 +263,7 @@ fn main() {
     cfg.port = args.port;
     cfg.domain = args.domain.clone();
     cfg.license_store = settings::license_dir();
+    cfg.bitmap_cache_dir = settings::bitmap_cache_dir(&args.host, args.port);
     if let Some((host, port)) = &args.gateway {
         let mut gw = rdp::GatewayConfig::new(host, &args.user, &password);
         gw.port = *port;

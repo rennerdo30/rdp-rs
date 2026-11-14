@@ -51,6 +51,7 @@ pub mod log;
 pub mod mcs;
 pub mod monitor;
 pub mod ntlm;
+pub mod orders;
 pub mod pdu;
 pub mod pointer;
 pub mod rail;

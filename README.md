@@ -37,8 +37,8 @@ Of the 38 features a full RDP client offers (below), 22 are done and 3 partly (6
 |  | Network auto-detect | ✅ | MS-RDPBCGR 2.2.14: "Detect automatically" speed; RTT and bandwidth answered, results in the session panel |
 | Graphics | Bitmap updates (planar, interleaved RLE) | ✅ | MS-RDPBCGR, MS-RDPEGDI |
 |  | Bulk compression (MPPC, NCRUSH, XCRUSH) | ✅ | MS-RDPBCGR 3.1.8, MS-RDPEGDI |
-|  | Drawing orders and glyph cache | — | MS-RDPEGDI |
-|  | Persistent bitmap cache | — | MS-RDPBCGR 2.2.1.17 |
+|  | Drawing orders and glyph cache | ✅ | MS-RDPEGDI: primary, secondary and offscreen orders; glyph, brush and bitmap caches |
+|  | Persistent bitmap cache | ✅ | MS-RDPBCGR 2.2.1.17: kept per server in `%LOCALAPPDATA%\rdp-rs\bitmap-cache`, 100 MB cap |
 |  | Graphics pipeline: ZGFX, surfaces, ClearCodec, Progressive | ✅ | MS-RDPEGFX (experimental) |
 |  | H.264 AVC420 | ✅ | MS-RDPEGFX 2.2.4.4 |
 |  | H.264 AVC444 | ✅ | MS-RDPEGFX 2.2.4.5, 2.2.4.6 (AVC444v2) |
