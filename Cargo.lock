@@ -1769,7 +1769,7 @@ checksum = "20675572f6f24e9e76ef639bc5552774ed45f1c30e2951e1e99c59888861c539"
 
 [[package]]
 name = "rdp"
-version = "0.1.0-beta.5"
+version = "0.1.0-beta.6"
 dependencies = [
  "ring",
  "rustls",
@@ -1804,7 +1804,7 @@ dependencies = [
 
 [[package]]
 name = "remora"
-version = "0.1.0-beta.5"
+version = "0.1.0-beta.6"
 dependencies = [
  "argon2",
  "chacha20poly1305 0.11.0",
@@ -1827,7 +1827,7 @@ dependencies = [
 
 [[package]]
 name = "remora-agent"
-version = "0.1.0-beta.5"
+version = "0.1.0-beta.6"
 dependencies = [
  "remora-link",
  "windows",
@@ -1836,7 +1836,7 @@ dependencies = [
 
 [[package]]
 name = "remora-link"
-version = "0.1.0-beta.5"
+version = "0.1.0-beta.6"
 dependencies = [
  "blake3",
  "getrandom 0.4.3",
@@ -1848,7 +1848,7 @@ dependencies = [
 
 [[package]]
 name = "remora-update"
-version = "0.1.0-beta.5"
+version = "0.1.0-beta.6"
 dependencies = [
  "serde_json",
  "sha2 0.11.1",

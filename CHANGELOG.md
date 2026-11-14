@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.1.0-beta.6
+
 - **In-app updates start again after an update.** A Remora that the setup had started (after the previous update) failed to start the next setup with "could not start the setup: The request is not supported (os error 50)": it handed its stale standard handles on to the setup. Remora now starts the setup without them. Until you run this version, close Remora and start it from the Start menu before you click **Update**.
 
 ## 0.1.0-beta.5
