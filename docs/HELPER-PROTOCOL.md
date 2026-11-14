@@ -143,7 +143,8 @@ middle playing the helper can therefore drop the channel whenever the code
 it would cause does not match the real helper's, and try again, silently
 (306 tries matched two digits in a test). So Remora counts every Ctl session
 that finished the handshake with an **unpinned or changed** helper key and
-ended (closed, failed or rejected by the helper) before **Remora's user**
+ended (closed, failed, rejected by the helper, or cut off with the whole
+RDP connection) before **Remora's user**
 answered the code. The user's own answer, and sessions with a pinned key or
 an admin-set fingerprint, never count.
 

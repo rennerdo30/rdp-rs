@@ -941,3 +941,29 @@ fn the_pre_tls_buffer_is_capped_in_bytes() {
     r.ctl.process(&[0], &mut out).unwrap_err();
     assert!(matches!(r.handle.state(), HelperState::Failed(_)));
 }
+
+/// Dropping the whole RDP connection mid-pairing is no free retry: each
+/// such attempt counts for the server like a closed channel.
+#[test]
+fn a_pairing_cut_off_by_a_reconnect_counts_for_the_server() {
+    let mut r = Rig::new("grind-reconnect");
+    let attempts = r.dir.join("helper-attempts.json");
+    r.handle.set_pairing_policy(Some(attempts.clone()), None);
+    let mitm = StaticKey::generate().unwrap();
+    for _ in 0..3 {
+        r.handle.set_transport_protocol(1);
+        let _h = r.connect(mitm.clone());
+        assert!(matches!(
+            r.handle.state(),
+            HelperState::AwaitingPairing { .. }
+        ));
+        // The connection drops; the tab reconnects (no channel close seen).
+        let mut fresh = r.handle.reattach();
+        r.bulk = fresh.pop().unwrap();
+        r.ctl = fresh.pop().unwrap();
+    }
+    assert!(remora_link::AttemptLog::is_blocked(
+        &attempts,
+        "server:3389"
+    ));
+}

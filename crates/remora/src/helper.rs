@@ -959,6 +959,10 @@ impl HelperHandle {
             c.generation = c.generation.wrapping_add(1);
             c.ctl = None;
             c.bulk = None;
+            // A pairing cut off with the whole connection still counts for
+            // the server (dropping the RDP connection must not be a free
+            // retry); the per-connection count starts over below.
+            c.end_pairing();
             c.reset_ctl();
             c.transport = Transport::Unknown;
             c.aborts = 0;
