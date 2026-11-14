@@ -15,17 +15,69 @@ pub use gdi::GdiCapturer;
 pub use input::SendInputSink;
 
 use std::io;
+use std::time::Duration;
 
-use super::{Backend, CaptureMode};
+use super::{Backend, CaptureMode, Capturer, Frame};
 use crate::info;
+
+/// True when every pixel of the frame has the same colour (alpha ignored).
+pub fn uniform(f: &Frame<'_>) -> bool {
+    let row = f.width as usize * 4;
+    let Some(first) = f.pixels.get(..3) else {
+        return true;
+    };
+    (0..f.height as usize).all(|y| {
+        f.pixels[y * f.stride..y * f.stride + row]
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .all(|p| &p[..3] == first)
+    })
+}
+
+/// Whether a capturer's first frame (the whole screen) is one colour; None
+/// when no frame came within a few tries.
+fn first_frame_uniform(c: &mut dyn Capturer) -> Option<bool> {
+    for _ in 0..5 {
+        if let Ok(Some(f)) = c.next_frame(Duration::from_millis(400)) {
+            return Some(uniform(&f));
+        }
+    }
+    None
+}
+
+/// Some display drivers give Desktop Duplication a black picture while GDI
+/// sees the desktop (the Venera virtio-gpu driver in QEMU guests): true when
+/// a probe duplication's first frame is one colour and GDI's is not.
+fn duplication_is_blank() -> bool {
+    let Ok(mut probe) = DuplicationCapturer::new() else {
+        return false;
+    };
+    if first_frame_uniform(&mut probe) != Some(true) {
+        return false;
+    }
+    drop(probe);
+    GdiCapturer::new()
+        .ok()
+        .and_then(|mut g| first_frame_uniform(&mut g))
+        == Some(false)
+}
 
 /// The capturer for the primary output and an input sink mapped to it.
 /// Automatic takes DXGI Desktop Duplication and falls back to GDI where it
-/// is not available (remote sessions such as Windows Sandbox's desktop).
+/// is not available (remote sessions such as Windows Sandbox's desktop) or
+/// delivers only a black picture where GDI sees the desktop.
 pub fn backend(mode: CaptureMode) -> io::Result<Backend> {
     let dxgi = match mode {
         CaptureMode::Gdi => None,
         CaptureMode::Dxgi => Some(DuplicationCapturer::new()?),
+        CaptureMode::Auto if duplication_is_blank() => {
+            info!(
+                "Desktop Duplication delivers a black picture on this display driver while GDI sees the desktop; capturing with GDI"
+            );
+            None
+        }
+        // A fresh duplication: its first frame is the whole screen.
         CaptureMode::Auto => match DuplicationCapturer::new() {
             Ok(c) => Some(c),
             Err(e) => {
@@ -44,5 +96,32 @@ pub fn backend(mode: CaptureMode) -> io::Result<Backend> {
             Box::new(GdiCapturer::new()?),
             Box::new(SendInputSink::new((0, 0))),
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn frame(px: &[u8], w: u16, h: u16, stride: usize) -> Frame<'_> {
+        Frame {
+            width: w,
+            height: h,
+            stride,
+            pixels: px,
+            damage: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn uniform_ignores_alpha_and_row_padding() {
+        // 2 x 2, stride 12 (4 bytes of padding per row).
+        let mut px = vec![0u8; 24];
+        assert!(uniform(&frame(&px, 2, 2, 12)), "all black");
+        px[3] = 0xFF; // alpha only
+        px[8..12].copy_from_slice(&[9, 9, 9, 9]); // padding only
+        assert!(uniform(&frame(&px, 2, 2, 12)));
+        px[16] = 1; // a real pixel in the second row
+        assert!(!uniform(&frame(&px, 2, 2, 12)));
     }
 }

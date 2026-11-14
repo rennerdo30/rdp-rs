@@ -3,7 +3,7 @@
 ## Unreleased
 
 - **The programs start on a clean Windows.** Remora, the server helper and Remora Host needed the Visual C++ runtime (`vcruntime140.dll`), which a fresh install, Server Core or Windows Sandbox does not have: they did not start there at all. The runtime is now built in.
-- **Remora Host:** a GDI screen capture when Desktop Duplication is not available (remote sessions such as Windows Sandbox, no GPU), chosen automatically or with `--capture gdi`; `set-password --password-file` for scripted tests. `scripts/host-sandbox-test.ps1` runs the server in Windows Sandbox and connects Remora to it.
+- **Remora Host:** a GDI screen capture when Desktop Duplication is not available (remote sessions such as Windows Sandbox, no GPU), chosen automatically (also when Desktop Duplication delivers only a black picture, as on the Venera virtio-gpu driver in QEMU guests) or with `--capture gdi`; `set-password --password-file` for scripted tests. `scripts/host-sandbox-test.ps1` runs the server in Windows Sandbox and `scripts/host-vm-test.ps1` in a throwaway clone of the renner.dev OS lab's Windows VM, and both connect Remora to it and check that the picture is not blank.
 - **`remora --expect-fingerprint SHA256`** accepts only that server certificate in the command-line mode.
 ## 0.1.0-beta.7
 

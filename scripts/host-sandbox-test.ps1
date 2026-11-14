@@ -66,6 +66,27 @@ function Wsb([string[]]$Arguments, [int]$Seconds = 120) {
     $r.Out
 }
 
+# Fails when the screenshot is one colour (a black or empty capture): the
+# connection worked but the server saw no picture. Samples a 32 x 32 grid.
+function Assert-Picture([string]$Png) {
+    Add-Type -AssemblyName System.Drawing
+    $bmp = [Drawing.Bitmap]::new($Png)
+    try {
+        $colours = [Collections.Generic.HashSet[int]]::new()
+        for ($i = 0; $i -lt 32; $i++) {
+            for ($j = 0; $j -lt 32; $j++) {
+                $x = [int](($bmp.Width - 1) * $i / 31)
+                $y = [int](($bmp.Height - 1) * $j / 31)
+                [void]$colours.Add($bmp.GetPixel($x, $y).ToArgb())
+            }
+        }
+        if ($colours.Count -lt 2) {
+            throw "the picture is a single colour ($('{0:X8}' -f ($colours | Select-Object -First 1))): the server captured nothing"
+        }
+        Write-Host "Picture check: $($colours.Count) colours in a 32 x 32 sample"
+    } finally { $bmp.Dispose() }
+}
+
 # --- binaries
 Push-Location $root
 try {
@@ -156,6 +177,7 @@ try {
     Write-Host $r.Out
     if ($r.Err) { Write-Host $r.Err }
     if ($r.Code -or -not (Test-Path -LiteralPath $png)) { throw "the client failed ($($r.Code))" }
+    Assert-Picture $png
     Write-Host "PASS: Remora connected and saved $png"
 
     if ($Interactive) {
