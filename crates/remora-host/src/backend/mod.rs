@@ -86,15 +86,26 @@ pub trait Authenticator: Send + Sync {
 /// The capturer and input sink of the platform's real desktop.
 pub type Backend = (Box<dyn Capturer>, Box<dyn InputSink>);
 
+/// How the Windows backend captures the screen.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum CaptureMode {
+    /// Desktop Duplication, or GDI where it is not available.
+    #[default]
+    Auto,
+    Dxgi,
+    Gdi,
+}
+
 /// The platform's backend: the Windows desktop, or an error that says this
 /// platform is not supported yet.
-pub fn os_backend() -> io::Result<Backend> {
+pub fn os_backend(mode: CaptureMode) -> io::Result<Backend> {
     #[cfg(windows)]
     {
-        windows::backend()
+        windows::backend(mode)
     }
     #[cfg(not(windows))]
     {
+        let _ = mode;
         unsupported::backend()
     }
 }

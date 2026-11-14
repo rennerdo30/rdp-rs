@@ -58,6 +58,9 @@ function Invoke-Bounded([string]$File, [string[]]$Arguments, [int]$Seconds) {
 }
 
 $cargo = (Get-Command cargo -ErrorAction Stop).Source
+# The C runtime linked in, as release.yml does: a clean Windows has no
+# vcruntime140.dll. For this process and its cargo only.
+$env:RUSTFLAGS = '-C target-feature=+crt-static'
 if (!$BinDir) {
     Invoke-Bounded $cargo @('build', '--release', '--locked', '-j', '8', '-p', 'remora', '-p', 'remora-agent') 3600 | Out-Null
     $meta = Invoke-Bounded $cargo @('metadata', '--format-version', '1', '--no-deps') 120 | ConvertFrom-Json

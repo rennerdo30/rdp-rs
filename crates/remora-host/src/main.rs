@@ -15,11 +15,12 @@ const USAGE: &str = "\
 Remora Host (experimental): an RDP server for Remora and other RDP clients.
 
 Usage:
-  remora-host set-password [--data-dir DIR]
+  remora-host set-password [--data-dir DIR] [--password-file FILE]
       Asks for a new host password twice (not shown) and stores its
       Argon2id hash. Clients log on with this password and any user name.
+      --password-file takes the file's first line instead (scripted tests).
   remora-host run [--port 3390] [--bind 0.0.0.0] [--demo [WIDTHxHEIGHT]]
-                  [--data-dir DIR] [--verbose]
+                  [--capture auto|dxgi|gdi] [--data-dir DIR] [--verbose]
       Serves this machine's desktop (Windows), or with --demo an animated
       test pattern that shows the input it receives (any platform; nothing
       is captured or typed). Needs a password (set-password).
@@ -38,6 +39,10 @@ struct Options {
     demo: Option<(u16, u16)>,
     data_dir: Option<PathBuf>,
     verbose: bool,
+    /// `set-password --password-file`: the password's first line, for
+    /// scripted tests (the sandbox test).
+    password_file: Option<PathBuf>,
+    capture: backend::CaptureMode,
 }
 
 fn parse_size(s: &str) -> Option<(u16, u16)> {
@@ -56,6 +61,8 @@ fn parse_args(args: &[String]) -> Result<Options, String> {
         demo: None,
         data_dir: None,
         verbose: false,
+        password_file: None,
+        capture: backend::CaptureMode::Auto,
     };
     while let Some(a) = it.next() {
         let mut value = |name: &str| it.next().cloned().ok_or(format!("{name} needs a value"));
@@ -73,6 +80,15 @@ fn parse_args(args: &[String]) -> Result<Options, String> {
                 )
             }
             "--data-dir" => o.data_dir = Some(PathBuf::from(value("--data-dir")?)),
+            "--password-file" => o.password_file = Some(PathBuf::from(value("--password-file")?)),
+            "--capture" => {
+                o.capture = match value("--capture")?.as_str() {
+                    "auto" => backend::CaptureMode::Auto,
+                    "dxgi" => backend::CaptureMode::Dxgi,
+                    "gdi" => backend::CaptureMode::Gdi,
+                    other => return Err(format!("--capture {other:?}: use auto, dxgi or gdi")),
+                }
+            }
             "--verbose" | "-v" => o.verbose = true,
             "--demo" => {
                 let size = match it.peek() {
@@ -99,6 +115,16 @@ fn data_dir(o: &Options) -> Result<PathBuf, String> {
 
 fn set_password(o: &Options) -> Result<(), String> {
     let dir = data_dir(o)?;
+    if let Some(file) = &o.password_file {
+        let text = Zeroizing::new(
+            std::fs::read_to_string(file)
+                .map_err(|e| format!("cannot read {}: {e}", file.display()))?,
+        );
+        let line = text.lines().next().unwrap_or("");
+        auth::set_password(&dir, line).map_err(|e| e.to_string())?;
+        println!("Password set ({}).", auth::password_path(&dir).display());
+        return Ok(());
+    }
     let first = Zeroizing::new(
         rpassword::prompt_password("New host password: ").map_err(|e| e.to_string())?,
     );
@@ -151,7 +177,7 @@ fn run(o: &Options) -> Result<(), String> {
             let (c, i) = demo::demo(w, h, true, true);
             (Box::new(c), Box::new(i))
         }
-        None => backend::os_backend().map_err(|e| e.to_string())?,
+        None => backend::os_backend(o.capture).map_err(|e| e.to_string())?,
     };
     let (w, h) = capturer.size();
 

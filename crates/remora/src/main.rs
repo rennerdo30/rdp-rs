@@ -94,6 +94,9 @@ struct Args {
     multimon: bool,
     /// `--kerberos`: NLA through Windows SSPI Negotiate (Kerberos, NTLM fallback).
     kerberos: bool,
+    /// `--expect-fingerprint`: the server certificate's SHA-256 (hex, any
+    /// separators); any other certificate is refused.
+    expect_fingerprint: Option<String>,
 }
 
 fn usage() -> ! {
@@ -104,6 +107,7 @@ fn usage() -> ! {
          \x20           [--compression off|rdp4|rdp5|rdp6|rdp61]\n\
          \x20           [--gfx]   (graphics pipeline, MS-RDPEGFX)\n\
          \x20           [--surface-commands] [--drawing-orders]   (experimental picture paths)\n\
+         \x20           [--expect-fingerprint SHA256]   (accept only this server certificate)\n\
          \x20           [--multimon]   (all local monitors, MS-RDPBCGR 2.2.1.3.6)\n\
          \x20           [--kerberos]   (Windows Negotiate: Kerberos, NTLM fallback;\n\
          \x20                           without -u: single sign-on as the logged-on user)\n\
@@ -148,6 +152,7 @@ fn parse_args() -> Args {
                 ));
             }
             "--screenshot" => a.screenshot = Some(val()),
+            "--expect-fingerprint" => a.expect_fingerprint = Some(val()),
             "--record" => a.record = Some(val()),
             "--snapshot-ui" => a.snapshot_ui = Some(val()),
             "--only" => a.snapshot_only = Some(val()),
@@ -312,6 +317,22 @@ fn main() {
     }
     cfg.surface_commands = args.surface_commands;
     cfg.drawing_orders = args.drawing_orders;
+    if let Some(expected) = &args.expect_fingerprint {
+        let want = normalize_fingerprint(expected);
+        if want.len() != 64 {
+            eprintln!("--expect-fingerprint needs a SHA-256 (64 hex digits)");
+            std::process::exit(2);
+        }
+        cfg.verify_certificate = Some(rdp::CertificateCheck(std::sync::Arc::new(
+            move |c: &rdp::ServerCertificate| {
+                let got = known_hosts::hex(&c.sha256);
+                if got != want {
+                    eprintln!("refused: the server certificate's SHA-256 is {got}");
+                }
+                got == want
+            },
+        )));
+    }
     if args.gfx {
         cfg.graphics = rdp::Graphics::Gfx;
         #[cfg(windows)]
@@ -693,4 +714,13 @@ fn write_png(path: &str, w: usize, h: usize, px: &[u32]) -> Result<(), Box<dyn s
     enc.set_depth(png::BitDepth::Eight);
     enc.write_header()?.write_image_data(&rgb)?;
     Ok(())
+}
+
+/// A fingerprint as lower-case hex digits, whatever separators it had
+/// (`AB:CD:..`, `ab cd ..`, `abcd..`).
+fn normalize_fingerprint(s: &str) -> String {
+    s.chars()
+        .filter(char::is_ascii_hexdigit)
+        .map(|c| c.to_ascii_lowercase())
+        .collect()
 }

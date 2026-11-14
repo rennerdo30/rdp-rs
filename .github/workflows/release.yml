@@ -34,6 +34,10 @@ jobs:
       RUSTC_WRAPPER: sccache
       SCCACHE_GHA_ENABLED: "true"
       CARGO_INCREMENTAL: "0"
+      # The C runtime linked in: a clean Windows (Server Core, a fresh
+      # install, Windows Sandbox) has no vcruntime140.dll, and the programs
+      # did not start there (STATUS_DLL_NOT_FOUND).
+      RUSTFLAGS: "-C target-feature=+crt-static"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

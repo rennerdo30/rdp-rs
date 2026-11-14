@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- **The programs start on a clean Windows.** Remora, the server helper and Remora Host needed the Visual C++ runtime (`vcruntime140.dll`), which a fresh install, Server Core or Windows Sandbox does not have: they did not start there at all. The runtime is now built in.
+- **Remora Host:** a GDI screen capture when Desktop Duplication is not available (remote sessions such as Windows Sandbox, no GPU), chosen automatically or with `--capture gdi`; `set-password --password-file` for scripted tests. `scripts/host-sandbox-test.ps1` runs the server in Windows Sandbox and connects Remora to it.
+- **`remora --expect-fingerprint SHA256`** accepts only that server certificate in the command-line mode.
 ## 0.1.0-beta.7
 
 - **Typing comes out right with another server layout, and Windows keys go where they should.** Automatic keyboard now sends what you type as the characters your layout makes from the start: a server keeps its own layout when it lacks yours (or the session already existed), and RDP does not tell Remora, so a Japanese keyboard typed nonsense into a German session. Shortcuts, navigation and function keys stay keys; **Remote** still sends every key as a key. **Windows key combinations** now go to the session whenever it has the keyboard by default (Win+R, Alt+Tab), and a Windows key that stays on this PC is no longer sent to the session as well (both Start menus opened). The Windows key never reached the session before: winit registered raw keyboard input for Remora's window, and Windows then skips the process's own keyboard hook while its window has the focus. Remora no longer registers raw input, and like mstsc it hooks the keyboard afresh whenever the session takes it. Keys that type nothing here, such as the Japanese 半角/全角 IME key that the IME also sends when Remora gets the focus back, are no longer sent as keys, so they cannot type the remote layout's character (`^` on German).
