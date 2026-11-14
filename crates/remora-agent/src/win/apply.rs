@@ -427,8 +427,13 @@ pub fn open_url(raw: &str) -> i32 {
     use std::os::windows::process::CommandExt;
     // CreateProcess with an argument vector: no shell, the URL is one
     // argument (it has no spaces or quotes after validation).
+    // No inherited stdio (a GUI process's standard handles may be stale;
+    // see remora-update's launch_setup, RDP-50).
     match Command::new(&cmd.exe)
         .args(links::fallback_args(&cmd, &url))
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
         .creation_flags(CREATE_NO_WINDOW)
         .spawn()
     {

@@ -439,16 +439,32 @@ pub fn launch_setup(setup: &[u8], version: &Version) -> Result<PathBuf, Error> {
         if sha256_hex(&on_disk) != sha256_hex(setup) {
             return Err(err("the saved setup changed on disk, so it was not run"));
         }
-        use std::os::windows::process::CommandExt;
-        const DETACHED_PROCESS: u32 = 0x0000_0008;
-        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
-        std::process::Command::new(&path)
-            .args(["/S", "/UPDATE"])
-            .creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP)
-            .spawn()
+        spawn_detached(&path, &["/S", "/UPDATE"])
             .map_err(|e| err(format!("could not start the setup: {e}")))?;
         Ok(path)
     }
+}
+
+/// Starts `exe` detached (no console, its own process group) with no
+/// inherited stdio. Remora is a GUI program, and when the setup itself
+/// started it (after an update) its standard handle values are stale
+/// copies that can name unrelated objects in this process. Rust duplicates
+/// inherited handles, and duplicating such an object fails with
+/// ERROR_NOT_SUPPORTED: every later update failed with "could not start
+/// the setup ... (os error 50)" (RDP-50).
+#[cfg(windows)]
+pub fn spawn_detached(exe: &Path, args: &[&str]) -> std::io::Result<std::process::Child> {
+    use std::os::windows::process::CommandExt;
+    use std::process::Stdio;
+    const DETACHED_PROCESS: u32 = 0x0000_0008;
+    const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+    std::process::Command::new(exe)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP)
+        .spawn()
 }
 
 fn allowed(url: &str) -> bool {
@@ -462,6 +478,7 @@ fn fetch(url: &str, limit: usize) -> Result<Vec<u8>, Error> {
         return Err(err("refusing a URL outside rdp-rs's GitHub releases"));
     }
     let out = Command::new("curl")
+        .stdin(Stdio::null())
         .args([
             "--fail",
             "--silent",

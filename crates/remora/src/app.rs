@@ -3141,7 +3141,12 @@ fn show_in_explorer(file: &std::path::Path) {
         }
     }
     #[cfg(not(windows))]
-    let _ = std::process::Command::new("xdg-open").arg(dir).spawn();
+    let _ = std::process::Command::new("xdg-open")
+        .arg(dir)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
 }
 
 /// `DOMAIN\user`, or the user name alone when it already says where it

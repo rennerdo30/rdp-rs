@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **In-app updates start again after an update.** A Remora that the setup had started (after the previous update) failed to start the next setup with "could not start the setup: The request is not supported (os error 50)": it handed its stale standard handles on to the setup. Remora now starts the setup without them. Until you run this version, close Remora and start it from the Start menu before you click **Update**.
+
 ## 0.1.0-beta.5
 
 - **New: the Remora server helper, `remora-agent.exe`** (a separate download in this release, and in the zip). Run it on a Windows server or PC you connect to and `remora-agent install` starts it for your user at every logon and reconnect (a scheduled task; no admin rights). It shows a tray icon (grey: waiting for Remora, amber: a pairing waits for you, green: connected) with received files, the helper's fingerprint, paired PCs, **Only paired PCs may connect**, the log and Quit. Paired with Remora, it reports the session's state, sends links you click on the server to your PC's browser, and moves files both ways with resume after a reconnect (**Send To > Send to my PC (Remora)** on the server; drop files onto Remora to send them there). Everything between the two is encrypted on top of RDP's own TLS. To update it, choose **Quit helper** in its tray menu, replace the exe and start it again; pairings are kept. See `crates/remora-agent/README.md` and the user guide.
