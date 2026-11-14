@@ -6625,9 +6625,7 @@ impl Ui {
         // Remote layout keeps the session's layout: after a switch on this
         // PC only a reconnect gives it the new one.
         let local = crate::keyboard::server_layout(crate::keyboard::local_klid());
-        if t.keyboard == KeyboardMode::Remote
-            && let Some(sent) = t.keyboard_layout.filter(|l| *l != local)
-        {
+        if t.keyboard == KeyboardMode::Remote && t.keyboard_layout.is_some_and(|l| l != local) {
             y += p(4.0);
             let r = Rect::new(x, y, w, p(108.0));
             Kit::new(cv, te, f, s).banner(
@@ -6635,7 +6633,7 @@ impl Ui {
                 Tone::Accent,
                 Icon::Refresh,
                 &format!("This PC types {}", crate::keyboard::layout_name(local)),
-                &format!("The session keeps {}.", crate::keyboard::layout_name(sent)),
+                "Reconnect to give the session this layout.",
             );
             self.btn(
                 cv,
@@ -7278,6 +7276,7 @@ pub fn sample_panel(page: u8, fullscreen: bool) -> Ui {
             // Redirected after logon, with network auto-detect results.
             t.redirected_to = Some("rdsh2.corp.example".into());
             t.network = Some("RTT 14 ms · 50.0 Mbit/s".into());
+            t.keyboard_layout = Some(0x0407);
         }
     }
     m

@@ -294,9 +294,9 @@ impl KeyboardMode {
     /// One line on what the choice does.
     pub fn hint(self) -> &'static str {
         match self {
-            KeyboardMode::Auto => "Keys as keys; text as typed here after you switch layouts.",
-            KeyboardMode::Remote => "Keys as keys; the session's layout picks the characters.",
-            KeyboardMode::Translate => "Text as typed here; shortcuts and special keys stay keys.",
+            KeyboardMode::Auto => "Keys as keys, or text once you switch layouts.",
+            KeyboardMode::Remote => "Keys only; the session's layout picks characters.",
+            KeyboardMode::Translate => "Text as typed here; shortcuts stay keys.",
         }
     }
 }

@@ -17,7 +17,7 @@ use super::{Fonts, Hit, Key, TabState, Ui};
 use crate::fuzzy::fuzzy;
 use crate::icons::Icon;
 use crate::kit::{self, Font, Hint, Kit};
-use crate::store::Opens;
+use crate::store::{KeyboardMode, Opens};
 use crate::text_field::TextField;
 use crate::theme::{self, ThemeChoice, Tone, pal, radius};
 
@@ -95,6 +95,8 @@ pub enum Command {
     Reconnect(u64),
     CloseTab(u64),
     CtrlAltDel(u64),
+    /// The session's Keyboard setting (RDP-32).
+    Keyboard(u64, KeyboardMode),
     FullScreen,
     Fit(u64),
     Unspan(u64),
@@ -132,6 +134,13 @@ impl Command {
             Command::Reconnect(id) => Hit::Reconnect(id),
             Command::CloseTab(id) => Hit::CloseTab(id),
             Command::CtrlAltDel(id) => Hit::CtrlAltDel(id),
+            Command::Keyboard(id, k) => Hit::TabKeyboard(
+                id,
+                KeyboardMode::ALL
+                    .iter()
+                    .position(|&x| x == k)
+                    .unwrap_or_default(),
+            ),
             Command::FullScreen => Hit::FullScreen,
             Command::Fit(id) => Hit::Fit(id),
             Command::Unspan(id) => Hit::Unspan(id),
@@ -572,6 +581,24 @@ impl Ui {
                         Lead::Icon(icon, Tone::Neutral),
                         on_off(on),
                         if on { "Turn off" } else { "Turn on" },
+                    );
+                }
+                // The other Keyboard choices; they apply at once.
+                for k in KeyboardMode::ALL.into_iter().filter(|k| *k != t.keyboard) {
+                    let title = match k {
+                        KeyboardMode::Auto => "Keyboard: automatic",
+                        KeyboardMode::Remote => "Keyboard: remote layout",
+                        KeyboardMode::Translate => "Keyboard: translate typing",
+                    };
+                    push(
+                        Command::Keyboard(id, k),
+                        s,
+                        title.into(),
+                        k.hint().into(),
+                        "keyboard layout typing translate unicode scancodes language",
+                        Lead::Icon(Icon::Keyboard, Tone::Neutral),
+                        Chip::None,
+                        "Use",
                     );
                 }
                 push(
@@ -1501,6 +1528,23 @@ mod tests {
         }
         m.palette.as_mut().unwrap().query.set(q);
         m.palette_items()
+    }
+
+    #[test]
+    fn keyboard_choices_other_than_the_current_one() {
+        let mut live = super::super::sample(true);
+        let c = cmds(&live);
+        assert!(c.contains(&Command::Keyboard(1, KeyboardMode::Remote)));
+        assert!(c.contains(&Command::Keyboard(1, KeyboardMode::Translate)));
+        assert!(!c.contains(&Command::Keyboard(1, KeyboardMode::Auto)));
+        assert_eq!(
+            Command::Keyboard(1, KeyboardMode::Translate).hit(),
+            Hit::TabKeyboard(1, 2)
+        );
+        live.tab_mut(1).unwrap().keyboard = KeyboardMode::Translate;
+        let c = cmds(&live);
+        assert!(c.contains(&Command::Keyboard(1, KeyboardMode::Auto)));
+        assert!(!c.contains(&Command::Keyboard(1, KeyboardMode::Translate)));
     }
 
     #[test]

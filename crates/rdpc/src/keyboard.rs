@@ -351,16 +351,21 @@ pub fn local_klid() -> u32 {
     0x0409
 }
 
-/// A readable layout name: "German (Germany)", "English (United States),
-/// Dvorak".
+/// A short readable layout name, in English like the rest of the app:
+/// "German (Germany)", "English (US), Dvorak".
 pub fn layout_name(layout: u32) -> String {
     let lang = (layout & 0xFFFF) as u16;
+    let short = |s: String| {
+        s.replace(" (United States)", " (US)")
+            .replace(" (United Kingdom)", " (UK)")
+    };
     #[cfg(windows)]
     let found = win::language_name(lang);
     #[cfg(not(windows))]
     let found: Option<String> = None;
     let base = found
         .or_else(|| builtin_language(lang).map(str::to_string))
+        .map(short)
         .unwrap_or_else(|| format!("Layout {layout:08X}"));
     match layout >> 16 {
         0 => base,
@@ -421,7 +426,7 @@ fn variant(layout: u32) -> Option<&'static str> {
 #[cfg(windows)]
 mod win {
     use windows_sys::Win32::Globalization::{
-        GetLocaleInfoEx, LCIDToLocaleName, LOCALE_ALLOW_NEUTRAL_NAMES, LOCALE_SLOCALIZEDDISPLAYNAME,
+        GetLocaleInfoEx, LCIDToLocaleName, LOCALE_ALLOW_NEUTRAL_NAMES, LOCALE_SENGLISHDISPLAYNAME,
     };
     use windows_sys::Win32::UI::Input::Ime::ImmGetIMEFileNameW;
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
@@ -470,7 +475,7 @@ mod win {
         }
     }
 
-    /// The display name of a language id in the UI language.
+    /// The English display name of a language id ("German (Germany)").
     pub fn language_name(lang: u16) -> Option<String> {
         let mut name = [0u16; 85]; // LOCALE_NAME_MAX_LENGTH
         // SAFETY: the buffer and its length in characters.
@@ -490,7 +495,7 @@ mod win {
         let m = unsafe {
             GetLocaleInfoEx(
                 name.as_ptr(),
-                LOCALE_SLOCALIZEDDISPLAYNAME,
+                LOCALE_SENGLISHDISPLAYNAME,
                 out.as_mut_ptr(),
                 out.len() as i32,
             )
@@ -759,7 +764,7 @@ mod tests {
     fn layout_names() {
         let n = layout_name(0x0407);
         assert!(n.starts_with("German"), "{n}");
-        assert!(layout_name(0x0001_0409).ends_with(", Dvorak"));
+        assert!(layout_name(0x0001_0409).ends_with(" (US), Dvorak"));
         assert!(layout_name(0x0005_0408).ends_with(", variant 5"));
         assert_eq!(builtin_language(0x0807), Some("German (Switzerland)"));
     }
