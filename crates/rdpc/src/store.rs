@@ -228,6 +228,8 @@ pub struct SessionOptions {
     pub quality: Quality,
     /// Where Windows key combinations go (part of Display for inheritance).
     pub win_keys: WinKeys,
+    /// How typing reaches the session (part of Display for inheritance).
+    pub keyboard: KeyboardMode,
     /// Local monitors the session spans, by device name; empty: the window.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub monitors: Vec<String>,
@@ -254,6 +256,47 @@ impl WinKeys {
             WinKeys::Local => "This PC",
             WinKeys::Remote => "Remote",
             WinKeys::FullScreen => "Full screen",
+        }
+    }
+}
+
+/// How keys reach the session when this PC's keyboard layout is not the
+/// session's (RDP-32). The session always starts with this PC's layout.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KeyboardMode {
+    /// Keys as scancodes while the layouts match; text as typed here once
+    /// this PC switches to another layout.
+    #[default]
+    Auto,
+    /// Always scancodes: the session's layout decides the characters.
+    Remote,
+    /// Text always as typed on this PC (Unicode); shortcuts and special
+    /// keys stay keys.
+    Translate,
+}
+
+impl KeyboardMode {
+    pub const ALL: [KeyboardMode; 3] = [
+        KeyboardMode::Auto,
+        KeyboardMode::Remote,
+        KeyboardMode::Translate,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            KeyboardMode::Auto => "Automatic",
+            KeyboardMode::Remote => "Remote",
+            KeyboardMode::Translate => "Translate",
+        }
+    }
+
+    /// One line on what the choice does.
+    pub fn hint(self) -> &'static str {
+        match self {
+            KeyboardMode::Auto => "Keys as keys; text as typed here after you switch layouts.",
+            KeyboardMode::Remote => "Keys as keys; the session's layout picks the characters.",
+            KeyboardMode::Translate => "Text as typed here; shortcuts and special keys stay keys.",
         }
     }
 }
@@ -840,6 +883,7 @@ impl Store {
             out.options.scale = g.options.scale;
             out.options.quality = g.options.quality;
             out.options.win_keys = g.options.win_keys;
+            out.options.keyboard = g.options.keyboard;
             out.options.monitors = g.options.monitors.clone();
         }
         if let Some(g) = self.source_of(&c.group, &c.inherit, |i| i.sharing) {
@@ -848,6 +892,7 @@ impl Store {
             out.options.scale = own.scale;
             out.options.quality = own.quality;
             out.options.win_keys = own.win_keys;
+            out.options.keyboard = own.keyboard;
             out.options.monitors = own.monitors;
         }
         out
@@ -1213,6 +1258,54 @@ mod tests {
         r.options.quality.apply(&mut cfg);
         assert_eq!(cfg.color_depth, 16);
         assert_eq!(cfg.experience.performance_flags() & 1, 1, "wallpaper off");
+    }
+
+    #[test]
+    fn keyboard_mode_is_inherited_with_display_and_defaults_to_automatic() {
+        // Saved before the setting existed: Automatic.
+        let o: SessionOptions = serde_json::from_str(r#"{"win_keys":"remote"}"#).unwrap();
+        assert_eq!(o.keyboard, KeyboardMode::Auto);
+        let o: SessionOptions = serde_json::from_str(r#"{"keyboard":"translate"}"#).unwrap();
+        assert_eq!(o.keyboard, KeyboardMode::Translate);
+        assert!(
+            serde_json::to_string(&o)
+                .unwrap()
+                .contains(r#""keyboard":"translate""#)
+        );
+
+        let g = Group {
+            path: "W".into(),
+            options: SessionOptions {
+                keyboard: KeyboardMode::Remote,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let own = SessionOptions {
+            keyboard: KeyboardMode::Translate,
+            ..Default::default()
+        };
+        let conn = |inherit| Connection {
+            group: "W".into(),
+            inherit,
+            options: own.clone(),
+            ..Default::default()
+        };
+        let s = store_with(vec![g], vec![]);
+        let display = conn(Inherit {
+            display: true,
+            ..Default::default()
+        });
+        assert_eq!(s.resolve(&display).options.keyboard, KeyboardMode::Remote);
+        let sharing = conn(Inherit {
+            sharing: true,
+            ..Default::default()
+        });
+        assert_eq!(
+            s.resolve(&sharing).options.keyboard,
+            KeyboardMode::Translate,
+            "sharing keeps the connection's own"
+        );
     }
 
     #[test]

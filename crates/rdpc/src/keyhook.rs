@@ -92,23 +92,6 @@ pub fn install(_sink: impl Fn(u8, bool, bool) + Send + 'static) -> bool {
 #[cfg(not(windows))]
 pub fn set_active(_on: bool) {}
 
-/// This PC's keyboard layout (the language id of the active input locale),
-/// sent so the remote session types with the same layout.
-pub fn local_layout() -> u32 {
-    #[cfg(windows)]
-    {
-        use windows_sys::Win32::UI::Input::KeyboardAndMouse::GetKeyboardLayout;
-        // SAFETY: plain query for the calling thread's layout.
-        let hkl = unsafe { GetKeyboardLayout(0) } as usize;
-        match (hkl & 0xFFFF) as u32 {
-            0 => 0x0409,
-            lang => lang,
-        }
-    }
-    #[cfg(not(windows))]
-    0x0409
-}
-
 #[cfg(all(test, windows))]
 mod tests {
     use super::imp::grabs;
@@ -121,6 +104,5 @@ mod tests {
         assert!(!grabs(VK_TAB as u32, false, false), "plain Tab stays");
         assert!(grabs(VK_SPACE as u32, true, false), "Alt+Space");
         assert!(!grabs(VK_A as u32, true, true), "letters never");
-        assert!(super::local_layout() != 0);
     }
 }
