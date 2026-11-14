@@ -2597,7 +2597,7 @@ impl Ui {
             k.text_in(Font::Semi, size::HEADING, row, "Remora", c.text);
         }
         // The mark and the name lead Home.
-        let logo = Rect::new(area.x + p(8.0), p(4.0), p(84.0), p(32.0));
+        let logo = Rect::new(area.x + p(8.0), p(4.0), p(96.0), p(32.0));
         self.hits.push((logo, Hit::HomeView(home::HomeHit::Home)));
         self.title_controls.push((logo.x, logo.right()));
         if self.store.is_vault() && !locked {

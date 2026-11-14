@@ -360,21 +360,13 @@ impl<'a, 'b> Kit<'a, 'b> {
         self.icon(icon, r.x + (r.w - d) / 2, r.y + (r.h - d) / 2, size, color);
     }
 
-    /// The Remora mark: an accent tile with a monitor and a live dot.
+    /// The Remora mark, the same as the app icon ([`crate::icon`]): a teal
+    /// tile with the remora whose body is a screen.
     pub fn logo(&mut self, x: i32, y: i32, size: f32) {
-        let p = pal();
-        let d = self.p(size);
-        let r = Rect::new(x, y, d, d);
-        self.cv.fill_round(r, d as f32 * 0.3, p.accent);
-        let m = (d as f32 * 0.62).round() as i32;
-        icons::draw(
-            self.cv,
-            Icon::Monitor,
-            (x + (d - m) / 2) as f32,
-            (y + (d - m) / 2) as f32 - d as f32 * 0.02,
-            m as f32,
-            p.accent_text,
-        );
+        let d = self.p(size).max(1);
+        let px = crate::icon::rgba(d as usize);
+        self.cv
+            .draw_rgba_scaled(Rect::new(x, y, d, d), d as usize, d as usize, &px);
     }
 
     // ---- Surfaces ------------------------------------------------------
