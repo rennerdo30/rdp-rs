@@ -13,6 +13,8 @@
 //! - [`dvc`] + [`disp`]: dynamic virtual channels (MS-RDPEDYC) and Display Control (MS-RDPEDISP)
 //! - [`monitor`]: multi-monitor layouts (MS-RDPBCGR 2.2.1.3.6, 2.2.1.3.10, 2.2.12.1)
 //! - [`gfx`]: the graphics pipeline (MS-RDPEGFX), opt-in through [`Graphics::Gfx`]
+//! - [`surfcmd`]: surface commands with RemoteFX and NSCodec (MS-RDPBCGR 2.2.9.2, MS-RDPRFX)
+//! - [`license`]: the licensing exchange (MS-RDPELE)
 //! - [`cliprdr`]: clipboard redirection on the `cliprdr` channel (MS-RDPECLIP)
 //! - [`client`]: the connection sequence and the session loop
 //! - [`autodetect`]: network auto-detection, RTT and bandwidth (MS-RDPBCGR 2.2.14)
@@ -44,6 +46,7 @@ pub mod gateway;
 pub mod gcc;
 pub mod gfx;
 pub mod input;
+pub mod license;
 pub mod log;
 pub mod mcs;
 pub mod monitor;
@@ -55,6 +58,7 @@ pub mod rdpdr;
 pub mod rdpei;
 pub mod rdpsnd;
 pub mod redirect;
+pub mod surfcmd;
 pub mod transport;
 pub mod x224;
 
