@@ -13,10 +13,11 @@
 //! Not supported: compressed data (MS-RDPEDYC 2.2.3.3, 2.2.3.4) closes the
 //! channel it arrives on; Soft-Sync (2.2.5) is ignored.
 //!
-//! Limits: a reassembled message is at most
-//! [`DynamicChannel::max_message_size`] bytes ([`DEFAULT_MAX_MESSAGE`] unless
-//! the channel says otherwise); a larger DYNVC_DATA_FIRST closes that
-//! channel, never the session. A second DYNVC_CREATE_REQ for a name that is
+//! Limits: a message is at most [`DynamicChannel::max_message_size`] bytes
+//! ([`DEFAULT_MAX_MESSAGE`] unless the channel says otherwise); a larger
+//! DYNVC_DATA_FIRST announcement or a larger unfragmented DYNVC_DATA closes
+//! that channel, never the session. Messages a failing handler queued are
+//! sent before the channel's DYNVC_CLOSE. A second DYNVC_CREATE_REQ for a name that is
 //! already open replaces the first binding unless the channel refuses it
 //! ([`DynamicChannel::allow_second_instance`]).
 
@@ -236,6 +237,15 @@ impl Drdynvc {
                     "dvc {}: {e}; channel closed",
                     self.channels[i].handler.name()
                 );
+                // What the handler queued before failing (a last error or
+                // a rejection for the peer) goes out before the close.
+                if let Some(id) = self.channels[i].id {
+                    for msg in self.out.msgs.drain(..) {
+                        if let Err(e) = encode_data(id, &msg, out) {
+                            trace!("dvc {id}: {e}");
+                        }
+                    }
+                }
                 self.close_local(i, LocalClose::HandlerError, out);
             }
         }
@@ -319,7 +329,16 @@ impl Drdynvc {
             return;
         };
         let Some(mut r) = self.channels[i].reasm.take() else {
-            // Unfragmented message.
+            // Unfragmented message: the same cap as a DATA_FIRST announcement.
+            let cap = self.channels[i].handler.max_message_size();
+            if data.len() > cap {
+                trace!(
+                    "dvc {id}: message of {} bytes over the {cap}-byte cap; channel closed",
+                    data.len()
+                );
+                self.close_local(i, LocalClose::TooLarge, out);
+                return;
+            }
             self.deliver(i, data, out);
             return;
         };
@@ -910,6 +929,55 @@ mod tests {
         let out = feed(&mut d, &[0x30, 0x02, b'k']);
         assert_eq!(out, vec![vec![0x30, 0x02, b'r', b'e', b':', b'k']]);
         assert_eq!(log_b.lock().unwrap().events, ["opened"]);
+    }
+
+    #[test]
+    fn plain_data_over_the_cap_closes_that_channel() {
+        let (a, log_a) = capped("A", Some(100), false);
+        let (b, log_b) = echo("B");
+        let mut d = Drdynvc::new(vec![a, b]);
+        feed(&mut d, &create_req(1, "A"));
+        feed(&mut d, &create_req(2, "B"));
+        // A DYNVC_DATA without DATA_FIRST at the cap is delivered...
+        let out = feed(&mut d, &[&[0x30, 0x01][..], &[7; 100]].concat());
+        assert_eq!(out.len(), 1);
+        assert_eq!(log_a.lock().unwrap().msgs.len(), 1);
+        // ...one byte more closes the channel without delivering it.
+        let out = feed(&mut d, &[&[0x30, 0x01][..], &[7; 101]].concat());
+        assert_eq!(out, vec![vec![0x40, 0x01]]);
+        assert_eq!(log_a.lock().unwrap().msgs.len(), 1);
+        assert_eq!(
+            log_a.lock().unwrap().events,
+            ["opened", "TooLarge", "closed"]
+        );
+        let out = feed(&mut d, &[0x30, 0x02, b'k']);
+        assert_eq!(out, vec![vec![0x30, 0x02, b'r', b'e', b':', b'k']]);
+        assert_eq!(log_b.lock().unwrap().events, ["opened"]);
+    }
+
+    /// A handler that queues a last message and then fails: the message
+    /// goes out before the DYNVC_CLOSE (a rejection must reach the peer).
+    struct LastWords;
+
+    impl DynamicChannel for LastWords {
+        fn name(&self) -> &str {
+            "L"
+        }
+        fn process(&mut self, _msg: &[u8], out: &mut DvcOut) -> Result<()> {
+            out.send(b"bye".to_vec());
+            proto("closing")
+        }
+    }
+
+    #[test]
+    fn queued_messages_go_out_before_the_close() {
+        let mut d = Drdynvc::new(vec![Box::new(LastWords)]);
+        feed(&mut d, &create_req(4, "L"));
+        let out = feed(&mut d, &[0x30, 0x04, b'x']);
+        assert_eq!(
+            out,
+            vec![vec![0x30, 0x04, b'b', b'y', b'e'], vec![0x40, 0x04]]
+        );
     }
 
     #[test]

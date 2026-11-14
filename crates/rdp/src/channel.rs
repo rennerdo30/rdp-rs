@@ -28,6 +28,10 @@ pub const CHANNEL_OPTION_SHOW_PROTOCOL: u32 = 0x0020_0000;
 /// Largest chunk body the client sends (VCChunkSize in our capability set).
 pub const CHUNK_SIZE: usize = 1600;
 
+/// Default cap on one reassembled static channel message
+/// ([`StaticChannel::max_message_size`]).
+pub const DEFAULT_MAX_MESSAGE: usize = 16 << 20;
+
 /// Complete channel messages a handler wants sent, in order.
 #[derive(Default)]
 pub struct ChannelOut {
@@ -67,6 +71,13 @@ pub trait StaticChannel: Send {
     /// the client starts itself (a local clipboard change, a drive added).
     fn tick(&mut self, _out: &mut ChannelOut) -> Result<()> {
         Ok(())
+    }
+
+    /// Largest reassembled message this channel accepts. A larger one
+    /// (announced or received) disables the channel instead of growing a
+    /// buffer the server controls.
+    fn max_message_size(&self) -> usize {
+        DEFAULT_MAX_MESSAGE
     }
 
     /// The dynamic virtual channel host, if this is `drdynvc`; the client
@@ -121,7 +132,14 @@ pub struct Defragmenter {
 impl Defragmenter {
     /// Adds one chunk, bulk-decompressing it with `bulk` (the connection's
     /// server-to-client state) when its header carries compression flags.
-    pub fn feed(&mut self, chunk: &[u8], bulk: &mut Decompressor) -> Result<Option<Vec<u8>>> {
+    /// A message announced or grown past `cap` bytes is an error (the
+    /// caller disables the channel); nothing past the cap is buffered.
+    pub fn feed(
+        &mut self,
+        chunk: &[u8],
+        bulk: &mut Decompressor,
+        cap: usize,
+    ) -> Result<Option<Vec<u8>>> {
         let mut r = Reader::new(chunk);
         let total = r.u32()? as usize;
         let flags = r.u32()?;
@@ -129,6 +147,15 @@ impl Defragmenter {
         if flags & CHANNEL_FLAG_FIRST != 0 {
             self.buf.clear();
             self.total = total;
+            if total > cap {
+                return crate::error::proto(format!(
+                    "channel message of {total} bytes over the {cap}-byte cap"
+                ));
+            }
+        }
+        if self.buf.len() + data.len() > cap {
+            self.buf = Vec::new();
+            return crate::error::proto(format!("channel message over the {cap}-byte cap"));
         }
         self.buf.extend_from_slice(&data);
         if flags & CHANNEL_FLAG_LAST != 0 {
@@ -165,9 +192,22 @@ mod tests {
         assert_eq!(chunks.len(), 3);
         let mut d = Defragmenter::default();
         let mut bulk = Decompressor::default();
-        assert!(d.feed(&chunks[0], &mut bulk).unwrap().is_none());
-        assert!(d.feed(&chunks[1], &mut bulk).unwrap().is_none());
-        assert_eq!(d.feed(&chunks[2], &mut bulk).unwrap().unwrap(), msg);
+        assert!(
+            d.feed(&chunks[0], &mut bulk, DEFAULT_MAX_MESSAGE)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            d.feed(&chunks[1], &mut bulk, DEFAULT_MAX_MESSAGE)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            d.feed(&chunks[2], &mut bulk, DEFAULT_MAX_MESSAGE)
+                .unwrap()
+                .unwrap(),
+            msg
+        );
     }
 
     #[test]
@@ -181,7 +221,37 @@ mod tests {
         );
         let mut d = Defragmenter::default();
         let mut bulk = Decompressor::default();
-        assert_eq!(d.feed(&c[0], &mut bulk).unwrap().unwrap(), b"hello");
+        assert_eq!(
+            d.feed(&c[0], &mut bulk, DEFAULT_MAX_MESSAGE)
+                .unwrap()
+                .unwrap(),
+            b"hello"
+        );
+    }
+
+    #[test]
+    fn messages_over_the_cap_are_refused() {
+        let msg = vec![5u8; 4000];
+        let chunks = chunk(&msg, false);
+        let mut bulk = Decompressor::default();
+        // Announced over the cap: refused at the first chunk.
+        let mut d = Defragmenter::default();
+        assert!(d.feed(&chunks[0], &mut bulk, 3999).is_err());
+        // Exactly the cap passes.
+        let mut d = Defragmenter::default();
+        assert!(d.feed(&chunks[0], &mut bulk, 4000).unwrap().is_none());
+        assert!(d.feed(&chunks[1], &mut bulk, 4000).unwrap().is_none());
+        assert_eq!(d.feed(&chunks[2], &mut bulk, 4000).unwrap().unwrap(), msg);
+        // A header that lies small: the data itself is capped, and the
+        // buffer does not keep growing with chunks that never say LAST.
+        let mut d = Defragmenter::default();
+        let mut first = chunks[0].clone();
+        first[..4].copy_from_slice(&10u32.to_le_bytes());
+        assert!(d.feed(&first, &mut bulk, 3000).unwrap().is_none());
+        let mut middle = chunks[1].clone();
+        middle[4..8].copy_from_slice(&0u32.to_le_bytes());
+        assert!(d.feed(&middle, &mut bulk, 3000).is_err());
+        assert!(d.buf.capacity() == 0, "the partial message is dropped");
     }
 
     #[test]
@@ -194,7 +264,13 @@ mod tests {
         c.put_bytes(&[0x41, 0x42, 0xF0, 0x80]);
         let mut d = Defragmenter::default();
         let mut bulk = Decompressor::new(crate::compress::Compression::Rdp4);
-        assert_eq!(d.feed(&c, &mut bulk).unwrap().unwrap(), b"ABABA");
-        assert!(d.feed(&c, &mut Decompressor::default()).is_err());
+        assert_eq!(
+            d.feed(&c, &mut bulk, DEFAULT_MAX_MESSAGE).unwrap().unwrap(),
+            b"ABABA"
+        );
+        assert!(
+            d.feed(&c, &mut Decompressor::default(), DEFAULT_MAX_MESSAGE)
+                .is_err()
+        );
     }
 }
