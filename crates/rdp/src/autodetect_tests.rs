@@ -22,7 +22,10 @@ fn rtt_request_gets_an_rtt_response_with_its_sequence_number() {
     let rsp = ad.on_pdu(&req, Instant::now()).unwrap();
     // 2.2.14.4 + 2.2.14.2.1: SEC_AUTODETECT_RSP (0x2000), headerLength 6,
     // TYPE_ID_AUTODETECT_RESPONSE, seq, responseType 0.
-    assert_eq!(rsp, [0x00, 0x20, 0x00, 0x00, 0x06, 0x01, 0x34, 0x12, 0x00, 0x00]);
+    assert_eq!(
+        rsp,
+        [0x00, 0x20, 0x00, 0x00, 0x06, 0x01, 0x34, 0x12, 0x00, 0x00]
+    );
     // The continuous variant (0x0001) is answered the same way.
     let req = pdu(&[0x06, 0x00, 0x02, 0x00, 0x01, 0x00]);
     assert_eq!(
@@ -36,7 +39,10 @@ fn connect_time_bandwidth_counts_payload_bytes() {
     let t0 = Instant::now();
     let mut ad = AutoDetect::default();
     // Start 0x1014 (2.2.14.1.2).
-    assert!(ad.on_pdu(&pdu(&[0x06, 0x00, 1, 0, 0x14, 0x10]), t0).is_none());
+    assert!(
+        ad.on_pdu(&pdu(&[0x06, 0x00, 1, 0, 0x14, 0x10]), t0)
+            .is_none()
+    );
     // Two payloads of 4 and 3 bytes (2.2.14.1.3, requestType 0x0002).
     let p1 = pdu(&[0x08, 0x00, 2, 0, 0x02, 0x00, 4, 0, 9, 9, 9, 9]);
     let p2 = pdu(&[0x08, 0x00, 3, 0, 0x02, 0x00, 3, 0, 7, 7, 7]);
@@ -76,7 +82,10 @@ fn continuous_bandwidth_counts_every_received_byte() {
     assert_eq!(&rsp[10..14], &1000u32.to_le_bytes());
     assert_eq!(&rsp[14..18], &1234u32.to_le_bytes());
     // A stop without a start is ignored.
-    assert!(ad.on_pdu(&pdu(&[0x06, 0x00, 11, 0, 0x29, 0x04]), t0).is_none());
+    assert!(
+        ad.on_pdu(&pdu(&[0x06, 0x00, 11, 0, 0x29, 0x04]), t0)
+            .is_none()
+    );
 }
 
 #[test]
@@ -154,7 +163,10 @@ fn malformed_or_foreign_data_never_panics_or_answers() {
             request_type: 0x0077
         }
     );
-    assert!(ad.on_pdu(&pdu(&[0x06, 0x00, 1, 0, 0x77, 0x00]), now).is_none());
+    assert!(
+        ad.on_pdu(&pdu(&[0x06, 0x00, 1, 0, 0x77, 0x00]), now)
+            .is_none()
+    );
     // A payload longer than the data is refused.
     assert!(parse_request(&[0x08, 0x00, 2, 0, 0x02, 0x00, 9, 0, 1]).is_err());
 }

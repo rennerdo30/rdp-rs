@@ -126,7 +126,9 @@ impl NetworkCharacteristics {
 /// Header (2.2.8.1.1.2.1) has SEC_AUTODETECT_REQ.
 pub fn request_data(data: &[u8]) -> Option<&[u8]> {
     let flags = crate::cursor::le16(data, 0)?;
-    (flags & SEC_AUTODETECT_REQ != 0).then(|| data.get(4..)).flatten()
+    (flags & SEC_AUTODETECT_REQ != 0)
+        .then(|| data.get(4..))
+        .flatten()
 }
 
 /// Parses one TS_AUTODETECT_REQ (2.2.14.1): (sequenceNumber, message).

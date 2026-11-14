@@ -638,7 +638,14 @@ fn follows_a_redirection_to_the_first_reachable_target() {
         .expect("redirection reported");
     assert_eq!(
         steps[..at],
-        [S::Resolving, S::Tcp, S::Tls, S::SignIn, S::Licensing, S::Capabilities]
+        [
+            S::Resolving,
+            S::Tcp,
+            S::Tls,
+            S::SignIn,
+            S::Licensing,
+            S::Capabilities
+        ]
     );
     assert_eq!(steps[at + 1], S::Resolving, "{steps:?}");
     assert!(steps[at + 1..].contains(&S::Tls), "{steps:?}");
@@ -777,7 +784,10 @@ fn connect_time_auto_detect_is_answered_on_the_message_channel() {
         .expect("the server hangs up");
     let seen = server.join().unwrap();
     // The client asked for the message channel (2.2.1.3.7) ...
-    assert!(contains(&seen.connect_initial, &[0x06, 0xC0, 8, 0, 0, 0, 0, 0]));
+    assert!(contains(
+        &seen.connect_initial,
+        &[0x06, 0xC0, 8, 0, 0, 0, 0, 0]
+    ));
     // ... joined it (3.2.5.3.8) ...
     assert!(seen.joined.contains(&MSG_CHANNEL), "{:?}", seen.joined);
     // ... and answered on it with an RTT Measure Response (2.2.14.4, 2.2.14.2.1).

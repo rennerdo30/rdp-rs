@@ -363,7 +363,10 @@ fn mid_session_redirection_continues_the_hop_chain() {
     cfg.redirects = 1; // one connect-time hop already
     let (mut client, _server) = session();
     let mut out = PollOutcome::default();
-    assert!(client.follow_redirection(&cfg).is_none(), "no redirection yet");
+    assert!(
+        client.follow_redirection(&cfg).is_none(),
+        "no redirection yet"
+    );
     // LB_NOREDIRECT is information only: nothing to follow.
     client
         .handle_share(&redirection_pdu(0x80), &mut out)
@@ -376,7 +379,10 @@ fn mid_session_redirection_continues_the_hop_chain() {
     assert_eq!(next.host, "broker.example");
     assert_eq!(next.redirects, 2);
     assert_eq!(next.redirection.as_ref().unwrap().session_id, 5);
-    assert_eq!((next.username.as_str(), next.password.as_str()), ("user", "pw"));
+    assert_eq!(
+        (next.username.as_str(), next.password.as_str()),
+        ("user", "pw")
+    );
     // The hop limit counts across connect-time and mid-session hops.
     let mut far = cfg.clone();
     far.redirects = redirect::MAX_REDIRECTS;
@@ -422,7 +428,13 @@ fn message_channel_auto_detect_is_answered_and_reported() {
     server.write_all(&indication(1004, &rtt)).unwrap();
     let mut answered = None;
     for _ in 0..100 {
-        assert!(client.poll(Duration::from_millis(20)).unwrap().closed.is_none());
+        assert!(
+            client
+                .poll(Duration::from_millis(20))
+                .unwrap()
+                .closed
+                .is_none()
+        );
         server.set_nonblocking(true).unwrap();
         let ready = server.peek(&mut [0u8; 1]).is_ok();
         server.set_nonblocking(false).unwrap();
@@ -446,7 +458,10 @@ fn message_channel_auto_detect_is_answered_and_reported() {
         }
     }
     assert_eq!(channel, 1004);
-    assert_eq!(data, [0x00, 0x20, 0x00, 0x00, 0x06, 0x01, 0x07, 0x00, 0x00, 0x00]);
+    assert_eq!(
+        data,
+        [0x00, 0x20, 0x00, 0x00, 0x06, 0x01, 0x07, 0x00, 0x00, 0x00]
+    );
     let n = network.expect("network characteristics reported");
     assert_eq!((n.bandwidth_kbps, n.average_rtt_ms), (Some(2000), Some(25)));
     assert_eq!(client.network(), n);
@@ -543,7 +558,15 @@ fn fastpath_drawing_orders_reach_the_framebuffer() {
             break;
         }
     }
-    assert_eq!(damage, vec![Damage { x: 1, y: 1, w: 2, h: 2 }]);
+    assert_eq!(
+        damage,
+        vec![Damage {
+            x: 1,
+            y: 1,
+            w: 2,
+            h: 2
+        }]
+    );
     assert_eq!(client.framebuffer().pixels[5], 0x102030);
     assert_eq!(client.framebuffer().pixels[0], 0);
     assert_eq!(events, vec![crate::RailEvent::WindowCreated(42)]);
