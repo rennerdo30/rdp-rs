@@ -130,6 +130,12 @@ impl ClipboardHandle {
     }
 }
 
+/// The default parent folder for files copied from a session:
+/// `rdp-rs-clip` in the system temp folder, one subfolder per transfer.
+pub fn default_file_root() -> PathBuf {
+    std::env::temp_dir().join("rdp-rs-clip")
+}
+
 /// Creates the `cliprdr` channel handler and its UI switch. Sharing starts off.
 pub fn cliprdr(backend: Box<dyn ClipboardBackend>) -> (Cliprdr, ClipboardHandle) {
     let enabled = Arc::new(AtomicBool::new(false));
@@ -148,7 +154,7 @@ pub fn cliprdr(backend: Box<dyn ClipboardBackend>) -> (Cliprdr, ClipboardHandle)
         last_seq: 0,
         requested: VecDeque::new(),
         pending_write: None,
-        file_root: std::env::temp_dir().join("rdpc-clip"),
+        file_root: default_file_root(),
         status,
         incoming: None,
         pending_files: None,
@@ -196,7 +202,7 @@ pub struct Cliprdr {
 
 impl Cliprdr {
     /// Folder under which remote files are stored, one fresh subfolder per
-    /// transfer (default: `rdpc-clip` in the system temp folder).
+    /// transfer (default: [`default_file_root`]).
     pub fn set_file_root(&mut self, root: PathBuf) {
         self.file_root = root;
     }

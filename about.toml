@@ -12,10 +12,10 @@ accepted = [
     "Unicode-3.0",
     "Unicode-DFS-2016",
 ]
-# Only rdpc for Windows is packaged today (docs/RELEASING.md).
+# Only Remora for Windows is packaged today (docs/RELEASING.md).
 targets = ["x86_64-pc-windows-msvc"]
 ignore-build-dependencies = true
 ignore-dev-dependencies = true
 # Unpublished crates are not skipped: ffwd-render (MIT, a git dependency
-# with `publish = false`) needs its notice. rdp-rs's own crates (rdp, rdpc,
-# rdpc-update) are listed too; LICENSE.txt covers them as well.
+# with `publish = false`) needs its notice. rdp-rs's own crates (rdp, remora,
+# remora-update) are listed too; LICENSE.txt covers them as well.

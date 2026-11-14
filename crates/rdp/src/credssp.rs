@@ -2,7 +2,7 @@
 //! public key binding, then delegation of the password credentials.
 //!
 //! The package is the crate's own NTLMv2 ([`crate::ntlm`]) unless the caller
-//! supplies another through [`AuthFactory`] (rdpc: Windows SSPI "Negotiate",
+//! supplies another through [`AuthFactory`] (Remora: Windows SSPI "Negotiate",
 //! which is Kerberos with NTLM fallback). MS-CSSP 3.1.5 treats the package's
 //! tokens and its encryption as opaque; CredSSP only needs [`AuthPackage`].
 

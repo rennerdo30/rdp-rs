@@ -2,7 +2,7 @@
 //! the two YUV420 subframes of AVC444 (2.2.4.5, 2.2.4.6; see `avc444`).
 //!
 //! The library defines the decoder interface and the colour conversion; the
-//! decoder itself is platform code supplied through [`H264Factory`] (rdpc
+//! decoder itself is platform code supplied through [`H264Factory`] (Remora
 //! uses the Windows Media Foundation H.264 decoder).
 
 use std::sync::Arc;

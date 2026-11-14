@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/rdp", "crates/rdpc", "crates/rdpc-update"]
+members = ["crates/rdp", "crates/remora", "crates/remora-update"]
 
 [workspace.package]
 version = "0.1.0-beta.1"

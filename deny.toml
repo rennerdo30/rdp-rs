@@ -3,7 +3,7 @@
 # For "A OR B" expressions one allowed side is enough.
 
 [graph]
-# Only rdpc for Windows is packaged today (docs/RELEASING.md); the protocol
+# Only Remora for Windows is packaged today (docs/RELEASING.md); the protocol
 # library builds everywhere, so all targets are checked.
 all-features = false
 
