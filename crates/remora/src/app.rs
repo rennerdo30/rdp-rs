@@ -752,6 +752,10 @@ impl App {
         // both Start menus opened). If the hook should have taken it,
         // Windows dropped the hook: install it again.
         if input.scancode.is_some_and(crate::keyboard::is_win_key) {
+            rdp::trace!(
+                "keyhook: a Windows key reached the window (hook active {})",
+                crate::keyhook::is_active()
+            );
             if input.down && crate::keyhook::is_active() {
                 rdp::trace!("keyhook: a Windows key passed the active hook; reinstalling");
                 crate::keyhook::reinstall();

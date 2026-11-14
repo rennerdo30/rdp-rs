@@ -65,6 +65,7 @@ mod imp {
                 // SAFETY: plain call.
                 let _ = THREAD.set(unsafe { GetCurrentThreadId() });
                 let mut h = hook();
+                rdp::trace!("keyhook: installed on its own thread ({})", !h.is_null());
                 let _ = ready_tx.send(!h.is_null());
                 // SAFETY: this thread's message loop; the hook procedure is
                 // called from inside GetMessageW.
@@ -98,7 +99,9 @@ mod imp {
     }
 
     pub fn set_active(on: bool) {
-        ACTIVE.store(on, Ordering::Relaxed);
+        if ACTIVE.swap(on, Ordering::Relaxed) != on {
+            rdp::trace!("keyhook: {}", if on { "takes Windows keys" } else { "off" });
+        }
     }
 
     /// Whether the hook takes Windows key combinations now.
@@ -118,12 +121,31 @@ mod imp {
         // SAFETY: for HC_ACTION, lparam points to a KBDLLHOOKSTRUCT owned by
         // the caller for the duration of the call.
         unsafe {
+            if code == HC_ACTION as i32 {
+                let k = &*(lparam as *const KBDLLHOOKSTRUCT);
+                // Only the Windows keys are logged (RDP-53 diagnostics).
+                if matches!(k.vkCode as u16, VK_LWIN | VK_RWIN) {
+                    rdp::trace!(
+                        "keyhook: Windows key {} (active {}, injected {}, flags {:#x})",
+                        if matches!(wparam as u32, WM_KEYDOWN | WM_SYSKEYDOWN) {
+                            "down"
+                        } else {
+                            "up"
+                        },
+                        ACTIVE.load(Ordering::Relaxed),
+                        k.flags & LLKHF_INJECTED != 0,
+                        k.flags
+                    );
+                }
+            }
             if code == HC_ACTION as i32 && ACTIVE.load(Ordering::Relaxed) {
                 let k = &*(lparam as *const KBDLLHOOKSTRUCT);
                 let alt = k.flags & LLKHF_ALTDOWN != 0;
                 let ctrl = GetAsyncKeyState(VK_CONTROL as i32) < 0;
-                if k.flags & LLKHF_INJECTED == 0
-                    && grabs(k.vkCode, alt, ctrl)
+                // Injected keys too: key remappers (PowerToys, AutoHotkey,
+                // vendor tools) and some IME setups inject the real keys,
+                // and Remora itself never injects keys on this PC.
+                if grabs(k.vkCode, alt, ctrl)
                     && let Some(sink) = SINK.get()
                     && let Ok(sink) = sink.lock()
                 {
