@@ -21,6 +21,10 @@ pub struct AppSettings {
     /// in logical px (the UI clamps them to its limits).
     pub sidebar_width: u32,
     pub panel_width: u32,
+    /// The session panel docks beside the picture; otherwise (the default)
+    /// a strip of its pages stays at the picture's edge and the panel
+    /// floats over the picture.
+    pub panel_pinned: bool,
 }
 
 /// Update channel choices offered in Settings: (setting, label).
@@ -89,6 +93,7 @@ impl Default for AppSettings {
             sidebar_collapsed: false,
             sidebar_width: crate::ui::SIDEBAR_W as u32,
             panel_width: crate::ui::DRAWER_W as u32,
+            panel_pinned: false,
         }
     }
 }
@@ -133,6 +138,8 @@ mod tests {
         // Settings from before the sidebar could fold or resize.
         assert!(!s.sidebar_collapsed);
         assert_eq!((s.sidebar_width, s.panel_width), (264, 320));
+        // Settings from before the panel could pin: the strip.
+        assert!(!s.panel_pinned);
     }
 
     #[test]
@@ -141,6 +148,7 @@ mod tests {
             sidebar_collapsed: true,
             sidebar_width: 400,
             panel_width: 360,
+            panel_pinned: true,
             ..AppSettings::default()
         };
         let json = serde_json::to_vec(&s).unwrap();

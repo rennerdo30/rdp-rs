@@ -71,21 +71,32 @@ pub(super) struct Dividers {
     pub(super) panel_right: i32,
 }
 
-/// A rail item's tooltip: where it goes (physical px) and what it says.
+/// A tooltip (rail, panel strip): where it goes (physical px) and what it
+/// says.
 pub(super) struct Tip {
-    rect: Rect,
-    title: String,
+    pub(super) rect: Rect,
+    pub(super) title: String,
     sub: Vec<String>,
     keys: Option<&'static str>,
 }
 
-/// One rail control that may show a tooltip.
-struct TipSpec {
-    hit: Hit,
-    anchor: Rect,
-    title: String,
-    sub: Vec<String>,
-    keys: Option<&'static str>,
+/// One control that may show a tooltip (the rail, the session panel's
+/// strip and header).
+pub(super) struct TipSpec {
+    pub(super) hit: Hit,
+    pub(super) anchor: Rect,
+    pub(super) title: String,
+    pub(super) sub: Vec<String>,
+    pub(super) keys: Option<&'static str>,
+}
+
+/// Where a tooltip goes: right of an area (the rail), left of one (the
+/// session panel's strip), or under its control.
+#[derive(Clone, Copy)]
+pub(super) enum TipSide {
+    Right(Rect),
+    Left(Rect),
+    Below,
 }
 
 impl Ui {
@@ -487,7 +498,7 @@ impl Ui {
             && self.confirm_exit.is_none()
             && let Some(spec) = specs.into_iter().find(|t| Some(t.hit) == self.hover)
         {
-            self.set_tip(cv, te, f, area, spec);
+            self.set_tip(cv, te, f, TipSide::Right(area), spec);
         }
     }
 
@@ -596,18 +607,19 @@ impl Ui {
         self.hits.push((r, hit));
     }
 
-    /// Lays out the tooltip of `spec` right of the rail, level with its
-    /// control and inside the window.
-    fn set_tip(
+    /// Lays out the tooltip of `spec` beside an area (level with its
+    /// control) or under its control, inside the window.
+    pub(super) fn set_tip(
         &mut self,
         cv: &mut Canvas,
         te: &mut TextEngine,
         f: &Fonts,
-        area: Rect,
+        side: TipSide,
         spec: TipSpec,
     ) {
         let s = self.scale;
         let p = |v: f32| (v * s).round() as i32;
+        let win_w = cv.width() as i32;
         let mut k = Kit::new(cv, te, f, s);
         let mut top_w = k.measure(Font::Semi, 12.5, &spec.title);
         if let Some(keys) = spec.keys {
@@ -621,9 +633,18 @@ impl Ui {
             .unwrap_or(0);
         let w = (top_w.max(sub_w) + 2 * p(10.0)).min(p(320.0));
         let h = p(32.0) + spec.sub.len() as i32 * p(17.0);
-        let x = area.right() + p(6.0);
-        let mid = spec.anchor.y + spec.anchor.h / 2;
-        let y = (mid - h / 2).clamp(p(4.0), (area.bottom() - h - p(4.0)).max(p(4.0)));
+        let level = |area: Rect| {
+            let mid = spec.anchor.y + spec.anchor.h / 2;
+            (mid - h / 2).clamp(p(4.0), (area.bottom() - h - p(4.0)).max(p(4.0)))
+        };
+        let (x, y) = match side {
+            TipSide::Right(area) => (area.right() + p(6.0), level(area)),
+            TipSide::Left(area) => (area.x - p(6.0) - w, level(area)),
+            TipSide::Below => (
+                (spec.anchor.right() - w).clamp(p(4.0), (win_w - w - p(4.0)).max(p(4.0))),
+                spec.anchor.bottom() + p(6.0),
+            ),
+        };
         self.tip = Some(Tip {
             rect: Rect::new(x, y, w, h),
             title: spec.title,

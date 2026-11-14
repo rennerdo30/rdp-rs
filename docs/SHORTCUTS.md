@@ -16,6 +16,7 @@ Remora has two keyboard states:
 | Click into the picture | Send the keyboard to the session |
 | **Ctrl+Alt+Home** | Give the keyboard back to Remora |
 | **Ctrl+Alt+K** | Open the command palette over the session; the session gets the keyboard back when it closes |
+| **Ctrl+Alt+P** | Show or hide the session panel. A floating panel takes the keyboard; **Esc** closes it and gives the keyboard back to the session |
 | **Ctrl+Alt+Break** | Full screen on or off. On a session shown on several monitors, back into its tab |
 | Hold **Alt** | Show the toolbar while the key is down (the key still goes to the session) |
 
@@ -37,6 +38,8 @@ page.
 | **Ctrl+N** | New connection (in the group you are looking at) |
 | **Ctrl+F** | Filter the connections in the sidebar by name, address, user, group or app (unfolds a folded sidebar) |
 | **Ctrl+B** | Fold the sidebar to its icon rail, or unfold it |
+| **Ctrl+Alt+P** | In a session tab: show or hide the session panel |
+| **Esc** | Close the floating session panel (after leaving a text field in it) |
 | **Ctrl+Tab** / **Ctrl+Shift+Tab** | Next / previous tab (the Connections tab included) |
 | **Ctrl+Shift+U** | Install the offered update |
 | **Up** / **Down** | Move through the sidebar's connections (when no text field has the cursor) |

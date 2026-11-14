@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- **The session panel folds to a strip and floats.** By default the side panel is now a slim strip of page icons (with tooltips) at the picture's right edge; an icon, the toolbar's Panel button or **Ctrl+Alt+P** (also from inside the session) opens the panel floating over the picture, so the remote desktop is not resized. A click on the picture or **Esc** closes it, and neither reaches the session. The pin in its header docks it beside the picture as before; Remora remembers the choice, and the palette has **Pin/Unpin session panel**. Full screen has no strip.
 - **No more repeated reconnects on some servers.** RemoteFX/NSCodec surface commands and drawing orders, new in 0.1.0-beta.2, are off again by default: a Windows server failed its picture encoding with them (0x112F) or dropped the connection after the window's size was applied, which looked like five connection timeouts before compatible mode took over. Remora draws as in 0.1.0-beta.1 again; `--surface-commands` and `--drawing-orders` turn them on for testing.
 - **The microphone works.** Remora never told the server at logon that it can record audio (INFO_AUDIOCAPTURE), so the server never opened the microphone channel and the remote PC reported no microphone, whether **Microphone** was switched on before or after connecting. It now does, and the switch works live in a running session.
 

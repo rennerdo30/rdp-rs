@@ -486,7 +486,7 @@ impl Ui {
         l.fixed
             || self.bar_pinned
             || !self.session_focus
-            || self.drawer
+            || self.panel_visible()
             || tb.open
             || tb.alt
             || tb.menu
@@ -503,10 +503,11 @@ impl Ui {
             .layout
             .as_ref()
             .map(|l| self.overlay_rect_of(l, self.pill_shown()));
-        match (bar, self.tip_bounds()) {
-            (Some(a), Some(b)) => Some(union(a, b)),
-            (a, b) => a.or(b),
-        }
+        // So do the strip's tooltips and the floating panel's shadow.
+        [bar, self.tip_bounds(), self.panel_shadow_rect()]
+            .into_iter()
+            .flatten()
+            .reduce(union)
     }
 
     fn overlay_rect_of(&self, l: &Layout, shown: bool) -> Rect {
@@ -518,6 +519,12 @@ impl Ui {
             r = union(r, inflate(l.menu_rect, self.scale));
         }
         r
+    }
+
+    /// Where the toolbar's pill was laid out (tests).
+    #[cfg(test)]
+    pub(super) fn pill_rect(&self) -> Option<Rect> {
+        self.toolbar.layout.as_ref().map(|l| l.pill.rect)
     }
 
     /// The rectangle to repaint over the picture since the last call, when
@@ -807,22 +814,38 @@ impl Ui {
         let picture = connected && !spanned && !apps;
 
         let mut area = content;
-        // The panel sits beside a running session only.
+        // The panel sits beside a running session only: docked, or the
+        // strip of its pages with the panel floating over the picture.
         let mut panel_edge = None;
-        if self.drawer && connected {
+        let mut float = None;
+        if connected && self.panel_pinned && self.drawer {
             let dw = self.panel_px(area.w);
             let drawer = Rect::new(area.right() - dw, area.y, dw, area.h);
             area.w -= dw + 1;
             cv.fill(Rect::new(area.right(), area.y, 1, area.h), c.divider);
-            self.paint_drawer(cv, te, f, drawer, id);
+            self.paint_drawer(cv, te, f, drawer, id, panel::Shape::Docked);
             panel_edge = Some(area.right());
+        } else if connected {
+            if self.strip_shown() {
+                let sw = self.strip_px();
+                let strip = Rect::new(area.right() - sw + 1, area.y, sw - 1, area.h);
+                area.w -= sw;
+                self.paint_strip(cv, te, f, strip, id);
+            }
+            if !self.panel_pinned && self.panel.open == Some(id) {
+                let fw = self.panel_px(area.w);
+                float = Some(Rect::new(area.right() - fw, area.y, fw, area.h));
+            }
         }
-        let mut pill_area = area;
+        // What the floating panel leaves of the picture: the toolbar
+        // centres over it, the picture is copied only there.
+        let open_w = float.map_or(area.w, |r| r.x - area.x);
+        let mut pill_area = Rect::new(area.x, area.y, open_w, area.h);
         if connected && !picture {
             // No picture to float over: the pill gets a band of its own.
             let band = Rect::new(area.x, area.y, area.w, p(BAND_H));
             cv.fill(band, c.bg);
-            pill_area = band;
+            pill_area = Rect::new(band.x, band.y, open_w, band.h);
             area.y += band.h;
             area.h -= band.h;
         }
@@ -857,6 +880,9 @@ impl Ui {
             TabState::Connected { .. } => {
                 self.session_area = Some((id, area));
                 self.hits.push((area, Hit::Session(id)));
+                if float.is_some() {
+                    self.session_clip = Some(Rect::new(area.x, area.y, open_w, area.h));
+                }
             }
             TabState::Connecting => {
                 let cert = self
@@ -890,6 +916,29 @@ impl Ui {
             }
             TabState::Ended(why) => self.paint_ended(cv, te, f, area, id, &host, &live, &why),
         }
+        // The floating panel over the picture's right part (its body takes
+        // the pointer from the picture under it); its shadow goes over the
+        // picture with the toolbar.
+        if let Some(r) = float {
+            self.hits.push((r, Hit::PanelBody));
+            self.paint_drawer(
+                cv,
+                te,
+                f,
+                r,
+                id,
+                panel::Shape::Float {
+                    pages: !self.strip_shown(),
+                },
+            );
+            let border = if c.dark { c.border_strong } else { c.border };
+            cv.fill(Rect::new(r.x, r.y, 1, r.h), border);
+            self.panel.float_rect = Some(r);
+            // Its left edge drags too, inside the panel (the picture is
+            // copied over everything left of it).
+            self.dividers.panel_right = r.right() + 2;
+            self.paint_divider(cv, Divider::Panel, r.x + 1, r.y, r.bottom());
+        }
         // The panel's left edge drags; last, so its grip wins over the
         // picture and the panel beside it.
         if let Some(x) = panel_edge {
@@ -909,7 +958,7 @@ impl Ui {
         let (name, recording, apps) = (t.name.clone(), t.recording, t.remote_app.is_some());
         let spanned = t.spanned;
         let mut items = vec![(
-            ToolItem::new(Tool::Panel, Icon::PanelRight).on(self.drawer),
+            ToolItem::new(Tool::Panel, Icon::PanelRight).on(self.panel_visible()),
             Hit::Drawer,
         )];
         if !apps && !spanned {
@@ -1008,6 +1057,7 @@ impl Ui {
         {
             self.paint_reconnect_card(cv, te, f, area, id, &attempt, &step);
         }
+        self.paint_panel_shadow(cv, te, f);
         self.paint_tip(cv, te, f);
         let Some(l) = self.toolbar.layout.clone() else {
             return;
@@ -1505,7 +1555,11 @@ impl Ui {
     pub fn paint_snapshot(&mut self, cv: &mut Canvas, te: &mut TextEngine, f: &Fonts) {
         self.paint_window(cv, te, f);
         if let Some((_, area)) = self.session_area {
+            // Only where the app would copy the picture (not under the
+            // floating panel).
+            let old = cv.set_clip(cv.clip().intersect(self.session_clip.unwrap_or(area)));
             paint_sample_picture(cv, area, SAMPLE_TINT, Some((te, f)));
+            cv.set_clip(old);
         }
         self.paint_overlays(cv, te, f);
     }
@@ -1563,7 +1617,7 @@ pub fn paint_sample_picture(
     tint: u32,
     text: Option<(&mut TextEngine, &Fonts)>,
 ) {
-    let old = cv.set_clip(r);
+    let old = cv.set_clip(r.intersect(cv.clip()));
     let (w, h) = (r.w.max(1), r.h.max(1));
     // Sized as if the remote desktop were 1280 x 800.
     let s = (w as f32 / 1280.0).min(h as f32 / 800.0).clamp(0.3, 3.0);
@@ -2119,7 +2173,8 @@ pub fn sample_ended(reason: EndReason) -> Ui {
 /// into the picture) or hidden to its handle; `menu` opens its menu.
 pub fn sample_toolbar(shown: bool, menu: bool, fullscreen: bool) -> Ui {
     let mut m = sample(true);
-    m.drawer = false;
+    // The panel unpinned (the default): its strip at the picture's edge.
+    m.panel_pinned = false;
     m.fullscreen = fullscreen;
     m.session_focus = !shown;
     m.toolbar.menu = menu;
@@ -2195,7 +2250,7 @@ mod tests {
         assert!(m.pill_shown() && m.take_overlay_damage().is_some());
         m.alt_key(false);
         assert!(!m.pill_shown());
-        m.drawer = true;
+        m.panel.open = m.active;
         assert!(m.pill_shown(), "stays while the panel is open");
     }
 

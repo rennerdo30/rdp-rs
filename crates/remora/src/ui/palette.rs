@@ -108,7 +108,10 @@ pub enum Command {
     ShareFolder(u64),
     StopSharing(u64, usize),
     Record(u64),
+    /// Show or hide the session panel (its toolbar button, Ctrl+Alt+P).
     Panel,
+    /// Dock the panel beside the picture, or float it over the picture.
+    PinPanel,
     Theme(ThemeChoice),
     OpenSettings,
     /// Fold or unfold the sidebar ("Toggle sidebar", Ctrl+B).
@@ -155,6 +158,7 @@ impl Command {
             Command::StopSharing(id, i) => Hit::RemoveDrive(id, i),
             Command::Record(id) => Hit::Record(id),
             Command::Panel => Hit::Drawer,
+            Command::PinPanel => Hit::PanelPin,
             Command::Theme(t) => Hit::Theme(
                 ThemeChoice::ALL
                     .iter()
@@ -681,19 +685,43 @@ impl Ui {
                     );
                 }
             }
+            let shown = self.panel_visible();
             push(
                 Command::Panel,
                 s,
-                if self.drawer {
-                    "Hide panel".into()
+                if shown {
+                    "Hide session panel".into()
                 } else {
-                    "Show panel".into()
+                    "Show session panel".into()
                 },
                 "Sharing, display, quality and session details".into(),
-                "drawer sidebar settings toggle",
+                "panel drawer sidebar settings toggle open close",
                 Lead::Icon(Icon::PanelRight, Tone::Neutral),
+                Chip::Keys("Ctrl+Alt+P"),
+                if shown { "Hide" } else { "Show" },
+            );
+            let (title, sub, verb) = if self.panel_pinned {
+                (
+                    "Unpin session panel",
+                    "A strip of its pages; the panel floats over the picture",
+                    "Unpin",
+                )
+            } else {
+                (
+                    "Pin session panel",
+                    "Beside the picture, which gets narrower",
+                    "Pin",
+                )
+            };
+            push(
+                Command::PinPanel,
+                s,
+                title.into(),
+                sub.into(),
+                "pin unpin dock float panel drawer strip",
+                Lead::Icon(Icon::Pin, Tone::Neutral),
                 Chip::None,
-                if self.drawer { "Hide" } else { "Show" },
+                verb,
             );
             push(
                 Command::CloseTab(id),
@@ -1006,6 +1034,12 @@ impl Ui {
         self.palette = None;
         let before = self.active;
         let action = self.activate(cmd.hit());
+        // A panel that now floats keeps the keyboard (Esc closes it and
+        // gives it back).
+        if self.panel.open.is_some() && !self.panel_pinned {
+            self.panel.return_to = return_to.filter(|&id| self.active == Some(id));
+            return action;
+        }
         if return_to.is_some()
             && return_to == before
             && self.active == before
