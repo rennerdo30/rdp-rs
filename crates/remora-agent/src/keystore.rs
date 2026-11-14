@@ -5,10 +5,11 @@
 //! The format and recovery rules are `remora_link::keyfile` (shared with
 //! Remora's client key): `"RAK1"`, `u32` little-endian length, the
 //! protected blob, whose plaintext is `"RAKP"` and the 32-byte private key.
-//! A file that cannot be read, parsed or unprotected is moved to
-//! `agent-key.bin.old` and a new key is made; Remora then warns the user
-//! about a changed key and asks to compare codes again, which is correct:
-//! the old key is gone.
+//! A file that does not parse, or that DPAPI refuses on every try, is kept
+//! as `agent-key.bin.old.<n>` and a new key is made; Remora then warns the
+//! user about a changed key and asks to compare codes again, which is
+//! correct: the old key is gone. A file that cannot be read right now is
+//! an error, never a new key.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -32,6 +33,13 @@ pub fn default_clients_path() -> Option<PathBuf> {
             .join("rdp-rs")
             .join("agent-clients.json"),
     )
+}
+
+/// `%LOCALAPPDATA%\rdp-rs\agent-strict`: the user's pinned-clients-only
+/// switch (`remora-agent strict on|off`).
+pub fn default_strict_path() -> Option<PathBuf> {
+    let base = std::env::var_os("LOCALAPPDATA")?;
+    Some(PathBuf::from(base).join("rdp-rs").join("agent-strict"))
 }
 
 #[cfg(test)]
@@ -133,7 +141,7 @@ mod tests {
     }
 
     #[test]
-    fn unusable_files_are_replaced_and_kept_once() {
+    fn unusable_files_are_replaced_and_kept() {
         let path = temp("corrupt");
         let p = FakeProtector::new(0x11);
         let first = load_or_create(&path, &p, &gen_).unwrap().key.public();
@@ -149,7 +157,7 @@ mod tests {
             ("empty", Box::new(|d: &mut Vec<u8>| d.clear())),
         ];
         let mut prev = first;
-        for (what, damage) in cases {
+        for (n, (what, damage)) in cases.into_iter().enumerate() {
             let mut data = std::fs::read(&path).unwrap();
             damage(&mut data);
             std::fs::write(&path, &data).unwrap();
@@ -160,8 +168,9 @@ mod tests {
                 r.origin
             );
             assert_ne!(r.key.public(), prev, "{what}: a new key");
+            // Kept under a new number each time (review 2 item 7).
             let mut old = path.as_os_str().to_owned();
-            old.push(".old");
+            old.push(format!(".old.{}", n + 1));
             assert_eq!(std::fs::read(&old).unwrap(), data, "{what}: kept");
             // And the new one loads.
             let again = load_or_create(&path, &p, &gen_).unwrap();

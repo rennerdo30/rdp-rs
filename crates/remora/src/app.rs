@@ -1705,6 +1705,7 @@ impl App {
     /// The network dropped a session: reconnect after a short wait, with the
     /// server's auto-reconnect cookie, a few times before giving up.
     fn dropped(&mut self, id: u64, why: String, cookie: Option<rdp::AutoReconnectCookie>) {
+        self.helper_connection_ended(id);
         let Some(s) = self.sessions.get_mut(&id) else {
             return;
         };
@@ -1777,6 +1778,7 @@ impl App {
     }
 
     fn ended(&mut self, id: u64, state: TabState) {
+        self.helper_connection_ended(id);
         // Its monitor windows close; the tab tells what happened.
         if self.spans.iter().any(|s| s.session == id) {
             self.spans.retain(|s| s.session != id);
@@ -2122,6 +2124,16 @@ impl ApplicationHandler<UserEvent> for App {
             UserEvent::Helper(id) => return self.helper_events(id),
             UserEvent::PickedFiles(id, files) => return self.send_files(id, files),
             UserEvent::PickedDownloads(dir) => {
+                // Received files need the Mark-of-the-Web: say at once when
+                // the folder's drive cannot keep it (the download would be
+                // refused).
+                if crate::helper_app::named_streams(&dir) == Some(false) {
+                    self.message(
+                        "That folder's drive can't mark files from the internet, so downloads \
+                         there would be refused; choose a folder on an NTFS drive.",
+                        Tone::Warning,
+                    );
+                }
                 if let Some(m) = &mut self.win {
                     m.ui.form_set_download_dir(dir.to_string_lossy().into_owned());
                 }

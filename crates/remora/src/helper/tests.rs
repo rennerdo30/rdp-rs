@@ -387,7 +387,7 @@ fn capabilities_follow_user_setting_and_policy() {
     let mut r = Rig::new("caps");
     r.handle.set_transport_protocol(1);
     r.handle.set_capabilities(cap::ALL);
-    r.handle.set_received_file_hook(|_| {});
+    r.handle.set_received_file_hook(|_| Ok(()));
     let mut h = r.connect(StaticKey::generate().unwrap());
     // Drive clipboard disabled by policy: no file transfer at all.
     let ack = r.pair_and_hello(&mut h, cap::ALL, policy::CLIPBOARD_DISABLED);
@@ -516,6 +516,7 @@ fn download_end_to_end_into_the_chosen_folder() {
         m2.lock().unwrap().push(p.to_path_buf());
         let name = std::thread::current().name().unwrap_or("").to_string();
         t2.lock().unwrap().push(name);
+        Ok(())
     });
     let mut h = r.connect(StaticKey::generate().unwrap());
     let ack = r.pair_and_hello(&mut h, cap::ALL, 0);
@@ -966,4 +967,243 @@ fn a_pairing_cut_off_by_a_reconnect_counts_for_the_server() {
         &attempts,
         "server:3389"
     ));
+}
+
+/// Opens Ctl and sends only the helper's first handshake message: the
+/// helper then stalls before the pairing code.
+fn stall_before_the_code(r: &mut Rig, key: &StaticKey) {
+    let mut out = DvcOut::default();
+    r.ctl.opened(&mut out).unwrap();
+    let (_s, first) = SecureSession::initiator(Channel::Ctl, key, Binding::default()).unwrap();
+    r.ctl.process(&first, &mut out).unwrap();
+}
+
+/// Review 2 item 9: a helper that never reaches the code is closed after
+/// the pairing-step timeout, and that counts as an aborted pairing.
+#[test]
+fn a_stalled_pairing_step_times_out_and_counts() {
+    let mut r = Rig::new("stall");
+    r.handle.set_transport_protocol(1);
+    let key = StaticKey::generate().unwrap();
+    for n in 1..=2u32 {
+        stall_before_the_code(&mut r, &key);
+        let mut out = DvcOut::default();
+        assert!(r.ctl.tick(&mut out).is_ok(), "not yet");
+        r.handle.lock().sas_deadline = Some(Instant::now() - Duration::from_secs(1));
+        assert!(r.ctl.tick(&mut out).is_err(), "closed");
+        assert_eq!(r.handle.lock().aborts, n);
+        r.ctl.closed();
+    }
+    assert_eq!(r.handle.state(), HelperState::PairingBlocked);
+}
+
+/// Review 2 item 10: a pairing left unanswered when the connection ends
+/// (without a reconnect of the tab) or the tab closes counts for the
+/// server at once.
+#[test]
+fn a_pairing_left_by_an_ended_connection_or_a_closed_tab_counts() {
+    let keep = temp_dir("ended-log");
+    let attempts = keep.join("helper-attempts.json");
+    let mut r = Rig::new("ended");
+    r.handle.set_pairing_policy(Some(attempts.clone()), None);
+    r.handle.set_transport_protocol(1);
+    let _h = r.connect(StaticKey::generate().unwrap());
+    assert!(matches!(
+        r.handle.state(),
+        HelperState::AwaitingPairing { .. }
+    ));
+    r.handle.connection_ended();
+    assert!(attempts.exists(), "recorded");
+    assert_eq!(r.handle.state(), HelperState::NotPresent);
+    let after_one = std::fs::read(&attempts).unwrap();
+    // Once only: a later reconnect does not count it again.
+    let mut fresh = r.handle.reattach();
+    r.bulk = fresh.pop().unwrap();
+    r.ctl = fresh.pop().unwrap();
+    assert_eq!(std::fs::read(&attempts).unwrap(), after_one);
+    // The tab closes while the next pairing waits: dropping it counts.
+    r.handle.set_transport_protocol(1);
+    let _h2 = r.connect(StaticKey::generate().unwrap());
+    drop(_h2);
+    drop(r);
+    assert_ne!(std::fs::read(&attempts).unwrap(), after_one, "second abort");
+    assert!(!remora_link::AttemptLog::is_blocked(
+        &attempts,
+        "server:3389"
+    ));
+    assert!(remora_link::AttemptLog::would_block(
+        &attempts,
+        "server:3389",
+        now_secs()
+    ));
+    let _ = std::fs::remove_dir_all(&keep);
+}
+
+/// Review 2 item 8: a damaged attempt log, or one that cannot be written,
+/// blocks instead of reading as "no attempts".
+#[test]
+fn a_damaged_or_unwritable_attempt_log_fails_closed() {
+    let mut r = Rig::new("damaged-log");
+    let attempts = r.dir.join("helper-attempts.json");
+    std::fs::write(&attempts, b"{damaged").unwrap();
+    r.handle.set_pairing_policy(Some(attempts.clone()), None);
+    r.handle.set_transport_protocol(1);
+    // Blocked before any code exists, and the log is kept as it is.
+    assert!(grind_once(&mut r, &StaticKey::generate().unwrap()).is_err());
+    assert_eq!(r.handle.state(), HelperState::PairingBlocked);
+    assert_eq!(std::fs::read(&attempts).unwrap(), b"{damaged", "kept");
+    // A log that can be read but not written: the abort that cannot be
+    // recorded blocks.
+    let mut r = Rig::new("unwritable-log");
+    let attempts = r.dir.join("helper-attempts.json");
+    std::fs::write(&attempts, b"{}").unwrap();
+    let mut ro = std::fs::metadata(&attempts).unwrap().permissions();
+    ro.set_readonly(true);
+    std::fs::set_permissions(&attempts, ro.clone()).unwrap();
+    r.handle.set_pairing_policy(Some(attempts.clone()), None);
+    r.handle.set_transport_protocol(1);
+    grind_once(&mut r, &StaticKey::generate().unwrap()).unwrap();
+    assert_eq!(r.handle.state(), HelperState::PairingBlocked);
+    #[allow(clippy::permissions_set_readonly_false)]
+    ro.set_readonly(false);
+    std::fs::set_permissions(&attempts, ro).unwrap();
+}
+
+/// Review 2 item 15: a pin store locked by another process does not hold
+/// up the adapter (and the session thread behind its lock): the pin is
+/// written once the lock is free.
+#[test]
+fn a_locked_pin_store_never_stalls_the_adapter() {
+    let mut r = Rig::new("busy-store");
+    r.handle.set_transport_protocol(1);
+    let key = StaticKey::generate().unwrap();
+    let mut h = r.connect(key.clone());
+    let pins = r.dir.join("helpers.json");
+    let lock = r.dir.join("helpers.json.lock");
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis();
+    std::fs::write(&lock, format!("{} {now_ms}", "ef".repeat(16))).unwrap();
+    let t = Instant::now();
+    r.handle.confirm_pairing(shown(&r.handle)).unwrap();
+    r.send(&mut h, hello(cap::ALL, 0));
+    assert!(t.elapsed() < Duration::from_secs(1), "{:?}", t.elapsed());
+    assert!(PinStore::load(&pins).unwrap().iter().next().is_none());
+    std::fs::remove_file(&lock).unwrap();
+    assert!(remora_link::store::flush_deferred(Duration::from_secs(10)));
+    assert_eq!(
+        PinStore::load(&pins)
+            .unwrap()
+            .check("server:3389", &key.public()),
+        PinCheck::Known
+    );
+}
+
+/// Review 2 item 12: a full queue drops progress and failures first and
+/// never a link question, an offer or a state; a link with no room left
+/// is declined (its slot freed), and offers refused unseen are counted
+/// with one event waiting.
+#[test]
+fn a_full_queue_keeps_links_offers_and_states() {
+    use remora_link::transfer::{Direction, reason};
+    let r = Rig::new("evict");
+    let mut c = r.handle.lock();
+    c.open_urls.push(7);
+    c.push(HelperEvent::OpenUrl {
+        request_id: 7,
+        url: "https://a.example/".into(),
+    });
+    c.push(HelperEvent::Transfer(TransferEvent::Offered {
+        id: [1; 16],
+        name: "a".into(),
+        size: 1,
+        mtime: 1,
+    }));
+    c.push(HelperEvent::State(HelperState::Paired));
+    let failed = |i: u32, direction| {
+        let mut id = [0xEE; 16];
+        id[..4].copy_from_slice(&i.to_le_bytes());
+        HelperEvent::Transfer(TransferEvent::Failed {
+            id,
+            direction,
+            reason: reason::IO,
+            by_peer: true,
+            detail: String::new(),
+        })
+    };
+    for i in 0..(MAX_EVENTS as u32 * 2) {
+        c.push(failed(i, Direction::Send));
+    }
+    assert!(c.events.len() <= MAX_EVENTS);
+    assert!(matches!(
+        c.events[0],
+        HelperEvent::OpenUrl { request_id: 7, .. }
+    ));
+    assert!(matches!(
+        c.events[1],
+        HelperEvent::Transfer(TransferEvent::Offered { .. })
+    ));
+    assert!(matches!(
+        c.events[2],
+        HelperEvent::State(HelperState::Paired)
+    ));
+    // Only links, offers and states: a new link is declined, not queued.
+    c.events.clear();
+    for i in 0..MAX_EVENTS as u32 {
+        let mut id = [0xAA; 16];
+        id[..4].copy_from_slice(&i.to_le_bytes());
+        c.push(HelperEvent::Transfer(TransferEvent::Offered {
+            id,
+            name: "o".into(),
+            size: 1,
+            mtime: 1,
+        }));
+    }
+    c.open_urls.push(9);
+    c.push(HelperEvent::OpenUrl {
+        request_id: 9,
+        url: "https://b.example/".into(),
+    });
+    assert!(!c.open_urls.contains(&9), "its slot is free");
+    assert!(
+        !c.events
+            .iter()
+            .any(|e| matches!(e, HelperEvent::OpenUrl { .. }))
+    );
+    // Offers refused before the app saw them: counted, one event waits.
+    c.events.clear();
+    c.offers.clear();
+    for i in 0..100 {
+        c.push(failed(i, Direction::Receive));
+    }
+    assert_eq!(c.refused_offers, 100);
+    assert_eq!(c.events.len(), 1);
+}
+
+/// Review 2 item 1: a helper with pinned clients only refuses this PC;
+/// Remora says the helper refused it.
+#[test]
+fn a_refusal_by_the_helper_is_shown_as_such() {
+    let mut r = Rig::new("refused");
+    r.handle.set_transport_protocol(1);
+    let mut h = r.connect(StaticKey::generate().unwrap());
+    r.send(&mut h, Message::PeerPairing(PairingStatus::Rejected));
+    let wire = h
+        .ctl
+        .send(
+            0,
+            &Message::Error(ErrorMsg {
+                code: err::PAIRING_REJECTED,
+                message: "this helper accepts paired Remora clients only".into(),
+            }),
+        )
+        .unwrap();
+    let mut out = DvcOut::default();
+    assert!(r.ctl.process(&wire, &mut out).is_err(), "closed");
+    assert!(
+        matches!(r.handle.state(), HelperState::Failed(ref w) if w.contains("refused this PC")),
+        "{:?}",
+        r.handle.state()
+    );
 }

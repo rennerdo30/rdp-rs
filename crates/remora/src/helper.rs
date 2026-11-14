@@ -16,7 +16,13 @@
 //!   in the middle could otherwise retry silently until the codes match):
 //!   two per connection refuse the helper for the rest of it, three per
 //!   server within a day block pairing with that server until the user
-//!   retries (HELPER-PROTOCOL.md 3.3).
+//!   retries (HELPER-PROTOCOL.md 3.3). A pairing step that stalls for
+//!   [`PAIRING_STEP_TIMEOUT`] counts too, and so does one cut off by the
+//!   end of the connection or of the tab ([`HelperHandle::connection_ended`]).
+//!   A damaged attempt log blocks (fails closed).
+//! - Store writes (pins, attempts) never wait long under the adapter's
+//!   lock: they wait [`STORE_WAIT`] for another process's lock file and are
+//!   then queued to the background store writer.
 //! - Remora's own Noise key is persistent (DPAPI-protected by the app) so
 //!   the helper can pin it too; the helper sends data to the client only
 //!   once it has (HELPER-PROTOCOL.md 4, 9).
@@ -41,7 +47,7 @@ use remora_link::msg::{
 };
 use remora_link::transfer::io::{FsDir, FsSource};
 use remora_link::transfer::worker::{EngineWorker, Posted};
-use remora_link::transfer::{CHUNK_SIZE, TransferEvent, WINDOW};
+use remora_link::transfer::{CHUNK_SIZE, Direction, TransferEvent, WINDOW};
 use remora_link::{
     Binding, Channel, Event, Message, PinCheck, PinStore, Sas, SecureSession, StaticKey, cap,
     policy,
@@ -64,6 +70,55 @@ const PROTOCOL_RDP: u32 = 0;
 /// Events kept for the app at most; beyond it the oldest progress or
 /// session info goes first (a helper must not grow the queue unbounded).
 pub const MAX_EVENTS: usize = 256;
+/// From `Remora::Ctl` opening to the pairing code (handshake and the SAS
+/// commit and reveal): a helper that takes longer is closed, and that
+/// counts as an aborted pairing.
+pub const PAIRING_STEP_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long a store write under the adapter's lock waits for another
+/// process's lock file before it is queued instead.
+pub const STORE_WAIT: Duration = Duration::from_millis(50);
+
+/// Runs a store write now when its lock is free within [`STORE_WAIT`];
+/// otherwise queues it on the background store writer with the full wait.
+/// An error only for a failure other than "busy".
+fn store_write(
+    job: impl Fn(Duration) -> remora_link::Result<()> + Send + 'static,
+) -> Result<(), String> {
+    match job(STORE_WAIT) {
+        Err(e) if remora_link::store::is_busy(&e) => {
+            remora_link::store::defer(move || {
+                if let Err(e) = job(remora_link::store::LOCK_WAIT) {
+                    rdp::trace!("helper: queued store write failed: {e}");
+                }
+            });
+            Ok(())
+        }
+        r => r.map_err(|e| e.to_string()),
+    }
+}
+
+/// Records an aborted pairing for `id`; whether pairing with it is now
+/// blocked. Fails closed: a write that fails, or a damaged log, blocks; a
+/// busy log is decided from what it holds and written later.
+fn record_abort(path: &Path, id: &str, now: u64) -> bool {
+    match remora_link::AttemptLog::record_abort_within(path, id, now, STORE_WAIT) {
+        Ok(blocked) => blocked,
+        Err(e) if remora_link::store::is_busy(&e) => {
+            let blocked = remora_link::AttemptLog::would_block(path, id, now);
+            let (path, id) = (path.to_path_buf(), id.to_string());
+            remora_link::store::defer(move || {
+                if let Err(e) = remora_link::AttemptLog::record_abort(&path, &id, now) {
+                    rdp::trace!("helper: aborted pairing not recorded: {e}");
+                }
+            });
+            blocked
+        }
+        Err(e) => {
+            rdp::trace!("helper: aborted pairing not recorded ({e}); blocking");
+            true
+        }
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum HelperState {
@@ -122,8 +177,8 @@ struct Link {
     buffered_bytes: usize,
 }
 
-type PathHook = Arc<dyn Fn(&Path) + Send + Sync>;
-type SpaceHook = Arc<dyn Fn(&Path) -> Option<u64> + Send + Sync>;
+type PathHook = Arc<dyn Fn(&Path) -> std::io::Result<()> + Send + Sync>;
+type SpaceHook = Arc<dyn Fn(&Path, TransferId) -> Option<u64> + Send + Sync>;
 type Notify = Arc<dyn Fn() + Send + Sync>;
 
 struct Core {
@@ -150,6 +205,18 @@ struct Core {
     /// A pairing with an unpinned key runs and the user has not answered:
     /// if Ctl ends now, it counts as aborted.
     pairing_open: bool,
+    /// The pairing code must be known by then ([`PAIRING_STEP_TIMEOUT`]).
+    sas_deadline: Option<Instant>,
+    /// The user retried pairing; the server's block is lifted even while
+    /// the cleared log is still being written.
+    retried: bool,
+    /// Offers the app was told about (a `Failed` for another id is an offer
+    /// refused unseen).
+    offers: std::collections::HashSet<TransferId>,
+    /// Offers refused unseen so far (one event is queued at a time).
+    refused_offers: u32,
+    /// The refused-offer event waiting in the queue.
+    refused_waiting: Option<TransferId>,
     /// The SAS of this Ctl session.
     sas: Option<Sas>,
     /// The user confirmed the code in this Ctl session.
@@ -182,6 +249,8 @@ struct Core {
     refusals: u32,
     notify: Option<Notify>,
     on_received: Option<PathHook>,
+    /// Whether a receive folder can keep the Mark-of-the-Web.
+    mark_check: Option<PathHook>,
     free_space: Option<SpaceHook>,
 }
 
@@ -193,23 +262,50 @@ impl Core {
         }
     }
 
-    /// Queues an event for the app, bounded: repeated refusals are counted
-    /// (one event waits at a time), progress and session info replace their
-    /// own older entry, and a full queue drops its oldest such entry first.
+    /// Queues an event for the app, bounded: repeated refusals (second
+    /// instances, offers refused unseen) are counted with one event waiting
+    /// at a time, progress and session info replace their own older entry.
+    /// A full queue drops, in this order, its oldest progress or session
+    /// info, failed or paused transfer, then any other entry that is not a
+    /// link, an offer or a state. A link or an offer that still finds no
+    /// room is answered here (declined, refused) instead of queued.
     fn push(&mut self, e: HelperEvent) {
-        let q = &mut self.events;
+        let mut unseen = false;
+        match &e {
+            HelperEvent::Transfer(TransferEvent::Offered { id, .. }) => {
+                self.offers.insert(*id);
+            }
+            HelperEvent::Transfer(TransferEvent::Completed { id, .. }) => {
+                self.offers.remove(id);
+            }
+            HelperEvent::Transfer(TransferEvent::Failed { id, direction, .. }) => {
+                unseen = !self.offers.remove(id) && *direction == Direction::Receive;
+            }
+            _ => {}
+        }
         let coalesced = match &e {
             HelperEvent::SecondInstanceRefused(_) => {
                 self.refusals = self.refusals.saturating_add(1);
-                q.iter()
+                self.events
+                    .iter()
                     .any(|x| matches!(x, HelperEvent::SecondInstanceRefused(_)))
             }
+            HelperEvent::Transfer(TransferEvent::Failed { id, .. }) if unseen => {
+                self.refused_offers = self.refused_offers.saturating_add(1);
+                if self.refused_waiting.is_some() {
+                    true
+                } else {
+                    self.refused_waiting = Some(*id);
+                    false
+                }
+            }
             HelperEvent::SessionInfo(_) => {
-                q.retain(|x| !matches!(x, HelperEvent::SessionInfo(_)));
+                self.events
+                    .retain(|x| !matches!(x, HelperEvent::SessionInfo(_)));
                 false
             }
             HelperEvent::Transfer(TransferEvent::Progress { id, direction, .. }) => {
-                let old = q.iter_mut().find(|x| {
+                let old = self.events.iter_mut().find(|x| {
                     matches!(x, HelperEvent::Transfer(TransferEvent::Progress { id: i, direction: d, .. })
                         if i == id && d == direction)
                 });
@@ -224,33 +320,87 @@ impl Core {
             _ => false,
         };
         if !coalesced {
-            if q.len() >= MAX_EVENTS {
-                let cheap = q.iter().position(|x| {
-                    matches!(
-                        x,
-                        HelperEvent::SessionInfo(_)
-                            | HelperEvent::Transfer(TransferEvent::Progress { .. })
-                    )
-                });
-                match cheap {
-                    Some(i) => {
-                        q.remove(i);
+            if self.events.len() >= MAX_EVENTS && !self.make_room() {
+                match &e {
+                    HelperEvent::OpenUrl { request_id, .. } => {
+                        // No room to ask the user: declined now.
+                        let rid = *request_id;
+                        self.open_urls.retain(|&r| r != rid);
+                        self.send(rid, &Message::OpenUrlResult(UrlStatus::Declined));
+                        return;
                     }
-                    None => {
-                        q.pop_front();
+                    HelperEvent::Transfer(TransferEvent::Offered { id, .. }) => {
+                        let id = *id;
+                        self.offers.remove(&id);
+                        self.engine.refuse(id, remora_link::transfer::reason::BUSY);
+                        return;
                     }
+                    HelperEvent::State(_) => {
+                        // The newest state matters; the oldest one goes.
+                        if let Some(i) = self
+                            .events
+                            .iter()
+                            .position(|x| matches!(x, HelperEvent::State(_)))
+                        {
+                            self.events.remove(i);
+                        }
+                    }
+                    _ => return,
                 }
             }
-            q.push_back(e);
+            self.events.push_back(e);
         }
         if let Some(n) = &self.notify {
             n();
         }
     }
 
+    /// Drops one entry the app can do without; false when every entry is a
+    /// link, an offer or a state.
+    fn make_room(&mut self) -> bool {
+        let tiers: [fn(&HelperEvent) -> bool; 3] = [
+            |x| {
+                matches!(
+                    x,
+                    HelperEvent::SessionInfo(_)
+                        | HelperEvent::Transfer(TransferEvent::Progress { .. })
+                )
+            },
+            |x| {
+                matches!(
+                    x,
+                    HelperEvent::Transfer(
+                        TransferEvent::Failed { .. } | TransferEvent::Paused { .. }
+                    )
+                )
+            },
+            |x| {
+                !matches!(
+                    x,
+                    HelperEvent::OpenUrl { .. }
+                        | HelperEvent::State(_)
+                        | HelperEvent::Transfer(TransferEvent::Offered { .. })
+                )
+            },
+        ];
+        for tier in tiers {
+            if let Some(i) = self.events.iter().position(tier) {
+                if let Some(HelperEvent::Transfer(TransferEvent::Failed { id, .. })) =
+                    self.events.remove(i)
+                    && self.refused_waiting == Some(id)
+                {
+                    self.refused_waiting = None;
+                }
+                return true;
+            }
+        }
+        false
+    }
+
     /// Ctl is ending (closed or failed). A pairing still open counts as
     /// aborted; returns whether pairing is now blocked.
     fn end_pairing(&mut self) -> bool {
+        self.sas_deadline = None;
         if !std::mem::take(&mut self.pairing_open) {
             return false;
         }
@@ -260,7 +410,8 @@ impl Core {
         }
         let persisted = match (&self.attempts_path, &self.server_id) {
             (Some(p), Some(id)) => {
-                remora_link::AttemptLog::record_abort(p, id, now_secs()).unwrap_or(false)
+                self.retried = false;
+                record_abort(p, id, now_secs())
             }
             _ => false,
         };
@@ -271,10 +422,11 @@ impl Core {
         self.blocked || persisted
     }
 
-    /// Pairing with this server is blocked across connections.
+    /// Pairing with this server is blocked across connections (a damaged
+    /// log blocks; a retry the user just made lifts it).
     fn server_blocked(&self) -> bool {
         match (&self.attempts_path, &self.server_id) {
-            (Some(p), Some(id)) => remora_link::AttemptLog::is_blocked(p, id),
+            (Some(p), Some(id)) => !self.retried && remora_link::AttemptLog::is_blocked(p, id),
             _ => false,
         }
     }
@@ -393,6 +545,7 @@ impl Core {
         });
         if ch == Channel::Ctl {
             self.reset_ctl();
+            self.sas_deadline = Some(Instant::now() + PAIRING_STEP_TIMEOUT);
             self.set_state(HelperState::Handshaking);
         }
         Ok(())
@@ -410,6 +563,7 @@ impl Core {
         self.next_heartbeat = None;
         self.open_urls.clear();
         self.pairing_open = false;
+        self.sas_deadline = None;
         self.sas = None;
         self.user_confirmed = false;
         self.peer_ok = false;
@@ -507,7 +661,7 @@ impl Core {
                         match self.engine.post(&msg) {
                             Posted::Queued => {}
                             Posted::NotFile => self.send_unsupported(&msg),
-                            Posted::Overflow => {
+                            Posted::Overflow | Posted::Invalid => {
                                 return self
                                     .fail(Channel::Bulk, "file data beyond every credit".into());
                             }
@@ -551,9 +705,12 @@ impl Core {
             }
             // The admin's pin stands for the SAS: pin exactly this key.
             if pin != PinCheck::Known
-                && let (Some(p), Some(id)) = (&self.pins_path, &self.server_id)
+                && let (Some(p), Some(id)) = (self.pins_path.clone(), self.server_id.clone())
             {
-                let _ = PinStore::update(p, |s| s.pin(id, &key, now_secs()));
+                let now = now_secs();
+                let _ = store_write(move |wait| {
+                    PinStore::update_within(&p, wait, |s| s.pin(&id, &key, now))
+                });
             }
             pin = PinCheck::Known;
         }
@@ -577,6 +734,7 @@ impl Core {
 
     fn on_sas(&mut self, sas: Sas) {
         self.sas = Some(sas);
+        self.sas_deadline = None;
         if !self.client_name.is_empty() {
             let name =
                 remora_link::wire::truncate(&self.client_name, remora_link::msg::MAX_CLIENT_NAME)
@@ -587,8 +745,12 @@ impl Core {
         match self.pin.clone() {
             Some(PinCheck::Known) => {
                 self.send(0, &Message::Pairing(PairingStatus::Known));
-                if let (Some(p), Some(id)) = (&self.pins_path, &self.server_id) {
-                    let _ = PinStore::update(p, |s| s.touch(id, now_secs()));
+                if let (Some(p), Some(id)) = (self.pins_path.clone(), self.server_id.clone()) {
+                    // Only "last seen": always on the store writer.
+                    let now = now_secs();
+                    remora_link::store::defer(move || {
+                        let _ = PinStore::update(&p, |s| s.touch(&id, now));
+                    });
                 }
                 self.paired();
             }
@@ -659,7 +821,8 @@ impl Core {
         };
         // An unreadable store is not overwritten (it may hold other
         // servers); the pairing then holds for this session only.
-        PinStore::update(&p, |s| s.pin(&id, &key, now_secs()))
+        let now = now_secs();
+        store_write(move |wait| PinStore::update_within(&p, wait, |s| s.pin(&id, &key, now)))
             .map_err(|e| format!("paired for this session only: {e}"))
     }
 
@@ -741,6 +904,14 @@ impl Core {
             }
             Message::Heartbeat { .. } => {}
             Message::PeerPairing(st) => self.on_peer_pairing(st),
+            // The helper refused this PC (its user said no, or it accepts
+            // pinned clients only): say so instead of "channel closed".
+            Message::Error(e) if e.code == err::PAIRING_REJECTED => self.fail(
+                Channel::Ctl,
+                "the server's helper refused this PC (its user rejected the code, \
+                 or it accepts only PCs paired with it)"
+                    .into(),
+            ),
             Message::Unknown { ty } => self.send(0, &Message::Unsupported { ty }),
             Message::Unsupported { .. } | Message::Error(_) => {}
             // Everything below needs a paired helper and an accepted capability.
@@ -775,7 +946,12 @@ impl Core {
             | Message::FileCredit { .. }
             | Message::FileCancel { .. }
             | Message::FileComplete { .. }) => {
-                self.engine.post(&m);
+                match self.engine.post(&m) {
+                    Posted::Queued | Posted::NotFile => {}
+                    Posted::Overflow | Posted::Invalid => {
+                        return self.fail(Channel::Ctl, "file messages beyond every limit".into());
+                    }
+                }
                 self.flush_engine();
             }
             // Client-to-helper messages coming back are protocol errors.
@@ -792,6 +968,17 @@ impl Core {
         }
         match ch {
             Channel::Ctl => {
+                if self.sas_deadline.is_some_and(|t| Instant::now() >= t) {
+                    // Stalled before the code: counts as an aborted pairing
+                    // unless the helper is pinned (Known).
+                    if self.pin != Some(PinCheck::Known) {
+                        self.pairing_open = true;
+                    }
+                    return self.fail(
+                        Channel::Ctl,
+                        "the helper did not finish pairing in time".into(),
+                    );
+                }
                 if let Some(t) = self.next_heartbeat
                     && Instant::now() >= t
                 {
@@ -806,13 +993,18 @@ impl Core {
         }
     }
 
-    fn fs_dir(&self, folder: &Path) -> FsDir {
+    /// The folder for download `id`: its free-space check leaves out the
+    /// download's own reservation, and received files must be marked.
+    fn fs_dir(&self, folder: &Path, id: TransferId) -> FsDir {
         let mut d = FsDir::new(folder);
         if let Some(f) = self.free_space.clone() {
-            d = d.with_free_space(move |p| f(p));
+            d = d.with_free_space(move |p| f(p, id));
         }
         if let Some(f) = self.on_received.clone() {
             d = d.on_finished(move |p| f(p));
+        }
+        if let Some(f) = self.mark_check.clone() {
+            d = d.with_mark_check(move |p| f(p));
         }
         d
     }
@@ -897,6 +1089,11 @@ impl HelperHandle {
                 aborts: 0,
                 blocked: false,
                 pairing_open: false,
+                sas_deadline: None,
+                retried: false,
+                offers: std::collections::HashSet::new(),
+                refused_offers: 0,
+                refused_waiting: None,
                 sas: None,
                 user_confirmed: false,
                 peer_ok: false,
@@ -921,6 +1118,7 @@ impl HelperHandle {
                 refusals: 0,
                 notify: None,
                 on_received: None,
+                mark_check: None,
                 free_space: None,
             })),
         }
@@ -1032,8 +1230,13 @@ impl HelperHandle {
         let mut c = self.lock();
         c.aborts = 0;
         c.blocked = false;
-        let r = match (&c.attempts_path, &c.server_id) {
-            (Some(p), Some(id)) => remora_link::AttemptLog::clear(p, id).map_err(|e| e.to_string()),
+        let r = match (c.attempts_path.clone(), c.server_id.clone()) {
+            (Some(p), Some(id)) => {
+                let r =
+                    store_write(move |wait| remora_link::AttemptLog::clear_within(&p, &id, wait));
+                c.retried = r.is_ok();
+                r
+            }
             _ => Ok(()),
         };
         if c.state == HelperState::PairingBlocked {
@@ -1075,13 +1278,27 @@ impl HelperHandle {
     }
 
     /// Called with the full path of every received file: the app adds the
-    /// Mark-of-the-Web here.
-    pub fn set_received_file_hook(&self, f: impl Fn(&Path) + Send + Sync + 'static) {
+    /// Mark-of-the-Web here. An error on the verified part file fails the
+    /// transfer (a file is never stored unmarked).
+    pub fn set_received_file_hook(
+        &self,
+        f: impl Fn(&Path) -> std::io::Result<()> + Send + Sync + 'static,
+    ) {
         self.lock().on_received = Some(Arc::new(f));
     }
 
-    /// Free bytes on the volume of a folder; without it the check is skipped.
-    pub fn set_free_space(&self, f: impl Fn(&Path) -> Option<u64> + Send + Sync + 'static) {
+    /// Checks a receive folder's volume before a download writes there
+    /// (named streams for the Mark-of-the-Web).
+    pub fn set_mark_check(&self, f: impl Fn(&Path) -> std::io::Result<()> + Send + Sync + 'static) {
+        self.lock().mark_check = Some(Arc::new(f));
+    }
+
+    /// Free bytes on the volume of a folder for a download (without its
+    /// own reservation); without it the check is skipped.
+    pub fn set_free_space(
+        &self,
+        f: impl Fn(&Path, TransferId) -> Option<u64> + Send + Sync + 'static,
+    ) {
         self.lock().free_space = Some(Arc::new(f));
     }
 
@@ -1108,6 +1325,25 @@ impl HelperHandle {
         self.lock().refusals
     }
 
+    /// How many of the helper's offers were refused before the app saw them.
+    pub fn refused_offers(&self) -> u32 {
+        self.lock().refused_offers
+    }
+
+    /// The tab's RDP connection ended (closed, failed, dropped) or the tab
+    /// closes: a pairing still waiting for the user counts as aborted now,
+    /// not only if this tab reconnects later.
+    pub fn connection_ended(&self) {
+        let mut c = self.lock();
+        let blocked = c.end_pairing();
+        if blocked {
+            c.set_state(HelperState::PairingBlocked);
+        } else if matches!(c.state, HelperState::AwaitingPairing { .. }) {
+            // Nothing left to answer on a connection that is gone.
+            c.set_state(HelperState::NotPresent);
+        }
+    }
+
     /// When the helper last sent anything on Ctl.
     pub fn last_seen(&self) -> Option<Instant> {
         self.lock().last_seen
@@ -1119,7 +1355,13 @@ impl HelperHandle {
             // The worker's news (it woke the app through the notify hook).
             c.flush_engine();
         }
-        c.events.pop_front()
+        let e = c.events.pop_front();
+        if let Some(HelperEvent::Transfer(TransferEvent::Failed { id, .. })) = &e
+            && c.refused_waiting == Some(*id)
+        {
+            c.refused_waiting = None;
+        }
+        e
     }
 
     /// The user confirmed that the code `shown` matches the helper's: pin
@@ -1190,7 +1432,7 @@ impl HelperHandle {
     /// back as a `Failed` transfer event.
     pub fn accept_file(&self, id: TransferId, folder: &Path) -> Result<(), String> {
         let mut c = self.lock();
-        let dir = c.fs_dir(folder);
+        let dir = c.fs_dir(folder, id);
         c.engine.accept(id, Box::new(dir));
         c.flush_engine();
         Ok(())
@@ -1212,6 +1454,13 @@ impl HelperHandle {
 impl Default for HelperHandle {
     fn default() -> Self {
         HelperHandle::new()
+    }
+}
+
+impl Drop for Core {
+    /// The last handle is gone (the tab closed): an open pairing counts.
+    fn drop(&mut self) {
+        self.end_pairing();
     }
 }
 

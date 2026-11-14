@@ -28,6 +28,10 @@ Usage:
   remora-agent trust-client <fingerprint>
                                      Pair a client by the fingerprint Remora shows in
                                      Settings > Security (no code to compare here).
+                                     Turns on pinned clients only.
+  remora-agent strict [on|off]       Pinned clients only: refuse unknown Remora clients
+                                     without showing a code (also on after trust-client,
+                                     or by the PinnedClientsOnly policy).
   remora-agent --version | --help
 
 The agent never needs administrator rights and opens no network ports.
@@ -37,12 +41,20 @@ Log: %LOCALAPPDATA%\\rdp-rs\\logs\\remora-agent.log
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
     Run,
-    Install { dry_run: bool },
-    Uninstall { dry_run: bool },
+    Install {
+        dry_run: bool,
+    },
+    Uninstall {
+        dry_run: bool,
+    },
     Status,
     PrintTaskXml,
-    RegisterLinks { dry_run: bool },
-    UnregisterLinks { dry_run: bool },
+    RegisterLinks {
+        dry_run: bool,
+    },
+    UnregisterLinks {
+        dry_run: bool,
+    },
     OpenUrl(String),
     Send(Vec<String>),
     SessionInfo,
@@ -50,6 +62,8 @@ pub enum Command {
     Clients,
     ForgetClient(String),
     TrustClient(String),
+    /// `strict`: None shows the state.
+    Strict(Option<bool>),
     Version,
     Help,
 }
@@ -107,6 +121,12 @@ pub fn parse<S: AsRef<str>>(args: &[S]) -> Result<Command, String> {
         "forget-client" if !rest.is_empty() => Ok(Command::ForgetClient(rest.join(" "))),
         "trust-client" if !rest.is_empty() => Ok(Command::TrustClient(rest.join(" "))),
         "forget-client" | "trust-client" => Err(format!("{first} takes a fingerprint")),
+        "strict" => match rest {
+            [] => Ok(Command::Strict(None)),
+            ["on"] => Ok(Command::Strict(Some(true))),
+            ["off"] => Ok(Command::Strict(Some(false))),
+            _ => Err("strict takes on or off".into()),
+        },
         "--version" | "-V" | "version" => none(rest, Command::Version),
         "--help" | "-h" | "/?" | "help" => Ok(Command::Help),
         other => Err(format!("unknown command: {other}")),
@@ -160,6 +180,10 @@ mod tests {
             Ok(Command::TrustClient("ab12cd34".into()))
         );
         assert!(parse(&["trust-client"]).is_err());
+        assert_eq!(parse(&["strict"]), Ok(Command::Strict(None)));
+        assert_eq!(parse(&["strict", "on"]), Ok(Command::Strict(Some(true))));
+        assert_eq!(parse(&["strict", "off"]), Ok(Command::Strict(Some(false))));
+        assert!(parse(&["strict", "maybe"]).is_err());
         assert!(parse(&["clients", "x"]).is_err());
     }
 }

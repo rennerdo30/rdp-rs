@@ -10,7 +10,8 @@
 //!   pairing with that server until the user retries (HELPER-PROTOCOL.md
 //!   3.3: the 10^-6 SAS bound holds only with this limit).
 //! - [`ClientStore`] (helper, `agent-clients.json`): the Remora client keys
-//!   the user confirmed on the server.
+//!   the user confirmed on the server, and the ones an admin trusted by
+//!   fingerprint (which switch the helper to pinned clients only).
 //!
 //! Every change goes through [`crate::store::update`]: re-read, merge and
 //! write under a lock file, through a unique temporary file and a rename.
@@ -18,6 +19,7 @@
 
 use std::collections::BTreeMap;
 use std::path::Path;
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
@@ -123,7 +125,17 @@ impl PinStore {
     /// Re-reads `path`, applies `change` and writes the result, under the
     /// store's lock. A malformed store is left alone (an error).
     pub fn update<R>(path: &Path, change: impl FnOnce(&mut PinStore) -> R) -> Result<R> {
-        crate::store::update(path, |cur| {
+        PinStore::update_within(path, crate::store::LOCK_WAIT, change)
+    }
+
+    /// [`PinStore::update`], waiting at most `wait` for another writer
+    /// ([`crate::store::is_busy`] after that; nothing changed).
+    pub fn update_within<R>(
+        path: &Path,
+        wait: Duration,
+        change: impl FnOnce(&mut PinStore) -> R,
+    ) -> Result<R> {
+        crate::store::update_within(path, wait, |cur| {
             let mut s = match cur {
                 Some(b) => PinStore::from_json(&b)?,
                 None => PinStore::new(),
@@ -241,45 +253,103 @@ struct Attempts {
 /// Aborted pairings per server (`helper-attempts.json`): an attacker in the
 /// middle that silently drops pairings until the codes happen to match is
 /// stopped after [`MAX_ABORTS`] tries a day, and the user is told.
+///
+/// Fails closed: a log that cannot be read or parsed blocks every server
+/// (the user sees "blocked" and can retry), and a write that fails counts
+/// as blocked. A retry on a damaged log moves it aside
+/// (`<log>.damaged.<n>`) and starts a new one.
 pub struct AttemptLog;
 
+/// The log's entries; `None` when it exists but is damaged.
+type Log = Option<BTreeMap<String, Attempts>>;
+
 impl AttemptLog {
-    fn read(bytes: Option<Vec<u8>>) -> BTreeMap<String, Attempts> {
-        // A damaged log is started over (it only ever blocks, never trusts).
-        bytes
-            .and_then(|b| serde_json::from_slice(&b).ok())
-            .unwrap_or_default()
+    fn parse(bytes: Option<Vec<u8>>) -> Log {
+        match bytes {
+            None => Some(BTreeMap::new()),
+            Some(b) => serde_json::from_slice(&b).ok(),
+        }
+    }
+
+    /// Reads the log without its lock (a reader sees a whole file); an
+    /// unreadable file is damaged.
+    fn read(path: &Path) -> Log {
+        match std::fs::read(path) {
+            Ok(b) => AttemptLog::parse(Some(b)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Some(BTreeMap::new()),
+            Err(_) => None,
+        }
+    }
+
+    /// Adds an abort at `now` to `a`; returns whether it is blocked.
+    fn add(a: &mut Attempts, now: u64) -> bool {
+        a.aborts.retain(|&t| t + ATTEMPT_WINDOW > now && t <= now);
+        a.aborts.push(now);
+        if a.aborts.len() >= MAX_ABORTS {
+            a.blocked = true;
+        }
+        a.blocked
     }
 
     /// Records a pairing for `id` that ended before the user answered.
-    /// Returns whether pairing with that server is now blocked.
+    /// Returns whether pairing with that server is now blocked (always
+    /// true for a damaged log, which is left as it is).
     pub fn record_abort(path: &Path, id: &str, now: u64) -> Result<bool> {
-        crate::store::update(path, |cur| {
-            let mut log = AttemptLog::read(cur);
-            let a = log.entry(id.to_string()).or_default();
-            a.aborts.retain(|&t| t + ATTEMPT_WINDOW > now && t <= now);
-            a.aborts.push(now);
-            if a.aborts.len() >= MAX_ABORTS {
-                a.blocked = true;
-            }
-            let blocked = a.blocked;
+        AttemptLog::record_abort_within(path, id, now, crate::store::LOCK_WAIT)
+    }
+
+    /// [`AttemptLog::record_abort`], waiting at most `wait` for another
+    /// writer ([`crate::store::is_busy`] after that; nothing recorded).
+    pub fn record_abort_within(path: &Path, id: &str, now: u64, wait: Duration) -> Result<bool> {
+        crate::store::update_within(path, wait, |cur| {
+            let Some(mut log) = AttemptLog::parse(cur) else {
+                return Ok((None, true));
+            };
+            let blocked = AttemptLog::add(log.entry(id.to_string()).or_default(), now);
             let json =
                 serde_json::to_vec_pretty(&log).map_err(|e| Error::Malformed(e.to_string()))?;
             Ok((Some(json), blocked))
         })
     }
 
-    /// Pairing with `id` is blocked (until [`AttemptLog::clear`]).
+    /// Whether recording an abort for `id` at `now` would block it, from
+    /// the log as it is (no write; a damaged log says yes). For a caller
+    /// that queues the write itself.
+    pub fn would_block(path: &Path, id: &str, now: u64) -> bool {
+        match AttemptLog::read(path) {
+            None => true,
+            Some(mut log) => AttemptLog::add(log.entry(id.to_string()).or_default(), now),
+        }
+    }
+
+    /// Pairing with `id` is blocked (until [`AttemptLog::clear`]). A
+    /// damaged log blocks every server.
     pub fn is_blocked(path: &Path, id: &str) -> bool {
-        AttemptLog::read(std::fs::read(path).ok())
-            .get(id)
-            .is_some_and(|a| a.blocked)
+        AttemptLog::read(path).is_none_or(|log| log.get(id).is_some_and(|a| a.blocked))
     }
 
     /// The user retries pairing with `id`: forget its aborts and the block.
     pub fn clear(path: &Path, id: &str) -> Result<()> {
-        crate::store::update(path, |cur| {
-            let mut log = AttemptLog::read(cur);
+        AttemptLog::clear_within(path, id, crate::store::LOCK_WAIT)
+    }
+
+    /// [`AttemptLog::clear`], waiting at most `wait` for another writer.
+    pub fn clear_within(path: &Path, id: &str, wait: Duration) -> Result<()> {
+        crate::store::update_within(path, wait, |cur| {
+            let log = match AttemptLog::parse(cur.clone()) {
+                Some(log) => log,
+                None => {
+                    // Damaged: keep it for diagnosis and start over (the
+                    // user chose to retry; the per-connection limit holds).
+                    if let Some(bytes) = &cur {
+                        keep_aside(path, bytes)?;
+                    }
+                    let json = serde_json::to_vec_pretty(&BTreeMap::<String, Attempts>::new())
+                        .map_err(|e| Error::Malformed(e.to_string()))?;
+                    return Ok((Some(json), ()));
+                }
+            };
+            let mut log = log;
             if log.remove(id).is_none() {
                 return Ok((None, ()));
             }
@@ -288,6 +358,65 @@ impl AttemptLog {
             Ok((Some(json), ()))
         })
     }
+}
+
+/// Copies a damaged store to `<path>.damaged.<n>` (a new number each time).
+fn keep_aside(path: &Path, bytes: &[u8]) -> Result<()> {
+    use std::io::Write;
+    for n in 1..=100u32 {
+        let mut name = path.as_os_str().to_owned();
+        name.push(format!(".damaged.{n}"));
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(std::path::PathBuf::from(name))
+        {
+            Ok(mut f) => {
+                f.write_all(bytes)?;
+                return Ok(());
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e.into()),
+        }
+    }
+    Err(Error::State("too many damaged logs kept"))
+}
+
+/// Longest client label kept or shown, in characters.
+pub const MAX_LABEL_CHARS: usize = 64;
+
+/// A peer-chosen label made safe to store and print: control characters,
+/// line and paragraph separators and the invisible or direction-changing
+/// format characters (U+061C, U+200B..U+200F, U+202A..U+202E,
+/// U+2066..U+2069, U+FEFF) are removed, and it is cut to
+/// [`MAX_LABEL_CHARS`] characters.
+pub fn clean_label(s: &str) -> String {
+    s.chars()
+        .filter(|&c| {
+            !c.is_control()
+                && !matches!(
+                    c,
+                    '\u{061C}'
+                        | '\u{200B}'..='\u{200F}'
+                        | '\u{2028}'..='\u{202E}'
+                        | '\u{2066}'..='\u{2069}'
+                        | '\u{FEFF}'
+                )
+        })
+        .take(MAX_LABEL_CHARS)
+        .collect::<String>()
+        .trim()
+        .to_string()
+}
+
+/// How a client got into the helper's list.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ClientOrigin {
+    /// Both users compared the code (the server's pairing dialog).
+    Dialog,
+    /// An admin trusted its fingerprint (`remora-agent trust-client`).
+    Admin,
 }
 
 /// One Remora client the user confirmed on the server.
@@ -302,6 +431,20 @@ pub struct PinnedClient {
     /// What the client called itself (untrusted, for the list only).
     #[serde(default)]
     pub label: String,
+    /// How it was pinned; missing in stores written before 1.2: then an
+    /// entry without a key was trusted by fingerprint ([`Self::origin`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<ClientOrigin>,
+}
+
+impl PinnedClient {
+    pub fn origin(&self) -> ClientOrigin {
+        self.origin.unwrap_or(if self.key.is_empty() {
+            ClientOrigin::Admin
+        } else {
+            ClientOrigin::Dialog
+        })
+    }
 }
 
 /// The helper's pinned Remora clients (`agent-clients.json`), keyed by the
@@ -364,35 +507,51 @@ impl ClientStore {
             .contains_key(&hex(&crate::fingerprint_bytes(key)))
     }
 
-    /// Pins a client key the user confirmed (keeps an existing entry's date).
+    /// Pins a client key the user confirmed (keeps an existing entry's date
+    /// and origin).
     pub fn pin(&mut self, key: &[u8; 32], label: &str, now: u64) {
         let fp = hex(&crate::fingerprint_bytes(key));
         let e = self.entries.entry(fp).or_insert(PinnedClient {
             key: String::new(),
             first_seen: now,
             label: String::new(),
+            origin: Some(ClientOrigin::Dialog),
         });
+        e.origin = Some(e.origin());
         e.key = hex(key);
+        let label = clean_label(label);
         if !label.is_empty() {
-            e.label = label.to_string();
+            e.label = label;
         }
     }
 
     /// Pins a client by its fingerprint alone (`remora-agent trust-client`).
+    /// A client paired through the dialog before becomes admin-trusted.
     pub fn trust(&mut self, fp: &[u8; crate::FINGERPRINT_LEN], label: &str, now: u64) -> bool {
         let id = hex(fp);
-        if self.entries.contains_key(&id) {
-            return false;
+        if let Some(e) = self.entries.get_mut(&id) {
+            let was = e.origin();
+            e.origin = Some(ClientOrigin::Admin);
+            return was != ClientOrigin::Admin;
         }
         self.entries.insert(
             id,
             PinnedClient {
                 key: String::new(),
                 first_seen: now,
-                label: label.to_string(),
+                label: clean_label(label),
+                origin: Some(ClientOrigin::Admin),
             },
         );
         true
+    }
+
+    /// An admin trusted a client by fingerprint: the helper then accepts
+    /// pinned clients only (no pairing dialog for unknown ones).
+    pub fn has_admin_trust(&self) -> bool {
+        self.entries
+            .values()
+            .any(|c| c.origin() == ClientOrigin::Admin)
     }
 
     /// Forgets the client with this fingerprint.
@@ -537,6 +696,104 @@ mod tests {
         assert!(!AttemptLog::is_blocked(&p, "s:1"));
         assert!(!AttemptLog::record_abort(&p, "s:1", 10 * day).unwrap());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Review 2 item 8: a damaged attempt log blocks (fails closed),
+    /// recording into it leaves it alone and says "blocked", and a retry
+    /// keeps it aside and starts over.
+    #[test]
+    fn a_damaged_attempt_log_blocks_until_retried() {
+        let dir = temp("damaged");
+        let p = dir.join("helper-attempts.json");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(&p, b"{not json").unwrap();
+        assert!(AttemptLog::is_blocked(&p, "s:1"));
+        assert!(AttemptLog::would_block(&p, "s:1", 5));
+        assert!(AttemptLog::record_abort(&p, "s:1", 5).unwrap());
+        assert_eq!(std::fs::read(&p).unwrap(), b"{not json", "left alone");
+        AttemptLog::clear(&p, "s:1").unwrap();
+        assert!(!AttemptLog::is_blocked(&p, "s:1"));
+        assert!(!AttemptLog::is_blocked(&p, "other:1"));
+        let mut kept = p.as_os_str().to_owned();
+        kept.push(".damaged.1");
+        assert_eq!(
+            std::fs::read(std::path::PathBuf::from(kept)).unwrap(),
+            b"{not json"
+        );
+        // An unreadable log (a folder in its place) blocks too.
+        let q = dir.join("folder.json");
+        std::fs::create_dir_all(&q).unwrap();
+        assert!(AttemptLog::is_blocked(&q, "s:1"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn would_block_matches_record_abort() {
+        let dir = temp("would");
+        let p = dir.join("helper-attempts.json");
+        assert!(!AttemptLog::would_block(&p, "s:1", 10));
+        AttemptLog::record_abort(&p, "s:1", 10).unwrap();
+        assert!(!AttemptLog::would_block(&p, "s:1", 11));
+        AttemptLog::record_abort(&p, "s:1", 11).unwrap();
+        assert!(AttemptLog::would_block(&p, "s:1", 12));
+        assert!(AttemptLog::record_abort(&p, "s:1", 12).unwrap());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Review 2 item 11: labels lose control and direction characters and
+    /// are cut to 64 characters.
+    #[test]
+    fn labels_are_cleaned() {
+        assert_eq!(clean_label("LAPTOP-7"), "LAPTOP-7");
+        assert_eq!(clean_label("a\u{202E}exe.txt\r\n"), "aexe.txt");
+        assert_eq!(clean_label("\u{2066}x\u{2069}\u{200F}\u{0007}y"), "xy");
+        assert_eq!(
+            clean_label(&"é".repeat(100)).chars().count(),
+            MAX_LABEL_CHARS
+        );
+        let mut c = ClientStore::new();
+        c.pin(&[1; 32], "evil\u{202E}gpj.exe", 1);
+        assert_eq!(c.iter().next().unwrap().1.label, "evilgpj.exe");
+    }
+
+    /// Review 2 item 1: fingerprints trusted by an admin are marked as
+    /// such (also in stores from before 1.2), dialog pins are not.
+    #[test]
+    fn admin_trust_is_recorded() {
+        let mut c = ClientStore::new();
+        c.pin(&[1; 32], "PC", 1);
+        assert!(!c.has_admin_trust());
+        let fp = crate::fingerprint_bytes(&[2; 32]);
+        assert!(c.trust(&fp, "", 2));
+        assert!(c.has_admin_trust());
+        // The client pairs later: still admin-trusted.
+        c.pin(&[2; 32], "PC2", 3);
+        assert!(c.has_admin_trust());
+        let back = ClientStore::from_json(&c.to_json()).unwrap();
+        assert_eq!(back, c);
+        assert!(back.has_admin_trust());
+        // Trusting a dialog-paired client makes it admin-trusted.
+        let mut d = ClientStore::new();
+        d.pin(&[1; 32], "PC", 1);
+        assert!(d.trust(&crate::fingerprint_bytes(&[1; 32]), "", 2));
+        assert!(d.has_admin_trust());
+        // A store from 1.1: an entry without a key was an admin's.
+        let old = format!(r#"{{"{}":{{"first_seen":1}}}}"#, hex(&fp));
+        assert!(
+            ClientStore::from_json(old.as_bytes())
+                .unwrap()
+                .has_admin_trust()
+        );
+        let old = format!(
+            r#"{{"{}":{{"key":"{}","first_seen":1}}}}"#,
+            hex(&crate::fingerprint_bytes(&[1; 32])),
+            hex(&[1; 32])
+        );
+        assert!(
+            !ClientStore::from_json(old.as_bytes())
+                .unwrap()
+                .has_admin_trust()
+        );
     }
 
     #[test]

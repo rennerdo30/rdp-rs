@@ -133,6 +133,16 @@ fn hkey(root: PolicyRoot) -> HKEY {
     }
 }
 
+/// The `PinnedClientsOnly` policy (HKLM only: an admin's setting; read,
+/// never written).
+pub fn pinned_clients_policy() -> Option<u32> {
+    reg_dword(
+        HKEY_LOCAL_MACHINE,
+        crate::clients::POLICY_KEY,
+        crate::clients::POLICY_VALUE,
+    )
+}
+
 pub fn reg_dword(root: HKEY, key: &str, name: &str) -> Option<u32> {
     let (k, n) = (wide(key), wide(name));
     let mut v = 0u32;

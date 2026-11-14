@@ -19,6 +19,7 @@ use super::files::WinFiles;
 use super::ui::WinPairingUi;
 use super::wts::{self, WtsChunkIo};
 use super::{OwnedHandle, pipe, sys, wide, window};
+use crate::closing;
 use crate::framing::{DvcPipe, MessagePipe};
 use crate::info::CpuTimes;
 use crate::keystore::{self, KeyOrigin};
@@ -75,14 +76,23 @@ pub enum Input {
 struct OpenChannel {
     file: Arc<OwnedHandle>,
     writer: SyncSender<Vec<u8>>,
+    /// Fires (disconnects) when the writer has sent everything and ended.
+    writer_done: Receiver<()>,
     stop: Arc<AtomicBool>,
 }
 
 impl OpenChannel {
-    fn close(self) {
+    /// Stops the channel: the writer first sends what was queued (the last
+    /// `PeerPairing` or `Error` of a refused session), at most
+    /// [`closing::FLUSH_WAIT`], then its I/O is cancelled. Returns the
+    /// thread that waits for that (shutdown joins it).
+    fn close(self) -> Option<std::thread::JoinHandle<()>> {
         self.stop.store(true, Ordering::SeqCst);
         drop(self.writer);
-        wts::cancel_all(&self.file);
+        let file = self.file;
+        closing::close_after_flush(self.writer_done, closing::FLUSH_WAIT, move || {
+            wts::cancel_all(&file)
+        })
     }
 }
 
@@ -169,7 +179,11 @@ fn event_loop(key: StaticKey) -> i32 {
         key,
         Box::new(WinPairingUi::new(tx.clone())),
         Box::new(WinFiles),
-        Box::new(FileClients(keystore::default_clients_path())),
+        Box::new(FileClients {
+            clients: keystore::default_clients_path(),
+            setting: keystore::default_strict_path(),
+            policy: sys::pinned_clients_policy,
+        }),
     ));
     // The transfer worker wakes the loop; a wake already queued is enough.
     let wake_tx = std::sync::Mutex::new(tx.clone());
@@ -353,10 +367,15 @@ impl Loop {
         }
         info!("shutting down");
         self.feed(AgentEvent::Shutdown);
+        // The last messages go out before the process ends (bounded).
+        let mut flushing = Vec::new();
         for ch in Channel::ALL {
             if let Some(oc) = self.open[ch.index()].take() {
-                oc.close();
+                flushing.extend(oc.close());
             }
+        }
+        for t in flushing {
+            let _ = t.join();
         }
         self.shutting_down = true;
     }
@@ -394,11 +413,15 @@ impl Loop {
         let file = Arc::new(file);
         let stop = Arc::new(AtomicBool::new(false));
         let (wtx, wrx) = mpsc::sync_channel::<Vec<u8>>(WRITE_QUEUE);
+        let (done_tx, done_rx) = mpsc::channel::<()>();
         let started = spawn_reader(ch, generation, file.clone(), stop.clone(), self.tx.clone())
-            .and_then(|()| spawn_writer(ch, generation, file.clone(), wrx, self.tx.clone()));
+            .and_then(|()| {
+                spawn_writer(ch, generation, file.clone(), wrx, done_tx, self.tx.clone())
+            });
         let oc = OpenChannel {
             file,
             writer: wtx,
+            writer_done: done_rx,
             stop,
         };
         if let Err(e) = started {
@@ -524,17 +547,22 @@ fn spawn_reader(
     Ok(())
 }
 
+/// The channel's writer: sends queued messages in order until the queue's
+/// sender is dropped and the queue is empty, then drops `done` (the close
+/// waits for that before cancelling the channel's I/O).
 fn spawn_writer(
     ch: Channel,
     generation: u64,
     file: Arc<OwnedHandle>,
     rx: Receiver<Vec<u8>>,
+    done: Sender<()>,
     tx: Sender<Input>,
 ) -> io::Result<()> {
     let io = WtsChunkIo::new(file)?;
     std::thread::Builder::new()
         .name(format!("write-{}", ch.dvc_name()))
         .spawn(move || {
+            let _done = done;
             let mut pipe = DvcPipe::new(io);
             for msg in rx {
                 if let Err(e) = pipe.send(&msg) {

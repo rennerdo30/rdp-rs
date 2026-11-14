@@ -3,7 +3,7 @@
 //! over in-memory channels. Not `crates/remora`: this checks the agent
 //! against the contract, with a Remora small enough to read.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, VecDeque};
 use std::rc::Rc;
 
@@ -49,9 +49,10 @@ impl UiLog {
 /// Pinned client keys and labels.
 type Pins = Rc<RefCell<Vec<([u8; 32], String)>>>;
 
-/// Pinned clients in memory, shared with the test.
+/// Pinned clients in memory and the pinned-clients-only switch, shared
+/// with the test.
 #[derive(Clone, Default)]
-struct MemClients(Pins);
+struct MemClients(Pins, Rc<Cell<bool>>);
 
 impl ClientPins for MemClients {
     fn is_pinned(&self, key: &[u8; 32]) -> bool {
@@ -60,6 +61,9 @@ impl ClientPins for MemClients {
     fn pin(&mut self, key: &[u8; 32], label: &str) -> io::Result<()> {
         self.0.borrow_mut().push((*key, label.to_string()));
         Ok(())
+    }
+    fn strict(&self) -> Option<&'static str> {
+        self.1.get().then_some("test")
     }
 }
 
@@ -1188,4 +1192,183 @@ fn wire_info_bounds() {
     );
     i.cpu_percent = Some(250.0);
     assert_eq!(wire_info(&i).cpu_percent, 100);
+}
+
+// ------------------------------------------------------------ review 2
+
+/// Review 2 item 2 (ported from the re-review's probe): an unknown client
+/// that Remora-side "confirms" by itself offers files while the dialog
+/// here is unanswered. Nothing reaches the engine or the receive folder;
+/// rejecting leaves nothing behind.
+#[test]
+fn an_unconfirmed_client_creates_no_part_files() {
+    let mut n = paired_net(Remora::new());
+    assert!(n.agent.answer_pending(), "server dialog is up");
+    assert!(n.remora.ack_sent);
+    n.remora.engine.set_permissions(true, false);
+    for i in 0..5 {
+        n.remora
+            .engine
+            .send(
+                &format!("junk{i}.bin"),
+                Box::new(MemSource::new(vec![1; 10], 1)),
+            )
+            .unwrap();
+    }
+    n.remora.pump();
+    n.settle();
+    n.tick();
+    assert!(n.files_dir.names().is_empty(), "{:?}", n.files_dir.names());
+    assert_eq!(n.agent.engine.active(), 0, "no transfer slot taken");
+    assert_eq!(n.agent.ctl.as_ref().unwrap().held.len(), 5);
+    assert!(
+        !n.remora
+            .got
+            .iter()
+            .any(|(_, m)| matches!(m, Message::FileAccept { .. }))
+    );
+    n.answer_locally(false);
+    n.tick();
+    assert!(n.files_dir.names().is_empty(), "{:?}", n.files_dir.names());
+    assert_eq!(n.agent.engine.active(), 0);
+}
+
+/// Review 2 item 2: file data on Bulk before the client is confirmed
+/// closes Bulk and reaches nothing.
+#[test]
+fn file_data_before_the_answer_closes_bulk() {
+    let mut n = paired_net(Remora::new());
+    assert!(n.agent.bulk_ready(), "Bulk opens before the answer");
+    n.remora.send(
+        0,
+        &Message::FileChunk {
+            id: [4; 16],
+            epoch: 1,
+            offset: 0,
+            data: vec![1; 100],
+        },
+    );
+    n.settle();
+    assert!(n.agent_closes.contains(&Channel::Bulk));
+    assert!(n.files_dir.names().is_empty());
+}
+
+/// Review 2 item 2: one client cannot hold every incoming transfer slot.
+#[test]
+fn one_client_holds_at_most_its_share_of_transfers() {
+    let mut n = paired_net(Remora::new());
+    n.answer_locally(true);
+    n.tick();
+    let total = MAX_PER_CLIENT + 4;
+    for i in 0..total {
+        n.remora
+            .engine
+            .send(
+                &format!("f{i}.bin"),
+                Box::new(MemSource::new(vec![i as u8; 1000], 1)),
+            )
+            .unwrap();
+    }
+    n.remora.pump();
+    n.settle();
+    let busy = n
+        .remora
+        .got
+        .iter()
+        .filter(|(_, m)| {
+            matches!(m, Message::FileReject { reason, .. }
+                if *reason == remora_link::transfer::reason::BUSY)
+        })
+        .count();
+    assert_eq!(busy, 4);
+    for _ in 0..10 {
+        n.advance(POLL_INTERVAL);
+    }
+    let stored = n
+        .files_dir
+        .names()
+        .iter()
+        .filter(|f| f.ends_with(".bin"))
+        .count();
+    assert_eq!(stored, MAX_PER_CLIENT);
+    assert!(n.agent.owners.is_empty(), "slots freed when done");
+}
+
+/// Review 2 item 1: with pinned clients only, an unknown client key is
+/// refused without a dialog (Remora hears why); a pinned one still pairs.
+#[test]
+fn pinned_clients_only_refuses_unknown_keys_without_a_dialog() {
+    let mut n = paired_net(Remora::new());
+    n.answer_locally(true);
+    n.drop_link();
+    n.ui.take();
+    n.clients.1.set(true);
+    // The pinned client: silent, as before.
+    n.connect(snapshot(PolicyFlags::default()));
+    assert!(n.ui.take().is_empty());
+    assert!(n.agent.server_to_client_allowed());
+    n.drop_link();
+    // Another key: no dialog, Ctl closed, Remora told.
+    n.remora.key = StaticKey::generate().unwrap();
+    let before = n.remora.got.len();
+    n.connect(snapshot(PolicyFlags::default()));
+    assert!(
+        !n.ui.take().iter().any(|u| matches!(u, Ui::Show(..))),
+        "no dialog"
+    );
+    assert!(n.agent.ctl.is_none());
+    assert!(n.agent_closes.contains(&Channel::Ctl));
+    let got = &n.remora.got[before..];
+    assert!(
+        got.iter()
+            .any(|(_, m)| *m == Message::PeerPairing(PairingStatus::Rejected))
+    );
+    assert!(
+        got.iter()
+            .any(|(_, m)| matches!(m, Message::Error(e) if e.code == err::PAIRING_REJECTED))
+    );
+    assert_eq!(n.clients.0.borrow().len(), 1, "nothing pinned");
+}
+
+/// Review 2 item 9: unknown keys whose pairing ends unanswered again and
+/// again are refused without a dialog for a while.
+#[test]
+fn unanswered_pairings_back_off() {
+    let mut r = Remora::new();
+    r.auto_confirm = None;
+    let mut n = paired_net(r);
+    let shown = |n: &Net| n.ui.take().iter().any(|u| matches!(u, Ui::Show(..)));
+    for _ in 1..MAX_UNANSWERED {
+        assert!(shown(&n));
+        n.drop_link();
+        n.remora.key = StaticKey::generate().unwrap();
+        n.connect(snapshot(PolicyFlags::default()));
+    }
+    assert!(shown(&n));
+    n.drop_link();
+    n.ui.take();
+    // Backing off: the next unknown key gets no dialog.
+    n.remora.key = StaticKey::generate().unwrap();
+    n.connect(snapshot(PolicyFlags::default()));
+    assert!(!shown(&n));
+    assert!(n.agent.ctl.is_none());
+    // After the back-off the dialog comes back.
+    n.now += BACKOFF_MIN + Duration::from_secs(1);
+    n.drop_link();
+    n.connect(snapshot(PolicyFlags::default()));
+    assert!(shown(&n));
+}
+
+/// Review 2 item 11: the client's name loses control and direction
+/// characters and is cut short before it is logged or pinned.
+#[test]
+fn the_client_name_is_cleaned() {
+    let mut n = paired_net(Remora::new());
+    let name = "LAPTOP\u{202E}exe.txt\u{7}\u{2066}".to_string();
+    n.remora.send(0, &Message::ClientName { name });
+    n.settle();
+    let got = n.agent.ctl.as_ref().unwrap().client_name.clone();
+    assert_eq!(got, "LAPTOPexe.txt");
+    n.answer_locally(true);
+    assert_eq!(n.clients.0.borrow()[0].1, got);
 }
