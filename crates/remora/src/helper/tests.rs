@@ -2,6 +2,7 @@
 
 use super::*;
 use remora_link::msg::SessionKind;
+use remora_link::transfer::Engine;
 use remora_link::transfer::io::MemSource;
 
 /// The helper side of one channel, driven by hand.
@@ -509,8 +510,13 @@ fn download_end_to_end_into_the_chosen_folder() {
     r.handle.set_capabilities(cap::ALL);
     let marked = Arc::new(Mutex::new(Vec::<PathBuf>::new()));
     let m2 = marked.clone();
-    r.handle
-        .set_received_file_hook(move |p| m2.lock().unwrap().push(p.to_path_buf()));
+    let threads = Arc::new(Mutex::new(Vec::<String>::new()));
+    let t2 = threads.clone();
+    r.handle.set_received_file_hook(move |p| {
+        m2.lock().unwrap().push(p.to_path_buf());
+        let name = std::thread::current().name().unwrap_or("").to_string();
+        t2.lock().unwrap().push(name);
+    });
     let mut h = r.connect(StaticKey::generate().unwrap());
     let ack = r.pair_and_hello(&mut h, cap::ALL, 0);
     assert_ne!(ack.capabilities & cap::FILE_DOWN, 0);
@@ -556,6 +562,17 @@ fn download_end_to_end_into_the_chosen_folder() {
             .ends_with("report.bin.remora-part")
     );
     assert!(marked[1].ends_with("report.bin"));
+    // Review 8: the file work ran on the transfer worker, never on the
+    // thread that moves the channel's bytes (here: the test thread).
+    assert!(
+        threads
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|t| t == "remora-transfer"),
+        "{:?}",
+        threads.lock().unwrap()
+    );
     let left: Vec<_> = std::fs::read_dir(&downloads).unwrap().collect();
     assert_eq!(left.len(), 1, "no part or sidecar left");
 }

@@ -40,7 +40,8 @@ use remora_link::msg::{
     ErrorMsg, Hello, HelloAck, PairingStatus, SessionInfo, TransferId, UrlStatus, err,
 };
 use remora_link::transfer::io::{FsDir, FsSource};
-use remora_link::transfer::{CHUNK_SIZE, Engine, TransferEvent, WINDOW};
+use remora_link::transfer::worker::{EngineWorker, Posted};
+use remora_link::transfer::{CHUNK_SIZE, TransferEvent, WINDOW};
 use remora_link::{
     Binding, Channel, Event, Message, PinCheck, PinStore, Sas, SecureSession, StaticKey, cap,
     policy,
@@ -55,8 +56,6 @@ const MAX_BUFFERED_BYTES: usize = 2 << 20;
 pub const MAX_ABORTS_PER_CONNECTION: u32 = 2;
 /// The client's heartbeat interval once paired.
 const HEARTBEAT: Duration = Duration::from_secs(10);
-/// File bytes read per Bulk tick (client-to-server pacing on top of credit).
-const BULK_BUDGET: usize = 512 << 10;
 /// Reassembly cap for the helper channels: the largest encrypted message
 /// plus slack (the DVC default is 16 MiB).
 pub const HELPER_MAX_MESSAGE: usize = remora_link::MAX_WIRE + 4096;
@@ -175,7 +174,9 @@ struct Core {
     next_heartbeat: Option<Instant>,
     heartbeat_seq: u32,
     open_urls: Vec<u32>,
-    engine: Engine,
+    /// The transfer engine on its own thread: the session thread only
+    /// posts received file messages and sends what the engine queued.
+    engine: EngineWorker,
     events: VecDeque<HelperEvent>,
     /// Second channel opens refused so far (one event is queued at a time).
     refusals: u32,
@@ -342,7 +343,11 @@ impl Core {
         self.flush_engine();
     }
 
+    /// Sends what the transfer worker queued and takes its events.
     fn flush_engine(&mut self) {
+        // Tests drive the adapter step by step: let the worker catch up.
+        #[cfg(test)]
+        self.engine.sync(Duration::from_secs(10));
         for m in self.engine.take_messages() {
             self.send(0, &m);
         }
@@ -499,8 +504,13 @@ impl Core {
                     Channel::Bulk => {
                         // Only file data travels on Bulk; the session
                         // already refused Ctl-only types.
-                        if !self.engine.handle(&msg) {
-                            self.send_unsupported(&msg);
+                        match self.engine.post(&msg) {
+                            Posted::Queued => {}
+                            Posted::NotFile => self.send_unsupported(&msg),
+                            Posted::Overflow => {
+                                return self
+                                    .fail(Channel::Bulk, "file data beyond every credit".into());
+                            }
                         }
                         self.flush_engine();
                     }
@@ -765,7 +775,7 @@ impl Core {
             | Message::FileCredit { .. }
             | Message::FileCancel { .. }
             | Message::FileComplete { .. }) => {
-                self.engine.handle(&m);
+                self.engine.post(&m);
                 self.flush_engine();
             }
             // Client-to-helper messages coming back are protocol errors.
@@ -791,10 +801,8 @@ impl Core {
                     self.next_heartbeat = Some(Instant::now() + HEARTBEAT);
                 }
             }
-            Channel::Bulk => {
-                self.engine.poll(BULK_BUDGET);
-                self.flush_engine();
-            }
+            // The worker reads ahead; this thread only moves its messages.
+            Channel::Bulk => self.flush_engine(),
         }
     }
 
@@ -908,7 +916,7 @@ impl HelperHandle {
                 next_heartbeat: None,
                 heartbeat_seq: 0,
                 open_urls: Vec::new(),
-                engine: Engine::default(),
+                engine: EngineWorker::default(),
                 events: VecDeque::new(),
                 refusals: 0,
                 notify: None,
@@ -1053,9 +1061,13 @@ impl HelperHandle {
         self.lock().set_transport(t);
     }
 
-    /// Called (on the session thread) whenever an event is queued.
+    /// Called (on the session thread, or the transfer worker's) whenever
+    /// an event is queued.
     pub fn set_notify(&self, f: impl Fn() + Send + Sync + 'static) {
-        self.lock().notify = Some(Arc::new(f));
+        let f: Notify = Arc::new(f);
+        let mut c = self.lock();
+        c.engine.set_notify(f.clone());
+        c.notify = Some(f);
     }
 
     /// Called with the full path of every received file: the app adds the
@@ -1098,7 +1110,12 @@ impl HelperHandle {
     }
 
     pub fn next_event(&self) -> Option<HelperEvent> {
-        self.lock().events.pop_front()
+        let mut c = self.lock();
+        if c.events.is_empty() {
+            // The worker's news (it woke the app through the notify hook).
+            c.flush_engine();
+        }
+        c.events.pop_front()
     }
 
     /// The user confirmed that the code `shown` matches the helper's: pin
@@ -1164,15 +1181,15 @@ impl HelperHandle {
     }
 
     /// Accepts an offered file into `folder` (the user's chosen folder).
+    /// Returns at once: a resume re-reads the part file on the transfer
+    /// worker, outside this lock and off the session thread; problems come
+    /// back as a `Failed` transfer event.
     pub fn accept_file(&self, id: TransferId, folder: &Path) -> Result<(), String> {
         let mut c = self.lock();
         let dir = c.fs_dir(folder);
-        let r = c
-            .engine
-            .accept(id, Box::new(dir))
-            .map_err(|e| e.to_string());
+        c.engine.accept(id, Box::new(dir));
         c.flush_engine();
-        r
+        Ok(())
     }
 
     pub fn reject_file(&self, id: TransferId) {

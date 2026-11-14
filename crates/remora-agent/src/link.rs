@@ -51,7 +51,8 @@ use remora_link::msg::{
     UrlStatus, err,
 };
 use remora_link::transfer::io::{Source, TargetDir};
-use remora_link::transfer::{Direction, Engine, TransferEvent};
+use remora_link::transfer::worker::{EngineWorker, Posted};
+use remora_link::transfer::{Direction, TransferEvent};
 use remora_link::{Binding, Event, Message, Sas, SecureSession, StaticKey, cap, policy};
 
 use crate::info::{SessionInfo, SessionKind};
@@ -65,9 +66,8 @@ pub const HEARTBEAT: Duration = Duration::from_secs(10);
 /// the link counts as forwarded and is not opened locally as well. Below
 /// the pipe's 3 s answer timeout.
 pub const URL_ANSWER_WAIT: Duration = Duration::from_secs(2);
-/// File bytes read per engine poll.
-pub const POLL_BUDGET: usize = 4 << 20;
-/// How often transfers are pumped without a message from Remora.
+/// How often transfers are pumped without a message from Remora (the
+/// worker also wakes the loop through [`LinkProtocol::set_transfer_notify`]).
 pub const POLL_INTERVAL: Duration = Duration::from_millis(200);
 /// Links waiting for Remora's answer at a time (Remora queues 8 too).
 const MAX_PENDING_URLS: usize = 8;
@@ -168,7 +168,9 @@ pub struct LinkProtocol {
     ui: Box<dyn PairingUi>,
     files: Box<dyn Files>,
     clients: Box<dyn ClientPins>,
-    engine: Engine,
+    /// The transfer engine on its own thread: reads, writes and re-hashes
+    /// never hold up this loop (heartbeats, links, pairing).
+    engine: EngineWorker,
     ctl: Option<Ctl>,
     bulk: Option<SecureSession>,
     /// Bulk was asked for and not closed since.
@@ -258,7 +260,7 @@ impl LinkProtocol {
             ui,
             files,
             clients,
-            engine: Engine::default(),
+            engine: EngineWorker::default(),
             ctl: None,
             bulk: None,
             bulk_wanted: false,
@@ -270,6 +272,12 @@ impl LinkProtocol {
             next_poll: None,
             now: Instant::now(),
         }
+    }
+
+    /// Called on the transfer worker's thread when it has messages or
+    /// events: the event loop should feed a `Timer` soon.
+    pub fn set_transfer_notify(&self, f: impl Fn() + Send + Sync + 'static) {
+        self.engine.set_notify(std::sync::Arc::new(f));
     }
 
     /// [`Protocol::on_event`] with an explicit clock (tests).
@@ -597,7 +605,7 @@ impl LinkProtocol {
             | Message::FileCancel { .. }
             | Message::FileComplete { .. }) => {
                 if self.acked().is_some() {
-                    self.engine.handle(&m);
+                    self.engine.post(&m);
                 } else {
                     self.send_error(err::NOT_ALLOWED, "not paired", out);
                 }
@@ -813,12 +821,16 @@ impl LinkProtocol {
                     self.update_link();
                 }
                 Event::Sas(_) => {}
-                Event::Message { msg, .. } => {
-                    if !self.engine.handle(&msg) {
-                        // Unknown types only: the session refuses Ctl types.
+                Event::Message { msg, .. } => match self.engine.post(&msg) {
+                    Posted::Queued => {}
+                    // Unknown types only: the session refuses Ctl types.
+                    Posted::NotFile => {
                         self.send(0, &Message::Unsupported { ty: msg.ty() }, out);
                     }
-                }
+                    Posted::Overflow => {
+                        return self.fail(Channel::Bulk, "file data beyond every credit", out);
+                    }
+                },
             }
         }
     }
@@ -921,9 +933,7 @@ impl LinkProtocol {
                 debug!("transfer {} name {name}", tid(&id));
                 match self.files.receive_dir() {
                     Ok(dir) => {
-                        if let Err(e) = self.engine.accept(id, dir) {
-                            warn!("transfer {}: {e}", tid(&id));
-                        }
+                        self.engine.accept(id, dir);
                     }
                     Err(e) => {
                         warn!("transfer {}: no receive folder: {e}", tid(&id));
@@ -961,10 +971,12 @@ impl LinkProtocol {
         }
     }
 
-    /// Moves file data and the engine's messages, handles its events.
+    /// Sends the worker's messages and handles its events.
     fn pump(&mut self, out: &mut Vec<Action>) {
-        self.engine.poll(POLL_BUDGET);
         for _ in 0..64 {
+            // Tests drive the protocol step by step: let the worker catch up.
+            #[cfg(test)]
+            self.engine.sync(Duration::from_secs(10));
             let mut busy = false;
             while let Some(e) = self.engine.next_event() {
                 busy = true;

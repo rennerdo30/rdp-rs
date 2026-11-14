@@ -9,7 +9,7 @@ use std::rc::Rc;
 
 use remora_link::msg::{HelloAck, PairingStatus, UrlStatus};
 use remora_link::transfer::io::{MemDir, MemSource};
-use remora_link::transfer::{BLOCK_SIZE, CHUNK_SIZE, WINDOW};
+use remora_link::transfer::{BLOCK_SIZE, CHUNK_SIZE, Engine, WINDOW};
 
 use super::*;
 use crate::info::{Memory, OsVersion, PolicyFlags};
@@ -46,9 +46,12 @@ impl UiLog {
     }
 }
 
+/// Pinned client keys and labels.
+type Pins = Rc<RefCell<Vec<([u8; 32], String)>>>;
+
 /// Pinned clients in memory, shared with the test.
 #[derive(Clone, Default)]
-struct MemClients(Rc<RefCell<Vec<([u8; 32], String)>>>);
+struct MemClients(Pins);
 
 impl ClientPins for MemClients {
     fn is_pinned(&self, key: &[u8; 32]) -> bool {

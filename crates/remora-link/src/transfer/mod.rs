@@ -44,6 +44,7 @@
 
 pub mod io;
 pub mod path;
+pub mod worker;
 
 use std::collections::{BTreeMap, VecDeque};
 
@@ -351,7 +352,7 @@ pub struct Engine {
     /// FileComplete in a disconnect) is answered with FileComplete again.
     completed: VecDeque<TransferId>,
     out: Vec<Message>,
-    events: VecDeque<TransferEvent>,
+    pub(crate) events: VecDeque<TransferEvent>,
     buf: Vec<u8>,
 }
 
@@ -464,7 +465,18 @@ impl Engine {
     }
 
     /// Offers a file. `name` is the plain name the receiver will see.
-    pub fn send(&mut self, name: &str, mut source: Box<dyn Source>) -> crate::Result<TransferId> {
+    pub fn send(&mut self, name: &str, source: Box<dyn Source>) -> crate::Result<TransferId> {
+        self.send_with_id(new_id()?, name, source)
+    }
+
+    /// [`Engine::send`] with an id chosen by the caller (a worker hands
+    /// the id out before the engine sees the file).
+    pub fn send_with_id(
+        &mut self,
+        id: TransferId,
+        name: &str,
+        mut source: Box<dyn Source>,
+    ) -> crate::Result<TransferId> {
         if !self.allow_send {
             return Err(crate::Error::State("sending files is switched off"));
         }
@@ -473,8 +485,11 @@ impl Engine {
         }
         path::check_name(name).map_err(|e| crate::Error::Malformed(e.to_string()))?;
         let (size, mtime) = source.stat()?;
+        if self.sending.contains_key(&id) {
+            return Err(crate::Error::State("transfer id in use"));
+        }
         let offer = FileOffer {
-            id: new_id()?,
+            id,
             name: name.to_string(),
             size,
             mtime,
@@ -568,6 +583,11 @@ impl Engine {
     /// Ids of transfers in progress (either direction).
     pub fn active(&self) -> usize {
         self.sending.len() + self.receiving.len()
+    }
+
+    /// An outgoing transfer is sending data (the worker keeps pumping).
+    pub fn sending_active(&self) -> bool {
+        self.sending.values().any(|s| s.state == SendState::Sending)
     }
 
     fn progress(&mut self, id: TransferId, direction: Direction, done: u64, total: u64) {

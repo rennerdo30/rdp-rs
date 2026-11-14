@@ -149,7 +149,7 @@ pub fn main() -> i32 {
                 Command::UnregisterLinks { dry_run } => apply::unregister_links(dry_run),
                 Command::SessionInfo => apply::print_session_info(),
                 Command::Fingerprint => print_fingerprint(),
-                Command::Clients => clients_command(|p| crate::clients::list(p)),
+                Command::Clients => clients_command(crate::clients::list),
                 Command::ForgetClient(fp) => {
                     clients_command(|p| crate::clients::forget(p, &fp).map(|s| s + "\n"))
                 }

@@ -66,6 +66,8 @@ pub enum Input {
     },
     /// The user answered the pairing dialog.
     PairingAnswer { ticket: u64, confirmed: bool },
+    /// The transfer worker has messages or events for the protocol.
+    TransferWake,
     /// Exit; `done` is signalled once the loop has finished.
     Shutdown { done: Option<Sender<()>> },
 }
@@ -153,6 +155,8 @@ struct Loop {
     static_info: Option<sys::StaticInfo>,
     cpu_prev: Option<CpuTimes>,
     shutting_down: bool,
+    /// A `TransferWake` is in the queue.
+    wake_queued: Arc<AtomicBool>,
 }
 
 /// Pipe requests waiting for the protocol's answer at a time; an older one
@@ -167,6 +171,17 @@ fn event_loop(key: StaticKey) -> i32 {
         Box::new(WinFiles),
         Box::new(FileClients(keystore::default_clients_path())),
     ));
+    // The transfer worker wakes the loop; a wake already queued is enough.
+    let wake_tx = std::sync::Mutex::new(tx.clone());
+    let queued = Arc::new(AtomicBool::new(false));
+    let q2 = queued.clone();
+    protocol.set_transfer_notify(move || {
+        if !q2.swap(true, Ordering::AcqRel)
+            && let Ok(t) = wake_tx.lock()
+        {
+            let _ = t.send(Input::TransferWake);
+        }
+    });
     let window = match window::spawn(tx.clone()) {
         Ok(w) => Some(w),
         Err(e) => {
@@ -194,6 +209,7 @@ fn event_loop(key: StaticKey) -> i32 {
         static_info: None,
         cpu_prev: None,
         shutting_down: false,
+        wake_queued: queued,
     };
     let remote = sys::remote_connected();
     info!(
@@ -317,6 +333,10 @@ impl Loop {
             }
             Input::PairingAnswer { ticket, confirmed } => {
                 self.feed(AgentEvent::PairingAnswer { ticket, confirmed });
+            }
+            Input::TransferWake => {
+                self.wake_queued.store(false, Ordering::Release);
+                self.feed(AgentEvent::Timer);
             }
             Input::Shutdown { done } => {
                 self.shutdown();

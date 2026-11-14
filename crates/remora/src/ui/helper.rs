@@ -1654,7 +1654,6 @@ impl Ui {
         }
         if blocked {
             let r = cells[i];
-            drop(k);
             let b = Button::secondary("Retry pairing").icon(Icon::Refresh);
             self.btn(
                 cv,
