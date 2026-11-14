@@ -3877,7 +3877,7 @@ impl Ui {
 
         // Actions, right to left.
         let bh = p(34.0);
-        let by = top + p(32.0);
+        let by = top + p(26.0);
         let mut bx = x + w;
         let connect = if group_mode { "Connect all" } else { "Connect" };
         let mut buttons = vec![
@@ -3939,7 +3939,7 @@ impl Ui {
                 if px + pw > x + w {
                     break;
                 }
-                k.pill(px, top + p(60.0), text, tone, lead);
+                k.pill(px, top + p(62.0), text, tone, lead);
                 px += pw + p(6.0);
             }
         }
