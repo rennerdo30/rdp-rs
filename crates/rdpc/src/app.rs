@@ -1085,7 +1085,7 @@ impl App {
             return;
         }
         m.scratch.resize(w * h, 0);
-        m.ui.paint(
+        m.ui.paint_window(
             &mut Canvas::new(&mut m.scratch, w, h),
             &mut self.te,
             &self.fonts,
@@ -1100,6 +1100,13 @@ impl App {
             sh.damage.clear();
             sh.full = false;
         }
+        // The palette and the quit question go over the session picture
+        // (dimming it); while they are up the session takes no updates.
+        m.ui.paint_overlays(
+            &mut Canvas::new(&mut m.scratch, w, h),
+            &mut self.te,
+            &self.fonts,
+        );
         let Ok(mut buf) = m.gfx.surface.buffer_mut() else {
             return;
         };
@@ -1226,6 +1233,8 @@ impl App {
                 NamedKey::Tab => Key::Tab,
                 NamedKey::Enter => Key::Enter,
                 NamedKey::Escape => Key::Esc,
+                NamedKey::PageUp => Key::PageUp,
+                NamedKey::PageDown => Key::PageDown,
                 NamedKey::Space if !ctrl => Key::Char(' '),
                 _ => return None,
             },
@@ -1235,6 +1244,9 @@ impl App {
                 "n" => Key::New,
                 "f" => Key::Find,
                 "s" => Key::Save,
+                // The command palette (and the editor-style alias).
+                "k" => Key::Palette,
+                "p" if self.mods.shift_key() => Key::Palette,
                 _ => return None,
             },
             WKey::Character(s) => {
@@ -1287,6 +1299,12 @@ impl App {
                 && matches!(ev.logical_key, WKey::Named(NamedKey::Home));
             if release {
                 m.ui.session_focus = false;
+                self.send(id, session::release_modifiers());
+                self.dirty();
+            } else if palette_chord(&ev, self.mods) {
+                // Ctrl+Alt+K: the command palette over the session, which
+                // gets the keyboard back when it closes.
+                m.ui.open_palette(Some(id));
                 self.send(id, session::release_modifiers());
                 self.dirty();
             } else if let Some(e) = session::key_event(&ev) {
@@ -2200,6 +2218,22 @@ impl App {
             _ => {}
         }
     }
+}
+
+/// Ctrl+Alt+K, the chord that opens the command palette while a session has
+/// the keyboard. AltGr is Ctrl+Alt on Windows, so an AltGr+K that types a
+/// character stays the session's.
+fn palette_chord(ev: &winit::event::KeyEvent, mods: ModifiersState) -> bool {
+    use winit::keyboard::{KeyCode, PhysicalKey};
+    ev.state.is_pressed()
+        && mods.control_key()
+        && mods.alt_key()
+        && !mods.shift_key()
+        && ev.physical_key == PhysicalKey::Code(KeyCode::KeyK)
+        && match &ev.logical_key {
+            WKey::Character(c) => c.eq_ignore_ascii_case("k"),
+            _ => true,
+        }
 }
 
 /// The display name of a shared folder: its last path component.

@@ -67,10 +67,12 @@ pub enum Icon {
     /// The side panel.
     PanelRight,
     Download,
+    /// The command palette (the looped-square command sign).
+    Command,
 }
 
 impl Icon {
-    pub const ALL: [Icon; 49] = [
+    pub const ALL: [Icon; 50] = [
         Icon::Plus,
         Icon::Search,
         Icon::Gear,
@@ -120,6 +122,7 @@ impl Icon {
         Icon::Sliders,
         Icon::PanelRight,
         Icon::Download,
+        Icon::Command,
     ];
 }
 
@@ -556,6 +559,18 @@ pub fn draw(cv: &mut Canvas, icon: Icon, x: f32, y: f32, size: f32, color: u32) 
             p.line(&[(8.0, 2.2), (8.0, 10.2)]);
             p.line(&[(4.6, 6.8), (8.0, 10.2), (11.4, 6.8)]);
             p.line(&[(2.8, 13.4), (13.2, 13.4)]);
+        }
+        Icon::Command => {
+            // A square whose sides run on into a loop at each corner.
+            let (a, b, r) = (5.6, 10.4, 1.9);
+            p.line(&[(a, a - r), (a, b + r)]);
+            p.line(&[(b, a - r), (b, b + r)]);
+            p.line(&[(a - r, a), (b + r, a)]);
+            p.line(&[(a - r, b), (b + r, b)]);
+            p.arc((a - r, a - r), r, 90.0, 360.0);
+            p.arc((b + r, a - r), r, 180.0, 450.0);
+            p.arc((a - r, b + r), r, 0.0, 270.0);
+            p.arc((b + r, b + r), r, 270.0, 540.0);
         }
     }
 }

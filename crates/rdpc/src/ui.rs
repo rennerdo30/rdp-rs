@@ -18,6 +18,9 @@ use crate::store::{
 use crate::text_field::TextField;
 use crate::theme::{self, ThemeChoice, Tone, pal, radius, size};
 
+mod palette;
+pub use palette::{SESSION_CHORD, sample as sample_palette};
+
 pub struct Fonts {
     pub ui: FontId,
     pub semi: FontId,
@@ -277,6 +280,8 @@ pub enum Hit {
     TabLaunch(u64, usize),
     RailFocus(u64, u32),
     RailClose(u64, u32),
+    /// Opens the command palette (sidebar search, session toolbar).
+    Palette,
 }
 
 /// A RemoteApp session tab: the connection's apps and the open windows.
@@ -503,6 +508,10 @@ pub enum Key {
     Find,
     NextTab,
     PrevTab,
+    /// Ctrl+K or Ctrl+Shift+P: the command palette.
+    Palette,
+    PageUp,
+    PageDown,
 }
 
 pub struct Ui {
@@ -609,6 +618,8 @@ pub struct Ui {
     home_scroll: i32,
     home_content: i32,
     home_area: Rect,
+    /// The command palette, while it is open.
+    palette: Option<palette::Palette>,
 }
 
 /// Title-row geometry in physical pixels for the frame hook.
@@ -689,6 +700,7 @@ impl Ui {
             home_scroll: 0,
             home_content: 0,
             home_area: Rect::default(),
+            palette: None,
         };
         m.fields[Field::Password as usize] = TextField::secret();
         m.fields[Field::Master as usize] = TextField::secret();
@@ -1531,6 +1543,9 @@ impl Ui {
 
     /// Returns true when the hover target changed (needs a repaint).
     pub fn mouse_move(&mut self, x: i32, y: i32) -> bool {
+        if self.palette.is_some() && self.confirm_exit.is_none() {
+            return self.palette_mouse_move(x, y);
+        }
         // Full screen with a hiding bar: the top edge shows it, leaving hides it.
         if self.fullscreen && !self.bar_pinned && self.active.is_some() {
             let bar = (TOOLBAR_H * self.scale).round() as i32;
@@ -1560,6 +1575,9 @@ impl Ui {
     }
 
     pub fn mouse_down(&mut self, x: i32, y: i32, te: &mut TextEngine, fonts: &Fonts) {
+        if self.palette.is_some() && self.confirm_exit.is_none() {
+            return self.palette_mouse_down(x, y);
+        }
         self.press = self.hit_at(x, y);
         self.session_focus = matches!(self.press, Some(Hit::Session(_)));
         match self.press {
@@ -1592,6 +1610,9 @@ impl Ui {
     }
 
     pub fn mouse_up(&mut self, x: i32, y: i32) -> Option<Action> {
+        if self.palette.is_some() && self.confirm_exit.is_none() {
+            return self.palette_mouse_up(x, y);
+        }
         let pressed = self.press.take();
         let hit = self.hit_at(x, y);
         if pressed.is_some() && pressed == hit {
@@ -1976,6 +1997,7 @@ impl Ui {
             }
             Hit::RailFocus(id, w) => return Some(Action::RailFocus(id, w)),
             Hit::RailClose(id, w) => return Some(Action::RailClose(id, w)),
+            Hit::Palette => self.open_palette(None),
         }
         None
     }
@@ -2127,7 +2149,11 @@ impl Ui {
             }
             return None;
         }
+        if self.palette.is_some() {
+            return self.palette_key(k);
+        }
         match k {
+            Key::Palette => self.open_palette(None),
             Key::Enter if self.focus == Some(Field::DrivePath) => {
                 return self.active.and_then(|id| self.add_drive(id));
             }
@@ -2250,6 +2276,16 @@ impl Ui {
 
     pub fn paint(&mut self, cv: &mut Canvas, te: &mut TextEngine, f: &Fonts) {
         self.paint_window(cv, te, f);
+        self.paint_overlays(cv, te, f);
+    }
+
+    /// What floats over the window: the command palette and the quit
+    /// question. The app paints the window, copies the session picture in,
+    /// then calls this, so a palette over a session dims its picture.
+    pub fn paint_overlays(&mut self, cv: &mut Canvas, te: &mut TextEngine, f: &Fonts) {
+        if self.palette.is_some() && self.confirm_exit.is_none() {
+            self.paint_palette(cv, te, f);
+        }
         if let Some(n) = self.confirm_exit {
             self.paint_exit_confirm(cv, te, f, n);
         }
@@ -2333,7 +2369,7 @@ impl Ui {
         );
     }
 
-    fn paint_window(&mut self, cv: &mut Canvas, te: &mut TextEngine, f: &Fonts) {
+    pub fn paint_window(&mut self, cv: &mut Canvas, te: &mut TextEngine, f: &Fonts) {
         self.hits.clear();
         self.field_rects.clear();
         self.session_area = None;
@@ -2451,6 +2487,8 @@ impl Ui {
                 &[
                     KitHint::Keys("Ctrl+Alt+Home"),
                     KitHint::Text("gives it back"),
+                    KitHint::Keys(SESSION_CHORD),
+                    KitHint::Text("commands"),
                 ],
             );
         } else {
@@ -2504,10 +2542,17 @@ impl Ui {
 
         // Search, with its shortcut while it is empty.
         let sr = Rect::new(pad, p(48.0), area.w - 2 * pad, p(32.0));
+        // Empty and idle it opens the command palette; Ctrl+F filters the
+        // list in place.
+        let launcher = !locked
+            && self.field(Field::Filter).text.is_empty()
+            && self.focus != Some(Field::Filter);
         let placeholder = if locked {
             "Locked"
+        } else if launcher {
+            ""
         } else {
-            "Search connections"
+            "Filter connections"
         };
         self.text_input_i(
             cv,
@@ -2518,15 +2563,20 @@ impl Ui {
             Field::Filter,
             placeholder,
         );
-        if !locked && self.field(Field::Filter).text.is_empty() && self.focus != Some(Field::Filter)
-        {
+        if launcher {
             let mut k = Kit::new(cv, te, f, s);
-            let kw = k.keys_width("Ctrl+F");
-            k.keys(
-                sr.right() - p(8.0) - kw,
-                sr.y + (sr.h - p(18.0)) / 2,
-                "Ctrl+F",
-            );
+            let kw = k.keys_width("Ctrl+K");
+            let kx = sr.right() - p(8.0) - kw;
+            k.keys(kx, sr.y + (sr.h - p(18.0)) / 2, "Ctrl+K");
+            // The placeholder ends before the key caps, whole.
+            let tx = sr.x + p(33.0);
+            let room = Rect::new(tx, sr.y, kx - p(6.0) - tx, sr.h);
+            let text = ["Search or run a command…", "Search or run…", "Search…"]
+                .into_iter()
+                .find(|t| k.measure(Font::Regular, FIELD_TEXT, t) <= room.w)
+                .unwrap_or("");
+            k.text_in(Font::Regular, FIELD_TEXT, room, text, c.text_faint);
+            self.hits.push((sr, Hit::Palette));
         }
 
         let mut list_top = p(96.0);
@@ -5222,6 +5272,9 @@ impl Ui {
     /// Mouse wheel over the quick panel or the connection form; true when
     /// something scrolled.
     pub fn scroll(&mut self, x: i32, y: i32, lines: f32) -> bool {
+        if self.palette.is_some() && self.confirm_exit.is_none() {
+            return self.palette_scroll(lines);
+        }
         if self.active.is_some() && self.drawer && self.drawer_area.contains(x, y) {
             let max = (self.drawer_content - self.drawer_area.h).max(0);
             let next = (self.drawer_scroll - (lines * 48.0 * self.scale) as i32).clamp(0, max);
@@ -5684,7 +5737,9 @@ impl Ui {
             TabState::Failed(why) => ("Failed", format!("{host} · {why}")),
         };
         let recording = self.tabs.iter().any(|t| t.id == id && t.recording);
-        let mut buttons: Vec<(Button, Hit)> = Vec::new();
+        // The command palette, as an icon button before the others.
+        let mut buttons: Vec<(Button, Hit)> =
+            vec![(Button::ghost("").icon(Icon::Command), Hit::Palette)];
         match state {
             TabState::Connected { .. } | TabState::Connecting => buttons.push((
                 Button::new("Disconnect", Variant::DangerGhost).icon(Icon::Power),

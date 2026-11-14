@@ -187,6 +187,54 @@ impl<'a, 'b> Kit<'a, 'b> {
         ) as i32
     }
 
+    /// Text with some characters marked (search matches): marked runs are
+    /// semibold in `mark`, the rest regular in `color`. `marks` are char
+    /// indices, ascending. Cut with an ellipsis at `max_w`; returns the end x.
+    #[allow(clippy::too_many_arguments)]
+    pub fn text_marked(
+        &mut self,
+        size: f32,
+        x: i32,
+        y: i32,
+        text: &str,
+        marks: &[usize],
+        color: u32,
+        mark: u32,
+        max_w: i32,
+    ) -> i32 {
+        let end = x + max_w;
+        let mut pen = x;
+        let mut run = String::new();
+        let mut run_marked = false;
+        let mut chars = text.chars().enumerate().peekable();
+        while let Some((i, ch)) = chars.next() {
+            let marked = marks.binary_search(&i).is_ok();
+            if marked != run_marked && !run.is_empty() {
+                let (font, c) = if run_marked {
+                    (Font::Semi, mark)
+                } else {
+                    (Font::Regular, color)
+                };
+                pen = self.text(font, size, pen, y, &run, c, end - pen);
+                run.clear();
+                if pen >= end {
+                    return pen;
+                }
+            }
+            run_marked = marked;
+            run.push(ch);
+            if chars.peek().is_none() {
+                let (font, c) = if run_marked {
+                    (Font::Semi, mark)
+                } else {
+                    (Font::Regular, color)
+                };
+                pen = self.text(font, size, pen, y, &run, c, end - pen);
+            }
+        }
+        pen
+    }
+
     /// Text vertically centred in `r`, left aligned (ellipsis at the right).
     pub fn text_in(&mut self, font: Font, size: f32, r: Rect, text: &str, color: u32) -> i32 {
         let id = self.font(font);
