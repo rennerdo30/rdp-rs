@@ -6,6 +6,7 @@
   - **Updating from rdpc 0.1.0-beta.1 needs nothing from you:** rdpc's updater finds the new release as before, and the setup moves the install: it waits for rdpc to close, installs Remora, removes rdpc's program folder, Start menu shortcut and Installed apps entry, and starts Remora.
   - **Your data stays where it is:** saved connections, the vault, settings, known hosts and logs remain in the `rdp-rs` folders under `%APPDATA%` and `%LOCALAPPDATA%`. The diagnostic log is now `remora.log`, and new recordings go to `Videos\Remora` (earlier ones stay in `Videos\rdpc`).
   - A taskbar button pinned to rdpc stops working after the move; pin Remora again.
+- **A website and a user guide.** [remora.renner.dev](https://remora.renner.dev) shows Remora with real screenshots, and `docs/` has a getting-started page, a user guide, every keyboard shortcut, troubleshooting for each error screen, and what is stored where.
 
 ## 0.1.0-beta.1
 

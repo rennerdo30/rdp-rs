@@ -10,13 +10,35 @@ MD4, MD5, HMAC-MD5, RC4 and the ASN.1 DER/BER/PER encodings. Only TLS
 ([rustls](https://github.com/rustls/rustls)) and SHA-256/randomness
 ([ring](https://github.com/briansmith/ring)) come from crates.
 
-**Remora** is the Windows app built on it: a connection manager with session
-tabs. See [docs/INSTALL.md](docs/INSTALL.md) to install it.
+**Remora** is the Windows app built on it: every remote PC in one window,
+each session in its own tab. Website: [remora.renner.dev](https://remora.renner.dev).
+
+![Remora with a session open: the connections sidebar, the remote desktop in a tab and the floating session toolbar (sample data)](docs/images/session.webp)
 
 > **Status: beta ([0.1.0-beta.1](https://github.com/rennerdo30/rdp-rs/releases)).**
 > It connects to Windows with NLA and is usable day to day through the bitmap
 > path; the graphics pipeline (GFX, H.264) is experimental. Expect rough edges
 > and please report them.
+
+## What Remora does
+
+| | |
+|---|---|
+| ![Home: quick connect, live sessions with thumbnails, favourites](docs/images/home.webp) | ![The command palette over a session](docs/images/palette.webp) |
+| **Home** shows every running session with a live thumbnail, your favourites and recent PCs. Quick connect takes a name, an address or `user@host:port`. | **Ctrl+K** searches sessions, connections, apps, groups and commands. **Ctrl+Alt+K** opens it inside a session. |
+| ![A failed sign-in: the cause, what to try, and where in the connection it stopped](docs/images/failed-password.webp) | ![The side panel's Sharing page in a running session](docs/images/panel-sharing.webp) |
+| **Connecting** shows each step; a failure says why, where it stopped and what to try. | **Sharing** (clipboard with files, folders, printers, smart cards, sound, microphone) is off until you switch it on, live. |
+
+Also: any subset of your monitors with one window each, RemoteApp programs in
+their own windows, H.264 (AVC420 and AVC444, experimental), automatic
+keyboard layout handling, Kerberos single sign-on, an encrypted password vault,
+trust-on-first-use certificates, dark and light themes, and recording to MP4.
+No account and no telemetry.
+
+**Documentation:** [Getting started](docs/GETTING-STARTED.md) ·
+[User guide](docs/USER-GUIDE.md) · [Keyboard shortcuts](docs/SHORTCUTS.md) ·
+[Troubleshooting](docs/TROUBLESHOOTING.md) · [Security and privacy](docs/SECURITY.md) ·
+[Install](docs/INSTALL.md)
 
 ## RDP coverage: about 78 %
 
@@ -68,8 +90,6 @@ Of the 38 features a full RDP client offers (below), 29 are done and 1 partly (7
 
 </details>
 
-![Session tab with the live control panel (sample data)](docs/images/session-tab.png)
-
 ## Install
 
 Windows: download the setup or the portable zip from
@@ -84,7 +104,7 @@ Windows: download the setup or the portable zip from
 - **Input:** fast-path keyboard (scancodes) and mouse (buttons, wheel); Ctrl+Alt+Del button.
 - **Sharing, switchable live without reconnecting:** clipboard (Unicode text, both ways), shared folders (drive redirection, confined to the shared folder), printers (Easy Print / XPS, no drivers on the server), smart cards (MS-RDPESC, forwarded to the local WinSCard), sound (MS-RDPEA, PCM).
 - **Cursor:** the remote pointer shapes (32/24/16/8/1 bpp, large pointers) as native cursors.
-- **Client UI:** one window with a connections sidebar, a tab per session and a control panel per session. Saved connections live in `%APPDATA%\rdp-rs\connections.json`; passwords are never stored.
+- **Client UI:** one window with a connections sidebar, a tab per session and a control panel per session. Saved connections live in `%APPDATA%\rdp-rs`; passwords are saved only in the encrypted vault, after you set a master password ([docs/SECURITY.md](docs/SECURITY.md)).
 
 ## Not yet
 
@@ -121,6 +141,9 @@ cargo run -p remora -- 192.168.1.20 -u DOMAIN\user -v
 
 # render the UI offscreen with sample data
 cargo run -p remora -- --snapshot-ui ui.png --scale 1.5
+
+# retake the website and user guide screenshots (needs ffmpeg)
+pwsh scripts/screenshots.ps1
 ```
 
 In `cmd.exe`, write `DOMAIN\user` without quotes (cmd keeps single quotes literally).
