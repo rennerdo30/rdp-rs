@@ -39,6 +39,23 @@ If pairings with unknown PCs keep ending without an answer on the server (three 
 
 If the key file is damaged or cannot be decrypted (for example after an administrator reset your password), the agent makes a new key, keeps the old file as `agent-key.bin.old.1` (`.old.2` the next time, and so on) and logs it; Remora then warns that the agent's key changed and asks you to compare codes again. A key file that cannot be read for the moment (locked, no access) is not replaced: the agent tries again and then stops with an error in the log.
 
+## Tray icon
+
+While it runs, the helper shows the Remora icon in the notification area of the remote session, with a dot for its state:
+
+- **grey:** waiting for Remora (no Remora connected, or still connecting);
+- **amber:** a pairing waits for you: compare the code in the helper's window;
+- **green:** connected to a Remora PC you confirmed (its name is in the tooltip, with the number of running transfers).
+
+Right-click (or click) it for:
+- **Open received files:** `Downloads\From Remora`.
+- **Copy this helper's fingerprint**, for Remora's helper fingerprint setting.
+- **Paired PCs:** forget one; it has to pair again.
+- **Only paired PCs may connect** (`strict on|off`); shown checked and greyed when a policy or a PC trusted by fingerprint keeps it on.
+- **Open log folder** and **Quit helper.** Quitting lasts until your next logon or reconnect.
+
+A note appears when a pairing waits for you and when a file from Remora arrived. Without a shell (Server Core) there is no icon; the helper works the same.
+
 ## Files
 
 **From your PC to the server:** drop files onto the Remora window (when Remora allows files to this server). They land in `Downloads\From Remora` (the folder is created when the first file arrives; a moved Downloads folder is followed).

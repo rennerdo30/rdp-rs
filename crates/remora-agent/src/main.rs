@@ -28,6 +28,7 @@ mod links;
 mod logging;
 mod seam;
 mod task;
+mod tray;
 #[cfg(windows)]
 mod win;
 

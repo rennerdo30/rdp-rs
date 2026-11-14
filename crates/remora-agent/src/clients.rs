@@ -85,6 +85,32 @@ pub fn strict_status(setting: &Path, policy: Option<u32>, clients: Option<&Path>
     }
 }
 
+/// The user's own "pinned clients only" switch (the tray's check mark).
+pub fn user_strict(setting: &Path) -> bool {
+    setting_on(setting)
+}
+
+/// Pinned clients only for a reason the user cannot switch off (policy,
+/// or a client trusted by fingerprint): that reason.
+pub fn forced_strict(policy: Option<u32>, clients: Option<&Path>) -> Option<&'static str> {
+    strict_mode(policy, None, clients)
+}
+
+/// The paired Remora PCs for the tray menu, labels cleaned. Empty when the
+/// list cannot be read (the menu then offers nothing to forget).
+pub fn paired(path: &Path) -> Vec<crate::tray::PairedPc> {
+    let Ok(store) = ClientStore::load(path) else {
+        return Vec::new();
+    };
+    store
+        .iter()
+        .map(|(fp, c)| crate::tray::PairedPc {
+            label: clean_label(&c.label),
+            fingerprint: format_fingerprint(&fp),
+        })
+        .collect()
+}
+
 /// The list as printed by `remora-agent clients`.
 pub fn list(path: &Path) -> Result<String, String> {
     let store = ClientStore::load(path).map_err(|e| format!("cannot read the client list: {e}"))?;

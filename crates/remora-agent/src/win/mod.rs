@@ -9,6 +9,7 @@ mod files;
 mod pipe;
 mod shortcut;
 mod sys;
+mod tray;
 mod ui;
 mod window;
 mod wts;

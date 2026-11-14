@@ -63,7 +63,7 @@
 //! open starts from scratch. The engine lives across channel sessions, so
 //! uploads pause on a drop and resume after the next pairing.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -78,7 +78,9 @@ use remora_link::transfer::{Direction, TransferEvent};
 use remora_link::{Binding, Event, Message, Sas, SecureSession, StaticKey, cap, policy};
 
 use crate::info::{SessionInfo, SessionKind};
-use crate::seam::{Action, AgentEvent, Channel, Protocol, SendOutcome, UrlOutcome};
+use crate::seam::{
+    Action, AgentEvent, AgentStatus, Channel, Notice, Phase, Protocol, SendOutcome, UrlOutcome,
+};
 use crate::{debug, info, warn};
 
 /// The helper's heartbeat interval once paired (Remora uses the same).
@@ -250,7 +252,14 @@ pub struct LinkProtocol {
     backoff_until: Option<Instant>,
     /// The next back-off.
     backoff: Duration,
+    /// Transfers moving or paused (for the tray).
+    active: BTreeSet<[u8; 16]>,
+    /// Tray notifications not yet taken.
+    notices: Vec<Notice>,
 }
+
+/// Tray notifications kept until taken; older ones are dropped.
+const MAX_NOTICES: usize = 8;
 
 /// Short transfer id for the log.
 fn tid(id: &[u8; 16]) -> String {
@@ -342,6 +351,34 @@ impl LinkProtocol {
             unanswered: Vec::new(),
             backoff_until: None,
             backoff: BACKOFF_MIN,
+            active: BTreeSet::new(),
+            notices: Vec::new(),
+        }
+    }
+
+    fn notice(&mut self, n: Notice) {
+        if self.notices.len() >= MAX_NOTICES {
+            self.notices.remove(0);
+        }
+        self.notices.push(n);
+    }
+
+    /// Where the helper stands, for the tray icon.
+    pub fn status(&self) -> AgentStatus {
+        let phase = match &self.ctl {
+            None => Phase::Waiting,
+            Some(c) if c.ticket.is_some() => Phase::Pairing,
+            Some(_) if self.client_trusted() => Phase::Connected,
+            Some(_) => Phase::Connecting,
+        };
+        AgentStatus {
+            phase,
+            client: self
+                .ctl
+                .as_ref()
+                .map(|c| remora_link::pins::clean_label(&c.client_name))
+                .unwrap_or_default(),
+            transfers: self.active.len(),
         }
     }
 
@@ -827,6 +864,7 @@ impl LinkProtocol {
         self.close_ui();
         self.ui.show_sas(ticket, sas);
         self.sas_shown = true;
+        self.notice(Notice::PairingWaiting);
     }
 
     /// Pins Remora's client key once both users confirmed (the dialog here
@@ -1166,7 +1204,9 @@ impl LinkProtocol {
                     }
                 }
             }
-            TransferEvent::Progress { .. } => {}
+            TransferEvent::Progress { id, .. } => {
+                self.active.insert(id);
+            }
             TransferEvent::Paused { id, direction } => {
                 info!("transfer {} {} paused", tid(&id), dir_name(direction));
             }
@@ -1176,6 +1216,10 @@ impl LinkProtocol {
                 name,
             } => {
                 self.owners.remove(&id);
+                self.active.remove(&id);
+                if direction == Direction::Receive {
+                    self.notice(Notice::FileReceived(name.clone()));
+                }
                 info!("transfer {} {} completed", tid(&id), dir_name(direction));
                 debug!("transfer {} stored as {name}", tid(&id));
             }
@@ -1187,6 +1231,7 @@ impl LinkProtocol {
                 detail,
             } => {
                 self.owners.remove(&id);
+                self.active.remove(&id);
                 warn!(
                     "transfer {} {} failed: reason {reason}{}",
                     tid(&id),
@@ -1265,6 +1310,14 @@ impl Protocol for LinkProtocol {
 
     fn next_deadline(&self) -> Option<Instant> {
         self.deadline()
+    }
+
+    fn status(&self) -> AgentStatus {
+        LinkProtocol::status(self)
+    }
+
+    fn take_notices(&mut self) -> Vec<Notice> {
+        std::mem::take(&mut self.notices)
     }
 }
 

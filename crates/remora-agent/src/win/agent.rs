@@ -16,6 +16,7 @@ use windows_sys::Win32::System::Threading::CreateMutexW;
 
 use super::dpapi::Dpapi;
 use super::files::WinFiles;
+use super::tray::{SharedFeed, TrayFeed};
 use super::ui::WinPairingUi;
 use super::wts::{self, WtsChunkIo};
 use super::{OwnedHandle, pipe, sys, wide, window};
@@ -26,7 +27,7 @@ use crate::keystore::{self, KeyOrigin};
 use crate::lifecycle::{LifeAction, Lifecycle, SessionChange};
 use crate::link::{FileClients, LinkProtocol};
 use crate::links;
-use crate::seam::{Action, AgentEvent, Channel, Protocol, SendOutcome, UrlOutcome};
+use crate::seam::{Action, AgentEvent, AgentStatus, Channel, Protocol, SendOutcome, UrlOutcome};
 use crate::{info, warn};
 use remora_link::StaticKey;
 
@@ -167,6 +168,11 @@ struct Loop {
     shutting_down: bool,
     /// A `TransferWake` is in the queue.
     wake_queued: Arc<AtomicBool>,
+    /// The session window (tray icon), when it started.
+    window: Option<window::WindowThread>,
+    tray: SharedFeed,
+    /// What the tray was last told.
+    shown: AgentStatus,
 }
 
 /// Pipe requests waiting for the protocol's answer at a time; an older one
@@ -175,6 +181,7 @@ const MAX_PENDING_REQUESTS: usize = 8;
 
 fn event_loop(key: StaticKey) -> i32 {
     let (tx, rx) = mpsc::channel::<Input>();
+    let fingerprint = remora_link::fingerprint(&key.public());
     let protocol = Box::new(LinkProtocol::new(
         key,
         Box::new(WinPairingUi::new(tx.clone())),
@@ -196,7 +203,8 @@ fn event_loop(key: StaticKey) -> i32 {
             let _ = t.send(Input::TransferWake);
         }
     });
-    let window = match window::spawn(tx.clone()) {
+    let tray: SharedFeed = Arc::new(std::sync::Mutex::new(TrayFeed::default()));
+    let window = match window::spawn(tx.clone(), tray.clone(), fingerprint) {
         Ok(w) => Some(w),
         Err(e) => {
             warn!("no session window ({e}); reconnects will not reopen channels");
@@ -224,6 +232,9 @@ fn event_loop(key: StaticKey) -> i32 {
         cpu_prev: None,
         shutting_down: false,
         wake_queued: queued,
+        window,
+        tray,
+        shown: AgentStatus::default(),
     };
     let remote = sys::remote_connected();
     info!(
@@ -237,7 +248,7 @@ fn event_loop(key: StaticKey) -> i32 {
     let actions = lp.life.start(remote);
     lp.run_life(actions);
     lp.run(&rx);
-    if let Some(w) = window {
+    if let Some(w) = lp.window {
         w.close();
     }
     0
@@ -272,7 +283,27 @@ impl Loop {
             if self.protocol.next_deadline().is_some_and(|d| d <= now) {
                 self.feed(AgentEvent::Timer);
             }
+            self.update_tray();
         }
+    }
+
+    /// Hands the tray a changed status and any new notices.
+    fn update_tray(&mut self) {
+        let Some(w) = self.window else { return };
+        let status = self.protocol.status();
+        let notices = self.protocol.take_notices();
+        if status == self.shown && notices.is_empty() {
+            return;
+        }
+        if let Ok(mut f) = self.tray.lock() {
+            f.status = status.clone();
+            f.notices.extend(notices);
+            // Bounded: the window drains it on every update.
+            let excess = f.notices.len().saturating_sub(8);
+            f.notices.drain(..excess);
+        }
+        self.shown = status;
+        w.status_changed();
     }
 
     fn request_id(&mut self) -> u64 {

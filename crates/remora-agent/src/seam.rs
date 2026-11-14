@@ -143,6 +143,49 @@ pub trait Protocol {
     fn next_deadline(&self) -> Option<Instant> {
         None
     }
+
+    /// What the tray icon shows now.
+    fn status(&self) -> AgentStatus {
+        AgentStatus::default()
+    }
+
+    /// Things worth a tray notification since the last call.
+    fn take_notices(&mut self) -> Vec<Notice> {
+        Vec::new()
+    }
+}
+
+/// Where the helper stands with Remora, for the tray icon.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Phase {
+    /// No Remora channel open (mstsc, console, or Remora not connected).
+    #[default]
+    Waiting,
+    /// A Remora channel is open; the handshake or pairing is under way.
+    Connecting,
+    /// The pairing dialog waits for the user here.
+    Pairing,
+    /// Paired with a Remora PC the user confirmed (now or before).
+    Connected,
+}
+
+/// The helper's state as the tray shows it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AgentStatus {
+    pub phase: Phase,
+    /// The Remora PC's name for itself (cleaned), when it sent one.
+    pub client: String,
+    /// File transfers moving or paused right now.
+    pub transfers: usize,
+}
+
+/// Something the user may want to know without looking at the tray.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Notice {
+    /// The pairing dialog opened.
+    PairingWaiting,
+    /// A file from Remora was stored (its stored name).
+    FileReceived(String),
 }
 
 #[cfg(test)]

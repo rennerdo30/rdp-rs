@@ -1372,3 +1372,29 @@ fn the_client_name_is_cleaned() {
     n.answer_locally(true);
     assert_eq!(n.clients.0.borrow()[0].1, got);
 }
+
+/// RDP-48: the tray follows the session: waiting without Remora, amber
+/// while the dialog waits (with a notice), connected once confirmed, and
+/// waiting again after the link drops.
+#[test]
+fn the_tray_status_follows_pairing_and_the_link() {
+    let mut n = Net::new(Remora::new(), BTreeMap::new());
+    assert_eq!(n.agent.status().phase, Phase::Waiting);
+    n.connect(snapshot(PolicyFlags::default()));
+    n.remora.send(
+        0,
+        &Message::ClientName {
+            name: "WORKPC".into(),
+        },
+    );
+    n.settle();
+    let st = n.agent.status();
+    assert_eq!(st.phase, Phase::Pairing, "the dialog waits");
+    assert_eq!(st.client, "WORKPC");
+    assert_eq!(n.agent.take_notices(), [Notice::PairingWaiting]);
+    assert!(n.agent.take_notices().is_empty(), "taken once");
+    n.answer_locally(true);
+    assert_eq!(n.agent.status().phase, Phase::Connected);
+    n.drop_link();
+    assert_eq!(n.agent.status(), AgentStatus::default(), "waiting again");
+}
