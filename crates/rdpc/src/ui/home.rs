@@ -578,7 +578,20 @@ impl Ui {
         self.field_mut(Field::Quick).set("");
         self.home.pick = 0;
         match choice {
-            Choice::Saved(ci) => self.connect_saved(ci),
+            Choice::Saved(ci) => {
+                // Already running: show it instead of a second session.
+                let live = self
+                    .store
+                    .connections
+                    .get(ci)
+                    .and_then(|c| self.live_tab(c));
+                if let Some(id) = live {
+                    self.active = Some(id);
+                    self.session_focus = false;
+                    return None;
+                }
+                self.connect_saved(ci)
+            }
             Choice::Host(t) => {
                 // A new host: the editor asks for the sign-in; Connect
                 // starts it and Save keeps it.
@@ -2779,6 +2792,10 @@ mod tests {
         );
         m.home_sample_typed("Test VM");
         assert_eq!(m.quick_choices(), vec![Choice::Saved(2)]);
+        // A saved connection with a live session switches to it.
+        m.home_sample_typed("Office workstation");
+        assert!(m.key(Key::Enter).is_none());
+        assert_eq!(m.active, Some(1));
     }
 
     #[test]
