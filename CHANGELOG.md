@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **The session panel folds to a strip and floats.** By default the side panel is now a slim strip of page icons (with tooltips) at the picture's right edge; an icon, the toolbar's Panel button or **Ctrl+Alt+P** (also from inside the session) opens the panel floating over the picture, so the remote desktop is not resized. A click on the picture or **Esc** closes it, and neither reaches the session. The pin in its header docks it beside the picture as before; Remora remembers the choice, and the palette has **Pin/Unpin session panel**. Full screen has no strip.
+
 ## 0.1.0-beta.4
 
 - **A sidebar that folds and resizes, and a resizable side panel.** The menu button at the sidebar's top left, **Ctrl+B** or **Collapse sidebar** in the palette folds the sidebar to a narrow rail of icons with each connection's initials, live dot and a tooltip. Drag the sidebar's right edge (200 to 480 px; narrower folds it) and the session side panel's left edge (280 to 560 px); a double-click on an edge resets it. A fitted session is resized once when the drag ends. The fold and both widths are remembered.

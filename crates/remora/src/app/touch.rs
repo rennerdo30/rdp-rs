@@ -51,7 +51,10 @@ impl App {
         let mut targets = Vec::new();
         // The main window: the visible part of the session picture, mapped
         // like `mouse_to_session`.
+        // None while the session panel floats over it (a tap on the
+        // picture closes the panel, as a click does).
         if let Some(m) = &self.win
+            && !m.ui.session_input_blocked()
             && let Some((id, area)) = m.ui.session_area
             && let Some((handle, fb)) = self.touch_session(id)
         {

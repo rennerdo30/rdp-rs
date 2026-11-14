@@ -461,6 +461,15 @@ fn snapshot_ui(path: &str, scale: f32) -> Result<(), Box<dyn std::error::Error>>
             m.sidebar_collapsed = true;
             m
         }),
+        // The session panel unpinned: its strip, floating, in full
+        // screen (RDP-39).
+        ("-panel-strip", || ui::sample_panel_strip(false)),
+        ("-panel-strip-tip", || ui::sample_panel_strip(true)),
+        ("-panel-float", || ui::sample_panel_float(0, false)),
+        ("-panel-float-quality", || ui::sample_panel_float(2, false)),
+        ("-panel-float-fullscreen", || {
+            ui::sample_panel_float(1, true)
+        }),
         ("-unlock", || {
             ui::Ui::new(store::Store::locked_sample(), 1.0)
         }),

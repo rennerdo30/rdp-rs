@@ -961,6 +961,7 @@ impl App {
                     self.settings.sidebar_collapsed = collapsed;
                     self.settings.sidebar_width = sidebar;
                     self.settings.panel_width = panel;
+                    self.settings.panel_pinned = m.ui.panel_pinned;
                     let _ = self.settings.save();
                 }
                 self.dirty();
@@ -1270,7 +1271,8 @@ impl App {
             // No live picture under it (RemoteApp, spanned): repaint it all.
             return self.dirty();
         };
-        let r = r.intersect(area);
+        // Only over the picture: a floating panel beside it is chrome.
+        let r = r.intersect(m.ui.session_clip.unwrap_or(area));
         if r.is_empty() {
             return;
         }
@@ -1479,6 +1481,14 @@ impl App {
         } else {
             None
         };
+        // Ctrl+Alt+P: the session panel, also from inside a session (a
+        // floating panel takes the keyboard; Esc gives it back).
+        if panel_chord(&ev, self.mods) && m.ui.panel_shortcut(session) {
+            if let Some(id) = session {
+                self.send(id, session::release_modifiers());
+            }
+            return self.dirty();
+        }
         if let Some(id) = session {
             // Alt (the host key) shows the toolbar while it is held; the
             // key still goes to the session.
@@ -1776,7 +1786,10 @@ impl App {
             // A divider's grip, or one being dragged (over the picture too).
             _ if m.ui.cursor_is_resize() => Shown::Icon(CursorIcon::ColResize),
             Some((id, area))
-                if area.contains(x, y) && !m.ui.over_overlay(x, y) && !m.ui.session_backdrop() =>
+                if area.contains(x, y)
+                    && !m.ui.over_overlay(x, y)
+                    && !m.ui.session_backdrop()
+                    && !m.ui.session_input_blocked() =>
             {
                 let c = self
                     .sessions
@@ -1819,6 +1832,11 @@ impl App {
         }
         // A divider's grip overlaps the picture's edge; a drag is not input.
         if m.pressed_in != Some(id) && (m.ui.over_divider(x, y) || m.ui.resizing()) {
+            return None;
+        }
+        // The session panel floats over the picture (a click on the
+        // picture only closes it), or that click is still down.
+        if m.ui.session_input_blocked() {
             return None;
         }
         let s = self.sessions.get(&id)?;
@@ -2001,6 +2019,7 @@ impl ApplicationHandler<UserEvent> for App {
                                 self.settings.sidebar_width,
                                 self.settings.panel_width,
                             );
+                            ui.panel_pinned = self.settings.panel_pinned;
                             if self.settings.check_updates {
                                 check_for_update(
                                     self.proxy.clone(),
@@ -2586,6 +2605,22 @@ fn palette_chord(ev: &winit::event::KeyEvent, mods: ModifiersState) -> bool {
         && ev.physical_key == PhysicalKey::Code(KeyCode::KeyK)
         && match &ev.logical_key {
             WKey::Character(c) => c.eq_ignore_ascii_case("k"),
+            _ => true,
+        }
+}
+
+/// Ctrl+Alt+P, the chord that shows or hides the session panel (also while
+/// a session has the keyboard). As with [`palette_chord`], an AltGr+P that
+/// types a character stays the session's.
+fn panel_chord(ev: &winit::event::KeyEvent, mods: ModifiersState) -> bool {
+    use winit::keyboard::{KeyCode, PhysicalKey};
+    ev.state.is_pressed()
+        && mods.control_key()
+        && mods.alt_key()
+        && !mods.shift_key()
+        && ev.physical_key == PhysicalKey::Code(KeyCode::KeyP)
+        && match &ev.logical_key {
+            WKey::Character(c) => c.eq_ignore_ascii_case("p"),
             _ => true,
         }
 }

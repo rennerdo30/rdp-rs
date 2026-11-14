@@ -21,8 +21,10 @@ use crate::theme::{self, ThemeChoice, Tone, pal, radius, size};
 mod palette;
 pub use palette::{SESSION_CHORD, sample as sample_palette};
 mod home;
+mod panel;
 mod sidebar;
 mod summary;
+pub use panel::{sample_panel_float, sample_panel_strip};
 pub use sidebar::{Divider, sample_rail, sample_resized};
 
 pub use home::ThumbDue;
@@ -312,6 +314,14 @@ pub enum Hit {
     RailMore,
     /// The draggable edge of the sidebar or of the session panel.
     Divider(Divider),
+    /// The session panel's strip: a page's icon (opens the panel on it),
+    /// the pin (docks the panel beside the picture, or floats it again),
+    /// the floating panel's close button, and its body (takes the pointer
+    /// from the picture under it, does nothing).
+    PanelPage(u8),
+    PanelPin,
+    PanelClose,
+    PanelBody,
 }
 
 /// A RemoteApp session tab: the connection's apps and the open windows.
@@ -680,6 +690,13 @@ pub struct Ui {
     dividers: sidebar::Dividers,
     /// The tooltip of the rail item under the pointer.
     tip: Option<sidebar::Tip>,
+    /// The session panel docks beside the picture (`drawer` shows or hides
+    /// it there); unpinned, a strip of page icons stays at the picture's
+    /// right edge and the panel floats over the picture (`panel`). The app
+    /// sets it from the settings (default unpinned); samples start pinned.
+    pub panel_pinned: bool,
+    /// The floating panel's state and where it was painted.
+    panel: panel::PanelState,
 }
 
 /// Title-row geometry in physical pixels for the frame hook.
@@ -768,6 +785,8 @@ impl Ui {
             panel_w: DRAWER_W,
             dividers: Default::default(),
             tip: None,
+            panel_pinned: true,
+            panel: Default::default(),
         };
         m.fields[Field::Password as usize] = TextField::secret();
         m.fields[Field::Master as usize] = TextField::secret();
@@ -796,8 +815,9 @@ impl Ui {
     }
 
     /// The physical size the session picture gets in a window of `w` x `h`
-    /// pixels: the same layout as `paint` (sidebar, tab strip, drawer; the
-    /// toolbar floats over the picture).
+    /// pixels: the same layout as `paint` (sidebar, tab strip, docked panel
+    /// or its strip; the toolbar and the floating panel go over the
+    /// picture).
     pub fn session_size_for(&self, w: i32, h: i32) -> (i32, i32) {
         let p = |v: f32| (v * self.scale).round() as i32;
         let (mut aw, ah) = if self.fullscreen {
@@ -808,8 +828,12 @@ impl Ui {
             let side_w = self.sidebar_px(w);
             (w - side_w - 1, h - p(STATUS_H) - p(STRIP_H) - 1)
         };
-        if self.drawer {
+        // The docked panel, or the strip that stands in for it (the
+        // floating panel goes over the picture).
+        if self.panel_pinned && self.drawer {
             aw -= self.panel_px(aw) + 1;
+        } else {
+            aw -= self.strip_px();
         }
         (aw.max(1), ah.max(1))
     }
@@ -1647,6 +1671,11 @@ impl Ui {
         if self.palette.is_some() && self.confirm_exit.is_none() {
             return self.palette_mouse_down(x, y);
         }
+        // The floating panel closes on a press outside it; on the picture
+        // that press does nothing else.
+        if self.panel_press(x, y) {
+            return;
+        }
         self.press = self.hit_at(x, y);
         if let Some(Hit::Divider(d)) = self.press {
             // A drag or a double-click; the session keeps the keyboard.
@@ -1690,6 +1719,9 @@ impl Ui {
             return self.palette_mouse_up(x, y);
         }
         let pressed = self.press.take();
+        if self.panel_release() {
+            return None;
+        }
         if let Some(Hit::Divider(_)) = pressed {
             return self.divider_release();
         }
@@ -1979,7 +2011,11 @@ impl Ui {
             Hit::Home => self.go_home(),
             Hit::Tab(id) => self.active = Some(id),
             Hit::CloseTab(id) => return Some(Action::CloseTab(id)),
-            Hit::Drawer => self.drawer = !self.drawer,
+            Hit::Drawer => self.toggle_panel(),
+            Hit::PanelPage(i) => self.panel_page(i),
+            Hit::PanelPin => return self.pin_panel(),
+            Hit::PanelClose => self.close_panel(),
+            Hit::PanelBody => {}
             Hit::SidebarToggle | Hit::RailMore => return self.toggle_sidebar(),
             // Dividers drag (see `mouse_down`); a click does nothing.
             Hit::Divider(_) => {}
@@ -2256,6 +2292,11 @@ impl Ui {
         if let Some(done) = self.toolbar_key(&k) {
             return done;
         }
+        if let Key::Esc = k
+            && self.panel_esc()
+        {
+            return None;
+        }
         match k {
             Key::Palette => self.open_palette(None),
             Key::Enter if self.focus == Some(Field::DrivePath) => {
@@ -2494,6 +2535,7 @@ impl Ui {
         self.caption = Rect::default();
         self.tip = None;
         self.dividers.panel_x = None;
+        self.panel.float_rect = None;
         let s = self.scale;
         let p = |v: f32| (v * s).round() as i32;
         let c = pal();
@@ -5516,7 +5558,7 @@ impl Ui {
         if self.palette.is_some() && self.confirm_exit.is_none() {
             return self.palette_scroll(lines);
         }
-        if self.active.is_some() && self.drawer && self.drawer_area.contains(x, y) {
+        if self.active.is_some() && self.panel_visible() && self.drawer_area.contains(x, y) {
             let max = (self.drawer_content - self.drawer_area.h).max(0);
             let next = (self.drawer_scroll - (lines * 48.0 * self.scale) as i32).clamp(0, max);
             let changed = next != self.drawer_scroll;
@@ -5937,8 +5979,20 @@ impl Ui {
     }
 
     /// The quick panel: four pages (Sharing, Display, Quality, Session) of
-    /// grouped cards, like Windows Settings. Its body scrolls.
-    fn paint_drawer(&mut self, cv: &mut Canvas, te: &mut TextEngine, f: &Fonts, d: Rect, id: u64) {
+    /// grouped cards, like Windows Settings. Its body scrolls. Docked, the
+    /// page switcher leads with the pin beside it; floating, a header with
+    /// the page's name, the pin and Close (and the switcher in full
+    /// screen, where there is no strip).
+    #[allow(clippy::too_many_arguments)]
+    fn paint_drawer(
+        &mut self,
+        cv: &mut Canvas,
+        te: &mut TextEngine,
+        f: &Fonts,
+        d: Rect,
+        id: u64,
+        shape: panel::Shape,
+    ) {
         let s = self.scale;
         let p = |v: f32| (v * s).round() as i32;
         cv.fill(d, pal().bg);
@@ -5971,33 +6025,42 @@ impl Ui {
         let x = d.x + p(12.0);
         let w = d.w - p(24.0);
 
+        let mut top = d.y;
+        if let panel::Shape::Float { .. } = shape {
+            top = self.paint_panel_head(cv, te, f, d);
+        }
         // Page switcher
-        let seg = Rect::new(x, d.y + p(12.0), w, p(36.0));
-        let pages: Vec<(String, Option<Icon>, bool, Hit)> = [
-            ("Sharing", Icon::Folder),
-            ("Display", Icon::Monitor),
-            ("Quality", Icon::Sliders),
-            ("Session", Icon::Info),
-        ]
-        .iter()
-        .enumerate()
-        .map(|(i, (n, icon))| {
-            (
-                n.to_string(),
-                Some(*icon),
-                self.drawer_page == i as u8,
-                Hit::DrawerPage(i as u8),
-            )
-        })
-        .collect();
-        self.segmented_i(cv, te, f, seg, &pages);
+        if matches!(
+            shape,
+            panel::Shape::Docked | panel::Shape::Float { pages: true }
+        ) {
+            let pin_w = if shape == panel::Shape::Docked {
+                p(36.0) + p(6.0)
+            } else {
+                0
+            };
+            let seg = Rect::new(x, top + p(12.0), w - pin_w, p(36.0));
+            let pages: Vec<(String, Option<Icon>, bool, Hit)> = panel::PAGES
+                .iter()
+                .enumerate()
+                .map(|(i, (n, icon, _))| {
+                    (
+                        n.to_string(),
+                        Some(*icon),
+                        self.drawer_page == i as u8,
+                        Hit::DrawerPage(i as u8),
+                    )
+                })
+                .collect();
+            self.segmented_i(cv, te, f, seg, &pages);
+            if pin_w > 0 {
+                let pin = Rect::new(seg.right() + p(6.0), seg.y, p(36.0), p(36.0));
+                self.paint_docked_pin(cv, te, f, pin);
+            }
+            top = seg.bottom();
+        }
 
-        let body = Rect::new(
-            d.x,
-            seg.bottom() + p(8.0),
-            d.w,
-            d.bottom() - seg.bottom() - p(8.0),
-        );
+        let body = Rect::new(d.x, top + p(8.0), d.w, d.bottom() - top - p(8.0));
         self.drawer_area = body;
         let inner = cv.set_clip(body);
         let first_hit = self.hits.len();

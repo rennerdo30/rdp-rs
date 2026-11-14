@@ -209,10 +209,30 @@ or hold **Alt** to bring it back. Its buttons, from the left:
 
   ![The side panel's Session page](images/panel-session.webp)
 
+**Floating or pinned.** By default the side panel folds to a slim strip at
+the picture's right edge with an icon per page (point at one for its name).
+Click an icon, the toolbar's **Panel** button, or press **Ctrl+Alt+P** (also
+while the session has the keyboard) and the panel opens on that page,
+floating over the right part of the picture. The remote desktop keeps its
+size, so nothing is resized. While it is open the session gets no mouse
+input: click anywhere on the picture, click the open page's icon again, use
+the panel's **×** or press **Esc** to close it. That click and that Esc are
+not sent to the session, and Esc gives the keyboard back to the session if
+Ctrl+Alt+P took it from there.
+
+The pin in the panel's header docks it beside the picture instead: the
+picture gets narrower (a desktop set to **Fit window** is resized to the new
+area) and the panel stays open; the toolbar's **Panel** button hides it, and
+a page icon in the strip docks it again. The lit pin of the docked panel
+floats it again. Remora remembers the choice; the command palette has
+**Pin session panel** / **Unpin session panel** and **Show session panel**
+too. In full screen there is no strip: the toolbar's **Panel** button opens
+the floating panel, with the page switcher at its top.
+
 Drag the side panel's left edge to make it wider or narrower (280 to 560 px);
 a double-click on the edge puts the default width back, and Remora remembers
-the width. A desktop set to **Fit window** follows: it is resized to the new
-picture area once you let go of the edge.
+the width. A desktop set to **Fit window** follows the docked panel: it is
+resized to the new picture area once you let go of the edge.
 
 When the network drops, Remora reconnects on its own, up to five times. When a
 session fails or ends, the tab says why; see
