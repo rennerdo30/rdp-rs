@@ -10,3 +10,5 @@ license.workspace = true
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 # SHA-256 and the system RNG.
 ring = "0.17"
+# Wipes the password of a received Client Info PDU (server side).
+zeroize = "1.9"

@@ -3,6 +3,7 @@
 ## Unreleased
 
 - **Typing comes out right with another server layout, and Windows keys go where they should.** Automatic keyboard now sends what you type as the characters your layout makes from the start: a server keeps its own layout when it lacks yours (or the session already existed), and RDP does not tell Remora, so a Japanese keyboard typed nonsense into a German session. Shortcuts, navigation and function keys stay keys; **Remote** still sends every key as a key. **Windows key combinations** now go to the session whenever it has the keyboard by default (Win+R, Alt+Tab), and a Windows key that stays on this PC is no longer sent to the session as well (both Start menus opened).
+- **Experimental: Remora Host, our own RDP server (`remora-host`).** It serves a Windows desktop to Remora or another RDP client over TLS with a self-signed certificate and its own password (Argon2id hash, rate-limited): uncompressed bitmap updates of the changed tiles, keyboard and mouse, one client at a time on port 3390. `remora-host run --demo` serves an animated test pattern instead, on any platform, and shows the input it receives. No NLA, clipboard, audio or multi-monitor yet; not part of the release packages. See `crates/remora-host/README.md` and `docs/HOST.md`.
 
 ## 0.1.0-beta.6
 

@@ -1,0 +1,40 @@
+[package]
+name = "remora-host"
+description = "Remora Host (experimental): an RDP server for Remora and other RDP clients, with a demo and a Windows backend"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+rdp = { path = "../rdp" }
+# The host password: an Argon2id hash in the PHC string format (RustCrypto,
+# as Remora's vault).
+argon2 = "0.6"
+# The self-signed TLS certificate, made on first run: an ECDSA P-256 key
+# through ring (already the TLS provider). No PEM support compiled in.
+rcgen = { version = "0.14.10", default-features = false, features = ["crypto", "ring"] }
+# Reads the new password without echo (`remora-host set-password`).
+rpassword = "7"
+# Wipes the private key and passwords from memory.
+zeroize = "1.9"
+
+[target.'cfg(windows)'.dependencies]
+# DXGI Desktop Duplication (COM interfaces; windows-sys has no vtables).
+windows = { version = "0.62.2", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    # DXGI_OUTPUT_DESC names the monitor (HMONITOR).
+    "Win32_Graphics_Gdi",
+] }
+# SendInput, the virtual screen metrics and DPAPI for the private key.
+windows-sys = { version = "0.61.2", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Cryptography",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+] }
