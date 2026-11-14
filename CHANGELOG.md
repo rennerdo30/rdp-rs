@@ -2,11 +2,28 @@
 
 ## Unreleased
 
+## 0.1.0-beta.2
+
 - **rdpc is now Remora.** The app has a new name and a new logo: a remora fish whose body is a screen. The executable is `remora.exe`, the setup is `remora-<version>-setup.exe`, and it installs to `%LOCALAPPDATA%\Programs\Remora` with a Start menu and Installed apps entry named Remora. The protocol library (`rdp`) and the repository (`rdp-rs`) keep their names.
   - **Updating from rdpc 0.1.0-beta.1 needs nothing from you:** rdpc's updater finds the new release as before, and the setup moves the install: it waits for rdpc to close, installs Remora, removes rdpc's program folder, Start menu shortcut and Installed apps entry, and starts Remora.
   - **Your data stays where it is:** saved connections, the vault, settings, known hosts and logs remain in the `rdp-rs` folders under `%APPDATA%` and `%LOCALAPPDATA%`. The diagnostic log is now `remora.log`, and new recordings go to `Videos\Remora` (earlier ones stay in `Videos\rdpc`).
   - A taskbar button pinned to rdpc stops working after the move; pin Remora again.
 - **A website and a user guide.** [remora.renner.dev](https://remora.renner.dev) shows Remora with real screenshots, and `docs/` has a getting-started page, a user guide, every keyboard shortcut, troubleshooting for each error screen, and what is stored where.
+- **A new look.** Every screen is redesigned: dark and light themes (following Windows or chosen in Settings), a new icon set and calmer layouts.
+  - **Home** shows running sessions with live thumbnails, favourites and recent PCs, with quick connect for a name, an address or `user@host:port`.
+  - **Ctrl+K command palette** finds sessions, connections, RemoteApp programs, groups and commands; **Ctrl+Alt+K** opens it inside a session.
+  - **Connecting** shows each step of the connection. A failure says why, where it stopped and what to try; an ended session says why it ended and offers to reconnect.
+  - A floating session toolbar replaces the old bar in full screen.
+- **Monitors:** pick any subset of this PC's monitors per connection on a map in the editor. The session gets one borderless window per chosen monitor; the others stay free.
+- **RemoteApp:** publish programs per connection and launch them from the sidebar, Home or the palette. Each remote window becomes its own local window with a taskbar button.
+- **Sign in with Windows:** Kerberos through Windows (NTLM as fallback), and single sign-on with an empty user name. It's a switch in the editor, inherited like the sign-in.
+- **Keyboard:** Remora tells the server this PC's keyboard layout at connect. A new Keyboard option translates typing for a server with a different layout. Text without a key (touch keyboard, emoji panel) is sent as Unicode.
+- **Touch and pen** (MS-RDPEI): multi-touch, and pen with pressure and tilt.
+- **Picture:** H.264 AVC444 (experimental, with AVC420 as before), drawing orders with glyph, brush and offscreen caches, a persistent bitmap cache per server (at most 100 MB), and RemoteFX and NSCodec surface bits for RDP 7 servers.
+- **Sound:** AAC, MP3 and ADPCM playback besides PCM.
+- **Connection:** server redirection (session broker and load balancing) while connecting and during a session; network auto-detect with a "Detect automatically" speed, whose results appear in the session panel; the full licensing exchange, with licenses kept in `%LOCALAPPDATA%\rdp-rs\licenses`.
+
+Not yet: UDP transport, RD Gateway over RPC/HTTP, legacy RDP security, serial ports, USB, cameras, plug and play devices, video redirection and shadowing. Most of what is new has been tested against the specifications and in unit tests, not yet against every kind of Windows server. The setup is still not code-signed, so Windows SmartScreen warns on the first run.
 
 ## 0.1.0-beta.1
 

@@ -1714,7 +1714,7 @@ mod tests {
                 .any(|i| matches!(i.entry.cmd, Command::OpenGroup(_)) && i.entry.title == "Lab")
         );
         // Apps.
-        let it = items(&mut m, "excel");
+        let it = items(&mut m, "ledger");
         assert_eq!(it[0].entry.cmd, Command::ConnectApp(3, 0));
         // Two stray letters in a description find nothing.
         let it = items(&mut m, "of");
