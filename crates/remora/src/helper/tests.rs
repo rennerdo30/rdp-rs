@@ -538,7 +538,16 @@ fn download_end_to_end_into_the_chosen_folder() {
         }
     }
     assert_eq!(std::fs::read(downloads.join("report.bin")).unwrap(), data);
-    assert_eq!(marked.lock().unwrap().len(), 1, "MotW hook called");
+    // The Mark-of-the-Web goes on the part before its rename, and on the
+    // stored file after it.
+    let marked = marked.lock().unwrap();
+    assert_eq!(marked.len(), 2, "MotW hook called twice: {marked:?}");
+    assert!(
+        marked[0]
+            .to_string_lossy()
+            .ends_with("report.bin.remora-part")
+    );
+    assert!(marked[1].ends_with("report.bin"));
     let left: Vec<_> = std::fs::read_dir(&downloads).unwrap().collect();
     assert_eq!(left.len(), 1, "no part or sidecar left");
 }
