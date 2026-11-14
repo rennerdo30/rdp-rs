@@ -486,7 +486,9 @@ impl Ui {
         l.fixed
             || self.bar_pinned
             || !self.session_focus
-            || self.panel_visible()
+            // The floating panel covers the picture; a docked one does not
+            // keep the bar up (RDP-47: it never hid while docked).
+            || (!self.panel_pinned && self.panel_visible())
             || tb.open
             || tb.alt
             || tb.menu
@@ -2251,7 +2253,20 @@ mod tests {
         m.alt_key(false);
         assert!(!m.pill_shown());
         m.panel.open = m.active;
-        assert!(m.pill_shown(), "stays while the panel is open");
+        assert!(m.pill_shown(), "stays while the panel floats");
+        // Docked beside the picture, the panel no longer keeps it up.
+        m.panel.open = None;
+        m.panel_pinned = true;
+        m.drawer = true;
+        assert!(
+            m.panel_visible() && !m.pill_shown(),
+            "docked: the bar hides"
+        );
+        // A session that connects on screen takes the keyboard; the bar hides.
+        m.session_focus = false;
+        assert!(m.pill_shown());
+        m.session_started(m.active.unwrap());
+        assert!(m.session_focus && !m.pill_shown());
     }
 
     #[test]

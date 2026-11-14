@@ -1023,6 +1023,12 @@ impl Ui {
     /// A session tab connected: its clock starts, and its saved
     /// connection counts as used now.
     pub fn session_started(&mut self, id: u64) {
+        // The session on screen takes the keyboard, as with a click into
+        // it, so the toolbar hides (RDP-47); not while the palette or a
+        // question is open.
+        if self.active == Some(id) && self.palette.is_none() && self.confirm_exit.is_none() {
+            self.session_focus = true;
+        }
         let now = self.now();
         self.home.since.entry(id).or_insert(now);
         self.mark_used(id, now, None);
