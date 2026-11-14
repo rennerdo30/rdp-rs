@@ -74,6 +74,8 @@ const SAVED_MASK: &str =
 
 /// Colour depths offered in the form.
 const DEPTHS: [u16; 4] = [32, 24, 16, 15];
+/// Sub-label of the "Touch and pen" switch.
+const TOUCH_HINT: &str = "Off: they act as the mouse";
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Field {
@@ -1721,7 +1723,9 @@ impl Ui {
             Hit::CertRefuse(id) => return Some(Action::CertAnswer(id, false)),
             Hit::TabPreset(id, i) => {
                 let t = self.tab_mut(id)?;
+                let touch = t.quality.touch;
                 t.quality = Quality::preset(PRESETS[i].0, t.quality.color_depth);
+                t.quality.touch = touch;
                 return Some(Action::SetQuality(id, t.quality));
             }
             Hit::TabDepth(id, i) => {
@@ -1738,7 +1742,8 @@ impl Ui {
                     2 => &mut q.composition,
                     3 => &mut q.window_drag,
                     4 => &mut q.animations,
-                    _ => &mut q.visual_styles,
+                    5 => &mut q.visual_styles,
+                    _ => &mut q.touch,
                 };
                 *flag = !*flag;
                 return Some(Action::SetQuality(id, t.quality));
@@ -1757,7 +1762,9 @@ impl Ui {
             Hit::FormGraphics(i) => self.opts.quality.gfx = i == 1,
             Hit::FormPreset(i) => {
                 let depth = self.opts.quality.color_depth;
+                let touch = self.opts.quality.touch;
                 self.opts.quality = Quality::preset(PRESETS[i].0, depth);
+                self.opts.quality.touch = touch;
             }
             Hit::FormDepth(i) => self.opts.quality.color_depth = DEPTHS[i],
             Hit::FormExperience(i) => {
@@ -1768,7 +1775,8 @@ impl Ui {
                     2 => &mut q.composition,
                     3 => &mut q.window_drag,
                     4 => &mut q.animations,
-                    _ => &mut q.visual_styles,
+                    5 => &mut q.visual_styles,
+                    _ => &mut q.touch,
                 };
                 *flag = !*flag;
             }
@@ -4234,7 +4242,22 @@ impl Ui {
         for (i, (r, (label, on))) in cells.iter().zip(rows).enumerate() {
             self.card_switch(cv, te, f, *r, label, "", on, Hit::FormExperience(i as u8));
         }
-        y + 6 * p(44.0)
+        y += 6 * p(44.0) + p(20.0);
+
+        self.caption(cv, te, f, x, y, w, "INPUT");
+        y += p(24.0);
+        let cells = self.card(cv, x, y, w, &[p(58.0)]);
+        self.card_switch(
+            cv,
+            te,
+            f,
+            cells[0],
+            "Touch and pen",
+            TOUCH_HINT,
+            q.touch,
+            Hit::FormExperience(6),
+        );
+        y + p(58.0)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -5502,7 +5525,12 @@ impl Ui {
         let s = self.scale;
         let p = |v: f32| (v * s).round() as i32;
         let q = t.quality;
-        if q != t.quality_live {
+        // Touch and pen apply live; everything else waits for a logon.
+        let fixed = Quality {
+            touch: t.quality_live.touch,
+            ..q
+        };
+        if fixed != t.quality_live {
             let r = Rect::new(x, y, w, p(96.0));
             cv.round_border(r, 8.0 * s, ACCENT_BORDER, BG_SELECT);
             te.draw(
@@ -5602,6 +5630,21 @@ impl Ui {
             );
         }
         y += 6 * p(42.0) + p(20.0);
+
+        self.caption(cv, te, f, x, y, w, "INPUT");
+        y += p(24.0);
+        let cells = self.card(cv, x, y, w, &[p(58.0)]);
+        self.card_switch(
+            cv,
+            te,
+            f,
+            cells[0],
+            "Touch and pen",
+            TOUCH_HINT,
+            q.touch,
+            Hit::TabExperience(id, 6),
+        );
+        y += p(58.0) + p(20.0);
 
         self.caption(cv, te, f, x, y, w, "GRAPHICS");
         y += p(24.0);
@@ -6699,7 +6742,7 @@ mod tests {
         );
         assert!(inside(&m));
         assert!(
-            m.hits.iter().any(|(_, h)| *h == Hit::FormExperience(5)),
+            m.hits.iter().any(|(_, h)| *h == Hit::FormExperience(6)),
             "the last row is reachable"
         );
         assert!(m.scroll_home(cx, cy, 100.0));
@@ -6777,6 +6820,40 @@ mod tests {
         assert!(m.mouse_move(500, 300), "leaving the bar hides it");
         m.paint(&mut Canvas::new(&mut px, w, h), &mut te, &fonts);
         assert!(m.session_clip.is_none());
+    }
+
+    #[test]
+    fn touch_switch_toggles_and_survives_a_speed_preset() {
+        let mut m = sample(false);
+        assert!(m.opts.quality.touch, "on by default");
+        m.activate(Hit::FormExperience(6));
+        assert!(!m.opts.quality.touch);
+        assert!(m.opts.quality.visual_styles, "row 5 untouched");
+        m.activate(Hit::FormPreset(PRESETS.len() - 1)); // Modem
+        assert_eq!(m.opts.quality.connection, 1);
+        assert!(!m.opts.quality.touch, "a speed preset keeps the choice");
+        m.activate(Hit::FormExperience(6));
+        assert!(m.opts.quality.touch);
+    }
+
+    #[test]
+    fn touch_needs_no_reconnect() {
+        let mut te = TextEngine::new();
+        let Some(fonts) = load_fonts(&mut te) else {
+            return; // no UI font on this machine (headless CI)
+        };
+        let banner = |m: &mut Ui, te: &mut TextEngine| {
+            let (w, h) = (1320usize, 1500usize);
+            let mut px = vec![0u32; w * h];
+            m.paint(&mut Canvas::new(&mut px, w, h), te, &fonts);
+            m.hits.iter().any(|(_, h)| *h == Hit::Reconnect(1))
+        };
+        let mut m = sample_panel(2, false);
+        assert!(banner(&mut m, &mut te), "wallpaper changed: reconnect");
+        let t = m.tab_mut(1).unwrap();
+        t.quality = t.quality_live;
+        t.quality.touch = !t.quality_live.touch;
+        assert!(!banner(&mut m, &mut te), "touch applies live");
     }
 
     /// Clicks the centre of the first hit rectangle for `hit`.

@@ -41,6 +41,7 @@ mod sspi;
 mod store;
 mod text_field;
 mod theme;
+mod touch;
 mod ui;
 mod vault;
 

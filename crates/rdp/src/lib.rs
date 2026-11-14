@@ -20,6 +20,7 @@
 //! - [`rdpsnd`]: audio output on the `rdpsnd` channel (MS-RDPEA)
 //! - [`audin`]: microphone redirection on the `AUDIO_INPUT` dynamic channel (MS-RDPEAI)
 //! - [`rail`]: RemoteApp, the `rail` channel and window orders (MS-RDPERP)
+//! - [`rdpei`]: touch and pen input on the `Microsoft::Windows::RDS::Input` dynamic channel (MS-RDPEI)
 //! - [`rdpdr`]: device redirection (MS-RDPEFS) with shared drives, printers (MS-RDPEPC) and smart cards (MS-RDPESC)
 
 pub mod audin;
@@ -51,6 +52,7 @@ pub mod pdu;
 pub mod pointer;
 pub mod rail;
 pub mod rdpdr;
+pub mod rdpei;
 pub mod rdpsnd;
 pub mod redirect;
 pub mod transport;
@@ -82,6 +84,10 @@ pub use rail::{RailEvent, RailHandle, RailState, RailWindow, RemoteApp};
 pub use rdpdr::{
     Device, Drive, IoCompletion, IoRequest, PrintBackend, PrintFormat, Printer, PrinterInfo, Rdpdr,
     RdpdrHandle, SmartCardBackend, rdpdr, share_printers, smart_card_device,
+};
+pub use rdpei::{
+    PenContact, PenFrame, TouchContact, TouchFrame, TouchHandle, TouchInput, TouchOptions,
+    touch_input,
 };
 pub use rdpsnd::{
     AudioBackend, AudioCodecs, AudioDecoder, AudioHandle, PcmFormat, Rdpsnd, rdpsnd, rdpsnd_with,

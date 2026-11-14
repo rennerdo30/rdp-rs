@@ -34,6 +34,9 @@ pub struct Controls {
     printers: Mutex<Vec<u32>>,
     /// Device id of the shared smart card subsystem, while shared.
     smart_card: Mutex<Option<u32>>,
+    /// Touch and pen over `Microsoft::Windows::RDS::Input` (MS-RDPEI); only
+    /// declared when this PC has a digitizer (MS-RDPEI 3.3.3).
+    touch: Option<rdp::TouchHandle>,
 }
 
 impl Controls {
@@ -59,11 +62,19 @@ impl Controls {
             rdp::rdpsnd_with(Box::new(WaveOut::new(speaker.clone())), codecs());
         let mic_device: DeviceChoice = Arc::new(Mutex::new(None));
         let (audin, microphone) = rdp::audin(Box::new(WaveIn::new(mic_device.clone())));
-        let dynamic: Vec<Box<dyn rdp::DynamicChannel>> = vec![
+        let mut dynamic: Vec<Box<dyn rdp::DynamicChannel>> = vec![
             Box::new(display_channel),
             Box::new(StaticOverDvc::new("AUDIO_PLAYBACK_DVC", audio_dvc_channel)),
             Box::new(audin),
         ];
+        let touch = crate::touch::digitizer_present().then(|| {
+            let (channel, handle) = rdp::touch_input(rdp::TouchOptions {
+                show_touch_visuals: false,
+                max_touch_contacts: crate::touch::max_contacts(),
+            });
+            dynamic.push(Box::new(channel));
+            handle
+        });
         // Same channels and order as mstsc: rdpdr, rdpsnd, cliprdr, drdynvc.
         let channels: Vec<Box<dyn StaticChannel>> = vec![
             Box::new(rdpdr),
@@ -82,6 +93,7 @@ impl Controls {
             mic_device,
             printers: Mutex::new(Vec::new()),
             smart_card: Mutex::new(None),
+            touch,
         };
         if let Some(&device) = CLI_MICROPHONE.get() {
             controls.set_microphone_device(device);
@@ -168,6 +180,11 @@ impl Controls {
     pub fn request_resize(&self, width: u32, height: u32) -> bool {
         self.display.request_resize(width, height);
         true
+    }
+
+    /// Touch and pen input to the session, when this PC has a digitizer.
+    pub fn touch(&self) -> Option<&rdp::TouchHandle> {
+        self.touch.as_ref()
     }
 
     /// Shares a local folder as a drive; it appears in the remote Explorer
