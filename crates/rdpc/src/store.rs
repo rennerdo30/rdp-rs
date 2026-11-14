@@ -150,6 +150,10 @@ pub struct Group {
     pub options: SessionOptions,
     /// Sections taken from the parent group.
     pub inherit: Inherit,
+    /// Colour (index into `theme::GROUP_COLORS`); None: the parent's, or
+    /// one picked from the name.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub color: Option<u8>,
 }
 
 impl Group {
@@ -693,6 +697,34 @@ impl Store {
         self.groups.iter().position(|g| g.path == path)
     }
 
+    /// A group's colour: its own choice, else the nearest parent's, else
+    /// one picked from its top-level name.
+    pub fn group_color(&self, path: &str) -> usize {
+        let n = crate::theme::GROUP_COLORS.len();
+        let mut p = path;
+        while !p.is_empty() {
+            if let Some(c) = self
+                .groups
+                .iter()
+                .find(|g| g.path == p)
+                .and_then(|g| g.color)
+            {
+                return c as usize % n;
+            }
+            p = parent_of(p);
+        }
+        crate::theme::color_for_name(path.split('/').next().unwrap_or(path))
+    }
+
+    /// A connection's colour: its group's, or one picked from its name.
+    pub fn connection_color(&self, c: &Connection) -> usize {
+        if c.group.is_empty() {
+            crate::theme::color_for_name(&c.name)
+        } else {
+            self.group_color(&c.group)
+        }
+    }
+
     /// Creates the group and any missing parents.
     pub fn ensure_group(&mut self, path: &str) {
         let mut prefix = String::new();
@@ -1089,6 +1121,43 @@ mod tests {
         assert_eq!(s.connections[0].group, "A", "members move up to the parent");
         assert!(s.group_index("A/C").is_some(), "sub-groups move up too");
         assert_eq!(normalize_path(" Work / /Servers/ "), "Work/Servers");
+    }
+
+    #[test]
+    fn group_colours_are_chosen_inherited_or_picked_from_the_name() {
+        let s = store_with(
+            vec![
+                Group {
+                    path: "Work".into(),
+                    color: Some(5),
+                    ..Default::default()
+                },
+                Group {
+                    path: "Work/Lab".into(),
+                    ..Default::default()
+                },
+                Group {
+                    path: "Home".into(),
+                    ..Default::default()
+                },
+            ],
+            vec![Connection {
+                name: "Box".into(),
+                group: "Work/Lab".into(),
+                ..Default::default()
+            }],
+        );
+        assert_eq!(s.group_color("Work"), 5);
+        assert_eq!(
+            s.group_color("Work/Lab"),
+            5,
+            "a sub-group takes its parent's"
+        );
+        assert_eq!(s.connection_color(&s.connections[0]), 5);
+        assert_eq!(s.group_color("Home"), crate::theme::color_for_name("Home"));
+        // Saved only when chosen; old files without it still load.
+        let json = String::from_utf8(s.file_json(false).unwrap()).unwrap();
+        assert_eq!(json.matches("\"color\"").count(), 1);
     }
 
     #[test]

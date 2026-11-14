@@ -15,7 +15,7 @@ use super::{App, RemoteCursor};
 use crate::remoteapp::{self, RailSession, Show};
 use crate::session;
 use crate::store::AppEntry;
-use crate::theme;
+use crate::theme::Tone;
 use crate::ui::{Action, AppWindowItem, RemoteAppView};
 
 impl App {
@@ -53,8 +53,8 @@ impl App {
             None => Ok(()),
         };
         match r {
-            Ok(()) => self.message(format!("Starting {name}…"), theme::TEXT_2),
-            Err(e) => self.message(e, theme::ERR),
+            Ok(()) => self.message(format!("Starting {name}…"), Tone::Muted),
+            Err(e) => self.message(e, Tone::Danger),
         }
         self.rail_refresh(id);
     }
@@ -73,7 +73,7 @@ impl App {
             }
         }
         if !errors.is_empty() {
-            self.message(errors.join(" "), theme::ERR);
+            self.message(errors.join(" "), Tone::Danger);
         }
     }
 
@@ -94,7 +94,7 @@ impl App {
                     );
                     rs.tracker.failed(&r.program);
                     rs.linger.launch_failed();
-                    notes.push((text, theme::ERR));
+                    notes.push((text, Tone::Danger));
                 }
                 RailEvent::WindowCreated(w) => {
                     if let Some(h) = &rs.handle {
@@ -113,7 +113,7 @@ impl App {
                 RailEvent::DesktopNotMonitored => notes.push((
                     "The remote session shows a secure screen (locked or signing in); its windows come back after it."
                         .into(),
-                    theme::WARN,
+                    Tone::Warning,
                 )),
                 _ => {}
             }
@@ -131,7 +131,10 @@ impl App {
             return;
         };
         if let Some(e) = rs.sync(el, id, &state) {
-            self.message(format!("Cannot open a window for the app: {e}"), theme::ERR);
+            self.message(
+                format!("Cannot open a window for the app: {e}"),
+                Tone::Danger,
+            );
         }
         let Some(rs) = self.rail(id) else { return };
         rs.tracker.update(&state);
@@ -161,7 +164,7 @@ impl App {
                     "All apps on {host} are closed; disconnecting in {} s unless you start another.",
                     remoteapp::LINGER.as_secs()
                 ),
-                theme::TEXT_2,
+                Tone::Muted,
             );
         }
         let Some(rs) = self.sessions.get(&id).and_then(|s| s.rail.as_ref()) else {
@@ -335,7 +338,7 @@ impl App {
                 self.handle_action(Action::CloseTab(id));
                 self.message(
                     format!("Disconnected from {host}: no apps were open."),
-                    theme::TEXT_2,
+                    Tone::Muted,
                 );
                 continue;
             }
