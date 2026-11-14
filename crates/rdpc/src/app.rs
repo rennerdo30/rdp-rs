@@ -147,6 +147,9 @@ struct Session {
     /// Keyboard layout and typing translation state (see `keyboard`); a
     /// cell because every send passes through it.
     keys: std::cell::RefCell<crate::keyboard::Keys>,
+    /// The last picture of a dropped session, shown dimmed while it
+    /// reconnects.
+    last_fb: Option<rdp::Framebuffer>,
 }
 
 #[derive(Clone, PartialEq)]
@@ -471,6 +474,9 @@ impl App {
         let (worker, controls) = self.spawn_worker(id, cfg.clone());
         if let Some(w) = &mut self.win {
             w.ui.open_tab(id, name, cfg.host.clone(), fit);
+            if let Some(t) = w.ui.tab_mut(id) {
+                t.live = ui::Live::for_config(&cfg);
+            }
         }
         let sent_layout = cfg.keyboard.layout;
         let remote_app = rail.is_some();
@@ -490,6 +496,7 @@ impl App {
                 spanned: false,
                 rail,
                 keys: std::cell::RefCell::new(crate::keyboard::Keys::new(klid, sent_layout)),
+                last_fb: None,
             },
         );
         if remote_app {
@@ -639,6 +646,7 @@ impl App {
         if let Some(t) = self.win.as_mut().and_then(|w| w.ui.tab_mut(id)) {
             t.state = TabState::Connecting;
             t.network = None; // measured again by the new connection
+            t.live.restart();
         }
         // The new session gets the settings the tab had.
         self.apply_options(id, &opts);
@@ -709,6 +717,14 @@ impl App {
                 self.dirty();
             }
             Action::SetFullscreen(on) => self.set_fullscreen(on),
+            Action::CopyText(text) => {
+                use rdp::ClipboardBackend;
+                let mut cb = crate::clipboard::WindowsClipboard { owner: self.hwnd() };
+                if !cb.write_text(&text) {
+                    self.message("Could not copy to the clipboard.", Tone::Warning);
+                }
+                self.dirty();
+            }
             Action::Browse(target) => {
                 let proxy = std::sync::Mutex::new(self.proxy.clone());
                 crate::picker::pick_folder(self.hwnd(), move |path| {
@@ -777,8 +793,11 @@ impl App {
                     }
                     if s.retry_pending {
                         s.retry_pending = false;
+                        s.last_fb = None;
                         if let Some(t) = self.win.as_mut().and_then(|w| w.ui.tab_mut(id)) {
                             t.state = TabState::Ended("reconnect cancelled".into());
+                            t.live.stopped();
+                            t.live.ended = Some(crate::failure::EndReason::ReconnectCancelled);
                         }
                     }
                     if let Some(w) = s.worker.as_mut() {
@@ -1141,6 +1160,12 @@ impl App {
             );
         }
         if let Some((id, area)) = m.ui.session_area
+            && m.ui.session_backdrop()
+            && let Some(fb) = self.sessions.get(&id).and_then(|s| s.last_fb.as_ref())
+        {
+            // Reconnecting: the last picture, dimmed by the overlay.
+            blit(fb, &mut m.scratch, w, area, area, None);
+        } else if let Some((id, area)) = m.ui.session_area
             && let Some(worker) = self.sessions.get(&id).and_then(|s| s.worker.as_ref())
         {
             let mut sh = worker.shared.lock().unwrap();
@@ -1150,13 +1175,15 @@ impl App {
             sh.damage.clear();
             sh.full = false;
         }
-        // The palette and the quit question go over the session picture
-        // (dimming it); while they are up the session takes no updates.
+        // The toolbar and the reconnect card float over the picture; the
+        // palette and the quit question go over that (dimming it), and
+        // while they are up the session takes no updates.
         m.ui.paint_overlays(
             &mut Canvas::new(&mut m.scratch, w, h),
             &mut self.te,
             &self.fonts,
         );
+        let _ = m.ui.take_overlay_damage();
         let Ok(mut buf) = m.gfx.surface.buffer_mut() else {
             return;
         };
@@ -1188,12 +1215,68 @@ impl App {
         std::mem::swap(&mut m.shown, &mut m.scratch);
     }
 
+    /// Repaints only what the session toolbar changed (shown, hidden,
+    /// hovered): the picture under it, then the toolbar, one present.
+    fn render_overlay(&mut self) {
+        let Some(m) = &mut self.win else { return };
+        let Some(r) = m.ui.take_overlay_damage() else {
+            return;
+        };
+        if m.chrome_dirty {
+            return; // a full repaint is coming anyway
+        }
+        let (w, h) = m.size;
+        let area = m.ui.session_area.map(|(_, a)| a);
+        let worker =
+            m.ui.session_area
+                .and_then(|(id, _)| self.sessions.get(&id))
+                .and_then(|s| s.worker.as_ref());
+        let (Some(area), Some(worker), true) = (area, worker, m.shown.len() == w * h) else {
+            // No live picture under it (RemoteApp, spanned): repaint it all.
+            return self.dirty();
+        };
+        let r = r.intersect(area);
+        if r.is_empty() {
+            return;
+        }
+        {
+            let mut cv = Canvas::new(&mut m.shown, w, h);
+            cv.fill(r, crate::theme::pal().bg_sidebar);
+            let sh = worker.shared.lock().unwrap();
+            blit(&sh.fb, &mut m.shown, w, area, r, None);
+        }
+        let mut cv = Canvas::new(&mut m.shown, w, h);
+        cv.set_clip(r);
+        m.ui.paint_overlays(&mut cv, &mut self.te, &self.fonts);
+        let Ok(mut buf) = m.gfx.surface.buffer_mut() else {
+            return;
+        };
+        let rects: Vec<softbuffer::Rect> =
+            to_sb(r.x as usize, r.y as usize, r.w as usize, r.h as usize)
+                .into_iter()
+                .collect();
+        if buf.age() == 0 {
+            buf.copy_from_slice(&m.shown);
+        } else {
+            for y in r.y as usize..r.bottom() as usize {
+                let o = y * w + r.x as usize;
+                buf[o..o + r.w as usize].copy_from_slice(&m.shown[o..o + r.w as usize]);
+            }
+        }
+        if let Err(e) = buf.present_with_damage(&rects) {
+            eprintln!("rdpc: present failed: {e}");
+        }
+    }
+
     /// Copies only the active session's damaged rectangles to the screen.
     fn render_session_damage(&mut self) {
         let Some(m) = &mut self.win else { return };
         let Some((id, area)) = m.ui.session_area else {
             return;
         };
+        if m.ui.session_backdrop() {
+            return; // the dimmed last picture does not change
+        }
         let Some(worker) = self.sessions.get(&id).and_then(|s| s.worker.as_ref()) else {
             return;
         };
@@ -1225,6 +1308,20 @@ impl App {
         drop(sh);
         if rects.is_empty() {
             return;
+        }
+        // The toolbar floats over the picture: paint it again where the
+        // update touched it (only there).
+        if let Some(over) = m.ui.overlay_rect() {
+            for r in &rects {
+                let (x, y) = (r.x as i32, r.y as i32);
+                let d =
+                    Rect::new(x, y, r.width.get() as i32, r.height.get() as i32).intersect(over);
+                if !d.is_empty() {
+                    let mut cv = Canvas::new(&mut m.shown, w, h);
+                    cv.set_clip(d);
+                    m.ui.paint_session_overlay(&mut cv, &mut self.te, &self.fonts);
+                }
+            }
         }
         let Ok(mut buf) = m.gfx.surface.buffer_mut() else {
             return;
@@ -1343,6 +1440,13 @@ impl App {
             None
         };
         if let Some(id) = session {
+            // Alt (the host key) shows the toolbar while it is held; the
+            // key still goes to the session.
+            if matches!(ev.logical_key, WKey::Named(NamedKey::Alt)) {
+                m.ui.alt_key(ev.state.is_pressed());
+                self.render_overlay();
+            }
+            let Some(m) = &mut self.win else { return };
             let release = ev.state.is_pressed()
                 && self.mods.control_key()
                 && self.mods.alt_key()
@@ -1495,12 +1599,16 @@ impl App {
         };
         let attempt = s.retries;
         let Some(&delay) = RETRY_DELAYS_S.get(attempt) else {
-            return self.ended(
+            return self.failed(
                 id,
-                TabState::Failed(format!(
+                format!(
                     "{why} (gave up after {} reconnect attempts)",
                     RETRY_DELAYS_S.len()
-                )),
+                ),
+                crate::failure::Failure {
+                    cause: crate::failure::Cause::ConnectionLost,
+                    step: None,
+                },
             );
         };
         s.retries += 1;
@@ -1508,12 +1616,28 @@ impl App {
         if cookie.is_some() {
             s.cfg.auto_reconnect = cookie;
         }
+        // Keep the last picture to show (dimmed) while reconnecting; a
+        // failed attempt has none, so the first one's stays.
+        if let Some(w) = &s.worker
+            && let Ok(sh) = w.shared.lock()
+            && sh.fb.width > 0
+        {
+            let mut fb = rdp::Framebuffer::new(sh.fb.width, sh.fb.height);
+            fb.pixels.copy_from_slice(&sh.fb.pixels);
+            s.last_fb = Some(fb);
+        }
+        let has_frame = s.last_fb.is_some();
         rdp::trace!(
             "ui: session {id} dropped ({why}); reconnect {}/{} in {delay} s",
             attempt + 1,
             RETRY_DELAYS_S.len()
         );
         self.ended(id, TabState::Connecting);
+        if let Some(t) = self.win.as_mut().and_then(|w| w.ui.tab_mut(id)) {
+            t.live.restart();
+            t.live.reconnect = Some((attempt + 1, RETRY_DELAYS_S.len()));
+            t.live.has_frame = has_frame;
+        }
         self.message(
             format!(
                 "Connection lost ({why}). Reconnecting in {delay} s, attempt {}/{}…",
@@ -1527,6 +1651,18 @@ impl App {
             std::thread::sleep(std::time::Duration::from_secs(delay));
             let _ = proxy.send_event(UserEvent::Retry(id));
         });
+    }
+
+    /// The session failed: why, in technical and plain terms.
+    fn failed(&mut self, id: u64, why: String, failure: crate::failure::Failure) {
+        if let Some(t) = self.win.as_mut().and_then(|w| w.ui.tab_mut(id)) {
+            t.live.stopped();
+            t.live.failure = Some(failure);
+        }
+        if let Some(s) = self.sessions.get_mut(&id) {
+            s.last_fb = None;
+        }
+        self.ended(id, TabState::Failed(why));
     }
 
     fn ended(&mut self, id: u64, state: TabState) {
@@ -1597,7 +1733,9 @@ impl App {
         let Some(m) = &self.win else { return };
         let (x, y) = m.cursor;
         let want = match m.ui.session_area {
-            Some((id, area)) if area.contains(x, y) => {
+            Some((id, area))
+                if area.contains(x, y) && !m.ui.over_overlay(x, y) && !m.ui.session_backdrop() =>
+            {
                 let c = self
                     .sessions
                     .get(&id)
@@ -1633,6 +1771,10 @@ impl App {
     fn mouse_to_session(&self, x: i32, y: i32) -> Option<(u64, u16, u16)> {
         let m = self.win.as_ref()?;
         let (id, area) = m.ui.session_area?;
+        // The toolbar over the picture takes its own clicks.
+        if m.ui.session_backdrop() || m.pressed_in != Some(id) && m.ui.over_overlay(x, y) {
+            return None;
+        }
         let s = self.sessions.get(&id)?;
         let fb = s
             .worker
@@ -2001,10 +2143,19 @@ impl ApplicationHandler<UserEvent> for App {
             self.thumb_frame(id);
         }
         match ev {
+            session::Event::Progress(step) => {
+                if let Some(t) = self.win.as_mut().and_then(|w| w.ui.tab_mut(id)) {
+                    t.live.progress(step);
+                }
+                if active {
+                    self.dirty();
+                }
+            }
             session::Event::Connected(info) => {
                 let mut layout = None;
                 if let Some(s) = self.sessions.get_mut(&id) {
                     s.retries = 0;
+                    s.last_fb = None;
                     let keys = s.keys.get_mut();
                     keys.connected(info.unicode_input());
                     layout = Some(keys.sent_layout);
@@ -2023,6 +2174,7 @@ impl ApplicationHandler<UserEvent> for App {
                         bpp: info.bpp,
                     };
                     t.keyboard_layout = layout;
+                    t.live.connected();
                     // After a redirection the session runs on the target.
                     if let Some(to) = &t.redirected_to {
                         host = to.clone();
@@ -2090,15 +2242,39 @@ impl ApplicationHandler<UserEvent> for App {
                     worker.notified.store(false, Ordering::Release);
                 }
             }
-            session::Event::Closed(why) => {
-                let why = if why == "disconnected" {
-                    "disconnected by you".to_string()
+            session::Event::Closed { why, error_info } => {
+                use crate::failure::{EndReason, Outcome};
+                let (why, outcome) = if why == "disconnected" {
+                    (
+                        "disconnected by you".into(),
+                        Outcome::Ended(EndReason::ByYou),
+                    )
                 } else {
-                    why
+                    (why, crate::failure::closed(error_info))
                 };
-                self.ended(id, TabState::Ended(why));
+                match outcome {
+                    Outcome::Failed(cause) => {
+                        let failure = crate::failure::Failure { cause, step: None };
+                        self.failed(id, why, failure)
+                    }
+                    Outcome::Ended(reason) => {
+                        if let Some(t) = self.win.as_mut().and_then(|w| w.ui.tab_mut(id)) {
+                            t.live.stopped();
+                            t.live.ended = Some(reason);
+                        }
+                        self.ended(id, TabState::Ended(why));
+                    }
+                }
             }
-            session::Event::Failed(why) => self.ended(id, TabState::Failed(why)),
+            // A reconnect attempt that cannot reach the server yet: the
+            // automatic retries go on.
+            session::Event::Failed { why, failure }
+                if failure.cause.is_network()
+                    && self.sessions.get(&id).is_some_and(|s| s.retries > 0) =>
+            {
+                self.dropped(id, why, None)
+            }
+            session::Event::Failed { why, failure } => self.failed(id, why, failure),
             session::Event::Dropped { why, cookie } => self.dropped(id, why, cookie),
             session::Event::Redirected { cfg, to } => self.redirected(id, *cfg, to),
             session::Event::Network(n) => {
@@ -2247,6 +2423,8 @@ impl App {
             }
             WindowEvent::Focused(focused) => {
                 self.win.as_mut().unwrap().ui.window_active = focused;
+                // Alt+Tab away leaves no Alt release behind.
+                self.win.as_mut().unwrap().ui.alt_key(false);
                 if !focused && let Some((id, _)) = self.win.as_ref().unwrap().ui.session_area {
                     self.send(id, session::release_modifiers());
                 }
@@ -2258,6 +2436,9 @@ impl App {
                 m.cursor = (x, y);
                 if m.ui.mouse_move(x, y) {
                     self.dirty();
+                } else {
+                    // Only the toolbar over the picture changed.
+                    self.render_overlay();
                 }
                 self.apply_cursor();
                 if let Some((id, fx, fy)) = self.mouse_to_session(x, y)
@@ -2643,7 +2824,7 @@ impl App {
                 if self.spans[i].pointer(x, y) {
                     self.render_spans(id);
                 }
-                if !self.spans[i].over_bar(y) {
+                if !self.spans[i].over_bar(x, y) {
                     let fb = self.span_fb_size(id);
                     let pos = self.spans[i].to_session(x, y, fb);
                     if let Some(s) = self.sessions.get_mut(&id)
@@ -2658,17 +2839,24 @@ impl App {
                 self.last_input = std::time::Instant::now();
                 let down = state == ElementState::Pressed;
                 let (x, y) = self.spans[i].cursor;
-                if self.spans[i].over_bar(y) {
+                if self.spans[i].over_bar(x, y) {
+                    use crate::span::BarButton as B;
                     if !down && button == MouseButton::Left {
                         match self.spans[i].button_at(x, y) {
-                            Some(crate::span::BarButton::Exit) => self.unspan(id),
-                            Some(crate::span::BarButton::Disconnect) => {
-                                self.handle_action(Action::Disconnect(id))
+                            Some(B::Exit) => self.unspan(id),
+                            Some(B::Disconnect) => self.handle_action(Action::Disconnect(id)),
+                            Some(B::CtrlAltDel) => self.send(id, session::ctrl_alt_del()),
+                            Some(B::Handle) => {
+                                self.spans[i].toggle_open();
+                                self.render_spans(id);
                             }
                             None => {}
                         }
                     }
                     return;
+                }
+                if down && self.spans[i].picture_clicked() {
+                    self.render_spans(id);
                 }
                 let fb = self.span_fb_size(id);
                 let pos = self.spans[i].to_session(x, y, fb);

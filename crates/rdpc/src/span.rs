@@ -4,8 +4,10 @@
 //!
 //! The session's framebuffer is the bounding box of the chosen monitors; a
 //! window shows the rectangle at its monitor's offset in it and maps its
-//! pointer back into it. The first window carries the session bar, which
-//! hides and shows at the top edge.
+//! pointer back into it. The first window carries the session toolbar: the
+//! same floating pill as the main window (see `ui::session_view`), hidden to
+//! a small handle at the top centre until the pointer touches the top edge
+//! or a tap on the handle opens it.
 //!
 //! RemoteApp windows (see `remoteapp`) are the same kind of window without
 //! the bar: each shows its remote window's rectangle, which may start left
@@ -19,9 +21,9 @@ use softbuffer::{Context, Surface};
 use winit::window::Window;
 
 use crate::icons::Icon;
-use crate::kit::{Button, Font, Kit, State, Variant};
 use crate::theme::pal;
 use crate::ui::Fonts;
+use crate::ui::session_view::{self, Pill, Tool, ToolItem};
 
 /// A monitor window to open (the event loop creates it).
 pub struct SpanSpec {
@@ -37,8 +39,12 @@ pub struct SpanSpec {
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum BarButton {
+    /// Back into the main window.
     Exit,
+    CtrlAltDel,
     Disconnect,
+    /// The handle the hidden toolbar leaves (a tap opens it).
+    Handle,
 }
 
 pub struct SpanWin {
@@ -49,12 +55,75 @@ pub struct SpanWin {
     pub size: (usize, usize),
     first: bool,
     title: String,
+    /// The pointer is at the top: the toolbar shows.
     revealed: bool,
+    /// Opened by a tap on its handle (until a tap on the picture).
+    open: bool,
     pub cursor: (i32, i32),
     hover: Option<BarButton>,
-    buttons: Vec<(Rect, BarButton)>,
+    /// The toolbar's layout from the last present.
+    pill: Option<Pill>,
+    /// Part of the window to repaint for the toolbar alone.
+    bar_dirty: Option<Rect>,
     /// The next present copies the whole picture.
     pub needs_full: bool,
+}
+
+fn union(a: Rect, b: Rect) -> Rect {
+    if a.is_empty() {
+        return b;
+    }
+    if b.is_empty() {
+        return a;
+    }
+    let x = a.x.min(b.x);
+    let y = a.y.min(b.y);
+    Rect::new(
+        x,
+        y,
+        a.right().max(b.right()) - x,
+        a.bottom().max(b.bottom()) - y,
+    )
+}
+
+fn tool_button(t: Tool) -> Option<BarButton> {
+    match t {
+        Tool::Window => Some(BarButton::Exit),
+        Tool::CtrlAltDel => Some(BarButton::CtrlAltDel),
+        Tool::Disconnect => Some(BarButton::Disconnect),
+        _ => None,
+    }
+}
+
+fn button_tool(b: BarButton) -> Option<Tool> {
+    match b {
+        BarButton::Exit => Some(Tool::Window),
+        BarButton::CtrlAltDel => Some(Tool::CtrlAltDel),
+        BarButton::Disconnect => Some(Tool::Disconnect),
+        BarButton::Handle => None,
+    }
+}
+
+/// The toolbar of a spanned session's first window.
+fn layout(te: &mut TextEngine, f: &Fonts, s: f32, w: usize, title: &str) -> Pill {
+    let p = |v: f32| (v * s).round() as i32;
+    let items = vec![
+        ToolItem::new(Tool::Window, Icon::Monitor),
+        ToolItem::new(Tool::CtrlAltDel, Icon::Keyboard),
+        ToolItem::new(Tool::Disconnect, Icon::Power).danger(),
+    ];
+    session_view::pill_layout(
+        te,
+        f,
+        s,
+        w as i32 / 2,
+        p(10.0),
+        w as i32 - p(24.0),
+        title,
+        pal().success,
+        None,
+        items,
+    )
 }
 
 fn sb(x: usize, y: usize, w: usize, h: usize) -> Option<softbuffer::Rect> {
@@ -139,9 +208,11 @@ impl SpanWin {
             first: spec.first,
             title: spec.title,
             revealed: false,
+            open: false,
             cursor: (0, 0),
             hover: None,
-            buttons: Vec::new(),
+            pill: None,
+            bar_dirty: None,
             needs_full: true,
         })
     }
@@ -158,55 +229,117 @@ impl SpanWin {
         self.window.scale_factor() as f32
     }
 
-    fn bar_h(&self) -> i32 {
-        (40.0 * self.scale()).round() as i32
+    fn area(&self) -> Rect {
+        Rect::new(0, 0, self.size.0 as i32, self.size.1 as i32)
     }
 
-    /// The pointer moved: the top edge shows the bar, leaving it hides it.
-    /// True when the window must be redrawn.
+    /// The toolbar shows (otherwise only its handle).
+    fn shown(&self) -> bool {
+        self.revealed || self.open
+    }
+
+    /// What the toolbar covers now: the pill with its shadow, or the handle.
+    fn bar_rect(&self) -> Option<Rect> {
+        if !self.first {
+            return None;
+        }
+        let s = self.scale();
+        match &self.pill {
+            Some(p) if self.shown() => Some(p.bounds(s)),
+            _ => Some(session_view::handle_rects(s, self.area()).0),
+        }
+    }
+
+    fn mark(&mut self, was: Option<Rect>) {
+        let r = match (was, self.bar_rect()) {
+            (Some(a), Some(b)) => union(a, b),
+            (a, b) => a.or(b).unwrap_or_default(),
+        };
+        self.bar_dirty = Some(self.bar_dirty.map_or(r, |d| union(d, r)));
+    }
+
+    /// The pointer moved: the top edge (or the handle) shows the toolbar,
+    /// leaving its neighbourhood hides it. True when the window must be
+    /// redrawn (only the toolbar's part of it).
     pub fn pointer(&mut self, x: i32, y: i32) -> bool {
         self.cursor = (x, y);
         if !self.first {
             return false;
         }
-        let bh = self.bar_h();
-        let want = if self.revealed {
-            y >= 0 && y < bh + (12.0 * self.scale()) as i32
-        } else {
-            (0..=2).contains(&y)
+        let s = self.scale();
+        let p = |v: f32| (v * s).round() as i32;
+        let handle = session_view::handle_rects(s, self.area()).1;
+        let want = match (&self.pill, self.revealed) {
+            (Some(pl), true) => {
+                let r = pl.rect;
+                Rect::new(r.x - p(40.0), 0, r.w + p(80.0), r.bottom() + p(28.0)).contains(x, y)
+            }
+            _ => (0..p(3.0).max(2)).contains(&y) || handle.contains(x, y),
         };
-        let hover = if want { self.button_at(x, y) } else { None };
-        let changed = want != self.revealed || hover != self.hover;
-        if changed {
-            self.revealed = want;
+        let was = self.bar_rect();
+        let changed_shown = want != self.revealed;
+        self.revealed = want;
+        let hover = self.button_at(x, y);
+        if changed_shown || hover != self.hover {
             self.hover = hover;
-            self.needs_full = true;
+            self.mark(was);
+            return true;
         }
-        changed
+        false
     }
 
-    /// The pointer is over the revealed bar (it does not reach the session).
-    pub fn over_bar(&self, y: i32) -> bool {
-        self.first && self.revealed && y < self.bar_h()
+    /// A tap or click on the picture: a toolbar opened by its handle folds.
+    pub fn picture_clicked(&mut self) -> bool {
+        if self.open {
+            let was = self.bar_rect();
+            self.open = false;
+            self.mark(was);
+            return true;
+        }
+        false
+    }
+
+    /// The handle was tapped: the toolbar opens (or folds again).
+    pub fn toggle_open(&mut self) {
+        let was = self.bar_rect();
+        self.open = !self.open;
+        self.mark(was);
+    }
+
+    /// The point is on the toolbar or its handle (not the session's).
+    pub fn over_bar(&self, x: i32, y: i32) -> bool {
+        self.button_at(x, y).is_some()
+            || self.shown() && self.pill.as_ref().is_some_and(|p| p.rect.contains(x, y))
     }
 
     /// The client rectangle (x, y, w, h) where touch reaches the session:
-    /// the whole window, below the bar while it shows.
+    /// the whole window, minus [`SpanWin::touch_holes`].
     pub fn touch_area(&self) -> (i32, i32, i32, i32) {
-        let (w, h) = (self.size.0 as i32, self.size.1 as i32);
-        let top = if self.first && self.revealed {
-            self.bar_h().min(h)
-        } else {
-            0
+        (0, 0, self.size.0 as i32, self.size.1 as i32)
+    }
+
+    /// Where touch is left to the toolbar (a tap on the handle opens it).
+    pub fn touch_holes(&self) -> Vec<(i32, i32, i32, i32)> {
+        if !self.first {
+            return Vec::new();
+        }
+        let r = match &self.pill {
+            Some(p) if self.shown() => p.rect,
+            _ => session_view::handle_rects(self.scale(), self.area()).1,
         };
-        (0, top, w, h - top)
+        vec![(r.x, r.y, r.w, r.h)]
     }
 
     pub fn button_at(&self, x: i32, y: i32) -> Option<BarButton> {
-        self.buttons
-            .iter()
-            .find(|(r, _)| r.contains(x, y))
-            .map(|(_, b)| *b)
+        if !self.first {
+            return None;
+        }
+        if self.shown() {
+            let p = self.pill.as_ref()?;
+            return p.tool_at(x, y).and_then(tool_button);
+        }
+        let handle = session_view::handle_rects(self.scale(), self.area()).1;
+        handle.contains(x, y).then_some(BarButton::Handle)
     }
 
     /// The framebuffer position of a point in this window.
@@ -231,10 +364,14 @@ impl SpanWin {
         }
         let full = std::mem::take(&mut self.needs_full);
         let (fx, fy) = self.fb;
-        let bar = self.first && self.revealed;
-        let bar_h = self.bar_h().max(0) as usize;
         let scale = self.scale();
-        let title = self.title.clone();
+        if self.first {
+            self.pill = Some(layout(te, fonts, scale, w, &self.title));
+        }
+        let bar = self.bar_rect();
+        let dirty = self.bar_dirty.take();
+        let shown = self.shown();
+        let pill = self.pill.clone();
         let hover = self.hover;
         let Ok(mut buf) = self.surface.buffer_mut() else {
             return;
@@ -255,70 +392,82 @@ impl SpanWin {
                 }
             }
         }
-        let mut buttons = Vec::new();
-        if bar && !rects.is_empty() || bar && full {
-            buttons = paint_bar(&mut buf, w, h, scale, &title, hover, te, fonts);
-            rects.extend(sb(0, 0, w, bar_h.min(h)));
+        // The toolbar alone changed: the picture under it, then the toolbar.
+        if let Some(d) = dirty.filter(|_| !full) {
+            let d = d.intersect(Rect::new(0, 0, w as i32, h as i32));
+            if !d.is_empty() {
+                copy(
+                    &mut buf,
+                    d.x as usize,
+                    d.y as usize,
+                    d.w as usize,
+                    d.h as usize,
+                );
+                rects.extend(sb(d.x as usize, d.y as usize, d.w as usize, d.h as usize));
+            }
+        }
+        // The toolbar floats over the picture: paint it again where the
+        // picture changed under it.
+        if let (Some(bar), Some(pill)) = (bar, &pill) {
+            for r in rects.clone() {
+                let r = Rect::new(
+                    r.x as i32,
+                    r.y as i32,
+                    r.width.get() as i32,
+                    r.height.get() as i32,
+                );
+                let d = r.intersect(bar);
+                if !d.is_empty() {
+                    let mut cv = Canvas::new(&mut buf, w, h);
+                    cv.set_clip(d);
+                    paint_bar(&mut cv, scale, pill, shown, hover, te, fonts);
+                }
+            }
         }
         if rects.is_empty() {
             return;
         }
         let _ = buf.present_with_damage(&rects);
-        if bar {
-            self.buttons = buttons;
-        }
     }
 }
 
-/// The session bar over the top of the first monitor: the connection's name,
-/// Exit full screen and Disconnect. Returns the buttons' rectangles.
+/// The toolbar of the first monitor window: the pill, or its handle.
+fn paint_bar(
+    cv: &mut Canvas,
+    s: f32,
+    pill: &Pill,
+    shown: bool,
+    hover: Option<BarButton>,
+    te: &mut TextEngine,
+    f: &Fonts,
+) {
+    if shown {
+        let tool = hover.and_then(button_tool);
+        session_view::paint_pill(cv, te, f, s, pill, tool, None, None);
+    } else {
+        let area = Rect::new(0, 0, cv.width() as i32, cv.height() as i32);
+        let tab = session_view::handle_rects(s, area).0;
+        session_view::paint_handle(cv, s, tab, hover == Some(BarButton::Handle));
+    }
+}
+
+/// For `--snapshot-ui`: a monitor window of a spanned session, a stand-in
+/// picture with the toolbar shown or hidden to its handle.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn paint_bar(
+pub fn paint_sample(
     px: &mut [u32],
     w: usize,
     h: usize,
     s: f32,
     title: &str,
-    hover: Option<BarButton>,
+    shown: bool,
     te: &mut TextEngine,
     f: &Fonts,
-) -> Vec<(Rect, BarButton)> {
-    let p = |v: f32| (v * s).round() as i32;
-    let c = pal();
+) {
     let mut cv = Canvas::new(px, w, h);
-    let bh = p(40.0);
-    cv.fill(Rect::new(0, 0, w as i32, bh), c.bg_sidebar);
-    cv.fill(Rect::new(0, bh - 1, w as i32, 1), c.border);
-    let mut k = Kit::new(&mut cv, te, f, s);
-    let d = p(16.0);
-    k.icon(Icon::Monitors, p(14.0), (bh - d) / 2, 16.0, c.accent);
-    k.text_in(
-        Font::Semi,
-        12.5,
-        Rect::new(p(40.0), 0, w as i32 / 2, bh),
-        title,
-        c.text,
-    );
-    let mut out = Vec::new();
-    let mut x = w as i32 - p(8.0);
-    for (b, button) in [
-        (
-            Button::new("Disconnect", Variant::DangerGhost).icon(Icon::Power),
-            BarButton::Disconnect,
-        ),
-        (
-            Button::secondary("Exit full screen").icon(Icon::ExitFullscreen),
-            BarButton::Exit,
-        ),
-    ] {
-        let bw = k.button_width(&b);
-        x -= bw;
-        let r = Rect::new(x, p(4.0), bw, bh - p(8.0));
-        k.button(r, &b, State::hover(hover == Some(button)));
-        out.push((r, button));
-        x -= p(6.0);
-    }
-    out
+    session_view::paint_sample_picture(&mut cv, Rect::new(0, 0, w as i32, h as i32));
+    let pill = layout(te, f, s, w, title);
+    paint_bar(&mut cv, s, &pill, shown, None, te, f);
 }
 
 #[cfg(test)]

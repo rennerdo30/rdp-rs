@@ -32,6 +32,9 @@ pub struct Target {
     pub handle: rdp::TouchHandle,
     /// Client-area rectangle (x, y, w, h) in which a contact may start.
     pub accept: (i32, i32, i32, i32),
+    /// Parts of `accept` left to the window's own controls (the session
+    /// toolbar floating over the picture, its handle).
+    pub holes: Vec<(i32, i32, i32, i32)>,
     /// Added to a point to get session framebuffer coordinates: to the
     /// client-area point, or to the screen point when `screen` is set.
     pub offset: (i32, i32),
@@ -42,8 +45,10 @@ pub struct Target {
 
 impl Target {
     pub fn accepts(&self, client: (i32, i32)) -> bool {
-        let (x, y, w, h) = self.accept;
-        client.0 >= x && client.1 >= y && client.0 < x + w && client.1 < y + h
+        let inside = |(x, y, w, h): (i32, i32, i32, i32)| {
+            client.0 >= x && client.1 >= y && client.0 < x + w && client.1 < y + h
+        };
+        inside(self.accept) && !self.holes.iter().any(|&r| inside(r))
     }
 
     /// Session framebuffer position of a point, clamped like mouse input.
@@ -636,12 +641,15 @@ mod tests {
         let t = Target {
             handle: handle.clone(),
             accept: (200, 80, 1000, 600),
+            holes: vec![(600, 80, 80, 26)],
             offset: (-200, -80),
             screen: false,
             fb: (1920, 1080),
         };
         assert!(t.accepts((200, 80)));
         assert!(!t.accepts((199, 80)), "sidebar");
+        assert!(!t.accepts((640, 90)), "the toolbar's handle");
+        assert!(t.accepts((640, 106)), "below the handle");
         assert!(!t.accepts((1200, 80)), "right of the picture");
         assert_eq!(t.map((250, 100), (0, 0)), (50, 20));
         assert_eq!(t.map((100, 50), (0, 0)), (0, 0), "clamped like the mouse");
