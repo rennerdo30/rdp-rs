@@ -610,6 +610,14 @@ impl DynamicChannel for GraphicsChannel {
         CHANNEL_NAME
     }
 
+    /// A graphics message can carry a whole uncompressed bitmap
+    /// (RDPGFX_WIRE_TO_SURFACE_PDU_1 with the uncompressed codec,
+    /// MS-RDPEGFX 2.2.2.1); a 7680 x 4320 desktop at 32 bpp is about
+    /// 127 MiB. So this channel keeps a cap far above the 16 MiB default.
+    fn max_message_size(&self) -> usize {
+        512 << 20
+    }
+
     /// Sends RDPGFX_CAPS_ADVERTISE_PDU first (3.3.5.18).
     fn opened(&mut self, out: &mut DvcOut) -> Result<()> {
         let caps = advertised_caps(self.h264.is_some());

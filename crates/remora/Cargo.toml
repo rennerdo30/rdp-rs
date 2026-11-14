@@ -7,6 +7,8 @@ license.workspace = true
 
 [dependencies]
 rdp = { path = "../rdp" }
+# The server helper protocol (Remora::Ctl / Remora::Bulk).
+remora-link = { path = "../remora-link" }
 remora-update = { path = "../remora-update" }
 # CPU canvas and text from ffwd (https://github.com/rennerdo30/ffwd, its
 # decision 0001), pinned to a published commit.
