@@ -133,6 +133,11 @@ impl Lock {
         let owner = format!("{}{}", unique_suffix()?, unique_suffix()?);
         let deadline = Instant::now() + wait;
         let mut takeovers = 0;
+        // On Windows a lock file another writer just deleted stays "delete
+        // pending" for a moment, and creating it then fails with Access
+        // denied instead of AlreadyExists: busy, not an error. A denial that
+        // lasts until the deadline is reported as itself.
+        let mut denied: Option<io::Error>;
         loop {
             match std::fs::OpenOptions::new()
                 .write(true)
@@ -147,7 +152,10 @@ impl Lock {
                     }
                     return Ok(Lock { path, owner });
                 }
-                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => denied = None,
+                Err(e) if cfg!(windows) && e.kind() == io::ErrorKind::PermissionDenied => {
+                    denied = Some(e);
+                }
                 Err(e) => return Err(e),
             }
             // A takeover earns one more immediate try, a bounded number of
@@ -160,6 +168,9 @@ impl Lock {
             }
             let now = Instant::now();
             if now >= deadline {
+                if let Some(e) = denied {
+                    return Err(e);
+                }
                 return Err(io::Error::new(
                     io::ErrorKind::WouldBlock,
                     format!("{} is locked by another writer", store.display()),
@@ -215,9 +226,27 @@ pub(crate) fn write_new_then_rename(path: &Path, data: &[u8], private: bool) -> 
         let _ = std::fs::remove_file(&tmp);
         return Err(e);
     }
-    std::fs::rename(&tmp, path).inspect_err(|_| {
+    rename_retrying(&tmp, path).inspect_err(|_| {
         let _ = std::fs::remove_file(&tmp);
     })
+}
+
+/// `rename`, retried briefly on Windows' Access denied: replacing a file
+/// that is "delete pending" (just removed while another handle was still
+/// open) fails that way for a moment.
+fn rename_retrying(from: &Path, to: &Path) -> io::Result<()> {
+    let mut tries = 0;
+    loop {
+        match std::fs::rename(from, to) {
+            Err(e)
+                if cfg!(windows) && e.kind() == io::ErrorKind::PermissionDenied && tries < 20 =>
+            {
+                tries += 1;
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            r => return r,
+        }
+    }
 }
 
 /// Runs `f` under `path`'s lock file (waiting at most `wait`).
