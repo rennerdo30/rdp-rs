@@ -45,7 +45,13 @@ pub struct Controls {
 impl Controls {
     /// The channel handlers for a new session, and the handles to steer them.
     /// `owner`: the main window's HWND, needed to set the local clipboard.
-    pub fn build(client_name: &str, owner: isize) -> (Vec<Box<dyn StaticChannel>>, Controls) {
+    /// `helper`: the tab's server helper, kept across its reconnects so file
+    /// transfers resume ([`crate::helper::HelperHandle::reattach`]).
+    pub fn build(
+        client_name: &str,
+        owner: isize,
+        helper: &crate::helper::HelperHandle,
+    ) -> (Vec<Box<dyn StaticChannel>>, Controls) {
         let (display_channel, display) = rdp::display_control();
         let (cliprdr, clipboard) = rdp::cliprdr(Box::new(WindowsClipboard { owner }));
         let (rdpdr, devices) = rdp::rdpdr(client_name);
@@ -78,8 +84,8 @@ impl Controls {
             dynamic.push(Box::new(channel));
             handle
         });
-        let helper = crate::helper::HelperHandle::new();
-        dynamic.extend(helper.channels());
+        dynamic.extend(helper.reattach());
+        let helper = helper.clone();
         // Same channels and order as mstsc: rdpdr, rdpsnd, cliprdr, drdynvc.
         let channels: Vec<Box<dyn StaticChannel>> = vec![
             Box::new(rdpdr),

@@ -16,8 +16,8 @@
 //!   for confirmation, files are written only into the folder the app
 //!   passes, and nothing is ever executed here.
 
-// The UI for pairing, links and transfers comes in a follow-up job; until
-// then the app uses only the listener, the server id and the TLS guard.
+// A few accessors (`last_seen`, `hello` before pairing) are for tests and
+// later UI.
 #![allow(dead_code)]
 
 use std::collections::VecDeque;
@@ -47,6 +47,9 @@ const BULK_BUDGET: usize = 512 << 10;
 pub const HELPER_MAX_MESSAGE: usize = remora_link::MAX_WIRE + 4096;
 /// `PROTOCOL_RDP` (MS-RDPBCGR 2.2.1.2.1): legacy security, no TLS.
 const PROTOCOL_RDP: u32 = 0;
+/// Events kept for the app at most; beyond it the oldest progress or
+/// session info goes first (a helper must not grow the queue unbounded).
+pub const MAX_EVENTS: usize = 256;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum HelperState {
@@ -64,6 +67,9 @@ pub enum HelperState {
     /// Paired and HelloAck sent (or waiting for the helper's Hello).
     Paired,
     Failed(String),
+    /// Pairing refused for this connection: too many attempts ended before
+    /// the user answered (set by the attempt limit; reconnect to try again).
+    PairingBlocked,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -103,6 +109,9 @@ type SpaceHook = Arc<dyn Fn(&Path) -> Option<u64> + Send + Sync>;
 type Notify = Arc<dyn Fn() + Send + Sync>;
 
 struct Core {
+    /// Bumped by [`HelperHandle::reattach`]: channel handlers of an older
+    /// RDP connection are stale and do nothing.
+    generation: u64,
     enabled: bool,
     user_caps: u32,
     server_id: Option<String>,
@@ -126,6 +135,8 @@ struct Core {
     open_urls: Vec<u32>,
     engine: Engine,
     events: VecDeque<HelperEvent>,
+    /// Second channel opens refused so far (one event is queued at a time).
+    refusals: u32,
     notify: Option<Notify>,
     on_received: Option<PathHook>,
     free_space: Option<SpaceHook>,
@@ -139,8 +150,56 @@ impl Core {
         }
     }
 
+    /// Queues an event for the app, bounded: repeated refusals are counted
+    /// (one event waits at a time), progress and session info replace their
+    /// own older entry, and a full queue drops its oldest such entry first.
     fn push(&mut self, e: HelperEvent) {
-        self.events.push_back(e);
+        let q = &mut self.events;
+        let coalesced = match &e {
+            HelperEvent::SecondInstanceRefused(_) => {
+                self.refusals = self.refusals.saturating_add(1);
+                q.iter()
+                    .any(|x| matches!(x, HelperEvent::SecondInstanceRefused(_)))
+            }
+            HelperEvent::SessionInfo(_) => {
+                q.retain(|x| !matches!(x, HelperEvent::SessionInfo(_)));
+                false
+            }
+            HelperEvent::Transfer(TransferEvent::Progress { id, direction, .. }) => {
+                let old = q.iter_mut().find(|x| {
+                    matches!(x, HelperEvent::Transfer(TransferEvent::Progress { id: i, direction: d, .. })
+                        if i == id && d == direction)
+                });
+                match old {
+                    Some(slot) => {
+                        *slot = e.clone();
+                        true
+                    }
+                    None => false,
+                }
+            }
+            _ => false,
+        };
+        if !coalesced {
+            if q.len() >= MAX_EVENTS {
+                let cheap = q.iter().position(|x| {
+                    matches!(
+                        x,
+                        HelperEvent::SessionInfo(_)
+                            | HelperEvent::Transfer(TransferEvent::Progress { .. })
+                    )
+                });
+                match cheap {
+                    Some(i) => {
+                        q.remove(i);
+                    }
+                    None => {
+                        q.pop_front();
+                    }
+                }
+            }
+            q.push_back(e);
+        }
         if let Some(n) = &self.notify {
             n();
         }
@@ -396,6 +455,10 @@ impl Core {
         if h.policy & policy::BLOCKS_FILE_TRANSFER != 0 {
             caps &= !(cap::FILE_UP | cap::FILE_DOWN);
         }
+        // Received files get the Mark-of-the-Web, or none are received.
+        if self.on_received.is_none() {
+            caps &= !cap::FILE_DOWN;
+        }
         let mut token = [0u8; 32];
         if let Err(e) = remora_link::random(&mut token) {
             return self.fail(Channel::Ctl, e.to_string());
@@ -462,15 +525,20 @@ impl Core {
                 self.push(HelperEvent::SessionInfo(info));
             }
             Message::OpenUrl { url } => {
+                let parsed = web_url(&url);
                 if self.accepted & cap::OPEN_URL == 0 {
                     self.send(request_id, &Message::OpenUrlResult(UrlStatus::Disabled));
-                } else if !is_web_url(&url) {
+                } else if parsed.is_none() {
                     self.send(request_id, &Message::OpenUrlResult(UrlStatus::Invalid));
                 } else if self.open_urls.len() >= 8 {
                     self.send(request_id, &Message::OpenUrlResult(UrlStatus::Declined));
-                } else {
+                } else if let Some(u) = parsed {
+                    // Only the re-serialized URL (ASCII host) leaves here.
                     self.open_urls.push(request_id);
-                    self.push(HelperEvent::OpenUrl { request_id, url });
+                    self.push(HelperEvent::OpenUrl {
+                        request_id,
+                        url: u.to_string(),
+                    });
                 }
             }
             m @ (Message::FileOffer(_)
@@ -524,23 +592,49 @@ impl Core {
     }
 }
 
-/// Only absolute http and https URLs without spaces or control characters.
-pub fn is_web_url(url: &str) -> bool {
-    let lower = url
-        .get(..8)
-        .map(str::to_ascii_lowercase)
-        .unwrap_or_default();
+/// Characters a link from the helper may not contain anywhere: they have no
+/// place in a plain web link and are what command lines, HTML and Windows
+/// paths split on.
+const URL_FORBIDDEN: [char; 9] = ['"', '<', '>', '\\', '`', '|', '{', '}', '^'];
+
+/// The helper's link as a WHATWG URL, if it is an absolute http or https
+/// URL with a host and nothing suspicious: no user info (`a@b`), no
+/// spaces, control characters or [`URL_FORBIDDEN`] characters. Its
+/// serialization (punycode host, percent-encoded path) is the only form
+/// the app shows or opens.
+pub fn web_url(raw: &str) -> Option<url::Url> {
+    if raw.len() > remora_link::msg::MAX_URL
+        || raw
+            .chars()
+            .any(|c| c.is_control() || c.is_whitespace() || URL_FORBIDDEN.contains(&c))
+    {
+        return None;
+    }
+    let lower = raw.get(..8).map(str::to_ascii_lowercase)?;
     let rest = if lower.starts_with("https://") {
-        &url[8..]
+        &raw[8..]
     } else if lower.starts_with("http://") {
-        &url[7..]
+        &raw[7..]
     } else {
-        return false;
+        return None;
     };
-    let host = rest.split(['/', '?', '#']).next().unwrap_or("");
-    !host.is_empty()
-        && url.len() <= remora_link::msg::MAX_URL
-        && !url.chars().any(|c| c.is_control() || c.is_whitespace())
+    // The authority as written: present, and without user info.
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    if authority.is_empty() || authority.contains('@') {
+        return None;
+    }
+    let u = url::Url::parse(raw).ok()?;
+    let ok = matches!(u.scheme(), "http" | "https")
+        && u.username().is_empty()
+        && u.password().is_none()
+        && u.host_str().is_some_and(|h| !h.is_empty() && h.is_ascii())
+        && u.as_str().len() <= remora_link::msg::MAX_URL;
+    ok.then_some(u)
+}
+
+/// [`web_url`] accepts it.
+pub fn is_web_url(url: &str) -> bool {
+    web_url(url).is_some()
 }
 
 fn now_secs() -> u64 {
@@ -563,6 +657,7 @@ impl HelperHandle {
         let client_key = StaticKey::generate().expect("OS random generator");
         HelperHandle {
             core: Arc::new(Mutex::new(Core {
+                generation: 0,
                 enabled: true,
                 user_caps: cap::SESSION_INFO,
                 server_id: None,
@@ -586,6 +681,7 @@ impl HelperHandle {
                 open_urls: Vec::new(),
                 engine: Engine::default(),
                 events: VecDeque::new(),
+                refusals: 0,
                 notify: None,
                 on_received: None,
                 free_space: None,
@@ -599,15 +695,42 @@ impl HelperHandle {
 
     /// The two dynamic channel handlers to register with `Drdynvc`.
     pub fn channels(&self) -> Vec<Box<dyn DynamicChannel>> {
+        let generation = self.lock().generation;
         [Channel::Ctl, Channel::Bulk]
             .into_iter()
             .map(|ch| {
                 Box::new(HelperChannel {
                     ch,
+                    generation,
                     core: self.core.clone(),
                 }) as Box<dyn DynamicChannel>
             })
             .collect()
+    }
+
+    /// A new RDP connection of the same tab (an automatic or manual
+    /// reconnect): drops the old connection's channels and secure sessions,
+    /// forgets its transport check and pairing, and returns fresh channel
+    /// handlers. File transfers are kept, paused, and resume once the helper
+    /// is paired again on the new connection (docs/HELPER-PROTOCOL.md 8).
+    /// Handlers of the old connection do nothing from now on, even if its
+    /// session thread still runs. The client's Noise key is new, as for any
+    /// connection.
+    pub fn reattach(&self) -> Vec<Box<dyn DynamicChannel>> {
+        {
+            let mut c = self.lock();
+            c.generation = c.generation.wrapping_add(1);
+            c.ctl = None;
+            c.bulk = None;
+            c.reset_ctl();
+            c.transport = Transport::Unknown;
+            if let Ok(k) = StaticKey::generate() {
+                c.client_key = k;
+            }
+            c.set_state(HelperState::NotPresent);
+            c.update_engine_link();
+        }
+        self.channels()
     }
 
     /// Off: helper channels are closed as soon as they open.
@@ -688,6 +811,11 @@ impl HelperHandle {
         self.lock().session_info.clone()
     }
 
+    /// How many second helper instances were refused on this connection.
+    pub fn second_instance_refusals(&self) -> u32 {
+        self.lock().refusals
+    }
+
     /// When the helper last sent anything on Ctl.
     pub fn last_seen(&self) -> Option<Instant> {
         self.lock().last_seen
@@ -697,11 +825,18 @@ impl HelperHandle {
         self.lock().events.pop_front()
     }
 
-    /// The user confirmed that both SAS match: pin the key and continue.
-    pub fn confirm_pairing(&self) -> Result<(), String> {
+    /// The user confirmed that the code `shown` matches the helper's: pin
+    /// the key and continue. Refused when the pairing waiting now is not
+    /// the one the dialog showed (the helper started over meanwhile: its
+    /// new code needs its own answer).
+    pub fn confirm_pairing(&self, shown: Sas) -> Result<(), String> {
         let mut c = self.lock();
-        if !matches!(c.state, HelperState::AwaitingPairing { .. }) {
-            return Err("no pairing to confirm".into());
+        match &c.state {
+            HelperState::AwaitingPairing { sas, .. } if *sas == shown => {}
+            HelperState::AwaitingPairing { .. } => {
+                return Err("the helper started pairing again with a new code".into());
+            }
+            _ => return Err("no pairing to confirm".into()),
         }
         let key = c.helper_key.ok_or("no helper key")?;
         let mut saved = Ok(());
@@ -720,10 +855,11 @@ impl HelperHandle {
         saved
     }
 
-    /// The SAS did not match or the user declined: close the helper.
-    pub fn reject_pairing(&self) {
+    /// The code `shown` did not match or the user declined: close the
+    /// helper. Only the pairing the dialog showed is rejected.
+    pub fn reject_pairing(&self, shown: Sas) {
         let mut c = self.lock();
-        if !matches!(c.state, HelperState::AwaitingPairing { .. }) {
+        if !matches!(&c.state, HelperState::AwaitingPairing { sas, .. } if *sas == shown) {
             return;
         }
         c.send(0, &Message::Pairing(PairingStatus::Rejected));
@@ -791,6 +927,8 @@ impl Default for HelperHandle {
 /// `Remora::Ctl` or `Remora::Bulk` on the session thread.
 struct HelperChannel {
     ch: Channel,
+    /// The connection this handler belongs to ([`HelperHandle::reattach`]).
+    generation: u64,
     core: Arc<Mutex<Core>>,
 }
 
@@ -799,9 +937,21 @@ impl HelperChannel {
         self.core.lock().unwrap_or_else(|p| p.into_inner())
     }
 
+    /// The core, unless this handler belongs to an older connection.
+    fn current(&self) -> Option<MutexGuard<'_, Core>> {
+        let c = self.lock();
+        (c.generation == self.generation).then_some(c)
+    }
+
+    fn stale(&self) -> rdp::Error {
+        rdp::Error::Protocol(format!("{}: an older connection", self.ch.name()))
+    }
+
     /// Moves queued bytes out; an error closes the channel.
     fn drain(&self, out: &mut DvcOut) -> rdp::Result<()> {
-        let mut c = self.lock();
+        let Some(mut c) = self.current() else {
+            return Err(self.stale());
+        };
         let Some(l) = c.link(self.ch) else {
             return Ok(());
         };
@@ -821,7 +971,10 @@ impl DynamicChannel for HelperChannel {
     }
 
     fn opened(&mut self, out: &mut DvcOut) -> rdp::Result<()> {
-        let r = self.lock().open(self.ch);
+        let r = match self.current() {
+            Some(mut c) => c.open(self.ch),
+            None => return Err(self.stale()),
+        };
         if let Err(e) = r {
             return Err(rdp::Error::Protocol(e));
         }
@@ -829,17 +982,26 @@ impl DynamicChannel for HelperChannel {
     }
 
     fn process(&mut self, msg: &[u8], out: &mut DvcOut) -> rdp::Result<()> {
-        self.lock().receive(self.ch, msg);
+        match self.current() {
+            Some(mut c) => c.receive(self.ch, msg),
+            None => return Err(self.stale()),
+        }
         self.drain(out)
     }
 
     fn tick(&mut self, out: &mut DvcOut) -> rdp::Result<()> {
-        self.lock().tick(self.ch);
+        match self.current() {
+            Some(mut c) => c.tick(self.ch),
+            // Not open on the old connection: nothing to close.
+            None => return Ok(()),
+        }
         self.drain(out)
     }
 
     fn closed(&mut self) {
-        self.lock().closed(self.ch);
+        if let Some(mut c) = self.current() {
+            c.closed(self.ch);
+        }
     }
 
     fn max_message_size(&self) -> usize {
@@ -848,15 +1010,16 @@ impl DynamicChannel for HelperChannel {
 
     /// One helper instance per session: a second open is refused.
     fn allow_second_instance(&mut self) -> bool {
-        self.lock()
-            .push(HelperEvent::SecondInstanceRefused(self.ch));
+        if let Some(mut c) = self.current() {
+            c.push(HelperEvent::SecondInstanceRefused(self.ch));
+        }
         false
     }
 
     /// Records why the DVC layer closed Ctl. `HandlerError` is this module's
     /// own close request, whose reason is already recorded.
     fn closing(&mut self, why: LocalClose) {
-        let mut c = self.lock();
+        let Some(mut c) = self.current() else { return };
         if self.ch == Channel::Ctl
             && why != LocalClose::HandlerError
             && !matches!(c.state, HelperState::Failed(_))

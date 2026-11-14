@@ -505,11 +505,17 @@ impl Ui {
             .layout
             .as_ref()
             .map(|l| self.overlay_rect_of(l, self.pill_shown()));
-        // So do the strip's tooltips and the floating panel's shadow.
-        [bar, self.tip_bounds(), self.panel_shadow_rect()]
-            .into_iter()
-            .flatten()
-            .reduce(union)
+        // So do the strip's tooltips, the floating panel's shadow and the
+        // server helper's cards.
+        [
+            bar,
+            self.tip_bounds(),
+            self.panel_shadow_rect(),
+            self.helper_overlay_rect(),
+        ]
+        .into_iter()
+        .flatten()
+        .reduce(union)
     }
 
     fn overlay_rect_of(&self, l: &Layout, shown: bool) -> Rect {
@@ -564,6 +570,10 @@ impl Ui {
 
     /// The toolbar's hit at a point, above everything else.
     pub(super) fn overlay_hit(&self, x: i32, y: i32) -> Option<Hit> {
+        // The helper's cards lie over the toolbar.
+        if let Some(h) = self.helper_overlay_hit(x, y) {
+            return Some(h);
+        }
         let l = self.toolbar.layout.as_ref()?;
         if !self.pill_shown() {
             return l.handle.1.contains(x, y).then_some(Hit::ToolbarHandle);
@@ -756,6 +766,7 @@ impl Ui {
     pub(super) fn toolbar_clear(&mut self) {
         self.toolbar.layout = None;
         self.toolbar.dim = None;
+        self.helper_overlay_clear();
     }
 
     /// The technical text of a failed session, for a bug report.
@@ -807,9 +818,12 @@ impl Ui {
         self.session_clip = None;
         self.toolbar.layout = None;
         self.toolbar.dim = None;
+        self.helper_overlay_clear();
         let Some(tab) = self.tabs.iter().find(|t| t.id == id) else {
             return;
         };
+        // The helper's pairing question covers the session, toolbar too.
+        let asking = tab.helper.pairing().is_some();
         let (host, state, name) = (tab.host.clone(), tab.state.clone(), tab.name.clone());
         let (spanned, apps, live) = (tab.spanned, tab.remote_app.is_some(), tab.live.clone());
         let connected = matches!(state, TabState::Connected { .. });
@@ -852,7 +866,7 @@ impl Ui {
             area.h -= band.h;
         }
         cv.fill(area, if picture { c.bg_sidebar } else { c.bg });
-        if connected {
+        if connected && !asking {
             self.layout_toolbar(te, f, pill_area, id, !picture);
         }
         match state {
@@ -917,6 +931,10 @@ impl Ui {
                 self.paint_failed(cv, te, f, area, id, &name, &host, &live, &why)
             }
             TabState::Ended(why) => self.paint_ended(cv, te, f, area, id, &host, &live, &why),
+        }
+        // The helper's questions over what the floating panel leaves.
+        if connected {
+            self.helper_layout(te, f, id, Rect::new(area.x, area.y, open_w, area.h));
         }
         // The floating panel over the picture's right part (its body takes
         // the pointer from the picture under it); its shadow goes over the
@@ -1053,7 +1071,6 @@ impl Ui {
     /// calls it after copying the picture in; `cv`'s clip limits it to a
     /// damaged part.
     pub fn paint_session_overlay(&mut self, cv: &mut Canvas, te: &mut TextEngine, f: &Fonts) {
-        let s = self.scale;
         if let (Some((_, area)), Some((id, attempt, step))) =
             (self.session_area, self.toolbar.dim.clone())
         {
@@ -1061,6 +1078,13 @@ impl Ui {
         }
         self.paint_panel_shadow(cv, te, f);
         self.paint_tip(cv, te, f);
+        self.paint_toolbar(cv, te, f);
+        // The helper's cards and questions over everything of the session.
+        self.paint_helper_overlay(cv, te, f);
+    }
+
+    fn paint_toolbar(&mut self, cv: &mut Canvas, te: &mut TextEngine, f: &Fonts) {
+        let s = self.scale;
         let Some(l) = self.toolbar.layout.clone() else {
             return;
         };

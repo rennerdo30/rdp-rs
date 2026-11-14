@@ -110,8 +110,10 @@ impl Ui {
 
     /// Mouse input is not the session's: the panel floats over it, or the
     /// press that closed it is still down.
+    /// So is it while the server helper's pairing question or the drop
+    /// target covers the session.
     pub fn session_input_blocked(&self) -> bool {
-        self.panel_floating() || self.panel.swallow
+        self.panel_floating() || self.panel.swallow || self.helper_modal_open() || self.dropping > 0
     }
 
     /// The toolbar's panel button (and the palette's "Show/Hide session

@@ -9,6 +9,7 @@ Start with [Getting started](GETTING-STARTED.md).
 - [Groups](#groups)
 - [Sessions](#sessions)
 - [Sharing](#sharing)
+- [Server helper](#server-helper)
 - [Monitors and full screen](#monitors-and-full-screen)
 - [RemoteApp](#remoteapp)
 - [Recording](#recording)
@@ -132,7 +133,8 @@ The editor has five pages.
 ![The Sharing page: devices, sound output, microphone](images/editor-sharing.webp)
 
 What the session may use from this PC, from the moment it starts. See
-[Sharing](#sharing).
+[Sharing](#sharing). The **Server helper** switches at the bottom are
+explained in [Server helper](#server-helper).
 
 ### Advanced
 
@@ -260,6 +262,69 @@ need a reconnect.
 - **Shared folders**: a folder of this PC appears as a drive in the session's
   Explorer. **Browse for a folder…**, or type a path and click **Add**. The
   server can reach only what is inside that folder.
+
+## Server helper
+
+`remora-agent` is a small, optional helper that runs inside your session on
+the server. With it, Remora shows the server's state, opens links you click
+there in your own browser, and copies files both ways with resume. Without
+it nothing changes: Remora shows nothing about a helper until one connects.
+How to install it on the server: `crates/remora-agent/README.md`.
+
+The helper talks to Remora through the RDP connection that is already open
+(no extra port, no firewall rule), end-to-end encrypted on top of the
+connection's TLS. It can never run anything on this PC.
+
+### Pairing
+
+The first time a helper connects from a server, Remora asks **Pair the
+server helper?** over the session and shows a six-digit code. The helper
+shows the same code on the server; compare them, then **Pair** (Enter) or
+**Don't pair** (Esc). While the question is up, the keyboard and mouse do
+not reach the session. After pairing, Remora remembers the helper's key for
+that server, and later sessions pair silently.
+
+If the key is different from last time, Remora warns: **The server helper's
+key changed**. A reinstalled helper does this, but so does an attack; here
+Enter and Esc both mean **Don't pair**, and only **Pair anyway** pairs.
+
+To forget a paired helper: **Forget…** on the editor's Sharing page, or
+**Forget paired helper** in the command palette. Its next session asks to
+pair again.
+
+### What it may do
+
+Set per connection on the editor's Sharing page, under **Server helper**
+(inherited with the rest of Sharing). Everything but session info is off
+until you switch it on; a change applies from the next connection.
+
+- **Session info** (always): the side panel's Session page shows the helper's
+  version, whether the remote screen is locked, idle time, CPU and memory.
+- **Open links on this PC**: a card asks **Open**, **Always for this server**
+  or **Ignore** for each link, showing where it goes first. Only http and
+  https links ever open; the address is checked again before your browser
+  gets it. **Open them without asking** (or **Always for this server**)
+  skips the question for that connection.
+- **Receive files from the server**: a card asks **Save** or **Decline** for
+  each file. Files go only into **Save received files in** (default
+  `Downloads\Remora`), are never written over (a second copy becomes
+  `name (2).ext`), and are marked as downloaded from the Internet, so
+  Windows and Office treat them with care.
+- **Send files to the server**: drop files onto the session (the drop target
+  says where they go, or why it cannot take them), or **Send files to…** on
+  the side panel's Sharing page or in the palette.
+
+If the server's policy turns off clipboard or drive redirection, file
+transfer is off too, whatever the switches say.
+
+### Transfers
+
+The side panel's Sharing page lists the files on their way, with progress,
+speed and time left; **×** cancels one, the folder button shows a received
+file in Explorer, **Clear finished** tidies the list. If the connection
+drops, transfers pause and continue where they stopped once the session is
+back (also after an automatic reconnect). **Show transfers** in the palette
+opens the list.
 
 ## Monitors and full screen
 

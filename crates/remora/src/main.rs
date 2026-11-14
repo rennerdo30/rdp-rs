@@ -27,6 +27,7 @@ mod fuzzy;
 #[cfg(windows)]
 mod h264_mf;
 mod helper;
+mod helper_app;
 mod icon;
 mod icons;
 mod keyboard;
@@ -71,6 +72,8 @@ struct Args {
     /// `--record out.mp4`: headless recording for `--wait` seconds.
     record: Option<String>,
     snapshot_ui: Option<String>,
+    /// `--only TEXT`: snapshot only the screens whose suffix contains it.
+    snapshot_only: Option<String>,
     icon_png: Option<String>,
     icon_size: usize,
     version: bool,
@@ -106,7 +109,7 @@ fn usage() -> ! {
          \x20      remora <host> -u <user> --screenshot out.png [--wait SECONDS]\n\
          \x20      remora <host> -u <user> --record out.mp4 [--wait SECONDS]\n\
          \x20      remora ... --microphone [INDEX]   (microphone on; see --list-microphones)\n\
-         \x20      remora --snapshot-ui out.png [--scale 1.5]\n\
+         \x20      remora --snapshot-ui out.png [--scale 1.5] [--only TEXT]\n\
          \x20      remora --icon-png out.png [--icon-size N]\n\
          \x20      remora --version\n\
          password: RDP_PASSWORD environment variable, otherwise prompted"
@@ -146,6 +149,7 @@ fn parse_args() -> Args {
             "--screenshot" => a.screenshot = Some(val()),
             "--record" => a.record = Some(val()),
             "--snapshot-ui" => a.snapshot_ui = Some(val()),
+            "--only" => a.snapshot_only = Some(val()),
             "--icon-png" => a.icon_png = Some(val()),
             "--icon-size" => {
                 a.icon_size = val()
@@ -241,7 +245,7 @@ fn main() {
         return;
     }
     if let Some(path) = &args.snapshot_ui {
-        if let Err(e) = snapshot_ui(path, args.scale) {
+        if let Err(e) = snapshot_ui(path, args.scale, args.snapshot_only.as_deref()) {
             eprintln!("error: {e}");
             std::process::exit(1);
         }
@@ -427,7 +431,12 @@ fn screenshot(
 /// Renders the window with sample data offscreen, using the window's paint
 /// code: `out.png` shows the Connections tab, `out-session.png` a session tab
 /// with the control drawer (the remote picture area is left empty).
-fn snapshot_ui(path: &str, scale: f32) -> Result<(), Box<dyn std::error::Error>> {
+fn snapshot_ui(
+    path: &str,
+    scale: f32,
+    only: Option<&str>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let wanted = |suffix: &str| only.is_none_or(|o| suffix.contains(o));
     let mut te = TextEngine::new();
     let fonts = ui::load_fonts(&mut te).ok_or("no usable UI font")?;
     let (w, h) = ((1320.0 * scale) as usize, (860.0 * scale) as usize);
@@ -517,6 +526,22 @@ fn snapshot_ui(path: &str, scale: f32) -> Result<(), Box<dyn std::error::Error>>
         ("-fullscreen-toolbar", || {
             sv::sample_toolbar(true, false, true)
         }),
+        // The server helper (RDP-42/43/44): pairing, a changed key, link
+        // and file cards, the drop target, the panel and the editor.
+        ("-helper-pairing", || ui::sample_helper_pairing(false)),
+        ("-helper-pairing-changed", || {
+            ui::sample_helper_pairing(true)
+        }),
+        ("-helper-cards", ui::sample_helper_cards),
+        ("-helper-drop", || ui::sample_helper_drop(true)),
+        ("-helper-drop-off", || ui::sample_helper_drop(false)),
+        ("-helper-panel-session", || ui::sample_helper_panel(3, true)),
+        ("-helper-panel-failed", || ui::sample_helper_panel(3, false)),
+        ("-helper-panel-transfers", || {
+            ui::sample_helper_panel(0, true)
+        }),
+        ("-helper-form", || ui::sample_helper_form(false)),
+        ("-helper-forget", || ui::sample_helper_form(true)),
     ];
     // The Home view and the editor at other window sizes (logical px).
     type SizedScreen = (&'static str, fn() -> ui::Ui, f32, f32);
@@ -589,7 +614,7 @@ fn snapshot_ui(path: &str, scale: f32) -> Result<(), Box<dyn std::error::Error>>
     }
     for (light, theme) in [("", &theme::DARK), ("-light", &theme::LIGHT)] {
         theme::set(theme);
-        for &(suffix, make) in &screens {
+        for &(suffix, make) in screens.iter().filter(|s| wanted(s.0)) {
             let mut m = make();
             m.scale = scale;
             m.custom_frame = cfg!(windows);
@@ -599,7 +624,7 @@ fn snapshot_ui(path: &str, scale: f32) -> Result<(), Box<dyn std::error::Error>>
             write_png(&out, w, h, &px)?;
             eprintln!("saved {w}x{h} snapshot to {out}");
         }
-        for (suffix, make, lw, lh) in sized {
+        for (suffix, make, lw, lh) in sized.into_iter().filter(|s| wanted(s.0)) {
             let (w, h) = ((lw * scale) as usize, (lh * scale) as usize);
             let mut m = make();
             m.scale = scale;
@@ -610,7 +635,7 @@ fn snapshot_ui(path: &str, scale: f32) -> Result<(), Box<dyn std::error::Error>>
             write_png(&out, w, h, &px)?;
             eprintln!("saved {w}x{h} snapshot to {out}");
         }
-        for (suffix, make, lw, lh) in site {
+        for (suffix, make, lw, lh) in site.into_iter().filter(|s| wanted(s.0)) {
             let (w, h) = ((lw * scale) as usize, (lh * scale) as usize);
             let mut m = make();
             m.scale = scale;
@@ -620,6 +645,9 @@ fn snapshot_ui(path: &str, scale: f32) -> Result<(), Box<dyn std::error::Error>>
             let out = path.replace(".png", &format!("{suffix}{light}.png"));
             write_png(&out, w, h, &px)?;
             eprintln!("saved {w}x{h} snapshot to {out}");
+        }
+        if only.is_some() {
+            continue;
         }
         // The component kit's reference sheet.
         let mut px = vec![0u32; w * h];

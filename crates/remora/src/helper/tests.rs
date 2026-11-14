@@ -125,7 +125,7 @@ impl Rig {
     /// Ctl paired and HelloAck received; returns the HelloAck.
     fn pair_and_hello(&mut self, h: &mut FakeHelper, offer: u32, policy_bits: u32) -> HelloAck {
         if matches!(self.handle.state(), HelperState::AwaitingPairing { .. }) {
-            self.handle.confirm_pairing().unwrap();
+            self.handle.confirm_pairing(shown(&self.handle)).unwrap();
             self.pump(h);
         }
         self.send(h, hello(offer, policy_bits));
@@ -158,6 +158,14 @@ impl Rig {
 impl Drop for Rig {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+/// The code the pairing dialog shows now.
+fn shown(h: &HelperHandle) -> Sas {
+    match h.state() {
+        HelperState::AwaitingPairing { sas, .. } => sas,
+        s => panic!("no pairing: {s:?}"),
     }
 }
 
@@ -228,7 +236,7 @@ fn first_contact_needs_the_sas_then_pins_the_key() {
     // The helper's Hello waits for the user; no HelloAck yet.
     r.send(&mut h, hello(cap::ALL, 0));
     assert!(!h.got.iter().any(|m| matches!(m, Message::HelloAck(_))));
-    r.handle.confirm_pairing().unwrap();
+    r.handle.confirm_pairing(shown(&r.handle)).unwrap();
     r.pump(&mut h);
     assert!(h.got.contains(&Message::Pairing(PairingStatus::Confirmed)));
     let ack = h
@@ -257,6 +265,62 @@ fn first_contact_needs_the_sas_then_pins_the_key() {
 }
 
 #[test]
+fn a_reconnect_keeps_transfers_and_retires_the_old_channels() {
+    let mut r = Rig::new("reattach");
+    r.handle.set_transport_protocol(1);
+    r.handle.set_capabilities(cap::ALL);
+    let key = StaticKey::generate().unwrap();
+    let mut h = r.connect(key.clone());
+    let ack = r.pair_and_hello(&mut h, cap::ALL, 0);
+    r.open_bulk(&mut h, ack.bulk_token);
+    let src = r.dir.join("upload.bin");
+    std::fs::write(&src, vec![7u8; 1000]).unwrap();
+    let id = r.handle.send_file(&src).unwrap();
+    r.pump(&mut h);
+    assert!(
+        h.got
+            .iter()
+            .any(|m| matches!(m, Message::FileOffer(o) if o.id == id))
+    );
+    r.events();
+
+    // The RDP connection drops and the tab reconnects.
+    let mut fresh = r.handle.reattach();
+    let new_bulk = fresh.pop().unwrap();
+    let new_ctl = fresh.pop().unwrap();
+    let mut old_ctl = std::mem::replace(&mut r.ctl, new_ctl);
+    let mut old_bulk = std::mem::replace(&mut r.bulk, new_bulk);
+    let ev = r.events();
+    assert!(ev.contains(&HelperEvent::State(HelperState::NotPresent)));
+    assert_eq!(r.handle.accepted_capabilities(), 0);
+    // The old connection's handlers are retired: whatever its thread still
+    // does cannot touch the new connection.
+    let mut out = DvcOut::default();
+    assert!(old_ctl.process(&[0; 8], &mut out).is_err());
+    assert!(old_ctl.opened(&mut out).is_err());
+    old_ctl.closed();
+    old_bulk.closed();
+    assert!(out.is_empty());
+
+    // Nothing is answered on the new connection before its TLS check.
+    r.handle.set_transport_protocol(1);
+    let mut h2 = r.connect(key);
+    assert!(h2.got.contains(&Message::Pairing(PairingStatus::Known)));
+    let ack2 = r.pair_and_hello(&mut h2, cap::ALL, 0);
+    assert_ne!(ack2.bulk_token, ack.bulk_token);
+    r.open_bulk(&mut h2, ack2.bulk_token);
+    r.pump(&mut h2);
+    // The same transfer is offered again (same id): the receiver resumes it.
+    assert!(
+        h2.got
+            .iter()
+            .any(|m| matches!(m, Message::FileOffer(o) if o.id == id)),
+        "{:?}",
+        h2.got
+    );
+}
+
+#[test]
 fn a_changed_key_warns_and_reject_closes() {
     let mut r = Rig::new("changed");
     let mut pins = PinStore::new();
@@ -268,7 +332,12 @@ fn a_changed_key_warns_and_reject_closes() {
         r.handle.state(),
         HelperState::AwaitingPairing { changed: true, .. }
     ));
-    r.handle.reject_pairing();
+    r.handle.reject_pairing(Sas(0));
+    assert!(
+        matches!(r.handle.state(), HelperState::AwaitingPairing { .. }),
+        "another code's answer does nothing"
+    );
+    r.handle.reject_pairing(shown(&r.handle));
     let mut out = DvcOut::default();
     assert!(r.ctl.tick(&mut out).is_err(), "channel closes");
     for m in out.take() {
@@ -296,7 +365,7 @@ fn an_unreadable_pin_store_is_treated_as_changed() {
         HelperState::AwaitingPairing { changed: true, .. }
     ));
     // Confirming does not overwrite the unreadable file.
-    assert!(r.handle.confirm_pairing().is_err());
+    assert!(r.handle.confirm_pairing(shown(&r.handle)).is_err());
     assert_eq!(
         std::fs::read(r.dir.join("helpers.json")).unwrap(),
         b"garbage"
@@ -309,6 +378,7 @@ fn capabilities_follow_user_setting_and_policy() {
     let mut r = Rig::new("caps");
     r.handle.set_transport_protocol(1);
     r.handle.set_capabilities(cap::ALL);
+    r.handle.set_received_file_hook(|_| {});
     let mut h = r.connect(StaticKey::generate().unwrap());
     // Drive clipboard disabled by policy: no file transfer at all.
     let ack = r.pair_and_hello(&mut h, cap::ALL, policy::CLIPBOARD_DISABLED);
@@ -500,7 +570,113 @@ fn web_url_check() {
         "\\\\server\\share",
         "ftp://x",
         "",
+        // User info hides the real host.
+        "https://good.example@evil.example/",
+        "https://@evil.example/",
+        "https://user:pw@evil.example/",
+        // Characters that split command lines, HTML or paths.
+        "https://evil\\@good.example/",
+        "https://a.example/\"onload",
+        "https://a.example/<x>",
+        "https://a.example/`cmd`",
+        "https://a.example/a|b",
+        "https://a.example/{x}",
+        "https://a.example/^",
+        "https:\\\\evil.example",
     ] {
         assert!(!is_web_url(bad), "{bad:?}");
     }
+    // What leaves is the WHATWG serialization: an ASCII (punycode) host.
+    let u = web_url("https://b\u{fc}cher.example/\u{e4}?q=1").unwrap();
+    assert_eq!(u.host_str(), Some("xn--bcher-kva.example"));
+    assert!(u.as_str().is_ascii(), "{u}");
+    assert_eq!(
+        web_url("HTTPS://Example.ORG:443/a").unwrap().as_str(),
+        "https://example.org/a"
+    );
+}
+
+#[test]
+fn a_new_pairing_attempt_needs_its_own_answer() {
+    let mut r = Rig::new("pair-again");
+    r.handle.set_transport_protocol(1);
+    let _h = r.connect(StaticKey::generate().unwrap());
+    let first = shown(&r.handle);
+    // The helper closes Ctl and starts over while the dialog is up.
+    r.ctl.closed();
+    let mut fresh = r.handle.channels();
+    r.bulk = fresh.pop().unwrap();
+    r.ctl = fresh.pop().unwrap();
+    let _h2 = r.connect(StaticKey::generate().unwrap());
+    let second = shown(&r.handle);
+    if second != first {
+        assert!(r.handle.confirm_pairing(first).is_err(), "old code");
+        assert!(matches!(
+            r.handle.state(),
+            HelperState::AwaitingPairing { .. }
+        ));
+        assert!(
+            PinStore::load(&r.dir.join("helpers.json"))
+                .unwrap()
+                .get("server:3389")
+                .is_none(),
+            "nothing pinned"
+        );
+    }
+    r.handle.confirm_pairing(second).unwrap();
+    assert_eq!(r.handle.state(), HelperState::Paired);
+}
+
+#[test]
+fn no_file_down_without_the_mark_of_the_web_hook() {
+    let mut r = Rig::new("motw-gate");
+    r.handle.set_transport_protocol(1);
+    r.handle.set_capabilities(cap::ALL);
+    let mut h = r.connect(StaticKey::generate().unwrap());
+    let ack = r.pair_and_hello(&mut h, cap::ALL, 0);
+    assert_eq!(ack.capabilities & cap::FILE_DOWN, 0);
+    assert_ne!(ack.capabilities & cap::FILE_UP, 0);
+}
+
+#[test]
+fn the_event_queue_stays_bounded() {
+    let mut r = Rig::new("flood");
+    for _ in 0..10_000 {
+        assert!(!r.ctl.allow_second_instance());
+    }
+    assert_eq!(r.handle.second_instance_refusals(), 10_000);
+    let ev = r.events();
+    assert_eq!(
+        ev.iter()
+            .filter(|e| matches!(e, HelperEvent::SecondInstanceRefused(_)))
+            .count(),
+        1
+    );
+    // Session info keeps only the newest.
+    r.handle.set_transport_protocol(1);
+    let mut h = r.connect(StaticKey::generate().unwrap());
+    r.pair_and_hello(&mut h, cap::ALL, 0);
+    r.events();
+    for i in 0..(MAX_EVENTS as u32 + 50) {
+        r.send(
+            &mut h,
+            Message::SessionInfo(SessionInfo {
+                locked: false,
+                idle_ms: i,
+                cpu_percent: 1,
+                mem_used: 1,
+                mem_total: 2,
+            }),
+        );
+    }
+    let ev = r.events();
+    assert!(ev.len() <= MAX_EVENTS);
+    let infos: Vec<_> = ev
+        .iter()
+        .filter_map(|e| match e {
+            HelperEvent::SessionInfo(i) => Some(i.idle_ms),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(infos, vec![MAX_EVENTS as u32 + 49]);
 }

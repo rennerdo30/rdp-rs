@@ -20,6 +20,7 @@ use crate::theme::{self, ThemeChoice, Tone, pal, radius, size};
 
 mod palette;
 pub use palette::{SESSION_CHORD, sample as sample_palette};
+pub mod helper;
 mod home;
 mod panel;
 mod sidebar;
@@ -27,6 +28,10 @@ mod summary;
 pub use panel::{sample_panel_float, sample_panel_strip};
 pub use sidebar::{Divider, sample_rail, sample_resized};
 
+pub use helper::{
+    HelperView, sample_cards as sample_helper_cards, sample_drop as sample_helper_drop,
+    sample_helper_form, sample_helper_panel, sample_pairing as sample_helper_pairing,
+};
 pub use home::ThumbDue;
 pub mod session_view;
 pub use session_view::Live;
@@ -322,6 +327,30 @@ pub enum Hit {
     PanelPin,
     PanelClose,
     PanelBody,
+    /// The server helper (see `helper`): the pairing question's answers,
+    /// a link's (always the first waiting one), an offered file's (index
+    /// into the offers), a transfer row's (index into the rows), Clear
+    /// finished, Send files, Show transfers and Forget (the tab's helper).
+    HelperPair(u64),
+    HelperNoPair(u64),
+    LinkOpen(u64),
+    LinkAlways(u64),
+    LinkIgnore(u64),
+    OfferSave(u64, usize),
+    OfferDecline(u64, usize),
+    TransferCancel(u64, usize),
+    TransferShow(u64, usize),
+    TransfersClear(u64),
+    SendFiles(u64),
+    ShowTransfers(u64),
+    ForgetHelper(u64),
+    /// Editor: a helper switch (0 links, 1 receive, 2 send, 3 links
+    /// without asking), the download folder, Forget; the forget question.
+    FormHelper(u8),
+    FormDownloads,
+    FormForgetHelper,
+    ForgetOk,
+    ForgetCancel,
 }
 
 /// A RemoteApp session tab: the connection's apps and the open windows.
@@ -414,6 +443,8 @@ pub struct Tab {
     pub network: Option<String>,
     /// Connection steps, timings, and why it failed or ended.
     pub live: Live,
+    /// The server helper, its questions and transfers.
+    pub helper: HelperView,
 }
 
 /// A server certificate to trust or refuse.
@@ -538,6 +569,28 @@ pub enum Action {
     /// The sidebar folded or unfolded, or a divider was dragged: keep the
     /// layout ([`Ui::layout_settings`]) in the settings.
     SaveLayout,
+    /// The server helper's pairing question answered for the code it
+    /// showed: pair (true) or not.
+    HelperPairing(u64, remora_link::Sas, bool),
+    /// A link request answered: open it (checked again) or not.
+    AnswerLink {
+        id: u64,
+        request_id: u32,
+        url: String,
+        open: bool,
+    },
+    /// Save an offered file into this folder, or decline it.
+    AcceptFile(u64, remora_link::msg::TransferId, std::path::PathBuf),
+    DeclineFile(u64, remora_link::msg::TransferId),
+    CancelTransfer(u64, remora_link::msg::TransferId),
+    /// Explorer with this file selected.
+    ShowInFolder(std::path::PathBuf),
+    /// The file picker for files to send to the session's server.
+    PickSendFiles(u64),
+    /// The folder picker for the editor's download folder.
+    BrowseDownloads,
+    /// Forget the helper pinned for this server (`host:port`).
+    ForgetHelper(String),
 }
 
 pub enum Key {
@@ -697,6 +750,14 @@ pub struct Ui {
     pub panel_pinned: bool,
     /// The floating panel's state and where it was painted.
     panel: panel::PanelState,
+    /// The server helper's cards over the session, as laid out.
+    helper_ov: helper::Overlay,
+    /// Files dragged over the window (the app counts them).
+    pub dropping: usize,
+    /// Servers with a paired helper (`host:port`; the app fills it in).
+    pub helper_pins: std::collections::HashSet<String>,
+    /// Asking to forget a paired helper: server id and host.
+    pub forget: Option<(String, String)>,
 }
 
 /// Title-row geometry in physical pixels for the frame hook.
@@ -787,6 +848,10 @@ impl Ui {
             tip: None,
             panel_pinned: true,
             panel: Default::default(),
+            helper_ov: Default::default(),
+            dropping: 0,
+            helper_pins: Default::default(),
+            forget: None,
         };
         m.fields[Field::Password as usize] = TextField::secret();
         m.fields[Field::Master as usize] = TextField::secret();
@@ -875,6 +940,7 @@ impl Ui {
             redirected_to: None,
             network: None,
             live: Live::default(),
+            helper: HelperView::default(),
         });
         self.active = Some(id);
         self.session_focus = false;
@@ -1906,6 +1972,24 @@ impl Ui {
             Hit::ExitConfirm => return Some(Action::Quit),
             Hit::ExitCancel => self.confirm_exit = None,
             Hit::Modal => {}
+            Hit::HelperPair(_)
+            | Hit::HelperNoPair(_)
+            | Hit::LinkOpen(_)
+            | Hit::LinkAlways(_)
+            | Hit::LinkIgnore(_)
+            | Hit::OfferSave(..)
+            | Hit::OfferDecline(..)
+            | Hit::TransferCancel(..)
+            | Hit::TransferShow(..)
+            | Hit::TransfersClear(_)
+            | Hit::SendFiles(_)
+            | Hit::ShowTransfers(_)
+            | Hit::ForgetHelper(_)
+            | Hit::FormHelper(_)
+            | Hit::FormDownloads
+            | Hit::FormForgetHelper
+            | Hit::ForgetOk
+            | Hit::ForgetCancel => return self.activate_helper(hit),
             Hit::TabWinKeys(id, i) => {
                 let t = self.tab_mut(id)?;
                 t.win_keys = WinKeys::ALL[i];
@@ -2279,8 +2363,18 @@ impl Ui {
             }
             return None;
         }
+        if self.forget.is_some() {
+            return match k {
+                Key::Esc => self.activate_helper(Hit::ForgetCancel),
+                Key::Enter => self.activate_helper(Hit::ForgetOk),
+                _ => None,
+            };
+        }
         if self.palette.is_some() {
             return self.palette_key(k);
+        }
+        if let Some(done) = self.helper_key(&k) {
+            return done;
         }
         if let Key::ToggleSidebar = k {
             return self.toggle_sidebar();
@@ -2442,6 +2536,9 @@ impl Ui {
         if self.palette.is_some() && self.confirm_exit.is_none() {
             self.paint_palette(cv, te, f);
             self.toolbar_clear();
+        }
+        if let Some((_, host)) = self.forget.clone() {
+            self.paint_forget_confirm(cv, te, f, &host);
         }
         if let Some(n) = self.confirm_exit {
             self.paint_exit_confirm(cv, te, f, n);
@@ -2637,7 +2734,7 @@ impl Ui {
         }
         let room = Rect::new(bar.x + p(14.0), bar.y, bar.w - rw - p(40.0), bar.h);
         let cy = bar.y + bar.h / 2;
-        if self.session_focus && self.active.is_some() {
+        if self.keys_to_session() && self.active.is_some() {
             let d = p(14.0);
             k.icon(Icon::Keyboard, room.x, cy - d / 2, 14.0, c.accent);
             let x = room.x + p(22.0);
@@ -5384,7 +5481,8 @@ impl Ui {
             &add,
             Hit::FormAddDrive,
         );
-        y + heights.iter().sum::<i32>()
+        let y = y + heights.iter().sum::<i32>();
+        self.form_helper(cv, te, f, x, y, w)
     }
 
     /// The panel's device card (hits carry the session id).
@@ -6101,6 +6199,8 @@ impl Ui {
         let s = self.scale;
         let p = |v: f32| (v * s).round() as i32;
         let c = pal();
+        // Files with the server first: what is moving now matters most.
+        y = self.page_sharing_transfers(cv, te, f, x, y, w, id);
         let rows = [
             (
                 Icon::Clipboard,
@@ -6571,6 +6671,7 @@ impl Ui {
             }
         }
         y += count as i32 * p(40.0) + p(24.0);
+        y = self.page_session_helper(cv, te, f, x, y, w, id);
 
         self.caption(cv, te, f, x, y, w, "Windows keys (Win, Alt+Tab)");
         y += p(26.0);
