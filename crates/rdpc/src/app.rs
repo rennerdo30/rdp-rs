@@ -59,6 +59,8 @@ pub enum UserEvent {
     UpToDate(Result<(), String>),
     /// Installing an update: the setup started (rdpc closes), or it failed.
     UpdateStarted(Result<(), String>),
+    /// Time for a throttled Home thumbnail of a session (sent once).
+    Thumb(u64),
 }
 
 /// Automatic reconnect attempts after a network drop, and the wait before each.
@@ -1127,6 +1129,17 @@ impl App {
             &mut self.te,
             &self.fonts,
         );
+        // The Home view just showed (or changed layout): pictures of the
+        // sessions that ran meanwhile, then paint them.
+        let need = m.ui.thumbs_needed();
+        if !need.is_empty() {
+            make_thumbs(&mut m.ui, &self.sessions, &need);
+            m.ui.paint(
+                &mut Canvas::new(&mut m.scratch, w, h),
+                &mut self.te,
+                &self.fonts,
+            );
+        }
         if let Some((id, area)) = m.ui.session_area
             && let Some(worker) = self.sessions.get(&id).and_then(|s| s.worker.as_ref())
         {
@@ -1538,10 +1551,44 @@ impl App {
         {
             let _ = t.join();
         }
+        if let Some(m) = &mut self.win
+            && state != TabState::Connecting
+        {
+            // Its saved connection keeps when and how long it ran.
+            m.ui.session_ended(id);
+        }
         if let Some(t) = self.win.as_mut().and_then(|w| w.ui.tab_mut(id)) {
             t.state = state;
         }
         self.dirty();
+    }
+
+    /// A session reported damage: refresh its Home thumbnail now, or once
+    /// after the throttle, or not at all while Home is hidden.
+    fn thumb_frame(&mut self, id: u64) {
+        let Some(m) = &mut self.win else { return };
+        if self.sessions.get(&id).is_some_and(|s| s.rail.is_some()) {
+            return;
+        }
+        match m.ui.thumb_due(id) {
+            ui::ThumbDue::No => {}
+            ui::ThumbDue::Now => {
+                self.make_thumb(id);
+                self.dirty();
+            }
+            ui::ThumbDue::After(wait) => {
+                let proxy = self.proxy.clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(wait);
+                    let _ = proxy.send_event(UserEvent::Thumb(id));
+                });
+            }
+        }
+    }
+
+    fn make_thumb(&mut self, id: u64) {
+        let Some(m) = &mut self.win else { return };
+        make_thumbs(&mut m.ui, &self.sessions, &[id]);
     }
 
     /// Shows the remote cursor while the pointer is over a session picture,
@@ -1602,6 +1649,23 @@ impl App {
         let fx = (x - area.x).clamp(0, fb.0 as i32 - 1) as u16;
         let fy = (y - area.y).clamp(0, fb.1 as i32 - 1) as u16;
         Some((id, fx, fy))
+    }
+}
+
+/// Makes the Home thumbnails of these sessions from their framebuffers.
+fn make_thumbs(ui: &mut Ui, sessions: &HashMap<u64, Session>, ids: &[u64]) {
+    let Some((tw, th)) = ui.thumb_target() else {
+        return;
+    };
+    for &id in ids {
+        let Some(worker) = sessions.get(&id).and_then(|s| s.worker.as_ref()) else {
+            continue;
+        };
+        let pic = {
+            let sh = worker.shared.lock().unwrap();
+            crate::thumb::of_framebuffer(&sh.fb, tw, th)
+        };
+        ui.set_thumb(id, pic);
     }
 }
 
@@ -1777,6 +1841,13 @@ impl ApplicationHandler<UserEvent> for App {
     fn user_event(&mut self, el: &ActiveEventLoop, event: UserEvent) {
         let (id, ev) = match event {
             UserEvent::Session(id, ev) => (id, ev),
+            UserEvent::Thumb(id) => {
+                if self.win.as_mut().is_some_and(|m| m.ui.thumb_tick(id)) {
+                    self.make_thumb(id);
+                    self.dirty();
+                }
+                return;
+            }
             UserEvent::Vault(r) => {
                 self.vault_result(r);
                 return self.dirty();
@@ -1926,6 +1997,9 @@ impl ApplicationHandler<UserEvent> for App {
             }
         };
         let active = self.win.as_ref().and_then(|w| w.ui.active) == Some(id);
+        if matches!(ev, session::Event::Frame) {
+            self.thumb_frame(id);
+        }
         match ev {
             session::Event::Connected(info) => {
                 let mut layout = None;
@@ -1934,6 +2008,9 @@ impl ApplicationHandler<UserEvent> for App {
                     let keys = s.keys.get_mut();
                     keys.connected(info.unicode_input());
                     layout = Some(keys.sent_layout);
+                }
+                if let Some(m) = &mut self.win {
+                    m.ui.session_started(id);
                 }
                 let mut host = self
                     .sessions
