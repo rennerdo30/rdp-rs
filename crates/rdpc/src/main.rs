@@ -21,6 +21,7 @@ mod clipboard;
 mod controls;
 #[cfg(windows)]
 mod frame;
+mod fuzzy;
 #[cfg(windows)]
 mod h264_mf;
 mod icon;
@@ -418,7 +419,7 @@ fn snapshot_ui(path: &str, scale: f32) -> Result<(), Box<dyn std::error::Error>>
     let (w, h) = ((1320.0 * scale) as usize, (860.0 * scale) as usize);
     // Every screen, in the dark theme and again with "-light" in the name.
     type Screen = (&'static str, fn() -> ui::Ui);
-    let screens: [Screen; 25] = [
+    let screens: [Screen; 29] = [
         ("", || ui::sample(false)),
         ("-session", || ui::sample(true)),
         ("-form-general", || ui::sample_form(0)),
@@ -446,6 +447,10 @@ fn snapshot_ui(path: &str, scale: f32) -> Result<(), Box<dyn std::error::Error>>
         ("-ended", || ui::sample_tab_state(1)),
         ("-spanned", || ui::sample_tab_state(3)),
         ("-empty", ui::sample_empty),
+        ("-palette", || ui::sample_palette(false, "")),
+        ("-palette-query", || ui::sample_palette(false, "of")),
+        ("-palette-session", || ui::sample_palette(true, "")),
+        ("-palette-none", || ui::sample_palette(true, "zzq")),
     ];
     for (light, theme) in [("", &theme::DARK), ("-light", &theme::LIGHT)] {
         theme::set(theme);
