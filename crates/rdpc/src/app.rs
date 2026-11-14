@@ -1233,6 +1233,7 @@ impl App {
                 "a" => Key::SelectAll,
                 "v" => Key::Paste(crate::clipboard::read_text()?),
                 "n" => Key::New,
+                "f" => Key::Find,
                 "s" => Key::Save,
                 _ => return None,
             },

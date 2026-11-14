@@ -103,6 +103,8 @@ pub enum Lead {
     None,
     /// A status dot in the tone's colour.
     Dot,
+    /// A dot in a given colour (a group colour).
+    Swatch(u32),
     Icon(Icon),
 }
 
@@ -335,28 +337,13 @@ impl<'a, 'b> Kit<'a, 'b> {
 
     /// A card: surface fill, 1 px border, card radius.
     pub fn card(&mut self, r: Rect) {
-        let p = pal();
-        self.cv
-            .round_border(r, radius::CARD * self.s, p.border, p.surface);
+        card(self.cv, self.s, r);
     }
 
     /// A card with rows of the given heights and dividers between them;
     /// returns the row rectangles.
     pub fn card_rows(&mut self, x: i32, y: i32, w: i32, heights: &[i32]) -> Vec<Rect> {
-        let total: i32 = heights.iter().sum();
-        self.card(Rect::new(x, y, w, total));
-        let inset = self.p(16.0);
-        let mut out = Vec::with_capacity(heights.len());
-        let mut ry = y;
-        for (i, &h) in heights.iter().enumerate() {
-            if i > 0 {
-                self.cv
-                    .fill(Rect::new(x + inset, ry, w - 2 * inset, 1), pal().divider);
-            }
-            out.push(Rect::new(x, ry, w, h));
-            ry += h;
-        }
-        out
+        card_rows(self.cv, self.s, x, y, w, heights)
     }
 
     /// A soft drop shadow around `r` (dialogs and popovers only).
@@ -462,29 +449,7 @@ impl<'a, 'b> Kit<'a, 'b> {
 
     /// The width a button needs for its label and icon.
     pub fn button_width(&mut self, b: &Button) -> i32 {
-        let font = if b.variant == Variant::Primary {
-            Font::Semi
-        } else {
-            Font::Regular
-        };
-        let text = if b.label.is_empty() {
-            0
-        } else {
-            self.measure(font, size::BODY, b.label)
-        };
-        let icon = if b.icon.is_some() {
-            self.p(16.0) + if text > 0 { self.p(7.0) } else { 0 }
-        } else {
-            0
-        };
-        let pad = if b.icon.is_some() && text > 0 {
-            self.p(12.0) + self.p(14.0)
-        } else if text == 0 {
-            self.p(16.0)
-        } else {
-            2 * self.p(14.0)
-        };
-        text + icon + pad
+        button_width(self.te, self.f, self.s, b)
     }
 
     /// A button: fill and border by variant and state, icon then label,
@@ -647,7 +612,7 @@ impl<'a, 'b> Kit<'a, 'b> {
         let tw = self.measure(Font::Semi, 11.5, text);
         let lead_w = match lead {
             Lead::None => 0,
-            Lead::Dot => self.p(12.0),
+            Lead::Dot | Lead::Swatch(_) => self.p(12.0),
             Lead::Icon(_) => self.p(17.0),
         };
         tw + lead_w + self.p(18.0)
@@ -666,12 +631,16 @@ impl<'a, 'b> Kit<'a, 'b> {
         let mut tx = x + self.p(9.0);
         match lead {
             Lead::None => {}
-            Lead::Dot => {
+            Lead::Dot | Lead::Swatch(_) => {
+                let dot = match lead {
+                    Lead::Swatch(c) => c,
+                    _ => tone.color(),
+                };
                 self.cv.fill_circle(
                     (tx + self.p(3.0)) as f32,
                     (y + h / 2) as f32,
                     3.0 * self.s,
-                    tone.color(),
+                    dot,
                 );
                 tx += self.p(12.0);
             }
@@ -726,6 +695,19 @@ impl<'a, 'b> Kit<'a, 'b> {
         );
         let inner = Rect::new(r.x, r.y, r.w, r.h - self.p(1.0));
         self.text_center(Font::Semi, 10.5, inner, key, p.text_secondary);
+        w
+    }
+
+    /// The width of `keys(combo)`.
+    pub fn keys_width(&mut self, combo: &str) -> i32 {
+        let h = self.p(18.0);
+        let mut w = 0;
+        for (i, key) in combo.split('+').enumerate() {
+            if i > 0 {
+                w += self.p(3.0);
+            }
+            w += (self.measure(Font::Semi, 10.5, key) + self.p(10.0)).max(h);
+        }
         w
     }
 
@@ -973,6 +955,58 @@ impl<'a, 'b> Kit<'a, 'b> {
     pub fn control_h(&self) -> i32 {
         self.p(height::CONTROL)
     }
+}
+
+/// A card: surface fill, 1 px border, card radius (no text engine needed).
+pub fn card(cv: &mut Canvas, s: f32, r: Rect) {
+    let p = pal();
+    cv.round_border(r, radius::CARD * s, p.border, p.surface);
+}
+
+/// A card with rows of the given heights and dividers between them;
+/// returns the row rectangles.
+pub fn card_rows(cv: &mut Canvas, s: f32, x: i32, y: i32, w: i32, heights: &[i32]) -> Vec<Rect> {
+    let total: i32 = heights.iter().sum();
+    card(cv, s, Rect::new(x, y, w, total));
+    let inset = (16.0 * s).round() as i32;
+    let mut out = Vec::with_capacity(heights.len());
+    let mut ry = y;
+    for (i, &h) in heights.iter().enumerate() {
+        if i > 0 {
+            cv.fill(Rect::new(x + inset, ry, w - 2 * inset, 1), pal().divider);
+        }
+        out.push(Rect::new(x, ry, w, h));
+        ry += h;
+    }
+    out
+}
+
+/// The width a button needs for its label and icon (physical px).
+pub fn button_width(te: &mut TextEngine, f: &Fonts, s: f32, b: &Button) -> i32 {
+    let p = |v: f32| (v * s).round() as i32;
+    let font = if b.variant == Variant::Primary {
+        f.semi
+    } else {
+        f.ui
+    };
+    let text = if b.label.is_empty() {
+        0
+    } else {
+        te.measure(font, size::BODY * s, b.label).ceil() as i32
+    };
+    let icon = if b.icon.is_some() {
+        p(16.0) + if text > 0 { p(7.0) } else { 0 }
+    } else {
+        0
+    };
+    let pad = if b.icon.is_some() && text > 0 {
+        p(12.0) + p(14.0)
+    } else if text == 0 {
+        p(16.0)
+    } else {
+        2 * p(14.0)
+    };
+    text + icon + pad
 }
 
 /// One or two letters for an avatar: the initials of the first two words,

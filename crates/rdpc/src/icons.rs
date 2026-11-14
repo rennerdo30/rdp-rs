@@ -194,6 +194,24 @@ impl Pen<'_, '_> {
         self.shape(&v);
     }
 
+    /// Fills the pixels whose centre (in grid units) passes `inside`; the
+    /// outline stroke drawn with it gives the anti-aliased edge.
+    fn fill_where(&mut self, inside: impl Fn((f32, f32)) -> bool) {
+        let side = (16.0 * self.k).ceil() as i32;
+        let (x0, y0) = (self.x.floor() as i32, self.y.floor() as i32);
+        for py in y0..y0 + side {
+            for px in x0..x0 + side {
+                let g = (
+                    (px as f32 + 0.5 - self.x) / self.k,
+                    (py as f32 + 0.5 - self.y) / self.k,
+                );
+                if inside(g) {
+                    self.cv.fill(ffwd_render::Rect::new(px, py, 1, 1), self.color);
+                }
+            }
+        }
+    }
+
     fn fill_rrect(&mut self, x: f32, y: f32, w: f32, h: f32, r: f32) {
         let (px, py) = self.pt((x, y));
         let rect = ffwd_render::Rect::new(
@@ -243,7 +261,6 @@ pub fn draw(cv: &mut Canvas, icon: Icon, x: f32, y: f32, size: f32, color: u32) 
                 let (c, s) = (a.cos(), a.sin());
                 p.line(&[(8.0 + 5.2 * c, 8.0 + 5.2 * s), (8.0 + 6.1 * c, 8.0 + 6.1 * s)]);
             }
-            p.w = w;
         }
         Icon::Play => p.fill_tri((4.5, 2.8), (13.2, 8.0), (4.5, 13.2)),
         Icon::Stop => p.fill_rrect(3.5, 3.5, 9.0, 9.0, 1.8),
@@ -465,14 +482,23 @@ pub fn draw(cv: &mut Canvas, icon: Icon, x: f32, y: f32, size: f32, color: u32) 
             }
         }
         Icon::Moon => {
-            let mut v = Pen::arc_pts((8.0, 8.0), 5.8, 5.8, 45.0, 315.0);
-            // Inner edge: a smaller circle to the right, back to the start.
-            let (cx, cy) = (13.4, 8.0);
-            let r = ((12.1f32 - cx).powi(2) + (3.9f32 - cy).powi(2)).sqrt();
-            let a0 = (3.9f32 - cy).atan2(12.1 - cx).to_degrees();
-            let a1 = (12.1f32 - cy).atan2(12.1 - cx).to_degrees();
-            v.extend(Pen::arc_pts((cx, cy), r, r, a0 + 360.0, a1).into_iter().skip(1));
-            p.shape(&v);
+            // A solid crescent: a disc minus a smaller one at its upper right.
+            let (o, ro) = ((8.0f32, 8.4f32), 5.6f32);
+            let (i, ri) = ((11.4f32, 5.2f32), 4.2f32);
+            let dist = |a: (f32, f32), b: (f32, f32)| ((a.0 - b.0).powi(2) + (a.1 - b.1).powi(2)).sqrt();
+            let ring = |c: (f32, f32), r: f32| -> Vec<(f32, f32)> {
+                (0..=180)
+                    .map(|k| {
+                        let a = (-43.0 + k as f32 * 2.0).to_radians();
+                        (c.0 + r * a.cos(), c.1 + r * a.sin())
+                    })
+                    .collect()
+            };
+            let outer: Vec<_> = ring(o, ro).into_iter().filter(|&q| dist(q, i) >= ri).collect();
+            let inner: Vec<_> = ring(i, ri).into_iter().filter(|&q| dist(q, o) <= ro).collect();
+            p.line(&outer);
+            p.line(&inner);
+            p.fill_where(|q| dist(q, o) < ro && dist(q, i) > ri);
         }
         Icon::Contrast => {
             p.circle((8.0, 8.0), 6.0);

@@ -150,6 +150,10 @@ pub struct Group {
     pub options: SessionOptions,
     /// Sections taken from the parent group.
     pub inherit: Inherit,
+    /// Colour (index into `theme::GROUP_COLORS`); None: the parent's, or
+    /// one picked from the name.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub color: Option<u8>,
 }
 
 impl Group {
@@ -691,6 +695,34 @@ impl Store {
 
     pub fn group_index(&self, path: &str) -> Option<usize> {
         self.groups.iter().position(|g| g.path == path)
+    }
+
+    /// A group's colour: its own choice, else the nearest parent's, else
+    /// one picked from its top-level name.
+    pub fn group_color(&self, path: &str) -> usize {
+        let n = crate::theme::GROUP_COLORS.len();
+        let mut p = path;
+        while !p.is_empty() {
+            if let Some(c) = self
+                .groups
+                .iter()
+                .find(|g| g.path == p)
+                .and_then(|g| g.color)
+            {
+                return c as usize % n;
+            }
+            p = parent_of(p);
+        }
+        crate::theme::color_for_name(path.split('/').next().unwrap_or(path))
+    }
+
+    /// A connection's colour: its group's, or one picked from its name.
+    pub fn connection_color(&self, c: &Connection) -> usize {
+        if c.group.is_empty() {
+            crate::theme::color_for_name(&c.name)
+        } else {
+            self.group_color(&c.group)
+        }
     }
 
     /// Creates the group and any missing parents.
