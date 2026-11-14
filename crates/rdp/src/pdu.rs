@@ -530,6 +530,18 @@ fn cap(out: &mut Vec<u8>, count: &mut u16, ty: u16, body: &[u8]) {
     *count += 1;
 }
 
+/// Multifragment Update MaxRequestSize (2.2.7.2.6): the reassembly buffer
+/// for one fragmented fast-path update, which "MUST always" hold all of its
+/// fragments. A RemoteFX or NSCodec surface command carries a whole frame in
+/// one update, so the buffer covers the desktop at 16 KiB per 64 x 64 tile
+/// (an uncompressed 32 bpp tile) plus 16 KiB for headers, and never less
+/// than 8 MiB. 7680 x 2160 needs about 64 MiB; 8 MiB made a Windows server
+/// fail its graphics encoding (ERRINFO_GRAPHICSSUBSYSTEMFAILED).
+pub fn max_request_size(width: u16, height: u16) -> u32 {
+    let tiles = u32::from(width).div_ceil(64) * u32::from(height).div_ceil(64);
+    (tiles * 16 * 1024 + 16 * 1024).max(8 * 1024 * 1024)
+}
+
 fn capabilities(
     width: u16,
     height: u16,
@@ -671,7 +683,7 @@ fn capabilities(
     cap(&mut out, &mut n, CAPSTYPE_LARGE_POINTER, &[0x03, 0x00]);
 
     let mut b = Vec::new();
-    b.put_u32(8 * 1024 * 1024);
+    b.put_u32(max_request_size(width, height));
     cap(&mut out, &mut n, CAPSTYPE_MULTIFRAGMENTUPDATE, &b);
 
     if let Some(rc) = rail {
@@ -789,6 +801,23 @@ pub fn error_info_name(code: u32) -> &'static str {
         0x0000_000A => "server requires fresh credentials",
         0x0000_000B => "disconnected by the user on the server",
         0x0000_000C => "logged off by the user",
+        0x112C => "frame acknowledgement too short (ERRINFO_BAD_FRAME_ACK_DATA)",
+        0x112D => {
+            "the server does not support the requested graphics mode (ERRINFO_GRAPHICSMODENOTSUPPORTED)"
+        }
+        0x112E => {
+            "the server's graphics subsystem failed to reset (ERRINFO_GRAPHICSSUBSYSTEMRESETFAILED)"
+        }
+        0x112F => {
+            "the server's graphics subsystem failed and cannot continue encoding (ERRINFO_GRAPHICSSUBSYSTEMFAILED)"
+        }
+        0x1130..=0x1132 => "the server rejected the time zone in the Extended Info Packet",
+        0x1133 => "dynamic virtual channel data error (ERRINFO_VCDECODINGERROR)",
+        0x1134 => "the monitor layout is larger than 32766 pixels (ERRINFO_VIRTUALDESKTOPTOOLARGE)",
+        0x1135 => {
+            "the server rejected the monitor layout (ERRINFO_MONITORGEOMETRYVALIDATIONFAILED)"
+        }
+        0x1136 => "too many monitors (ERRINFO_INVALIDMONITORCOUNT)",
         0x10C9..=0x1195 => "server rejected a client PDU (protocol error, MS-RDPBCGR 2.2.5.1.1)",
         _ => "see MS-RDPBCGR 2.2.5.1.1",
     }
@@ -797,6 +826,31 @@ pub fn error_info_name(code: u32) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn multifragment_buffer_holds_a_whole_frame() {
+        assert_eq!(
+            max_request_size(800, 600),
+            8 * 1024 * 1024,
+            "never below 8 MiB"
+        );
+        // 120 x 34 tiles of 16 KiB, plus 16 KiB.
+        assert_eq!(max_request_size(7680, 2160), 4080 * 16384 + 16384);
+        let pdu = confirm_active(1, 2, 7680, 2160, 0x409, 32, false);
+        let at = pdu
+            .windows(4)
+            .position(|w| w == [26, 0, 8, 0])
+            .expect("multifragment capability set");
+        let size = u32::from_le_bytes(pdu[at + 4..at + 8].try_into().unwrap());
+        assert_eq!(size, max_request_size(7680, 2160));
+    }
+
+    #[test]
+    fn graphics_error_infos_are_named() {
+        assert!(error_info_name(0x112F).contains("GRAPHICSSUBSYSTEMFAILED"));
+        assert!(error_info_name(0x112E).contains("RESETFAILED"));
+        assert!(error_info_name(0x10CA).contains("rejected a client PDU"));
+    }
 
     #[test]
     fn compression_is_advertised() {

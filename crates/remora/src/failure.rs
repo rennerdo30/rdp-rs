@@ -165,6 +165,13 @@ pub fn classify(e: &rdp::Error, step: Option<&ConnectStep>) -> Cause {
     }
 }
 
+/// The server's graphics encoder gave up (MS-RDPBCGR 2.2.5.1.1:
+/// ERRINFO_GRAPHICSMODENOTSUPPORTED, ERRINFO_GRAPHICSSUBSYSTEMRESETFAILED,
+/// ERRINFO_GRAPHICSSUBSYSTEMFAILED). The plain bitmap path may still work.
+pub fn is_graphics_failure(error_info: u32) -> bool {
+    matches!(error_info, 0x0000_112D..=0x0000_112F)
+}
+
 /// A session the server closed: an ordinary end, or a failure, from its
 /// Set Error Info code (MS-RDPBCGR 2.2.5.1.1; 0 = none sent).
 pub fn closed(error_info: u32) -> Outcome {

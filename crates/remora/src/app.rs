@@ -609,6 +609,33 @@ impl App {
         }
     }
 
+    /// The server's graphics encoder failed (ERRINFO_GRAPHICSSUBSYSTEMFAILED
+    /// and its neighbours): connects again once with the plain bitmap path,
+    /// without surface commands (RemoteFX, NSCodec) or drawing orders, and
+    /// keeps that for the tab's later reconnects. False when the tab already
+    /// uses the plain path; the failure screen shows then.
+    fn graphics_fallback(&mut self, id: u64) -> bool {
+        let Some(s) = self.sessions.get_mut(&id) else {
+            return false;
+        };
+        if !s.cfg.surface_commands && !s.cfg.drawing_orders {
+            return false;
+        }
+        s.cfg.surface_commands = false;
+        s.cfg.drawing_orders = false;
+        let cfg = s.cfg.clone();
+        rdp::trace!(
+            "ui: session {id}: the server's graphics failed; connecting again without surface commands and drawing orders"
+        );
+        self.ended(id, TabState::Connecting);
+        self.reconnect_with(id, cfg);
+        self.message(
+            "The server's graphics failed; connecting again in compatible mode…",
+            Tone::Muted,
+        );
+        true
+    }
+
     /// The server moved the running session to another server (MS-RDPBCGR
     /// 3.2.5.13): the tab connects the next hop with its current settings.
     /// The session's saved config stays the original one, so a later
@@ -1000,12 +1027,8 @@ impl App {
                 self.dirty();
             }
             Action::OpenLogFolder => {
-                if let Some(dir) =
-                    crate::settings::log_path().and_then(|p| p.parent().map(|d| d.to_path_buf()))
-                {
-                    let _ = std::fs::create_dir_all(&dir);
-                    // Explorer shows the folder and exits on its own.
-                    let _ = std::process::Command::new("explorer").arg(&dir).spawn();
+                if let Some(log) = crate::settings::log_path() {
+                    show_in_explorer(&log);
                 }
             }
             Action::SetCheckUpdates(on) => {
@@ -2247,6 +2270,9 @@ impl ApplicationHandler<UserEvent> for App {
                     worker.notified.store(false, Ordering::Release);
                 }
             }
+            session::Event::Closed { error_info, .. }
+                if crate::failure::is_graphics_failure(error_info)
+                    && self.graphics_fallback(id) => {}
             session::Event::Closed { why, error_info } => {
                 use crate::failure::{EndReason, Outcome};
                 let (why, outcome) = if why == "disconnected" {
@@ -2912,4 +2938,47 @@ fn winit_theme(choice: ThemeChoice) -> Option<winit::window::Theme> {
 fn apply_theme(choice: ThemeChoice, window: &Window) {
     let light = window.theme() == Some(winit::window::Theme::Light);
     crate::theme::set(choice.palette(light));
+}
+
+/// Opens an Explorer window on `file`'s folder with the file selected (the
+/// folder alone when the file does not exist yet). The request goes to the
+/// running shell process, which has no right to take the foreground, so its
+/// window opened behind Remora; AllowSetForegroundWindow passes our right on.
+fn show_in_explorer(file: &std::path::Path) {
+    let Some(dir) = file.parent() else {
+        return;
+    };
+    let _ = std::fs::create_dir_all(dir);
+    let args = if file.exists() {
+        format!("/select,\"{}\"", file.display())
+    } else {
+        format!("\"{}\"", dir.display())
+    };
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::UI::Shell::ShellExecuteW;
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            AllowSetForegroundWindow, SW_SHOWNORMAL,
+        };
+        let wide = |s: &str| s.encode_utf16().chain([0]).collect::<Vec<u16>>();
+        let (verb, exe, params) = (wide("open"), wide("explorer.exe"), wide(&args));
+        // ASFW_ANY: the shell process may bring its window to the front.
+        unsafe { AllowSetForegroundWindow(u32::MAX) };
+        let r = unsafe {
+            ShellExecuteW(
+                std::ptr::null_mut(),
+                verb.as_ptr(),
+                exe.as_ptr(),
+                params.as_ptr(),
+                std::ptr::null(),
+                SW_SHOWNORMAL,
+            )
+        };
+        // Values up to 32 are errors (ShellExecuteW's documented contract).
+        if r as usize <= 32 {
+            rdp::trace!("ui: Explorer did not start for {args}: code {}", r as usize);
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = std::process::Command::new("xdg-open").arg(dir).spawn();
 }

@@ -83,10 +83,10 @@ fn order_caps() -> Vec<u8> {
 }
 
 /// Revision 2 Bitmap Cache Capability Set body (2.2.7.1.4.2).
-fn bitmap_cache_rev2(persistent: bool) -> Vec<u8> {
+fn bitmap_cache_rev2(persistent: bool, keys_follow: bool) -> Vec<u8> {
     const PERSISTENT_KEYS_EXPECTED_FLAG: u16 = 0x0001;
     let mut b = Vec::new();
-    b.put_u16(if persistent {
+    b.put_u16(if persistent && keys_follow {
         PERSISTENT_KEYS_EXPECTED_FLAG
     } else {
         0
@@ -120,7 +120,7 @@ fn glyph_caps() -> Vec<u8> {
 }
 
 /// The capability sets replacing the bitmap-only ones: (type, body).
-pub fn client_caps(persistent: bool) -> Vec<(u16, Vec<u8>)> {
+pub fn client_caps(persistent: bool, keys_follow: bool) -> Vec<(u16, Vec<u8>)> {
     const BRUSH_COLOR_FULL: u32 = 2;
     let mut offscreen = Vec::new();
     offscreen.put_u32(1);
@@ -128,7 +128,10 @@ pub fn client_caps(persistent: bool) -> Vec<(u16, Vec<u8>)> {
     offscreen.put_u16(OFFSCREEN_CACHE_ENTRIES);
     vec![
         (CAPSTYPE_ORDER, order_caps()),
-        (CAPSTYPE_BITMAPCACHE_REV2, bitmap_cache_rev2(persistent)),
+        (
+            CAPSTYPE_BITMAPCACHE_REV2,
+            bitmap_cache_rev2(persistent, keys_follow),
+        ),
         (CAPSTYPE_BRUSH, BRUSH_COLOR_FULL.to_le_bytes().to_vec()),
         (CAPSTYPE_GLYPHCACHE, glyph_caps()),
         (CAPSTYPE_OFFSCREENCACHE, offscreen),

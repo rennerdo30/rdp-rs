@@ -188,7 +188,10 @@ impl Orders {
 
     /// The client capability sets for drawing orders.
     pub fn client_caps(&self) -> Vec<(u16, Vec<u8>)> {
-        caps::client_caps(self.store.is_some())
+        // PERSISTENT_KEYS_EXPECTED_FLAG promises a Persistent Key List PDU
+        // (2.2.7.1.4.2); set it only when one will follow.
+        let keys = !self.keys_sent && self.persisted_keys.iter().any(|k| !k.is_empty());
+        caps::client_caps(self.store.is_some(), keys)
     }
 
     /// Persistent Key List PDU bodies (MS-RDPBCGR 2.2.1.17) to send once,

@@ -1406,11 +1406,25 @@ fn confirm_active_gets_the_order_and_cache_sets() {
     // Other sets are untouched and in place.
     assert_eq!(before[0], after[0]);
 
-    // With a persistent directory, cache 2 is persistent and keys are expected.
+    // With a persistent directory, cache 2 is persistent; keys are expected
+    // only when a key list will follow.
     let dir = temp_dir("caps");
     let o = Orders::new(Some(&dir));
-    let rev2 = caps::client_caps(o.store.is_some())[1].1.clone();
+    let rev2 = caps::client_caps(o.store.is_some(), true)[1].1.clone();
     assert_eq!(u16::from_le_bytes([rev2[0], rev2[1]]), 1);
+    // An empty cache sends no Persistent Key List PDU, so it promises none.
+    let empty = o.client_caps();
+    let empty = &empty[1].1;
+    assert_eq!(
+        u16::from_le_bytes([empty[0], empty[1]]),
+        0,
+        "no keys, no flag"
+    );
+    assert_eq!(
+        u32::from_le_bytes(empty[12..16].try_into().unwrap()),
+        2560 | 0x8000_0000,
+        "the cache stays persistent"
+    );
     assert_eq!(
         u32::from_le_bytes(rev2[12..16].try_into().unwrap()),
         2560 | 0x8000_0000
