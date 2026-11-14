@@ -581,9 +581,30 @@ impl App {
     }
 
     fn reconnect(&mut self, id: u64) {
-        let Some(mut cfg) = self.sessions.get(&id).map(|s| s.cfg.clone()) else {
+        let Some(cfg) = self.sessions.get(&id).map(|s| s.cfg.clone()) else {
             return;
         };
+        self.reconnect_with(id, cfg);
+        if let Some(t) = self.win.as_mut().and_then(|w| w.ui.tab_mut(id)) {
+            t.redirected_to = None;
+        }
+    }
+
+    /// The server moved the running session to another server (MS-RDPBCGR
+    /// 3.2.5.13): the tab connects the next hop with its current settings.
+    /// The session's saved config stays the original one, so a later
+    /// reconnect goes through the broker again.
+    fn redirected(&mut self, id: u64, cfg: Config, to: String) {
+        rdp::trace!("ui: session {id} redirected to {to}");
+        self.ended(id, TabState::Connecting);
+        self.reconnect_with(id, cfg);
+        if let Some(t) = self.win.as_mut().and_then(|w| w.ui.tab_mut(id)) {
+            t.redirected_to = Some(to.clone());
+        }
+        self.message(format!("Redirected to {to}; connecting…"), theme::TEXT_2);
+    }
+
+    fn reconnect_with(&mut self, id: u64, mut cfg: Config) {
         let opts = self.tab_options(id);
         cfg.scale = self.tab_scale(id);
         if let Some(mut old) = self.sessions.get_mut(&id).and_then(|s| s.worker.take()) {
@@ -600,6 +621,7 @@ impl App {
         self.rail_reset(id);
         if let Some(t) = self.win.as_mut().and_then(|w| w.ui.tab_mut(id)) {
             t.state = TabState::Connecting;
+            t.network = None; // measured again by the new connection
         }
         // The new session gets the settings the tab had.
         self.apply_options(id, &opts);
@@ -1836,20 +1858,23 @@ impl ApplicationHandler<UserEvent> for App {
                 if let Some(s) = self.sessions.get_mut(&id) {
                     s.retries = 0;
                 }
+                let mut host = self
+                    .sessions
+                    .get(&id)
+                    .map_or(String::new(), |s| s.cfg.host.clone());
                 if let Some(t) = self.win.as_mut().and_then(|w| w.ui.tab_mut(id)) {
                     t.state = TabState::Connected {
                         width: info.width,
                         height: info.height,
                         bpp: info.bpp,
                     };
+                    // After a redirection the session runs on the target.
+                    if let Some(to) = &t.redirected_to {
+                        host = to.clone();
+                    }
                 }
                 self.message(
-                    format!(
-                        "Connected: {} ({}×{}).",
-                        self.sessions.get(&id).map_or("", |s| s.cfg.host.as_str()),
-                        info.width,
-                        info.height
-                    ),
+                    format!("Connected: {host} ({}×{}).", info.width, info.height),
                     theme::TEXT_2,
                 );
             }
@@ -1920,6 +1945,13 @@ impl ApplicationHandler<UserEvent> for App {
             }
             session::Event::Failed(why) => self.ended(id, TabState::Failed(why)),
             session::Event::Dropped { why, cookie } => self.dropped(id, why, cookie),
+            session::Event::Redirected { cfg, to } => self.redirected(id, *cfg, to),
+            session::Event::Network(n) => {
+                if let Some(t) = self.win.as_mut().and_then(|w| w.ui.tab_mut(id)) {
+                    t.network = n.summary();
+                }
+                self.dirty();
+            }
         }
     }
 

@@ -313,7 +313,10 @@ impl Default for Quality {
 }
 
 /// The speed presets offered in the form: (connection type, label).
-pub const PRESETS: [(u8, &str); 5] = [
+/// 7 is CONNECTION_TYPE_AUTODETECT (MS-RDPBCGR 2.2.1.3.2): the server
+/// measures the link (network auto-detect, 2.2.14).
+pub const PRESETS: [(u8, &str); 6] = [
+    (7, "Detect automatically"),
     (6, "LAN"),
     (5, "WAN"),
     (4, "Broadband"),

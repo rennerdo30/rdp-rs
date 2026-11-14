@@ -25,6 +25,11 @@ pub enum ConnectionType {
     /// 10 Mbps or more.
     #[default]
     Lan = 6,
+    /// CONNECTION_TYPE_AUTODETECT: the server measures the link and picks
+    /// the desktop features itself (2.2.1.3.2). The client then advertises
+    /// RNS_UD_CS_SUPPORT_NETCHAR_AUTODETECT and the message channel, and
+    /// answers the server's measurements (2.2.14, [`crate::autodetect`]).
+    Auto = 7,
 }
 
 impl ConnectionType {
@@ -36,6 +41,7 @@ impl ConnectionType {
             4 => ConnectionType::BroadbandHigh,
             5 => ConnectionType::Wan,
             6 => ConnectionType::Lan,
+            7 => ConnectionType::Auto,
             _ => return None,
         })
     }
@@ -92,7 +98,9 @@ impl Experience {
             cursor_shadow: false,
         };
         match c {
-            ConnectionType::Lan | ConnectionType::Wan => all,
+            // Auto: the server overrides the flags once it has measured the
+            // link (2.2.1.3.2); until then, and if it cannot, everything is on.
+            ConnectionType::Lan | ConnectionType::Wan | ConnectionType::Auto => all,
             ConnectionType::BroadbandHigh => Experience {
                 wallpaper: false,
                 animations: false,
@@ -184,6 +192,8 @@ mod tests {
         assert!(count(ConnectionType::Lan) > count(ConnectionType::BroadbandHigh));
         assert!(count(ConnectionType::BroadbandHigh) > count(ConnectionType::BroadbandLow));
         assert_eq!(count(ConnectionType::Modem), 0);
+        assert_eq!(ConnectionType::from_u8(7), Some(ConnectionType::Auto));
+        assert_eq!(ConnectionType::from_u8(8), None);
         assert_eq!(
             ConnectionType::from_u8(4),
             Some(ConnectionType::BroadbandHigh)
