@@ -326,8 +326,9 @@ impl Framer {
     }
 }
 
-/// Length of the TPKT or fast-path PDU at the start of `b`, once known.
-fn frame_len(b: &[u8]) -> Result<Option<usize>> {
+/// Length of the TPKT or fast-path PDU at the start of `b`, once known. The
+/// server uses it for fast-path input too: the same header layout.
+pub(crate) fn frame_len(b: &[u8]) -> Result<Option<usize>> {
     let Some(&first) = b.first() else {
         return Ok(None);
     };

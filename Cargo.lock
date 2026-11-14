@@ -1773,6 +1773,7 @@ version = "0.1.0-beta.6"
 dependencies = [
  "ring",
  "rustls",
+ "zeroize",
 ]
 
 [[package]]

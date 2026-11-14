@@ -23,6 +23,8 @@
 //! - [`audin`]: microphone redirection on the `AUDIO_INPUT` dynamic channel (MS-RDPEAI)
 //! - [`rail`]: RemoteApp, the `rail` channel and window orders (MS-RDPERP)
 //! - [`rdpei`]: touch and pen input on the `Microsoft::Windows::RDS::Input` dynamic channel (MS-RDPEI)
+//! - [`server`]: the server side for Remora Host: TLS, the connection sequence,
+//!   bitmap updates and input (MS-RDPBCGR)
 //! - [`rdpdr`]: device redirection (MS-RDPEFS) with shared drives, printers (MS-RDPEPC) and smart cards (MS-RDPESC)
 
 pub mod audin;
@@ -60,6 +62,7 @@ pub mod rdpdr;
 pub mod rdpei;
 pub mod rdpsnd;
 pub mod redirect;
+pub mod server;
 pub mod surfcmd;
 pub mod transport;
 pub mod x224;
