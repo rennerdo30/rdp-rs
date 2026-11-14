@@ -55,7 +55,7 @@ fn gcc_client_data_carries_the_monitor_blocks() {
     let mut s = crate::gcc::ClientSettings {
         width: d.width as u16,
         height: d.height as u16,
-        keyboard_layout: 0x409,
+        keyboard: &crate::KeyboardInfo::default(),
         client_name: "TEST",
         selected_protocol: 3,
         scale: 100,

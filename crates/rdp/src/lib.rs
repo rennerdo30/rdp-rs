@@ -80,7 +80,7 @@ pub use framebuffer::{Damage, Framebuffer};
 pub use gateway::GatewayConfig;
 pub use gfx::Graphics;
 pub use gfx::h264::{H264Decoder, H264Factory, Yuv420Frame};
-pub use input::InputEvent;
+pub use input::{InputEvent, KeyboardInfo};
 pub use log::set_verbose;
 pub use monitor::{Monitor, Orientation, VirtualDesktop};
 pub use pdu::AutoReconnectCookie;

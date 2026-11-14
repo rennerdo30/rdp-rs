@@ -39,7 +39,9 @@ const RNS_UD_CS_SUPPORT_NETCHAR_AUTODETECT: u16 = 0x0080;
 pub struct ClientSettings<'a> {
     pub width: u16,
     pub height: u16,
-    pub keyboard_layout: u32,
+    /// keyboardLayout, keyboardType, keyboardSubType, keyboardFunctionKey,
+    /// imeFileName.
+    pub keyboard: &'a crate::KeyboardInfo,
     pub client_name: &'a str,
     pub selected_protocol: u32,
     /// Desktop scale in percent (100..=500), as Windows' display scaling.
@@ -86,13 +88,13 @@ pub fn client_data_blocks(s: &ClientSettings) -> Vec<u8> {
     core.put_u16(s.height);
     core.put_u16(RNS_UD_COLOR_8BPP);
     core.put_u16(RNS_UD_SAS_DEL);
-    core.put_u32(s.keyboard_layout);
+    core.put_u32(s.keyboard.layout); // keyboardLayout
     core.put_u32(22621); // clientBuild
     core.put_bytes(&fixed_utf16(s.client_name, 32));
-    core.put_u32(4); // keyboardType: IBM enhanced (101/102)
-    core.put_u32(0); // keyboardSubType
-    core.put_u32(12); // keyboardFunctionKey
-    core.put_zeros(64); // imeFileName
+    core.put_u32(s.keyboard.kind); // keyboardType
+    core.put_u32(s.keyboard.subtype); // keyboardSubType
+    core.put_u32(s.keyboard.function_keys); // keyboardFunctionKey
+    core.put_bytes(&s.keyboard.ime_file_name_field()); // imeFileName
     core.put_u16(RNS_UD_COLOR_8BPP); // postBeta2ColorDepth
     core.put_u16(1); // clientProductId
     core.put_u32(0); // serialNumber
@@ -279,7 +281,7 @@ mod tests {
         let s = ClientSettings {
             width: 1024,
             height: 768,
-            keyboard_layout: 0x409,
+            keyboard: &crate::KeyboardInfo::default(),
             client_name: "TEST",
             selected_protocol: 3,
             scale: 150,
@@ -341,6 +343,41 @@ mod tests {
         assert_eq!(b[210], 6, "CONNECTION_TYPE_LAN");
         assert_eq!(&a[a.len() - 20..a.len() - 12], &msg);
         assert_eq!(cluster(&auto), (0x4F, 2));
+    }
+
+    #[test]
+    fn core_block_carries_the_keyboard() {
+        let kb = crate::KeyboardInfo {
+            layout: 0x0001_0409,
+            kind: 7,
+            subtype: 2,
+            function_keys: 12,
+            ime_file_name: "IMJP.IME".into(),
+        };
+        let s = ClientSettings {
+            width: 1024,
+            height: 768,
+            keyboard: &kb,
+            client_name: "TEST",
+            selected_protocol: 3,
+            scale: 100,
+            color_depth: 32,
+            connection_type: crate::ConnectionType::Lan,
+            channels: &[],
+            gfx: false,
+            monitors: None,
+            redirected_session_id: None,
+            redirected_smartcard: false,
+        };
+        let b = client_data_blocks(&s);
+        let u32_at = |o: usize| u32::from_le_bytes(b[o..o + 4].try_into().unwrap());
+        // After the 4-byte block header (2.2.1.3.2): keyboardLayout at 12,
+        // keyboardType, keyboardSubType, keyboardFunctionKey at 52..64, then
+        // imeFileName (64 bytes).
+        assert_eq!(u32_at(16), 0x0001_0409);
+        assert_eq!((u32_at(56), u32_at(60), u32_at(64)), (7, 2, 12));
+        assert_eq!(&b[68..72], &[b'I', 0, b'M', 0]);
+        assert_eq!(&b[84..132], &[0; 48]);
     }
 
     /// Server data with SC_CORE, SC_NET and SC_MCS_MSGCHANNEL (2.2.1.4.5).

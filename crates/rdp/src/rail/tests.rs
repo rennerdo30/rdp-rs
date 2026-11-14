@@ -1042,7 +1042,15 @@ fn confirm_active_carries_rail_caps() {
         (caps.window.icon_caches, caps.window.icon_cache_entries),
         (2, 12)
     );
-    let pdu = crate::pdu::confirm_active_with(1, 2, (640, 480), 0x409, 32, false, Some(&caps));
+    let pdu = crate::pdu::confirm_active_with(
+        1,
+        2,
+        (640, 480),
+        &crate::KeyboardInfo::default(),
+        32,
+        false,
+        Some(&caps),
+    );
     let rail_at = pdu.windows(4).position(|w| w == [0x17, 0, 8, 0]).unwrap();
     assert_eq!(&pdu[rail_at + 4..rail_at + 8], &[0xC1, 0, 0, 0]);
     let win_at = pdu.windows(4).position(|w| w == [0x18, 0, 11, 0]).unwrap();

@@ -61,7 +61,9 @@ pub struct Config {
     pub width: u16,
     pub height: u16,
     pub client_name: String,
-    pub keyboard_layout: u32,
+    /// The client keyboard (layout, type, IME) the session is set up for
+    /// (MS-RDPBCGR 2.2.1.3.2, 2.2.7.1.6); US English by default.
+    pub keyboard: crate::KeyboardInfo,
     /// Desktop scale in percent (100..=500), like Windows' display scaling.
     pub scale: u32,
     /// Bound on every step of the connection sequence.
@@ -136,7 +138,7 @@ impl Config {
             width: 1280,
             height: 800,
             client_name: "RDP-RS".into(),
-            keyboard_layout: 0x0409,
+            keyboard: crate::KeyboardInfo::default(),
             scale: 100,
             timeout: Duration::from_secs(20),
             auto_reconnect: None,
@@ -171,6 +173,17 @@ pub struct ConnectionInfo {
     pub width: u16,
     pub height: u16,
     pub bpp: u16,
+    /// inputFlags of the server's Input Capability Set (MS-RDPBCGR
+    /// 2.2.7.1.6); 0 when it sent none.
+    pub input_flags: u16,
+}
+
+impl ConnectionInfo {
+    /// The server takes Unicode keyboard events (INPUT_FLAG_UNICODE); without
+    /// it [`crate::InputEvent::Unicode`] MUST NOT be sent.
+    pub fn unicode_input(&self) -> bool {
+        self.input_flags & crate::input::INPUT_FLAG_UNICODE != 0
+    }
 }
 
 #[derive(Debug, Default)]
@@ -259,7 +272,7 @@ pub struct Client {
     user_id: u16,
     io_channel: u16,
     share_id: u32,
-    keyboard_layout: u32,
+    keyboard: crate::KeyboardInfo,
     color_depth: u16,
     fb: Framebuffer,
     fastpath: Reassembler,
@@ -689,7 +702,7 @@ impl Client {
         let settings = gcc::ClientSettings {
             width,
             height,
-            keyboard_layout: cfg.keyboard_layout,
+            keyboard: &cfg.keyboard,
             client_name: &cfg.client_name,
             selected_protocol: protocol,
             scale: cfg.scale,
@@ -846,7 +859,7 @@ impl Client {
             user_id,
             io_channel: io,
             share_id: demand.share_id,
-            keyboard_layout: cfg.keyboard_layout,
+            keyboard: cfg.keyboard.clone(),
             color_depth: crate::experience::valid_color_depth(cfg.color_depth),
             fb: Framebuffer::new(demand.width as usize, demand.height as usize),
             fastpath: Reassembler::default(),
@@ -859,6 +872,7 @@ impl Client {
                 width: demand.width,
                 height: demand.height,
                 bpp: demand.bpp,
+                input_flags: demand.input_flags.unwrap_or(0),
             },
             active: false,
             last_error_info: 0,
@@ -916,7 +930,7 @@ impl Client {
             demand.share_id,
             self.user_id,
             (demand.width, demand.height),
-            self.keyboard_layout,
+            &self.keyboard,
             self.color_depth,
             self.bulk.max() != Compression::Off,
             rail_caps.as_ref(),
@@ -1159,6 +1173,7 @@ impl Client {
                     self.info.width = demand.width;
                     self.info.height = demand.height;
                     self.info.bpp = demand.bpp;
+                    self.info.input_flags = demand.input_flags.unwrap_or(0);
                     self.active = false;
                     self.activate(&demand)?;
                 }

@@ -419,7 +419,7 @@ impl App {
         // Auto scale follows this PC's Windows scaling.
         cfg.scale = opts.scale.unwrap_or_else(|| self.auto_scale());
         cfg.verify_certificate = Some(certificate_check(self.proxy.clone(), self.next_id));
-        cfg.keyboard_layout = crate::keyhook::local_layout();
+        cfg.keyboard.layout = crate::keyhook::local_layout();
         // Picture quality is fixed at logon; reconnects keep this config.
         opts.quality.apply(&mut cfg);
         // RemoteApp: the desktop is all monitors; apps get their own windows.
