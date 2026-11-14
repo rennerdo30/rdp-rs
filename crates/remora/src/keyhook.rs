@@ -7,11 +7,12 @@
 //! low-level keyboard hook takes them first, hands their scancodes to Remora
 //! and keeps them from the local shell. Everything else passes untouched.
 //!
-//! The hook runs on its own thread with its own message loop. On the window
-//! thread a busy frame (connecting, a large picture) delayed it past the
-//! low-level hook timeout, and Windows then removes such a hook silently
-//! for good: the local shell got the Windows key while Remora also sent it
-//! on, and both Start menus opened (RDP-53).
+//! The hook runs on its own thread with its own message loop, and like
+//! mstsc it is hooked afresh each time the session takes the keyboard and
+//! unhooked when it lets go. Hooked once at start, it was never called
+//! while Remora's window was in front (the log showed no hook call at all
+//! then), so the local shell kept the Windows key (RDP-53). A fresh hook is
+//! the newest, and the newest low-level hook is called first.
 
 #[cfg(windows)]
 mod imp {
@@ -38,6 +39,8 @@ mod imp {
     static THREAD: OnceLock<u32> = OnceLock::new();
     /// Posted to the hook thread: unhook and hook again.
     const REINSTALL: u32 = WM_APP + 1;
+    /// Posted to the hook thread: unhook.
+    const UNHOOK: u32 = WM_APP + 2;
     /// Diagnostics (RDP-53): hook calls so far, and when the last one ran
     /// (milliseconds since the process started).
     static CALLS: AtomicU64 = AtomicU64::new(0);
@@ -88,9 +91,10 @@ mod imp {
             .spawn(move || {
                 // SAFETY: plain call.
                 let _ = THREAD.set(unsafe { GetCurrentThreadId() });
-                let mut h = hook();
-                rdp::trace!("keyhook: installed on its own thread ({})", !h.is_null());
-                let _ = ready_tx.send(!h.is_null());
+                // Hooked only while the session has the keyboard (set_active).
+                let mut h: HHOOK = std::ptr::null_mut();
+                rdp::trace!("keyhook: thread ready");
+                let _ = ready_tx.send(true);
                 // SAFETY: this thread's message loop; the hook procedure is
                 // called from inside GetMessageW.
                 unsafe {
@@ -101,7 +105,15 @@ mod imp {
                                 UnhookWindowsHookEx(h);
                             }
                             h = hook();
-                            rdp::trace!("keyhook: reinstalled ({})", !h.is_null());
+                            rdp::trace!("keyhook: hooked ({})", !h.is_null());
+                            continue;
+                        }
+                        if msg.hwnd.is_null() && msg.message == UNHOOK {
+                            if !h.is_null() {
+                                UnhookWindowsHookEx(h);
+                                h = std::ptr::null_mut();
+                                rdp::trace!("keyhook: unhooked");
+                            }
                             continue;
                         }
                         DispatchMessageW(&msg);
@@ -114,17 +126,24 @@ mod imp {
                 .unwrap_or(false)
     }
 
-    /// Hooks again (Windows may have dropped the hook without telling).
-    pub fn reinstall() {
+    fn post(message: u32) {
         if let Some(&tid) = THREAD.get() {
             // SAFETY: posting to our hook thread's queue.
-            unsafe { PostThreadMessageW(tid, REINSTALL, 0, 0) };
+            unsafe { PostThreadMessageW(tid, message, 0, 0) };
         }
     }
 
+    /// Hooks again (Windows may have dropped the hook without telling).
+    pub fn reinstall() {
+        post(REINSTALL);
+    }
+
+    /// The session takes the keyboard (hook afresh, as mstsc does on focus)
+    /// or lets go (unhook).
     pub fn set_active(on: bool) {
         if ACTIVE.swap(on, Ordering::Relaxed) != on {
             rdp::trace!("keyhook: {}", if on { "takes Windows keys" } else { "off" });
+            post(if on { REINSTALL } else { UNHOOK });
         }
     }
 
