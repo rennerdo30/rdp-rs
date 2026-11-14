@@ -14,7 +14,7 @@ use crate::store::{
     Store, WinKeys, default_app_name, normalize_path, parent_of, preset_name,
 };
 use crate::text_field::TextField;
-use crate::theme::*;
+use crate::theme::{ThemeChoice, Tone, pal};
 
 pub struct Fonts {
     pub ui: FontId,
@@ -165,6 +165,9 @@ pub enum Hit {
     /// Settings: update channel (index into CHANNELS) and Check now.
     UpdateChannel(usize),
     CheckNow,
+    /// Settings: theme (index into ThemeChoice::ALL); sidebar: dark/light toggle.
+    Theme(usize),
+    ThemeToggle,
     /// Monitor map in the editor: toggle a monitor (index into `local_monitors`).
     FormMonitor(usize),
     /// Microphone device: index into `mics` + 1 (0 = default); form and panel.
@@ -289,12 +292,12 @@ pub enum TabState {
 }
 
 impl TabState {
-    fn color(&self) -> u32 {
+    fn tone(&self) -> Tone {
         match self {
-            TabState::Connecting => WARN,
-            TabState::Connected { .. } => OK,
-            TabState::Ended(_) => TEXT_4,
-            TabState::Failed(_) => ERR,
+            TabState::Connecting => Tone::Warning,
+            TabState::Connected { .. } => Tone::Success,
+            TabState::Ended(_) => Tone::Muted,
+            TabState::Failed(_) => Tone::Danger,
         }
     }
 }
@@ -438,6 +441,8 @@ pub enum Action {
     OpenLogFolder,
     SetUpdateChannel(String),
     CheckUpdatesNow,
+    /// Colour theme (Settings, or the sidebar's theme button).
+    SetTheme(ThemeChoice),
     SetRemember(bool),
     ChangeMaster {
         current: zeroize::Zeroizing<String>,
@@ -543,10 +548,12 @@ pub struct Ui {
     pub remembered: bool,
     pub diagnostic_log: bool,
     pub update_channel: String,
+    /// Colour theme choice (the app applies the palette).
+    pub theme: ThemeChoice,
     /// Settings: the change-master form is open; a backup waits for its password.
     change_master: bool,
     pub import_file: Option<std::path::PathBuf>,
-    pub settings_note: Option<(String, u32)>,
+    pub settings_note: Option<(String, Tone)>,
     /// Asking whether to quit while this many sessions are open.
     pub confirm_exit: Option<usize>,
     /// Keyboard goes to the active session (set by clicking into it).
@@ -557,7 +564,7 @@ pub struct Ui {
     press: Option<Hit>,
     hits: Vec<(Rect, Hit)>,
     field_rects: Vec<(Field, Rect)>,
-    message: Option<(String, u32)>,
+    message: Option<(String, Tone)>,
     pub scale: f32,
     pub renderer: String,
     /// The tab strip is the window's title row (Windows 11 frame installed).
@@ -634,6 +641,7 @@ impl Ui {
             remembered: false,
             diagnostic_log: false,
             update_channel: "auto".into(),
+            theme: ThemeChoice::Dark,
             change_master: false,
             import_file: None,
             settings_note: None,
@@ -686,8 +694,8 @@ impl Ui {
         &mut self.fields[f as usize]
     }
 
-    pub fn set_message(&mut self, text: impl Into<String>, color: u32) {
-        self.message = Some((text.into(), color));
+    pub fn set_message(&mut self, text: impl Into<String>, tone: Tone) {
+        self.message = Some((text.into(), tone));
     }
 
     /// The physical size the session picture gets in a window of `w` x `h`
@@ -1030,9 +1038,9 @@ impl Ui {
         match self.form_add_app() {
             Ok(()) => {
                 let n = self.apps.last().map(|a| a.name.clone()).unwrap_or_default();
-                self.set_message(format!("Added {n}. Save keeps it."), TEXT_2);
+                self.set_message(format!("Added {n}. Save keeps it."), Tone::Muted);
             }
-            Err(e) => self.set_message(e, ERR),
+            Err(e) => self.set_message(e, Tone::Danger),
         }
     }
 
@@ -1058,7 +1066,7 @@ impl Ui {
         let c = self.store.connections.get(ci)?.clone();
         let app = c.apps.get(ai)?.clone();
         if let Some(id) = self.launch_target(&c.name, &c.host) {
-            self.set_message(format!("Starting {}…", app.name), TEXT_2);
+            self.set_message(format!("Starting {}…", app.name), Tone::Muted);
             return Some(Action::ExecApp(id, app));
         }
         let r = self.store.resolve(&c);
@@ -1088,13 +1096,13 @@ impl Ui {
                     c.name,
                     app.name
                 ),
-                WARN,
+                Tone::Warning,
             );
             return None;
         }
         self.set_message(
             format!("Connecting to {} for {}…", r.host, app.name),
-            TEXT_2,
+            Tone::Muted,
         );
         Some(session_action(
             &r,
@@ -1143,7 +1151,7 @@ impl Ui {
         }
         let c = match self.form() {
             Ok(c) => c,
-            Err(e) => return self.set_message(e, ERR),
+            Err(e) => return self.set_message(e, Tone::Danger),
         };
         let name = c.name.clone();
         let group = c.group.clone();
@@ -1160,19 +1168,19 @@ impl Ui {
         self.field_mut(Field::Name).set(&name);
         self.field_mut(Field::GroupPath).set(&group);
         match self.store.save() {
-            Ok(()) => self.set_message(format!("Saved {name}."), TEXT_2),
-            Err(e) => self.set_message(e, ERR),
+            Ok(()) => self.set_message(format!("Saved {name}."), Tone::Muted),
+            Err(e) => self.set_message(e, Tone::Danger),
         }
     }
 
     fn save_group(&mut self) {
         let g = match self.group_form() {
             Ok(g) => g,
-            Err(e) => return self.set_message(e, ERR),
+            Err(e) => return self.set_message(e, Tone::Danger),
         };
         let old = self.group_edit.clone().flatten();
         if old.as_deref() != Some(g.path.as_str()) && self.store.group_index(&g.path).is_some() {
-            return self.set_message(format!("A group {} already exists.", g.path), ERR);
+            return self.set_message(format!("A group {} already exists.", g.path), Tone::Danger);
         }
         match &old {
             Some(old) => self.store.rename_group(old, &g.path),
@@ -1186,8 +1194,8 @@ impl Ui {
         self.group_edit = Some(Some(path.clone()));
         self.field_mut(Field::GroupPath).set(parent_of(&path));
         match self.store.save() {
-            Ok(()) => self.set_message(format!("Saved group {path}."), TEXT_2),
-            Err(e) => self.set_message(e, ERR),
+            Ok(()) => self.set_message(format!("Saved group {path}."), Tone::Muted),
+            Err(e) => self.set_message(e, Tone::Danger),
         }
     }
 
@@ -1196,11 +1204,11 @@ impl Ui {
             Some(Some(path)) => {
                 self.store.delete_group(&path);
                 if let Err(e) = self.store.save() {
-                    return self.set_message(e, ERR);
+                    return self.set_message(e, Tone::Danger);
                 }
                 self.set_message(
                     format!("Deleted group {path}; its connections moved up."),
-                    TEXT_2,
+                    Tone::Muted,
                 );
                 if self.store.connections.is_empty() {
                     self.new_connection();
@@ -1215,9 +1223,9 @@ impl Ui {
         let Some(i) = self.selected else { return };
         let gone = self.store.connections.remove(i);
         if let Err(e) = self.store.save() {
-            return self.set_message(e, ERR);
+            return self.set_message(e, Tone::Danger);
         }
-        self.set_message(format!("Deleted {}.", gone.name), TEXT_2);
+        self.set_message(format!("Deleted {}.", gone.name), Tone::Muted);
         if self.store.connections.is_empty() {
             self.new_connection();
         } else {
@@ -1229,7 +1237,7 @@ impl Ui {
         match self.group_edit.clone() {
             Some(Some(path)) => return self.connect_all(&path),
             Some(None) => {
-                self.set_message("Save the group first.", ERR);
+                self.set_message("Save the group first.", Tone::Danger);
                 return None;
             }
             None => {}
@@ -1237,7 +1245,7 @@ impl Ui {
         let c = match self.form() {
             Ok(c) => c,
             Err(e) => {
-                self.set_message(e, ERR);
+                self.set_message(e, Tone::Danger);
                 return None;
             }
         };
@@ -1251,7 +1259,7 @@ impl Ui {
             if let Some(i) = self.selected {
                 self.store.connections[i].password = c.password.clone();
                 if let Err(e) = self.store.save() {
-                    self.set_message(e, ERR);
+                    self.set_message(e, Tone::Danger);
                 }
             }
         }
@@ -1261,11 +1269,11 @@ impl Ui {
         if let Some(app) = &first
             && let Some(id) = self.launch_target(&r.name, &r.host)
         {
-            self.set_message(format!("Starting {}…", app.name), TEXT_2);
+            self.set_message(format!("Starting {}…", app.name), Tone::Muted);
             return Some(Action::ExecApp(id, app.clone()));
         }
         if r.user.is_empty() && !r.kerberos {
-            self.set_message("No user name: enter one here or in the group.", ERR);
+            self.set_message("No user name: enter one here or in the group.", Tone::Danger);
             return None;
         }
         // A typed password wins; otherwise the saved one (vault only).
@@ -1274,7 +1282,7 @@ impl Ui {
         } else {
             typed
         };
-        self.set_message(format!("Connecting to {}…", r.host), TEXT_2);
+        self.set_message(format!("Connecting to {}…", r.host), Tone::Muted);
         Some(session_action(&r, &password, first.as_ref()))
     }
 
@@ -1309,7 +1317,7 @@ impl Ui {
             ),
             (n, k) => format!("Connecting {n}; {k} skipped (no saved password or user)."),
         };
-        self.set_message(msg, if n == 0 { ERR } else { TEXT_2 });
+        self.set_message(msg, if n == 0 { Tone::Danger } else { Tone::Muted });
         (n > 0).then_some(Action::Batch(acts))
     }
 
@@ -1598,7 +1606,7 @@ impl Ui {
                             "Installing restarts rdpc and closes {open} open session{}. Click Update again to go ahead.",
                             if open == 1 { "" } else { "s" }
                         ),
-                        WARN,
+                        Tone::Warning,
                     );
                     return None;
                 }
@@ -1628,6 +1636,19 @@ impl Ui {
                 ));
             }
             Hit::CheckNow => return Some(Action::CheckUpdatesNow),
+            Hit::Theme(i) => {
+                let choice = ThemeChoice::ALL[i.min(ThemeChoice::ALL.len() - 1)];
+                return Some(Action::SetTheme(choice));
+            }
+            // The sidebar button flips what is on screen now (System included).
+            Hit::ThemeToggle => {
+                let next = if pal().dark {
+                    ThemeChoice::Light
+                } else {
+                    ThemeChoice::Dark
+                };
+                return Some(Action::SetTheme(next));
+            }
             Hit::OpenLogFolder => return Some(Action::OpenLogFolder),
             Hit::RememberKey => return Some(Action::SetRemember(!self.remembered)),
             Hit::ChangeMasterOpen => {
@@ -1890,7 +1911,7 @@ impl Ui {
             Hit::FormRemoveApp(i) => {
                 if i < self.apps.len() {
                     let gone = self.apps.remove(i);
-                    self.set_message(format!("Removed {}. Save keeps it.", gone.name), TEXT_2);
+                    self.set_message(format!("Removed {}. Save keeps it.", gone.name), Tone::Muted);
                 }
             }
             Hit::FormAddApp => self.add_app_clicked(),
@@ -1905,7 +1926,7 @@ impl Ui {
                     .apps
                     .get(i)?
                     .clone();
-                self.set_message(format!("Starting {}…", app.name), TEXT_2);
+                self.set_message(format!("Starting {}…", app.name), Tone::Muted);
                 return Some(Action::ExecApp(id, app));
             }
             Hit::RailFocus(id, w) => return Some(Action::RailFocus(id, w)),
@@ -1965,7 +1986,7 @@ impl Ui {
             self.save_password = true;
             self.set_message(
                 "Master password set. Passwords you save are encrypted.",
-                TEXT_2,
+                Tone::Muted,
             );
         } else if self.store.connections.is_empty() {
             self.new_connection();
@@ -1984,7 +2005,7 @@ impl Ui {
         self.selected = None;
         self.new_connection();
         self.focus = Some(Field::Master);
-        self.set_message("Locked.", TEXT_2);
+        self.set_message("Locked.", Tone::Muted);
     }
 
     fn form_add_drive(&mut self) {
@@ -1996,10 +2017,10 @@ impl Ui {
             .to_string();
         if path.is_empty() {
             self.focus = Some(Field::FormDrive);
-            return self.set_message("Type the folder to share, then press Add.", TEXT_2);
+            return self.set_message("Type the folder to share, then press Add.", Tone::Muted);
         }
         if !std::path::Path::new(&path).is_dir() {
-            return self.set_message(format!("{path} is not a folder."), ERR);
+            return self.set_message(format!("{path} is not a folder."), Tone::Danger);
         }
         if !self.opts.drives.contains(&path) {
             self.opts.drives.push(path);
@@ -2041,11 +2062,11 @@ impl Ui {
             .to_string();
         if path.is_empty() {
             self.focus = Some(Field::DrivePath);
-            self.set_message("Type the folder to share, then press Add.", TEXT_2);
+            self.set_message("Type the folder to share, then press Add.", Tone::Muted);
             return None;
         }
         if !std::path::Path::new(&path).is_dir() {
-            self.set_message(format!("{path} is not a folder."), ERR);
+            self.set_message(format!("{path} is not a folder."), Tone::Danger);
             return None;
         }
         self.field_mut(Field::DrivePath).set("");
@@ -2195,7 +2216,7 @@ impl Ui {
         let cw = p(420.0).min(w - p(32.0));
         let ch = p(170.0);
         let r = Rect::new((w - cw) / 2, (h - ch) / 2, cw, ch);
-        cv.round_border(r, 10.0 * s, BORDER, BG_BAR);
+        cv.round_border(r, 10.0 * s, pal().border, pal().surface);
         let x = r.x + p(24.0);
         let tw = (r.w - p(48.0)) as f32;
         te.draw(
@@ -2205,7 +2226,7 @@ impl Ui {
             x as f32,
             (r.y + p(40.0)) as f32,
             "Quit rdpc?",
-            TEXT,
+            pal().text,
             tw,
         );
         let line = if n == 1 {
@@ -2220,7 +2241,7 @@ impl Ui {
             x as f32,
             (r.y + p(68.0)) as f32,
             &line,
-            TEXT_2,
+            pal().text_secondary,
             tw,
         );
         let by = r.bottom() - p(24.0) - p(34.0);
@@ -2259,7 +2280,7 @@ impl Ui {
         let s = self.scale;
         let p = |v: f32| (v * s).round() as i32;
         let (w, h) = (cv.width() as i32, cv.height() as i32);
-        cv.fill(Rect::new(0, 0, w, h), BG);
+        cv.fill(Rect::new(0, 0, w, h), pal().bg);
         // Full screen: the session with its toolbar and panel, nothing else.
         if self.fullscreen
             && let Some(id) = self.active_tab().map(|t| t.id)
@@ -2273,7 +2294,7 @@ impl Ui {
         let side_w = p(260.0).min(w / 3);
 
         self.paint_sidebar(cv, te, f, Rect::new(0, 0, side_w, body_h));
-        cv.fill(Rect::new(side_w, 0, 1, body_h), BORDER_SOFT);
+        cv.fill(Rect::new(side_w, 0, 1, body_h), pal().divider);
         let main = Rect::new(side_w + 1, 0, w - side_w - 1, body_h);
         let strip_h = p(38.0);
         self.paint_tabs(cv, te, f, Rect::new(main.x, 0, main.w, strip_h));
@@ -2288,8 +2309,8 @@ impl Ui {
         }
 
         let bar = Rect::new(0, body_h, w, bar_h);
-        cv.fill(bar, BG_BAR);
-        cv.fill(Rect::new(0, body_h, w, 1), BORDER_SOFT);
+        cv.fill(bar, pal().surface);
+        cv.fill(Rect::new(0, body_h, w, 1), pal().divider);
         let right = format!("{} renderer · damage-only presents", self.renderer);
         let text_w = te.measure(f.ui, 12.0 * s, &right) as i32;
         let mut rw = text_w;
@@ -2305,10 +2326,10 @@ impl Ui {
             cv.round_border(
                 r,
                 5.0 * s,
-                ACCENT_BORDER,
-                if hover { CONTROL_HOVER } else { BG_CHOSEN },
+                pal().accent_border,
+                if hover { pal().surface_hover } else { pal().surface_raised },
             );
-            centered(cv, te, f.ui, 12.0 * s, r, &text, TEXT);
+            centered(cv, te, f.ui, 12.0 * s, r, &text, pal().text);
             self.hits.push((r, Hit::Update));
             rw += bw + p(14.0);
         }
@@ -2319,17 +2340,17 @@ impl Ui {
             Rect::new(w - text_w - p(14.0), body_h, text_w + p(14.0), bar_h),
             0.0,
             &right,
-            TEXT_4,
+            pal().text_faint,
         );
         let (msg, color) = if self.session_focus && self.active.is_some() {
             (
                 "Keyboard goes to the remote session · Ctrl+Alt+Home gives it back".to_string(),
-                ACCENT,
+                Tone::Accent,
             )
         } else {
             self.message
                 .clone()
-                .unwrap_or_else(|| ("Ready".into(), TEXT_3))
+                .unwrap_or_else(|| ("Ready".into(), Tone::Muted))
         };
         te.draw_in(
             cv,
@@ -2338,17 +2359,17 @@ impl Ui {
             Rect::new(0, body_h, w - rw - p(28.0), bar_h),
             p(14.0) as f32,
             &msg,
-            color,
+            color.color(),
         );
     }
 
     fn paint_sidebar(&mut self, cv: &mut Canvas, te: &mut TextEngine, f: &Fonts, area: Rect) {
         let s = self.scale;
         let p = |v: f32| (v * s).round() as i32;
-        cv.fill(area, BG_SIDEBAR);
+        cv.fill(area, pal().bg_sidebar);
         let pad = p(14.0);
         let head = Rect::new(pad, p(5.0), area.w - 2 * pad, p(28.0));
-        te.draw_in(cv, f.semi, 11.5 * s, head, 0.0, "CONNECTIONS", TEXT_3);
+        te.draw_in(cv, f.semi, 11.5 * s, head, 0.0, "CONNECTIONS", pal().text_muted);
         let nw = p(62.0);
         if !self.store.is_locked() {
             self.button(
@@ -2402,7 +2423,7 @@ impl Ui {
             area.w - 2 * pad,
             p(32.0),
         );
-        cv.fill(Rect::new(0, area.bottom() - foot, area.w, 1), BORDER_SOFT);
+        cv.fill(Rect::new(0, area.bottom() - foot, area.w, 1), pal().divider);
         let settings_style = if self.settings_open && self.active.is_none() {
             Style::Secondary
         } else {
@@ -2424,7 +2445,7 @@ impl Ui {
                 } else {
                     "No saved connections yet."
                 },
-                TEXT_3,
+                pal().text_muted,
             );
             te.draw_in(
                 cv,
@@ -2437,7 +2458,7 @@ impl Ui {
                 } else {
                     "Fill in the form and press Save."
                 },
-                TEXT_4,
+                pal().text_faint,
             );
         } else if rows.is_empty() {
             te.draw_in(
@@ -2447,7 +2468,7 @@ impl Ui {
                 Rect::new(pad, list.y + p(8.0), list.w - 2 * pad, p(22.0)),
                 0.0,
                 "No match.",
-                TEXT_3,
+                pal().text_muted,
             );
         }
         let row_h = p(52.0);
@@ -2469,14 +2490,14 @@ impl Ui {
                     let count = self.store.members(&path).count().to_string();
                     let hovered = matches!(self.hover, Some(Hit::GroupRow(h) | Hit::GroupToggle(h)) if h == gi);
                     if home && open_group.as_deref() == Some(path.as_str()) {
-                        cv.fill_round(r, 6.0 * s, BG_SELECT);
+                        cv.fill_round(r, 6.0 * s, pal().selected);
                         cv.fill_round(
                             Rect::new(r.x, r.y + p(9.0), p(3.0), r.h - p(18.0)),
                             1.5 * s,
-                            ACCENT,
+                            pal().accent,
                         );
                     } else if hovered {
-                        cv.fill_round(r, 6.0 * s, BG_HOVER);
+                        cv.fill_round(r, 6.0 * s, pal().surface_hover);
                     }
                     let open = !self.collapsed.contains(&path);
                     te.draw(
@@ -2486,7 +2507,7 @@ impl Ui {
                         (r.x + indent + p(12.0)) as f32,
                         (r.y + p(21.0)) as f32,
                         if open { "▼" } else { "►" },
-                        TEXT_3,
+                        pal().text_muted,
                         p(14.0) as f32,
                     );
                     let cw = te.measure(f.ui, 12.0 * s, &count) as i32;
@@ -2497,7 +2518,7 @@ impl Ui {
                         (r.x + indent + p(28.0)) as f32,
                         (r.y + p(22.0)) as f32,
                         &name,
-                        TEXT_2,
+                        pal().text_secondary,
                         (r.w - indent - p(48.0) - cw) as f32,
                     );
                     te.draw(
@@ -2507,7 +2528,7 @@ impl Ui {
                         (r.right() - p(14.0) - cw) as f32,
                         (r.y + p(22.0)) as f32,
                         &count,
-                        TEXT_4,
+                        pal().text_faint,
                         (cw + p(2.0)) as f32,
                     );
                     self.hits.push((r.intersect(list), Hit::GroupRow(gi)));
@@ -2549,13 +2570,13 @@ impl Ui {
         let p = |v: f32| (v * s).round() as i32;
         let hit = Hit::AppRow(ci, ai);
         if self.hover == Some(hit) {
-            cv.fill_round(r, 6.0 * s, BG_HOVER);
+            cv.fill_round(r, 6.0 * s, pal().surface_hover);
         }
         let c = &self.store.connections[ci];
         let (name, program) = (c.apps[ai].name.clone(), c.apps[ai].program.clone());
         let dot = self.app_dot(&c.name, &c.host, &program);
         let mid = r.y + r.h / 2;
-        app_glyph(cv, s, r.x + p(14.0), mid - p(7.0), TEXT_3);
+        app_glyph(cv, s, r.x + p(14.0), mid - p(7.0), pal().text_muted);
         let text_w = r.w - p(44.0) - if dot.is_some() { p(16.0) } else { 0 };
         te.draw(
             cv,
@@ -2564,7 +2585,7 @@ impl Ui {
             (r.x + p(36.0)) as f32,
             (mid + p(5.0)) as f32,
             &name,
-            TEXT_2,
+            pal().text_secondary,
             text_w as f32,
         );
         if let Some(color) = dot {
@@ -2585,10 +2606,10 @@ impl Ui {
             let Some(v) = &t.remote_app else { continue };
             let live = matches!(t.state, TabState::Connected { .. } | TabState::Connecting);
             if live && same(&v.running) {
-                return Some(OK);
+                return Some(pal().success);
             }
             if live && same(&v.starting) {
-                out = Some(WARN);
+                out = Some(pal().warning);
             }
         }
         out
@@ -2609,14 +2630,14 @@ impl Ui {
         let p = |v: f32| (v * s).round() as i32;
         let hit = Hit::Row(i);
         if home && self.selected == Some(i) && self.group_edit.is_none() {
-            cv.fill_round(r, 6.0 * s, BG_SELECT);
+            cv.fill_round(r, 6.0 * s, pal().selected);
             cv.fill_round(
                 Rect::new(r.x, r.y + p(12.0), p(3.0), r.h - p(24.0)),
                 1.5 * s,
-                ACCENT,
+                pal().accent,
             );
         } else if self.hover == Some(hit) {
-            cv.fill_round(r, 6.0 * s, BG_HOVER);
+            cv.fill_round(r, 6.0 * s, pal().surface_hover);
         }
         let c = self.store.resolve(&self.store.connections[i]);
         let dot = self.connection_dot(&c);
@@ -2628,7 +2649,7 @@ impl Ui {
             (r.x + p(14.0)) as f32,
             (r.y + p(22.0)) as f32,
             &c.name,
-            TEXT,
+            pal().text,
             text_w as f32,
         );
         let sub = if c.port == 3389 {
@@ -2643,7 +2664,7 @@ impl Ui {
             (r.x + p(14.0)) as f32,
             (r.y + p(40.0)) as f32,
             &sub,
-            TEXT_3,
+            pal().text_muted,
             text_w as f32,
         );
         if let Some(color) = dot {
@@ -2665,8 +2686,8 @@ impl Ui {
             .filter(|t| t.name == c.name && t.host == c.host)
         {
             match t.state {
-                TabState::Connected { .. } => return Some(OK),
-                TabState::Connecting => out = Some(WARN),
+                TabState::Connected { .. } => return Some(pal().success),
+                TabState::Connecting => out = Some(pal().warning),
                 _ => {}
             }
         }
@@ -2676,10 +2697,10 @@ impl Ui {
     fn paint_tabs(&mut self, cv: &mut Canvas, te: &mut TextEngine, f: &Fonts, strip: Rect) {
         let s = self.scale;
         let p = |v: f32| (v * s).round() as i32;
-        cv.fill(strip, BG_SIDEBAR);
+        cv.fill(strip, pal().bg_sidebar);
         cv.fill(
             Rect::new(strip.x, strip.bottom() - 1, strip.w, 1),
-            BORDER_SOFT,
+            pal().divider,
         );
         self.title_height = strip.bottom();
         let mut right = strip.right();
@@ -2698,7 +2719,7 @@ impl Ui {
         let tw = te.measure(f.ui, 13.0 * s, label) as i32 + p(28.0);
         let r = Rect::new(x, y, tw, th);
         self.tab_shape(cv, r, self.active.is_none(), self.hover == Some(Hit::Home));
-        let color = if self.active.is_none() { TEXT } else { TEXT_2 };
+        let color = if self.active.is_none() { pal().text } else { pal().text_secondary };
         centered(cv, te, f.ui, 13.0 * s, r, label, color);
         self.hits.push((r, Hit::Home));
         self.title_controls.push((r.x, r.right()));
@@ -2707,7 +2728,7 @@ impl Ui {
         let tabs: Vec<(u64, String, u32)> = self
             .tabs
             .iter()
-            .map(|t| (t.id, t.name.clone(), t.state.color()))
+            .map(|t| (t.id, t.name.clone(), t.state.tone().color()))
             .collect();
         let avail = right - x - p(6.0);
         let each = if tabs.is_empty() {
@@ -2735,7 +2756,7 @@ impl Ui {
                 p(20.0),
                 p(20.0),
             );
-            let tc = if active { TEXT } else { TEXT_2 };
+            let tc = if active { pal().text } else { pal().text_secondary };
             te.draw(
                 cv,
                 f.ui,
@@ -2749,7 +2770,7 @@ impl Ui {
             self.hits.push((r, Hit::Tab(id)));
             let ch = Hit::CloseTab(id);
             if self.hover == Some(ch) {
-                cv.fill_round(close, 4.0 * s, CONTROL_HOVER);
+                cv.fill_round(close, 4.0 * s, pal().surface_hover);
             }
             if active || self.hover == Some(Hit::Tab(id)) || self.hover == Some(ch) {
                 let (cx, cy, d) = (
@@ -2757,8 +2778,8 @@ impl Ui {
                     (close.y + close.h / 2) as f32,
                     4.0 * s,
                 );
-                cv.stroke(&[(cx - d, cy - d), (cx + d, cy + d)], 1.4 * s, TEXT_2);
-                cv.stroke(&[(cx - d, cy + d), (cx + d, cy - d)], 1.4 * s, TEXT_2);
+                cv.stroke(&[(cx - d, cy - d), (cx + d, cy + d)], 1.4 * s, pal().text_secondary);
+                cv.stroke(&[(cx - d, cy + d), (cx + d, cy - d)], 1.4 * s, pal().text_secondary);
             }
             self.hits.push((close, ch));
             x += r.w + p(2.0);
@@ -2787,13 +2808,13 @@ impl Ui {
                     self.press == Some(Hit::WinClose),
                 ),
             };
-            let idle = if self.window_active { TEXT } else { TEXT_3 };
+            let idle = if self.window_active { pal().text } else { pal().text_muted };
             let (fill, glyph) = match (i, hover, pressed && hover) {
-                (2, true, true) => (CLOSE_PRESS, 0xffffff),
-                (2, true, false) => (CLOSE_HOVER, 0xffffff),
-                (_, true, true) => (BG_PRESS, TEXT),
-                (_, true, false) => (BG_HOVER, TEXT),
-                _ => (BG_SIDEBAR, idle),
+                (2, true, true) => (pal().close_pressed, 0xffffff),
+                (2, true, false) => (pal().close_hover, 0xffffff),
+                (_, true, true) => (pal().surface_pressed, pal().text),
+                (_, true, false) => (pal().surface_hover, pal().text),
+                _ => (pal().bg_sidebar, idle),
             };
             cv.fill(b, fill);
             let (cx, cy) = (b.x + b.w / 2, b.y + b.h / 2);
@@ -2855,11 +2876,11 @@ impl Ui {
         let w = te.measure(f.ui, 12.5 * s, text) as i32 + p(24.0);
         let r = Rect::new(x, y + p(2.0), w, h - p(4.0));
         let (border, fill, color) = if chosen {
-            (ACCENT_BORDER, BG_CHOSEN, TEXT)
+            (pal().accent_border, pal().surface_raised, pal().text)
         } else if self.hover == Some(hit) {
-            (BORDER_HOVER, CONTROL_HOVER, TEXT_2)
+            (pal().border_strong, pal().surface_hover, pal().text_secondary)
         } else {
-            (BORDER, BG, TEXT_3)
+            (pal().border, pal().bg, pal().text_muted)
         };
         cv.round_border(r, 6.0 * s, border, fill);
         centered(cv, te, f.ui, 12.5 * s, r, text, color);
@@ -2873,7 +2894,7 @@ impl Ui {
             cv.fill_round(
                 Rect::new(r.x, r.y, r.w, r.h + (8.0 * s) as i32),
                 6.0 * s,
-                BG,
+                pal().bg,
             );
             cv.fill(
                 Rect::new(
@@ -2882,13 +2903,13 @@ impl Ui {
                     r.w - (12.0 * s) as i32,
                     (2.0 * s).max(1.0) as i32,
                 ),
-                ACCENT,
+                pal().accent,
             );
         } else if hover {
             cv.fill_round(
                 Rect::new(r.x, r.y + (2.0 * s) as i32, r.w, r.h - (6.0 * s) as i32),
                 6.0 * s,
-                BG_HOVER,
+                pal().surface_hover,
             );
         }
     }
@@ -2920,7 +2941,7 @@ impl Ui {
             x as f32,
             (y + p(20.0)) as f32,
             title,
-            TEXT,
+            pal().text,
             w as f32,
         );
         y += p(34.0);
@@ -2931,7 +2952,7 @@ impl Ui {
             x as f32,
             (y + p(14.0)) as f32,
             sub,
-            TEXT_3,
+            pal().text_muted,
             w as f32,
         );
         y += p(36.0);
@@ -2973,7 +2994,7 @@ impl Ui {
                 x as f32,
                 (y + p(12.0)) as f32,
                 &e,
-                ERR,
+                pal().danger,
                 w as f32,
             );
             y += p(26.0);
@@ -2985,7 +3006,7 @@ impl Ui {
             } else {
                 "Unlocking…"
             };
-            centered(cv, te, f.ui, 13.0 * s, Rect::new(x, y, w, bh), busy, TEXT_2);
+            centered(cv, te, f.ui, 13.0 * s, Rect::new(x, y, w, bh), busy, pal().text_secondary);
         } else if creating {
             self.button(
                 cv,
@@ -3024,22 +3045,22 @@ impl Ui {
         let new = zeroize::Zeroizing::new(self.field(Field::NewMaster).text.clone());
         let again = zeroize::Zeroizing::new(self.field(Field::MasterConfirm).text.clone());
         if current.is_empty() {
-            self.settings_note = Some(("Enter your current master password.".into(), ERR));
+            self.settings_note = Some(("Enter your current master password.".into(), Tone::Danger));
             return None;
         }
         if new.chars().count() < 8 {
-            self.settings_note = Some(("Use at least 8 characters for the new one.".into(), ERR));
+            self.settings_note = Some(("Use at least 8 characters for the new one.".into(), Tone::Danger));
             return None;
         }
         if new != again {
-            self.settings_note = Some(("The two new passwords differ.".into(), ERR));
+            self.settings_note = Some(("The two new passwords differ.".into(), Tone::Danger));
             return None;
         }
         for f in [Field::Master, Field::NewMaster, Field::MasterConfirm] {
             self.field_mut(f).set("");
         }
         self.unlocking = true;
-        self.settings_note = Some(("Changing the master password…".into(), TEXT_2));
+        self.settings_note = Some(("Changing the master password…".into(), Tone::Muted));
         Some(Action::ChangeMaster { current, new })
     }
 
@@ -3047,12 +3068,12 @@ impl Ui {
         let path = self.import_file.clone()?;
         let password = zeroize::Zeroizing::new(self.field(Field::ImportPass).text.clone());
         if password.is_empty() {
-            self.settings_note = Some(("Enter the backup's master password.".into(), ERR));
+            self.settings_note = Some(("Enter the backup's master password.".into(), Tone::Danger));
             return None;
         }
         self.field_mut(Field::ImportPass).set("");
         self.unlocking = true;
-        self.settings_note = Some(("Opening the backup…".into(), TEXT_2));
+        self.settings_note = Some(("Opening the backup…".into(), Tone::Muted));
         Some(Action::Import { path, password })
     }
 
@@ -3063,7 +3084,7 @@ impl Ui {
             self.change_master = false;
             self.import_file = None;
         }
-        self.settings_note = Some((text, if ok { OK } else { ERR }));
+        self.settings_note = Some((text, if ok { Tone::Success } else { Tone::Danger }));
     }
 
     /// App settings: security, backup, updates, about.
@@ -3083,7 +3104,7 @@ impl Ui {
             x as f32,
             (top + p(48.0)) as f32,
             "Settings",
-            TEXT,
+            pal().text,
             w as f32,
         );
         let version = format!("rdpc {}", env!("CARGO_PKG_VERSION"));
@@ -3094,7 +3115,7 @@ impl Ui {
             x as f32,
             (top + p(70.0)) as f32,
             &version,
-            TEXT_3,
+            pal().text_muted,
             w as f32,
         );
         let mut y = top + p(100.0);
@@ -3106,7 +3127,7 @@ impl Ui {
                 x as f32,
                 (y + p(4.0)) as f32,
                 &note,
-                color,
+                color.color(),
                 w as f32,
             );
             y += p(24.0);
@@ -3264,7 +3285,7 @@ impl Ui {
                 (cells[0].x + p(16.0)) as f32,
                 (cells[0].y + p(27.0)) as f32,
                 &format!("Import from {name}"),
-                TEXT_2,
+                pal().text_secondary,
                 (w - p(32.0)) as f32,
             );
             self.field_row(
@@ -3414,7 +3435,7 @@ impl Ui {
             (r.x + p(16.0)) as f32,
             (mid - p(2.0)) as f32,
             label,
-            TEXT,
+            pal().text,
             tw,
         );
         te.draw(
@@ -3424,7 +3445,7 @@ impl Ui {
             (r.x + p(16.0)) as f32,
             (mid + p(14.0)) as f32,
             sub,
-            TEXT_3,
+            pal().text_muted,
             tw,
         );
         self.button(
@@ -3531,7 +3552,7 @@ impl Ui {
             x as f32,
             (top + p(48.0)) as f32,
             &title,
-            TEXT,
+            pal().text,
             tw,
         );
         te.draw(
@@ -3541,7 +3562,7 @@ impl Ui {
             x as f32,
             (top + p(70.0)) as f32,
             &sub,
-            TEXT_3,
+            pal().text_muted,
             tw,
         );
 
@@ -3592,7 +3613,7 @@ impl Ui {
             cv.fill_round(
                 Rect::new(area.right() - p(7.0), sy, p(4.0), bar),
                 2.0 * s,
-                BORDER_HOVER,
+                pal().border_strong,
             );
         }
         self.clip_hits(first_hit, area);
@@ -3620,7 +3641,7 @@ impl Ui {
             (r.x + p(16.0)) as f32,
             (r.y + r.h / 2 + p(5.0)) as f32,
             label,
-            TEXT_2,
+            pal().text_secondary,
             p(110.0) as f32,
         );
         let input = Rect::new(
@@ -3736,7 +3757,7 @@ impl Ui {
                 (r.x + p(16.0)) as f32,
                 (r.y + r.h / 2 + p(5.0)) as f32,
                 "Host",
-                TEXT_2,
+                pal().text_secondary,
                 p(110.0) as f32,
             );
             let port_w = p(84.0);
@@ -3916,12 +3937,12 @@ impl Ui {
                 (r.x + p(16.0)) as f32,
                 (r.y + r.h / 2 + p(5.0)) as f32,
                 "No apps yet: type a program below and press Add.",
-                TEXT_3,
+                pal().text_muted,
                 (r.w - p(32.0)) as f32,
             );
         }
         for (i, (r, app)) in cells.iter().zip(&apps).enumerate() {
-            app_glyph(cv, s, r.x + p(16.0), r.y + r.h / 2 - p(7.0), ACCENT);
+            app_glyph(cv, s, r.x + p(16.0), r.y + r.h / 2 - p(7.0), pal().accent);
             let close = Rect::new(r.right() - p(40.0), r.y + p(14.0), p(24.0), p(24.0));
             let tw = (close.x - r.x - p(56.0)) as f32;
             te.draw(
@@ -3931,7 +3952,7 @@ impl Ui {
                 (r.x + p(42.0)) as f32,
                 (r.y + p(22.0)) as f32,
                 &app.name,
-                TEXT,
+                pal().text,
                 tw,
             );
             let mut sub = app.program.clone();
@@ -3948,20 +3969,20 @@ impl Ui {
                 (r.x + p(42.0)) as f32,
                 (r.y + p(40.0)) as f32,
                 &sub,
-                TEXT_3,
+                pal().text_muted,
                 tw,
             );
             let hit = Hit::FormRemoveApp(i);
             if self.hover == Some(hit) {
-                cv.fill_round(close, 5.0 * s, CONTROL_HOVER);
+                cv.fill_round(close, 5.0 * s, pal().surface_hover);
             }
             let (cx, cy, dd) = (
                 (close.x + close.w / 2) as f32,
                 (close.y + close.h / 2) as f32,
                 4.0 * s,
             );
-            cv.stroke(&[(cx - dd, cy - dd), (cx + dd, cy + dd)], 1.4 * s, TEXT_2);
-            cv.stroke(&[(cx - dd, cy + dd), (cx + dd, cy - dd)], 1.4 * s, TEXT_2);
+            cv.stroke(&[(cx - dd, cy - dd), (cx + dd, cy + dd)], 1.4 * s, pal().text_secondary);
+            cv.stroke(&[(cx - dd, cy + dd), (cx + dd, cy - dd)], 1.4 * s, pal().text_secondary);
             self.hits.push((close, hit));
         }
         // The add rows: program and name; arguments, folder and Add.
@@ -4122,9 +4143,9 @@ impl Ui {
         let mons = self.local_monitors.clone();
         let box_h = p(150.0);
         let frame = Rect::new(x, y, w, box_h);
-        cv.round_border(frame, 8.0 * s, BORDER_SOFT, BG_BAR);
+        cv.round_border(frame, 8.0 * s, pal().divider, pal().surface);
         let Some((bl, bt, bw, bh)) = crate::monitors::bounds(&mons) else {
-            centered(cv, te, f.ui, 12.5 * s, frame, "No monitors found.", TEXT_3);
+            centered(cv, te, f.ui, 12.5 * s, frame, "No monitors found.", pal().text_muted);
             return y + box_h;
         };
         let pad = p(16.0) as f32;
@@ -4142,11 +4163,11 @@ impl Ui {
             let on = self.opts.monitors.contains(&m.name);
             let hit = Hit::FormMonitor(i);
             let (border, fill, color) = if on {
-                (ACCENT, BG_SELECT, TEXT)
+                (pal().accent, pal().selected, pal().text)
             } else if self.hover == Some(hit) {
-                (BORDER_HOVER, CONTROL_HOVER, TEXT_2)
+                (pal().border_strong, pal().surface_hover, pal().text_secondary)
             } else {
-                (BORDER, BG, TEXT_3)
+                (pal().border, pal().bg, pal().text_muted)
             };
             cv.round_border(r, 5.0 * s, border, fill);
             let num = (i + 1).to_string();
@@ -4347,20 +4368,20 @@ impl Ui {
                 (r.x + p(16.0)) as f32,
                 (r.y + r.h / 2 + p(5.0)) as f32,
                 path,
-                TEXT,
+                pal().text,
                 (close.x - r.x - p(24.0)) as f32,
             );
             let hit = Hit::FormRemoveDrive(i);
             if self.hover == Some(hit) {
-                cv.fill_round(close, 5.0 * s, CONTROL_HOVER);
+                cv.fill_round(close, 5.0 * s, pal().surface_hover);
             }
             let (cx, cy, dd) = (
                 (close.x + close.w / 2) as f32,
                 (close.y + close.h / 2) as f32,
                 4.0 * s,
             );
-            cv.stroke(&[(cx - dd, cy - dd), (cx + dd, cy + dd)], 1.4 * s, TEXT_2);
-            cv.stroke(&[(cx - dd, cy + dd), (cx + dd, cy - dd)], 1.4 * s, TEXT_2);
+            cv.stroke(&[(cx - dd, cy - dd), (cx + dd, cy + dd)], 1.4 * s, pal().text_secondary);
+            cv.stroke(&[(cx - dd, cy + dd), (cx + dd, cy - dd)], 1.4 * s, pal().text_secondary);
             self.hits.push((close, hit));
         }
         let r = cells[n];
@@ -4620,10 +4641,10 @@ impl Ui {
             let dw = p(320.0).min(area.w / 2);
             let drawer = Rect::new(area.right() - dw, area.y, dw, area.h);
             area.w -= dw + 1;
-            cv.fill(Rect::new(area.right(), area.y, 1, area.h), BORDER_SOFT);
+            cv.fill(Rect::new(area.right(), area.y, 1, area.h), pal().divider);
             self.paint_drawer(cv, te, f, drawer, id);
         }
-        cv.fill(area, BG_SIDEBAR);
+        cv.fill(area, pal().bg_sidebar);
         self.session_clip = None;
         if overlay && self.bar_revealed {
             let bar = Rect::new(area.x, area.y, area.w, tb.h);
@@ -4639,7 +4660,7 @@ impl Ui {
                     15.0 * s,
                     Rect::new(area.x, mid - p(48.0), area.w, p(24.0)),
                     "This session is on its monitors",
-                    TEXT,
+                    pal().text,
                 );
                 centered(
                     cv,
@@ -4648,7 +4669,7 @@ impl Ui {
                     12.5 * s,
                     Rect::new(area.x, mid - p(22.0), area.w, p(20.0)),
                     "Ctrl+Alt+Break or the bar at their top edge brings it back here.",
-                    TEXT_3,
+                    pal().text_muted,
                 );
                 let bw = p(190.0);
                 self.button(
@@ -4689,7 +4710,7 @@ impl Ui {
                         14.0 * s,
                         Rect::new(area.x, area.y, area.w, area.h - p(40.0)),
                         &format!("Connecting to {name}…"),
-                        TEXT_2,
+                        pal().text_secondary,
                     ),
                 }
             }
@@ -4710,7 +4731,7 @@ impl Ui {
                     } else {
                         "Session ended"
                     },
-                    TEXT,
+                    pal().text,
                 );
                 centered(
                     cv,
@@ -4719,7 +4740,7 @@ impl Ui {
                     12.5 * s,
                     Rect::new(area.x + p(24.0), mid - p(32.0), area.w - p(48.0), p(20.0)),
                     &why,
-                    if failed { ERR } else { TEXT_3 },
+                    if failed { pal().danger } else { pal().text_muted },
                 );
                 let bw = p(120.0);
                 self.button(
@@ -4744,7 +4765,7 @@ impl Ui {
         }
         if overlay && self.bar_revealed {
             let bar = Rect::new(area.x, area.y, area.w, tb.h);
-            cv.fill(bar, BG);
+            cv.fill(bar, pal().bg);
             self.paint_toolbar(cv, te, f, bar, id, &host, &state, &name);
         }
     }
@@ -4778,7 +4799,7 @@ impl Ui {
             x as f32,
             (y + p(18.0)) as f32,
             &format!("Apps on {host}"),
-            TEXT,
+            pal().text,
             w as f32,
         );
         let n = view.windows.len();
@@ -4794,7 +4815,7 @@ impl Ui {
             x as f32,
             (y + p(40.0)) as f32,
             &sub,
-            TEXT_3,
+            pal().text_muted,
             w as f32,
         );
         y += p(70.0);
@@ -4817,7 +4838,7 @@ impl Ui {
                 (r.x + p(16.0)) as f32,
                 (r.y + r.h / 2 + p(5.0)) as f32,
                 text,
-                TEXT_3,
+                pal().text_muted,
                 (r.w - p(32.0)) as f32,
             );
         }
@@ -4828,7 +4849,7 @@ impl Ui {
                 Some((iw, ih, rgba)) if rgba.len() == *iw as usize * *ih as usize * 4 => {
                     cv.draw_rgba_scaled(ir, *iw as usize, *ih as usize, rgba)
                 }
-                _ => app_glyph(cv, s, ir.x + p(3.0), ir.y + p(3.0), TEXT_3),
+                _ => app_glyph(cv, s, ir.x + p(3.0), ir.y + p(3.0), pal().text_muted),
             }
             let (cw, fw) = (p(70.0), p(70.0));
             let close = Rect::new(r.right() - p(12.0) - cw, r.y + p(10.0), cw, r.h - p(20.0));
@@ -4851,7 +4872,7 @@ impl Ui {
                 (r.x + p(48.0)) as f32,
                 (r.y + ty) as f32,
                 title,
-                TEXT,
+                pal().text,
                 tw,
             );
             if win.minimized {
@@ -4862,7 +4883,7 @@ impl Ui {
                     (r.x + p(48.0)) as f32,
                     (r.y + p(40.0)) as f32,
                     "Minimized",
-                    TEXT_3,
+                    pal().text_muted,
                     tw,
                 );
             }
@@ -4898,7 +4919,7 @@ impl Ui {
                 (cells[0].x + p(16.0)) as f32,
                 (cells[0].y + rh / 2 + p(5.0)) as f32,
                 "This connection has no apps; add them in its editor.",
-                TEXT_3,
+                pal().text_muted,
                 (w - p(32.0)) as f32,
             );
         }
@@ -4910,16 +4931,16 @@ impl Ui {
                 cv.fill_round(
                     Rect::new(r.x + p(3.0), r.y + p(3.0), r.w - p(6.0), r.h - p(6.0)),
                     6.0 * s,
-                    BG_HOVER,
+                    pal().surface_hover,
                 );
             }
-            app_glyph(cv, s, r.x + p(16.0), r.y + r.h / 2 - p(7.0), ACCENT);
+            app_glyph(cv, s, r.x + p(16.0), r.y + r.h / 2 - p(7.0), pal().accent);
             let (state, color) = if same(&view.running, &app.program) {
-                ("Running · start another", OK)
+                ("Running · start another", pal().success)
             } else if same(&view.starting, &app.program) {
-                ("Starting…", WARN)
+                ("Starting…", pal().warning)
             } else {
-                ("Start", ACCENT)
+                ("Start", pal().accent)
             };
             let sw = te.measure(f.ui, 12.5 * s, state) as i32;
             te.draw(
@@ -4929,7 +4950,7 @@ impl Ui {
                 (r.x + p(42.0)) as f32,
                 (r.y + p(22.0)) as f32,
                 &app.name,
-                TEXT,
+                pal().text,
                 (r.w - p(80.0) - sw) as f32,
             );
             te.draw(
@@ -4939,7 +4960,7 @@ impl Ui {
                 (r.x + p(42.0)) as f32,
                 (r.y + p(40.0)) as f32,
                 &app.program,
-                TEXT_3,
+                pal().text_muted,
                 (r.w - p(80.0) - sw) as f32,
             );
             te.draw(
@@ -4973,12 +4994,12 @@ impl Ui {
     ) {
         let s = self.scale;
         let p = |v: f32| (v * s).round() as i32;
-        cv.fill(Rect::new(tb.x, tb.bottom() - 1, tb.w, 1), BORDER_SOFT);
+        cv.fill(Rect::new(tb.x, tb.bottom() - 1, tb.w, 1), pal().divider);
         cv.fill_circle(
             (tb.x + p(18.0)) as f32,
             (tb.y + tb.h / 2) as f32,
             4.0 * s,
-            state.color(),
+            state.tone().color(),
         );
         // RemoteApp: no picture here, so no full screen and no recording.
         let apps = self
@@ -5063,7 +5084,7 @@ impl Ui {
             Rect::new(tb.x + p(30.0), tb.y, bx - tb.x - p(36.0), tb.h),
             0.0,
             &info,
-            TEXT_2,
+            pal().text_secondary,
         );
     }
 
@@ -5086,11 +5107,11 @@ impl Ui {
         let h = p(250.0);
         let r = Rect::new(area.x + (area.w - w) / 2, area.y + (area.h - h) / 2, w, h);
         let (border, title, color) = if c.changed {
-            (DANGER_BORDER, "The server certificate changed", ERR)
+            (pal().danger_border, "The server certificate changed", pal().danger)
         } else {
-            (BORDER, "Verify the server", TEXT)
+            (pal().border, "Verify the server", pal().text)
         };
-        cv.round_border(r, 10.0 * s, border, BG_BAR);
+        cv.round_border(r, 10.0 * s, border, pal().surface);
         let x = r.x + p(22.0);
         let tw = (r.w - p(44.0)) as f32;
         te.draw(
@@ -5115,7 +5136,7 @@ impl Ui {
             x as f32,
             (r.y + p(62.0)) as f32,
             &line,
-            TEXT_2,
+            pal().text_secondary,
             tw,
         );
         let sub = if c.changed {
@@ -5130,12 +5151,12 @@ impl Ui {
             x as f32,
             (r.y + p(82.0)) as f32,
             sub,
-            TEXT_3,
+            pal().text_muted,
             tw,
         );
         // The fingerprint, 16 bytes per line.
         let fr = Rect::new(x, r.y + p(100.0), r.w - p(44.0), p(56.0));
-        cv.round_border(fr, 6.0 * s, BORDER_SOFT, BG);
+        cv.round_border(fr, 6.0 * s, pal().divider, pal().bg);
         te.draw(
             cv,
             f.ui,
@@ -5143,7 +5164,7 @@ impl Ui {
             (fr.x + p(12.0)) as f32,
             (fr.y + p(14.0)) as f32,
             "SHA-256",
-            TEXT_4,
+            pal().text_faint,
             tw,
         );
         let (a, b) = c.fingerprint.split_at(c.fingerprint.len().min(48));
@@ -5155,7 +5176,7 @@ impl Ui {
                 (fr.x + p(12.0)) as f32,
                 (fr.y + p(30.0) + i as i32 * p(16.0)) as f32,
                 part,
-                TEXT,
+                pal().text,
                 (fr.w - p(24.0)) as f32,
             );
         }
@@ -5195,7 +5216,7 @@ impl Ui {
     fn paint_drawer(&mut self, cv: &mut Canvas, te: &mut TextEngine, f: &Fonts, d: Rect, id: u64) {
         let s = self.scale;
         let p = |v: f32| (v * s).round() as i32;
-        cv.fill(d, BG_SIDEBAR);
+        cv.fill(d, pal().bg_sidebar);
         let old = cv.set_clip(d);
         let Some(tab) = self.tabs.iter().find(|t| t.id == id) else {
             cv.set_clip(old);
@@ -5265,7 +5286,7 @@ impl Ui {
             cv.fill_round(
                 Rect::new(body.right() - p(5.0), by, p(3.0), bar),
                 1.5 * s,
-                BORDER_HOVER,
+                pal().border_strong,
             );
         }
         self.clip_hits(first_hit, body);
@@ -5371,7 +5392,7 @@ impl Ui {
                 ),
                 0.0,
                 "None yet. Shared folders show in the remote Explorer.",
-                TEXT_3,
+                pal().text_muted,
             );
             y += p(44.0);
         } else {
@@ -5386,7 +5407,7 @@ impl Ui {
                     (r.x + p(14.0)) as f32,
                     (r.y + p(21.0)) as f32,
                     &drv.name,
-                    TEXT,
+                    pal().text,
                     (close.x - r.x - p(20.0)) as f32,
                 );
                 te.draw(
@@ -5396,20 +5417,20 @@ impl Ui {
                     (r.x + p(14.0)) as f32,
                     (r.y + p(38.0)) as f32,
                     &drv.path,
-                    TEXT_3,
+                    pal().text_muted,
                     (close.x - r.x - p(20.0)) as f32,
                 );
                 let hit = Hit::RemoveDrive(id, i);
                 if self.hover == Some(hit) {
-                    cv.fill_round(close, 5.0 * s, CONTROL_HOVER);
+                    cv.fill_round(close, 5.0 * s, pal().surface_hover);
                 }
                 let (cx, cy, dd) = (
                     (close.x + close.w / 2) as f32,
                     (close.y + close.h / 2) as f32,
                     4.0 * s,
                 );
-                cv.stroke(&[(cx - dd, cy - dd), (cx + dd, cy + dd)], 1.4 * s, TEXT_2);
-                cv.stroke(&[(cx - dd, cy + dd), (cx + dd, cy - dd)], 1.4 * s, TEXT_2);
+                cv.stroke(&[(cx - dd, cy - dd), (cx + dd, cy + dd)], 1.4 * s, pal().text_secondary);
+                cv.stroke(&[(cx - dd, cy + dd), (cx + dd, cy - dd)], 1.4 * s, pal().text_secondary);
                 self.hits.push((close, hit));
             }
             y += n as i32 * p(50.0);
@@ -5532,7 +5553,7 @@ impl Ui {
         };
         if fixed != t.quality_live {
             let r = Rect::new(x, y, w, p(96.0));
-            cv.round_border(r, 8.0 * s, ACCENT_BORDER, BG_SELECT);
+            cv.round_border(r, 8.0 * s, pal().accent_border, pal().selected);
             te.draw(
                 cv,
                 f.semi,
@@ -5540,7 +5561,7 @@ impl Ui {
                 (r.x + p(14.0)) as f32,
                 (r.y + p(24.0)) as f32,
                 "Reconnect to apply",
-                TEXT,
+                pal().text,
                 (r.w - p(28.0)) as f32,
             );
             te.draw(
@@ -5550,7 +5571,7 @@ impl Ui {
                 (r.x + p(14.0)) as f32,
                 (r.y + p(42.0)) as f32,
                 "Quality is fixed when the session logs on.",
-                TEXT_2,
+                pal().text_secondary,
                 (r.w - p(28.0)) as f32,
             );
             self.button(
@@ -5732,7 +5753,7 @@ impl Ui {
                 (r.x + p(14.0)) as f32,
                 (r.y + r.h / 2 + p(5.0)) as f32,
                 label,
-                TEXT_3,
+                pal().text_muted,
                 p(80.0) as f32,
             );
             let vw = te.measure(f.ui, 12.5 * s, &value) as i32;
@@ -5744,7 +5765,7 @@ impl Ui {
                 (r.right() - p(14.0) - vw.min(room)) as f32,
                 (r.y + r.h / 2 + p(5.0)) as f32,
                 &value,
-                TEXT,
+                pal().text,
                 room as f32,
             );
         }
@@ -5832,7 +5853,7 @@ impl Ui {
     ) {
         let s = self.scale;
         let p = |v: f32| (v * s).round() as i32;
-        cv.round_border(r, 7.0 * s, BORDER, BG);
+        cv.round_border(r, 7.0 * s, pal().border, pal().bg);
         let pad = p(3.0);
         let n = items.len().max(1) as i32;
         let inner = r.w - 2 * pad;
@@ -5842,9 +5863,9 @@ impl Ui {
             let x1 = r.x + pad + inner * (i + 1) / n;
             let cell = Rect::new(x0, r.y + pad, x1 - x0, r.h - 2 * pad);
             if *on {
-                cv.round_border(cell, 5.0 * s, ACCENT_BORDER, BG_CHOSEN);
+                cv.round_border(cell, 5.0 * s, pal().accent_border, pal().surface_raised);
             } else if self.hover == Some(*hit) {
-                cv.fill_round(cell, 5.0 * s, BG_HOVER);
+                cv.fill_round(cell, 5.0 * s, pal().surface_hover);
             }
             let font = if *on { f.semi } else { f.ui };
             centered(
@@ -5854,7 +5875,7 @@ impl Ui {
                 12.0 * s,
                 cell,
                 text,
-                if *on { TEXT } else { TEXT_3 },
+                if *on { pal().text } else { pal().text_muted },
             );
             self.hits.push((cell, *hit));
         }
@@ -5866,12 +5887,12 @@ impl Ui {
         let s = self.scale;
         let p = |v: f32| (v * s).round() as i32;
         let total: i32 = heights.iter().sum();
-        cv.round_border(Rect::new(x, y, w, total), 8.0 * s, BORDER_SOFT, BG_BAR);
+        cv.round_border(Rect::new(x, y, w, total), 8.0 * s, pal().divider, pal().surface);
         let mut out = Vec::with_capacity(heights.len());
         let mut ry = y;
         for (i, &h) in heights.iter().enumerate() {
             if i > 0 {
-                cv.fill(Rect::new(x + p(14.0), ry, w - p(28.0), 1), BORDER_SOFT);
+                cv.fill(Rect::new(x + p(14.0), ry, w - p(28.0), 1), pal().divider);
             }
             out.push(Rect::new(x, ry, w, h));
             ry += h;
@@ -5898,7 +5919,7 @@ impl Ui {
             cv.fill_round(
                 Rect::new(r.x + p(3.0), r.y + p(3.0), r.w - p(6.0), r.h - p(6.0)),
                 6.0 * s,
-                BG_HOVER,
+                pal().surface_hover,
             );
         }
         let text_w = (r.w - p(78.0)) as f32;
@@ -5911,7 +5932,7 @@ impl Ui {
                 (r.x + p(14.0)) as f32,
                 (mid + p(5.0)) as f32,
                 label,
-                TEXT,
+                pal().text,
                 text_w,
             );
         } else {
@@ -5922,7 +5943,7 @@ impl Ui {
                 (r.x + p(14.0)) as f32,
                 (mid - p(2.0)) as f32,
                 label,
-                TEXT,
+                pal().text,
                 text_w,
             );
             te.draw(
@@ -5932,7 +5953,7 @@ impl Ui {
                 (r.x + p(14.0)) as f32,
                 (mid + p(14.0)) as f32,
                 sub,
-                TEXT_3,
+                pal().text_muted,
                 text_w,
             );
         }
@@ -5959,7 +5980,7 @@ impl Ui {
             cv.fill_round(
                 Rect::new(r.x + p(3.0), r.y + p(3.0), r.w - p(6.0), r.h - p(6.0)),
                 6.0 * s,
-                BG_HOVER,
+                pal().surface_hover,
             );
         }
         let text_w = (r.w - p(64.0)) as f32;
@@ -5972,7 +5993,7 @@ impl Ui {
             (r.x + p(14.0)) as f32,
             (mid - p(2.0)) as f32,
             label,
-            TEXT,
+            pal().text,
             text_w,
         );
         te.draw(
@@ -5982,12 +6003,12 @@ impl Ui {
             (r.x + p(14.0)) as f32,
             (mid + p(14.0)) as f32,
             sub,
-            TEXT_3,
+            pal().text_muted,
             text_w,
         );
         let (cx, cy) = ((r.right() - p(26.0)) as f32, mid as f32);
         if chosen {
-            cv.fill_circle(cx, cy, 9.0 * s, ACCENT);
+            cv.fill_circle(cx, cy, 9.0 * s, pal().accent);
             cv.stroke(
                 &[
                     (cx - 4.0 * s, cy),
@@ -5995,11 +6016,11 @@ impl Ui {
                     (cx + 4.2 * s, cy - 3.2 * s),
                 ],
                 1.8 * s,
-                ACCENT_TEXT,
+                pal().accent_text,
             );
         } else {
-            cv.fill_circle(cx, cy, 9.0 * s, BORDER_HOVER);
-            cv.fill_circle(cx, cy, 7.5 * s, BG_BAR);
+            cv.fill_circle(cx, cy, 9.0 * s, pal().border_strong);
+            cv.fill_circle(cx, cy, 7.5 * s, pal().surface);
         }
         self.hits.push((r, hit));
     }
@@ -6022,7 +6043,7 @@ impl Ui {
             cv.fill_round(
                 Rect::new(r.x + p(3.0), r.y + p(3.0), r.w - p(6.0), r.h - p(6.0)),
                 6.0 * s,
-                BG_HOVER,
+                pal().surface_hover,
             );
         }
         let mid = r.y + r.h / 2;
@@ -6034,12 +6055,12 @@ impl Ui {
             (r.x + p(14.0)) as f32,
             (mid + p(5.0)) as f32,
             label,
-            TEXT,
+            pal().text,
             (r.w - p(64.0)) as f32,
         );
         let (cx, cy) = ((r.right() - p(26.0)) as f32, mid as f32);
         if chosen {
-            cv.fill_circle(cx, cy, 9.0 * s, ACCENT);
+            cv.fill_circle(cx, cy, 9.0 * s, pal().accent);
             cv.stroke(
                 &[
                     (cx - 4.0 * s, cy),
@@ -6047,11 +6068,11 @@ impl Ui {
                     (cx + 4.2 * s, cy - 3.2 * s),
                 ],
                 1.8 * s,
-                ACCENT_TEXT,
+                pal().accent_text,
             );
         } else {
-            cv.fill_circle(cx, cy, 9.0 * s, BORDER_HOVER);
-            cv.fill_circle(cx, cy, 7.5 * s, BG_BAR);
+            cv.fill_circle(cx, cy, 9.0 * s, pal().border_strong);
+            cv.fill_circle(cx, cy, 7.5 * s, pal().surface);
         }
         self.hits.push((r, hit));
     }
@@ -6063,7 +6084,7 @@ impl Ui {
         cv.fill_round(
             sw,
             sw.h as f32 / 2.0,
-            if on { ACCENT } else { BORDER_HOVER },
+            if on { pal().accent } else { pal().border_strong },
         );
         let knob_x = if on {
             sw.right() - sw.h / 2
@@ -6074,7 +6095,7 @@ impl Ui {
             knob_x as f32,
             (sw.y + sw.h / 2) as f32,
             sw.h as f32 / 2.0 - 2.5 * s,
-            if on { ACCENT_TEXT } else { TEXT_2 },
+            if on { pal().accent_text } else { pal().text_secondary },
         );
     }
 
@@ -6098,7 +6119,7 @@ impl Ui {
             Rect::new(x + (4.0 * s) as i32, y, w, (18.0 * s) as i32),
             0.0,
             text,
-            TEXT_3,
+            pal().text_muted,
         );
     }
 
@@ -6121,7 +6142,7 @@ impl Ui {
             x as f32,
             y as f32,
             text,
-            TEXT_4,
+            pal().text_faint,
             w as f32,
         );
     }
@@ -6153,13 +6174,13 @@ impl Ui {
         let hit = Hit::Field(field);
         let focused = self.focus == Some(field);
         let border = if focused {
-            ACCENT_BORDER
+            pal().accent_border
         } else if self.hover == Some(hit) {
-            BORDER_HOVER
+            pal().border_strong
         } else {
-            BORDER
+            pal().border
         };
-        cv.round_border(r, 6.0 * s, border, BG_INPUT);
+        cv.round_border(r, 6.0 * s, border, pal().surface_raised);
         let pad = 10.0 * s;
         let size = 13.5 * s;
         let inner = r.inset((pad - 1.0) as i32, 2);
@@ -6174,7 +6195,7 @@ impl Ui {
             placeholder
         };
         if display.is_empty() && !focused {
-            let color = if saved { TEXT_2 } else { TEXT_4 };
+            let color = if saved { pal().text_secondary } else { pal().text_faint };
             te.draw_in(cv, f.ui, size, r, pad, placeholder, color);
         } else {
             let scroll = if focused {
@@ -6194,7 +6215,7 @@ impl Ui {
                         tw.ceil() as i32 + 1,
                         r.h - (12.0 * s) as i32,
                     ),
-                    BG_TEXT_SELECT,
+                    pal().text_selection,
                 );
             }
             if display.is_empty() {
@@ -6205,11 +6226,11 @@ impl Ui {
                     x + (5.0 * s).round(),
                     base.round(),
                     placeholder,
-                    TEXT_4,
+                    pal().text_faint,
                     f32::MAX,
                 );
             } else {
-                te.draw(cv, f.ui, size, x, base.round(), &display, TEXT, f32::MAX);
+                te.draw(cv, f.ui, size, x, base.round(), &display, pal().text, f32::MAX);
             }
             if focused {
                 let cx = x + te.measure(
@@ -6224,7 +6245,7 @@ impl Ui {
                         (1.5 * s).max(1.0).round() as i32,
                         r.h - (14.0 * s) as i32,
                     ),
-                    ACCENT,
+                    pal().accent,
                 );
             }
             cv.set_clip(old);
@@ -6250,38 +6271,38 @@ impl Ui {
         let colors = match style {
             Style::Primary => {
                 let fill = if press {
-                    ACCENT_PRESS
+                    pal().accent_pressed
                 } else if hover {
-                    ACCENT_HOVER
+                    pal().accent_hover
                 } else {
-                    ACCENT
+                    pal().accent
                 };
-                Some((fill, fill, ACCENT_TEXT))
+                Some((fill, fill, pal().accent_text))
             }
             Style::Secondary => Some((
-                if hover { BORDER_HOVER } else { BORDER },
+                if hover { pal().border_strong } else { pal().border },
                 if press {
-                    BG_PRESS
+                    pal().surface_pressed
                 } else if hover {
-                    CONTROL_HOVER
+                    pal().surface_hover
                 } else {
-                    BG_INPUT
+                    pal().surface_raised
                 },
-                TEXT,
+                pal().text,
             )),
             Style::Ghost => {
-                hover.then_some((BORDER, if press { BG_PRESS } else { BG_HOVER }, TEXT))
+                hover.then_some((pal().border, if press { pal().surface_pressed } else { pal().surface_hover }, pal().text))
             }
             Style::Danger => Some((
-                if hover { ERR } else { DANGER_BORDER },
+                if hover { pal().danger } else { pal().danger_border },
                 if press {
-                    BG_PRESS
+                    pal().surface_pressed
                 } else if hover {
-                    CONTROL_HOVER
+                    pal().surface_hover
                 } else {
-                    BG
+                    pal().bg
                 },
-                ERR,
+                pal().danger,
             )),
         };
         let color = match colors {
@@ -6289,7 +6310,7 @@ impl Ui {
                 cv.round_border(r, 6.0 * s, border, fill);
                 color
             }
-            None => TEXT_2, // ghost at rest: label only
+            None => pal().text_secondary, // ghost at rest: label only
         };
         let font = if matches!(style, Style::Primary) {
             f.semi
@@ -6543,7 +6564,7 @@ pub fn sample_apps_form() -> Ui {
     m.focus = None;
     m.field_mut(Field::AppProgram)
         .set(r"\\fs01\tools\timesheet.exe");
-    m.set_message("Added Expense report. Save keeps it.", TEXT_2);
+    m.set_message("Added Expense report. Save keeps it.", Tone::Muted);
     m
 }
 
@@ -6551,7 +6572,7 @@ pub fn sample_apps_form() -> Ui {
 pub fn sample_apps_tab() -> Ui {
     let mut m = sample(false);
     sample_apps_session(&mut m, true);
-    m.set_message("Connected: apps.corp.example (4480×1440).", TEXT_2);
+    m.set_message("Connected: apps.corp.example (4480×1440).", Tone::Muted);
     m
 }
 
@@ -6563,6 +6584,43 @@ pub fn sample_group() -> Ui {
     }
     // Also shows the status-bar update button.
     m.update = Some("0.2.0".into());
+    m
+}
+
+/// The quit question over a session tab.
+pub fn sample_exit() -> Ui {
+    let mut m = sample(true);
+    m.confirm_exit = Some(2);
+    m
+}
+
+/// The Build server tab in a given state: 0 connecting, 1 ended, 2 failed,
+/// 3 shown on its monitors (spanned).
+pub fn sample_tab_state(state: u8) -> Ui {
+    let mut m = sample(false);
+    m.active = Some(2);
+    if let Some(t) = m.tab_mut(2) {
+        t.state = match state {
+            0 => TabState::Connecting,
+            1 => TabState::Ended("The server ended the session (logged off).".into()),
+            2 => t.state.clone(),
+            _ => {
+                t.spanned = true;
+                TabState::Connected {
+                    width: 4480,
+                    height: 1440,
+                    bpp: 32,
+                }
+            }
+        };
+    }
+    m
+}
+
+/// No saved connections yet (first start).
+pub fn sample_empty() -> Ui {
+    let mut m = Ui::new(Store::memory(Vec::new()), 1.0);
+    m.focus = None;
     m
 }
 
@@ -6675,7 +6733,7 @@ pub fn sample(session_tab: bool) -> Ui {
         "authentication failed: server error 0xc000006d STATUS_LOGON_FAILURE".into(),
     );
     m.active = if session_tab { Some(1) } else { None };
-    m.set_message("Connected to 10.0.0.15.", TEXT_2);
+    m.set_message("Connected to 10.0.0.15.", Tone::Muted);
     m
 }
 

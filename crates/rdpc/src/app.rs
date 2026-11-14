@@ -28,7 +28,7 @@ use winit::window::{CursorIcon, CustomCursor, Window, WindowId};
 use crate::controls::Controls;
 use crate::session::{self, Worker};
 use crate::store::{SessionOptions, Store, WinKeys};
-use crate::theme;
+use crate::theme::{ThemeChoice, Tone};
 use crate::ui::{self, Action, Fonts, Key, SharedDrive, TabState, Ui};
 
 mod rail;
@@ -264,7 +264,7 @@ impl App {
                     let _ = proxy.send_event(UserEvent::Recorded(rec.finish()));
                 });
             }
-            self.message("Finishing the recording…", theme::TEXT_2);
+            self.message("Finishing the recording…", Tone::Muted);
             return;
         }
         let (w, h) = worker
@@ -288,9 +288,9 @@ impl App {
                 if let Some(t) = self.win.as_mut().and_then(|m| m.ui.tab_mut(id)) {
                     t.recording = true;
                 }
-                self.message(format!("Recording to {}", path.display()), theme::WARN);
+                self.message(format!("Recording to {}", path.display()), Tone::Warning);
             }
-            Err(e) => self.message(format!("Cannot record: {e}"), theme::ERR),
+            Err(e) => self.message(format!("Cannot record: {e}"), Tone::Danger),
         }
     }
 
@@ -436,7 +436,7 @@ impl App {
         if !opts.monitors.is_empty() && chosen.is_empty() && rail.is_none() {
             self.message(
                 "The chosen monitors are not connected; using this window.",
-                theme::WARN,
+                Tone::Warning,
             );
         }
         if rail.is_none() {
@@ -551,7 +551,7 @@ impl App {
             t.drives = drives;
         }
         if !warn.is_empty() {
-            self.message(warn.join(" · "), theme::WARN);
+            self.message(warn.join(" · "), Tone::Warning);
         }
     }
 
@@ -602,7 +602,7 @@ impl App {
         if let Some(t) = self.win.as_mut().and_then(|w| w.ui.tab_mut(id)) {
             t.redirected_to = Some(to.clone());
         }
-        self.message(format!("Redirected to {to}; connecting…"), theme::TEXT_2);
+        self.message(format!("Redirected to {to}; connecting…"), Tone::Muted);
     }
 
     fn reconnect_with(&mut self, id: u64, mut cfg: Config) {
@@ -635,9 +635,9 @@ impl App {
         }
     }
 
-    fn message(&mut self, text: impl Into<String>, color: u32) {
+    fn message(&mut self, text: impl Into<String>, tone: Tone) {
         if let Some(w) = &mut self.win {
-            w.ui.set_message(text, color);
+            w.ui.set_message(text, tone);
         }
         self.dirty();
     }
@@ -684,7 +684,7 @@ impl App {
                     .get(&id)
                     .map(|s| s.controls.set_microphone(on));
                 if let Some(Err(e)) = r {
-                    self.message(format!("Microphone: {e}"), theme::ERR);
+                    self.message(format!("Microphone: {e}"), Tone::Danger);
                 }
                 self.dirty();
             }
@@ -716,7 +716,7 @@ impl App {
                 if let Some(m) = &mut self.win {
                     m.ui.update_busy = true;
                 }
-                self.message(format!("Downloading rdpc {}…", c.version), theme::TEXT_2);
+                self.message(format!("Downloading rdpc {}…", c.version), Tone::Muted);
                 let proxy = self.proxy.clone();
                 std::thread::spawn(move || {
                     let r = rdpc_update::download_verified(&c)
@@ -788,7 +788,7 @@ impl App {
                     if let Some(t) = self.win.as_mut().and_then(|w| w.ui.tab_mut(id)) {
                         t.clipboard = false;
                     }
-                    self.message(e, theme::WARN);
+                    self.message(e, Tone::Warning);
                 } else {
                     self.message(
                         if on {
@@ -796,7 +796,7 @@ impl App {
                         } else {
                             "Clipboard no longer shared."
                         },
-                        theme::TEXT_2,
+                        Tone::Muted,
                     );
                 }
             }
@@ -806,7 +806,7 @@ impl App {
                 if let Some(s) = self.sessions.get(&id) {
                     s.controls.set_scale(pct);
                 }
-                self.message(format!("Remote desktop scale {pct} %."), theme::TEXT_2);
+                self.message(format!("Remote desktop scale {pct} %."), Tone::Muted);
             }
             Action::SetFit(id, on) => {
                 if let Some(s) = self.sessions.get_mut(&id) {
@@ -815,7 +815,7 @@ impl App {
                 if !on {
                     self.message(
                         "Fit to window off: the desktop keeps its size.",
-                        theme::TEXT_2,
+                        Tone::Muted,
                     );
                 }
                 self.dirty();
@@ -835,9 +835,9 @@ impl App {
                                 path,
                             });
                         }
-                        self.message(format!("Sharing {name}."), theme::TEXT_2);
+                        self.message(format!("Sharing {name}."), Tone::Muted);
                     }
-                    Some(Err(e)) => self.message(e, theme::WARN),
+                    Some(Err(e)) => self.message(e, Tone::Warning),
                     None => {}
                 }
             }
@@ -849,7 +849,7 @@ impl App {
                     .and_then(|t| (i < t.drives.len()).then(|| t.drives.remove(i)));
                 if let (Some(d), Some(s)) = (drive, self.sessions.get(&id)) {
                     s.controls.remove_drive(d.device_id);
-                    self.message(format!("Stopped sharing {}.", d.name), theme::TEXT_2);
+                    self.message(format!("Stopped sharing {}.", d.name), Tone::Muted);
                 }
             }
             Action::CtrlAltDel(id) => self.send(id, session::ctrl_alt_del()),
@@ -873,6 +873,20 @@ impl App {
                 let _ = self.settings.save();
                 if let Some(m) = &mut self.win {
                     m.ui.auto_lock = min;
+                }
+                self.dirty();
+            }
+            Action::SetTheme(choice) => {
+                self.settings.theme = choice;
+                let _ = self.settings.save();
+                if let Some(m) = &mut self.win {
+                    m.ui.theme = choice;
+                    m.gfx.window.set_theme(winit_theme(choice));
+                    apply_theme(choice, &m.gfx.window);
+                    m.shown.clear();
+                }
+                for s in &self.spans {
+                    s.window.request_redraw();
                 }
                 self.dirty();
             }
@@ -908,7 +922,7 @@ impl App {
                     let _ = proxy.send_event(ev);
                 });
                 if let Some(m) = &mut self.win {
-                    m.ui.settings_note = Some(("Checking for updates…".into(), theme::TEXT_2));
+                    m.ui.settings_note = Some(("Checking for updates…".into(), Tone::Muted));
                 }
                 self.dirty();
             }
@@ -922,7 +936,7 @@ impl App {
                 if on {
                     self.message(
                         "Diagnostic log on: connect, then send rdpc.log.",
-                        theme::TEXT_2,
+                        Tone::Muted,
                     );
                 }
                 self.dirty();
@@ -1330,7 +1344,7 @@ impl App {
                 if let Some(t) = self.win.as_mut().and_then(|w| w.ui.tab_mut(id)) {
                     reset(t);
                 }
-                self.message(e, theme::WARN);
+                self.message(e, Tone::Warning);
             }
             Some(Ok(())) => {
                 let text = if on {
@@ -1338,7 +1352,7 @@ impl App {
                 } else {
                     format!("{what} no longer shared.")
                 };
-                self.message(text, theme::TEXT_2);
+                self.message(text, Tone::Muted);
             }
             None => {}
         }
@@ -1356,7 +1370,7 @@ impl App {
                             (remembered, ui.store_mut().remembered_key_path())
                             && let Err(e) = std::fs::write(&path, blob)
                         {
-                            ui.set_message(format!("Could not remember the key: {e}"), theme::WARN);
+                            ui.set_message(format!("Could not remember the key: {e}"), Tone::Warning);
                         }
                         ui.vault_opened();
                     }
@@ -1439,7 +1453,7 @@ impl App {
                 attempt + 1,
                 RETRY_DELAYS_S.len()
             ),
-            theme::WARN,
+            Tone::Warning,
         );
         let proxy = self.proxy.clone();
         std::thread::spawn(move || {
@@ -1582,7 +1596,7 @@ impl ApplicationHandler<UserEvent> for App {
             if let Some(m) = &mut self.win {
                 m.ui.store_mut().lock();
                 m.ui.vault_locked();
-                m.ui.set_message("Locked after being idle.", theme::TEXT_2);
+                m.ui.set_message("Locked after being idle.", Tone::Muted);
             }
             self.dirty();
         }
@@ -1619,7 +1633,8 @@ impl ApplicationHandler<UserEvent> for App {
                 .with_title("rdpc")
                 .with_inner_size(LogicalSize::new(1320.0, 860.0))
                 .with_min_inner_size(LogicalSize::new(900.0, 560.0))
-                .with_window_icon(crate::icon::window_icon(64));
+                .with_window_icon(crate::icon::window_icon(64))
+                .with_theme(winit_theme(self.settings.theme));
             // The taskbar (and Alt+Tab) uses the large icon; give it full resolution.
             #[cfg(windows)]
             let attrs = {
@@ -1652,6 +1667,7 @@ impl ApplicationHandler<UserEvent> for App {
                     {
                         let _ = gfx.surface.resize(w, h);
                     }
+                    apply_theme(self.settings.theme, &gfx.window);
                     gfx.window.request_redraw();
                     self.win = Some(MainWin {
                         gfx,
@@ -1671,6 +1687,7 @@ impl ApplicationHandler<UserEvent> for App {
                             ui.diagnostic_log = rdp::log::verbose();
                             ui.remembered = remembered_exists(&mut ui);
                             ui.update_channel = self.settings.update_channel.clone();
+                            ui.theme = self.settings.theme;
                             if self.settings.check_updates {
                                 check_for_update(
                                     self.proxy.clone(),
@@ -1719,7 +1736,7 @@ impl ApplicationHandler<UserEvent> for App {
                             "rdpc {} is available: Ctrl+Shift+U or Update in the status bar.",
                             c.version
                         ),
-                        theme::OK,
+                        Tone::Success,
                     ));
                 }
                 self.update = Some(c);
@@ -1747,7 +1764,7 @@ impl ApplicationHandler<UserEvent> for App {
                 if let Some(m) = &mut self.win {
                     m.ui.update_busy = false;
                 }
-                return self.message(format!("Update failed: {e}"), theme::ERR);
+                return self.message(format!("Update failed: {e}"), Tone::Danger);
             }
             UserEvent::HookKey(scancode, extended, down) => {
                 let main = self
@@ -1792,10 +1809,10 @@ impl ApplicationHandler<UserEvent> for App {
                                 secs % 60,
                                 info.bytes as f64 / 1e6
                             ),
-                            theme::OK,
+                            Tone::Success,
                         );
                     }
-                    Err(e) => self.message(format!("Recording failed: {e}"), theme::ERR),
+                    Err(e) => self.message(format!("Recording failed: {e}"), Tone::Danger),
                 }
                 return;
             }
@@ -1877,7 +1894,7 @@ impl ApplicationHandler<UserEvent> for App {
                 }
                 self.message(
                     format!("Connected: {host} ({}×{}).", info.width, info.height),
-                    theme::TEXT_2,
+                    Tone::Muted,
                 );
             }
             session::Event::Pointer(p) => {
@@ -2032,6 +2049,17 @@ impl App {
         }
         match event {
             WindowEvent::CloseRequested => self.request_quit(),
+            // Windows switched between light and dark apps: System follows.
+            WindowEvent::ThemeChanged(_) if self.settings.theme == ThemeChoice::System => {
+                if let Some(m) = &mut self.win {
+                    apply_theme(ThemeChoice::System, &m.gfx.window);
+                    m.shown.clear();
+                }
+                for s in &self.spans {
+                    s.window.request_redraw();
+                }
+                self.dirty();
+            }
             WindowEvent::Resized(sz) => {
                 let m = self.win.as_mut().unwrap();
                 m.size = (sz.width as usize, sz.height as usize);
@@ -2350,7 +2378,7 @@ impl App {
                 sw.window.focus_window();
                 self.spans.push(sw);
             }
-            Err(e) => self.message(format!("Cannot open the monitor window: {e}"), theme::ERR),
+            Err(e) => self.message(format!("Cannot open the monitor window: {e}"), Tone::Danger),
         }
     }
 
@@ -2531,4 +2559,19 @@ impl App {
             _ => {}
         }
     }
+}
+
+/// The native frame's theme: a fixed choice, or None to follow Windows.
+fn winit_theme(choice: ThemeChoice) -> Option<winit::window::Theme> {
+    match choice {
+        ThemeChoice::Dark => Some(winit::window::Theme::Dark),
+        ThemeChoice::Light => Some(winit::window::Theme::Light),
+        ThemeChoice::System => None,
+    }
+}
+
+/// Paints with `choice`; System asks the window which theme Windows uses.
+fn apply_theme(choice: ThemeChoice, window: &Window) {
+    let light = window.theme() == Some(winit::window::Theme::Light);
+    crate::theme::set(choice.palette(light));
 }

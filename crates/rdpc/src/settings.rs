@@ -13,6 +13,8 @@ pub struct AppSettings {
     pub diagnostic_log: bool,
     /// Update channel: "auto" (follows the installed version), "stable", "beta".
     pub update_channel: String,
+    /// Colour theme: dark (default), light, or the Windows app theme.
+    pub theme: crate::theme::ThemeChoice,
 }
 
 /// Update channel choices offered in Settings: (setting, label).
@@ -77,6 +79,7 @@ impl Default for AppSettings {
             check_updates: true,
             diagnostic_log: false,
             update_channel: "auto".into(),
+            theme: crate::theme::ThemeChoice::Dark,
         }
     }
 }
@@ -115,5 +118,8 @@ mod tests {
         let s: AppSettings = serde_json::from_str(r#"{"check_updates":false}"#).unwrap();
         assert_eq!(s.auto_lock_minutes, 15);
         assert!(!s.check_updates);
+        assert_eq!(s.theme, crate::theme::ThemeChoice::Dark);
+        let s: AppSettings = serde_json::from_str(r#"{"theme":"light"}"#).unwrap();
+        assert_eq!(s.theme, crate::theme::ThemeChoice::Light);
     }
 }

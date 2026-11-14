@@ -18,7 +18,7 @@ use ffwd_render::{Canvas, Rect, TextEngine};
 use softbuffer::{Context, Surface};
 use winit::window::Window;
 
-use crate::theme::*;
+use crate::theme::pal;
 use crate::ui::Fonts;
 
 /// A monitor window to open (the event loop creates it).
@@ -271,7 +271,7 @@ impl SpanWin {
 /// The session bar over the top of the first monitor: the connection's name,
 /// Exit full screen and Disconnect. Returns the buttons' rectangles.
 #[allow(clippy::too_many_arguments)]
-fn paint_bar(
+pub(crate) fn paint_bar(
     px: &mut [u32],
     w: usize,
     h: usize,
@@ -284,8 +284,8 @@ fn paint_bar(
     let p = |v: f32| (v * s).round() as i32;
     let mut cv = Canvas::new(px, w, h);
     let bh = p(40.0);
-    cv.fill(Rect::new(0, 0, w as i32, bh), BG_BAR);
-    cv.fill(Rect::new(0, bh - 1, w as i32, 1), BORDER_SOFT);
+    cv.fill(Rect::new(0, 0, w as i32, bh), pal().surface);
+    cv.fill(Rect::new(0, bh - 1, w as i32, 1), pal().divider);
     te.draw_in(
         &mut cv,
         f.ui,
@@ -293,7 +293,7 @@ fn paint_bar(
         Rect::new(p(14.0), 0, w as i32 / 2, bh),
         0.0,
         title,
-        TEXT_2,
+        pal().text_secondary,
     );
     let mut out = Vec::new();
     let mut x = w as i32 - p(8.0);
@@ -306,20 +306,20 @@ fn paint_bar(
         x -= bw;
         let r = Rect::new(x, p(6.0), bw, bh - p(12.0));
         let fill = if hover == Some(button) {
-            CONTROL_HOVER
+            pal().surface_hover
         } else {
-            BG_INPUT
+            pal().surface_raised
         };
         let border = if button == BarButton::Disconnect {
-            DANGER_BORDER
+            pal().danger_border
         } else {
-            BORDER
+            pal().border
         };
         cv.round_border(r, 6.0 * s, border, fill);
         let color = if button == BarButton::Disconnect {
-            ERR
+            pal().danger
         } else {
-            TEXT
+            pal().text
         };
         te.draw_in(
             &mut cv,

@@ -414,71 +414,55 @@ fn snapshot_ui(path: &str, scale: f32) -> Result<(), Box<dyn std::error::Error>>
     let mut te = TextEngine::new();
     let fonts = ui::load_fonts(&mut te).ok_or("no usable UI font")?;
     let (w, h) = ((1320.0 * scale) as usize, (860.0 * scale) as usize);
-    for (session, out) in [
-        (false, path.to_string()),
-        (true, path.replace(".png", "-session.png")),
-    ] {
-        let mut m = ui::sample(session);
-        m.scale = scale;
-        m.custom_frame = cfg!(windows);
-        let mut px = vec![0u32; w * h];
-        m.paint(&mut Canvas::new(&mut px, w, h), &mut te, &fonts);
-        write_png(&out, w, h, &px)?;
-        eprintln!("saved {w}x{h} snapshot to {out}");
+    // Every screen, in the dark theme and again with "-light" in the name.
+    let screens: [(&str, fn() -> ui::Ui); 25] = [
+        ("", || ui::sample(false)),
+        ("-session", || ui::sample(true)),
+        ("-form-general", || ui::sample_form(0)),
+        ("-form-display", || ui::sample_form(1)),
+        ("-form-experience", || ui::sample_form(2)),
+        ("-form-sharing", || ui::sample_form(3)),
+        ("-form-advanced", || ui::sample_form(4)),
+        ("-settings", || ui::sample_settings(false)),
+        ("-settings-vault", || ui::sample_settings(true)),
+        ("-cert", || ui::sample_cert(false)),
+        ("-cert-changed", || ui::sample_cert(true)),
+        ("-panel-display", || ui::sample_panel(1, false)),
+        ("-panel-quality", || ui::sample_panel(2, false)),
+        ("-panel-session", || ui::sample_panel(3, false)),
+        ("-fullscreen", || ui::sample_panel(0, true)),
+        ("-group", ui::sample_group),
+        ("-apps-form", ui::sample_apps_form),
+        ("-apps-session", ui::sample_apps_tab),
+        ("-unlock", || ui::Ui::new(store::Store::locked_sample(), 1.0)),
+        ("-exit", ui::sample_exit),
+        ("-failed", || ui::sample_tab_state(2)),
+        ("-connecting", || ui::sample_tab_state(0)),
+        ("-ended", || ui::sample_tab_state(1)),
+        ("-spanned", || ui::sample_tab_state(3)),
+        ("-empty", ui::sample_empty),
+    ];
+    for (light, theme) in [("", &theme::DARK), ("-light", &theme::LIGHT)] {
+        theme::set(theme);
+        for (suffix, make) in screens {
+            let mut m = make();
+            m.scale = scale;
+            m.custom_frame = cfg!(windows);
+            let mut px = vec![0u32; w * h];
+            m.paint(&mut Canvas::new(&mut px, w, h), &mut te, &fonts);
+            let out = path.replace(".png", &format!("{suffix}{light}.png"));
+            write_png(&out, w, h, &px)?;
+            eprintln!("saved {w}x{h} snapshot to {out}");
+        }
+        // The bar over a session spread across monitors.
+        let bh = (40.0 * scale).round() as usize;
+        let mut px = vec![0u32; w * bh];
+        span::paint_bar(&mut px, w, bh, scale, "Office workstation", None, &mut te, &fonts);
+        let out = path.replace(".png", &format!("-span-bar{light}.png"));
+        write_png(&out, w, bh, &px)?;
+        eprintln!("saved {w}x{bh} snapshot to {out}");
     }
-    // The quick panel pages, and full screen.
-    for (page, full, suffix) in [
-        (20, false, "-form-general"),
-        (21, false, "-form-display"),
-        (22, false, "-form-experience"),
-        (23, false, "-form-sharing"),
-        (24, false, "-form-advanced"),
-        (30, false, "-settings"),
-        (31, false, "-settings-vault"),
-        (8, false, "-cert"),
-        (9, false, "-cert-changed"),
-        (1, false, "-panel-display"),
-        (2, false, "-panel-quality"),
-        (3, false, "-panel-session"),
-        (0, true, "-fullscreen"),
-    ] {
-        let mut m = match page {
-            8 | 9 => ui::sample_cert(page == 9),
-            30.. => ui::sample_settings(page == 31),
-            20.. => ui::sample_form(page - 20),
-            _ => ui::sample_panel(page, full),
-        };
-        m.scale = scale;
-        m.custom_frame = cfg!(windows);
-        let mut px = vec![0u32; w * h];
-        m.paint(&mut Canvas::new(&mut px, w, h), &mut te, &fonts);
-        let out = path.replace(".png", &format!("{suffix}.png"));
-        write_png(&out, w, h, &px)?;
-        eprintln!("saved {w}x{h} snapshot to {out}");
-    }
-    // The group form; an Apps connection's editor (sidebar with app rows);
-    // a RemoteApp session tab.
-    for (mut m, suffix) in [
-        (ui::sample_group(), "-group"),
-        (ui::sample_apps_form(), "-apps-form"),
-        (ui::sample_apps_tab(), "-apps-session"),
-    ] {
-        m.scale = scale;
-        m.custom_frame = cfg!(windows);
-        let mut px = vec![0u32; w * h];
-        m.paint(&mut Canvas::new(&mut px, w, h), &mut te, &fonts);
-        let out = path.replace(".png", &format!("{suffix}.png"));
-        write_png(&out, w, h, &px)?;
-        eprintln!("saved {w}x{h} snapshot to {out}");
-    }
-    // The unlock screen of an encrypted vault.
-    let mut m = ui::Ui::new(store::Store::locked_sample(), scale);
-    m.custom_frame = cfg!(windows);
-    let mut px = vec![0u32; w * h];
-    m.paint(&mut Canvas::new(&mut px, w, h), &mut te, &fonts);
-    let out = path.replace(".png", "-unlock.png");
-    write_png(&out, w, h, &px)?;
-    eprintln!("saved {w}x{h} snapshot to {out}");
+    theme::set(&theme::DARK);
     Ok(())
 }
 
