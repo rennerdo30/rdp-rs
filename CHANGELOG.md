@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 0.1.0-beta.3
+
+- **Servers whose picture encoding failed now connect.** Some Windows servers gave up about a second after logon with error 0x112F ("the server's graphics subsystem failed"). Remora now reconnects such a session once in compatible mode, without RemoteFX surface commands and drawing orders, as 0.1.0-beta.1 drew the screen, and keeps that mode for the tab's later reconnects.
+- **Closer to the specification:** Remora offers a receive buffer large enough for a whole frame at the desktop size (it was 8 MB), and promises the server its cached-bitmap list only when it sends one.
+- **Clearer errors:** the server's graphics and monitor errors (0x112C to 0x1136) are named instead of "server rejected a client PDU".
+- **Open log** on the error screen opens Explorer with `remora.log` selected, in front of Remora.
+
 ## 0.1.0-beta.2
 
 - **rdpc is now Remora.** The app has a new name and a new logo: a remora fish whose body is a screen. The executable is `remora.exe`, the setup is `remora-<version>-setup.exe`, and it installs to `%LOCALAPPDATA%\Programs\Remora` with a Start menu and Installed apps entry named Remora. The protocol library (`rdp`) and the repository (`rdp-rs`) keep their names.

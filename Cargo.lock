@@ -1451,7 +1451,7 @@ checksum = "20675572f6f24e9e76ef639bc5552774ed45f1c30e2951e1e99c59888861c539"
 
 [[package]]
 name = "rdp"
-version = "0.1.0-beta.2"
+version = "0.1.0-beta.3"
 dependencies = [
  "ring",
  "rustls",
@@ -1486,7 +1486,7 @@ dependencies = [
 
 [[package]]
 name = "remora"
-version = "0.1.0-beta.2"
+version = "0.1.0-beta.3"
 dependencies = [
  "argon2",
  "chacha20poly1305",
@@ -1507,7 +1507,7 @@ dependencies = [
 
 [[package]]
 name = "remora-update"
-version = "0.1.0-beta.2"
+version = "0.1.0-beta.3"
 dependencies = [
  "serde_json",
  "sha2",
