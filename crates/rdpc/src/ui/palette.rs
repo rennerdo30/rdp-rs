@@ -744,7 +744,12 @@ impl Ui {
         // Saved connections. One with a session up is listed under Sessions
         // (or is the one on screen), so Enter never opens it twice.
         if !locked {
-            for (i, c) in self.store.connections.iter().enumerate() {
+            // Favourites first, then the most recently used (the Home
+            // view's star and history), then the saved order.
+            let conns = &self.store.connections;
+            let mut by_use: Vec<usize> = (0..conns.len()).collect();
+            by_use.sort_by_key(|&i| (!conns[i].pinned, std::cmp::Reverse(conns[i].last_used)));
+            for (i, c) in by_use.into_iter().map(|i| (i, &conns[i])) {
                 let open = self.tabs.iter().any(|t| {
                     t.name == c.name
                         && t.host == c.host
@@ -1668,6 +1673,28 @@ mod tests {
         let it = items(&mut live, "");
         assert_eq!(it[0].entry.section, Section::Session);
         assert_eq!(it[0].entry.cmd, Command::Disconnect(1));
+    }
+
+    #[test]
+    fn empty_query_lists_favourites_then_recent_connections() {
+        let mut m = super::super::sample(false);
+        m.store.connections[3].pinned = true;
+        m.store.connections[1].last_used = Some(50);
+        m.store.connections[2].last_used = Some(90);
+        let order: Vec<Command> = items(&mut m, "")
+            .iter()
+            .filter(|i| i.entry.section == Section::Connections)
+            .map(|i| i.entry.cmd)
+            .collect();
+        assert_eq!(
+            order,
+            vec![
+                Command::Connect(3),
+                Command::Connect(2),
+                Command::Connect(1)
+            ],
+            "pinned, then newest use; the open Office workstation is under Sessions"
+        );
     }
 
     #[test]

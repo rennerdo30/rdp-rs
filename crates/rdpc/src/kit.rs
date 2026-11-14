@@ -1122,7 +1122,8 @@ pub fn paint_sheet(cv: &mut Canvas, te: &mut TextEngine, f: &Fonts, s: f32) {
         k.cv.round_border(cell, 6.0 * s, p.border, p.surface);
         k.icon_in(*icon, cell, 16.0, p.text);
     }
-    y += 3 * k.p(40.0) + k.p(20.0);
+    let icon_rows = (Icon::ALL.len() as i32 + 16) / 17;
+    y += icon_rows * k.p(40.0) + k.p(20.0);
     k.section(x0, y, k.p(600.0), "Buttons", None);
     y += k.p(28.0);
     let variants = [

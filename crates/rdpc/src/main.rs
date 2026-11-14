@@ -45,6 +45,7 @@ mod sspi;
 mod store;
 mod text_field;
 mod theme;
+mod thumb;
 mod touch;
 mod ui;
 mod vault;
@@ -420,7 +421,7 @@ fn snapshot_ui(path: &str, scale: f32) -> Result<(), Box<dyn std::error::Error>>
     let (w, h) = ((1320.0 * scale) as usize, (860.0 * scale) as usize);
     // Every screen, in the dark theme and again with "-light" in the name.
     type Screen = (&'static str, fn() -> ui::Ui);
-    let screens: [Screen; 29] = [
+    let screens: [Screen; 32] = [
         ("", || ui::sample(false)),
         ("-session", || ui::sample(true)),
         ("-form-general", || ui::sample_form(0)),
@@ -452,10 +453,35 @@ fn snapshot_ui(path: &str, scale: f32) -> Result<(), Box<dyn std::error::Error>>
         ("-palette-query", || ui::sample_palette(false, "of")),
         ("-palette-session", || ui::sample_palette(true, "")),
         ("-palette-none", || ui::sample_palette(true, "zzq")),
+        ("-home", ui::sample_home),
+        ("-home-typed", || ui::sample_home_typed("off")),
+        ("-home-new-host", || {
+            ui::sample_home_typed("alex@10.0.0.99:3390")
+        }),
+    ];
+    // The Home view and the editor at other window sizes (logical px).
+    type SizedScreen = (&'static str, fn() -> ui::Ui, f32, f32);
+    let sized: [SizedScreen; 5] = [
+        ("-home-900", ui::sample_home, 900.0, 760.0),
+        ("-home-1920", ui::sample_home, 1920.0, 1080.0),
+        ("-home-2560", ui::sample_home, 2560.0, 1400.0),
+        ("-empty-1920", ui::sample_empty, 1920.0, 1080.0),
+        ("-editor-1920", || ui::sample_form(0), 1920.0, 1080.0),
     ];
     for (light, theme) in [("", &theme::DARK), ("-light", &theme::LIGHT)] {
         theme::set(theme);
         for (suffix, make) in screens {
+            let mut m = make();
+            m.scale = scale;
+            m.custom_frame = cfg!(windows);
+            let mut px = vec![0u32; w * h];
+            m.paint(&mut Canvas::new(&mut px, w, h), &mut te, &fonts);
+            let out = path.replace(".png", &format!("{suffix}{light}.png"));
+            write_png(&out, w, h, &px)?;
+            eprintln!("saved {w}x{h} snapshot to {out}");
+        }
+        for (suffix, make, lw, lh) in sized {
+            let (w, h) = ((lw * scale) as usize, (lh * scale) as usize);
             let mut m = make();
             m.scale = scale;
             m.custom_frame = cfg!(windows);

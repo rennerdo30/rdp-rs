@@ -50,6 +50,15 @@ pub struct Connection {
     /// The programs an Apps connection offers (its own, not inherited).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub apps: Vec<AppEntry>,
+    /// Pinned to the Home view's Favourites (the star).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub pinned: bool,
+    /// When a session of it last ran (Unix seconds) and how long the last
+    /// one lasted (seconds); missing in older files: never.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_used: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_duration: Option<u64>,
 }
 
 /// What a connection opens.

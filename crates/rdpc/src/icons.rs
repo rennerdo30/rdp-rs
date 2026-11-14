@@ -69,10 +69,16 @@ pub enum Icon {
     Download,
     /// The command palette (the looped-square command sign).
     Command,
+    /// A pinned favourite (filled star).
+    StarFilled,
+    /// Recent use, session length.
+    Clock,
+    /// Quick connect.
+    Bolt,
 }
 
 impl Icon {
-    pub const ALL: [Icon; 50] = [
+    pub const ALL: [Icon; 53] = [
         Icon::Plus,
         Icon::Search,
         Icon::Gear,
@@ -123,6 +129,9 @@ impl Icon {
         Icon::PanelRight,
         Icon::Download,
         Icon::Command,
+        Icon::StarFilled,
+        Icon::Clock,
+        Icon::Bolt,
     ];
 }
 
@@ -555,6 +564,31 @@ pub fn draw(cv: &mut Canvas, icon: Icon, x: f32, y: f32, size: f32, color: u32) 
             p.rrect(1.8, 2.6, 12.4, 10.8, 1.6);
             p.line(&[(9.8, 2.6), (9.8, 13.4)]);
         }
+        Icon::StarFilled => {
+            let pts: Vec<(f32, f32)> = (0..10)
+                .map(|i| {
+                    let r = if i % 2 == 0 { 6.2 } else { 2.7 };
+                    let a = (-90.0 + i as f32 * 36.0f32).to_radians();
+                    (8.0 + r * a.cos(), 8.6 + r * a.sin())
+                })
+                .collect();
+            for i in 0..10 {
+                p.fill_tri((8.0, 8.6), pts[i], pts[(i + 1) % 10]);
+            }
+            p.shape(&pts);
+        }
+        Icon::Clock => {
+            p.circle((8.0, 8.0), 6.0);
+            p.line(&[(8.0, 4.6), (8.0, 8.0), (10.6, 9.6)]);
+        }
+        Icon::Bolt => p.shape(&[
+            (9.4, 1.8),
+            (3.4, 9.2),
+            (7.6, 9.2),
+            (6.6, 14.2),
+            (12.6, 6.8),
+            (8.4, 6.8),
+        ]),
         Icon::Download => {
             p.line(&[(8.0, 2.2), (8.0, 10.2)]);
             p.line(&[(4.6, 6.8), (8.0, 10.2), (11.4, 6.8)]);

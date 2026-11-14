@@ -20,6 +20,10 @@ use crate::theme::{self, ThemeChoice, Tone, pal, radius, size};
 
 mod palette;
 pub use palette::{SESSION_CHORD, sample as sample_palette};
+mod home;
+mod summary;
+
+pub use home::ThumbDue;
 
 pub struct Fonts {
     pub ui: FontId,
@@ -119,6 +123,8 @@ pub enum Field {
     AppName,
     AppArgs,
     AppDir,
+    /// The Home view's quick connect field.
+    Quick,
 }
 
 /// Fields cleared for a new connection or group.
@@ -284,6 +290,8 @@ pub enum Hit {
     RailClose(u64, u32),
     /// Opens the command palette (sidebar search, session toolbar).
     Palette,
+    /// The Home view's controls (see `home`).
+    HomeView(home::HomeHit),
 }
 
 /// A RemoteApp session tab: the connection's apps and the open windows.
@@ -549,7 +557,7 @@ pub struct Ui {
     /// Key derivation running.
     pub unlocking: bool,
     vault_error: Option<String>,
-    fields: [TextField; 18],
+    fields: [TextField; 19],
     size: usize,
     focus: Option<Field>,
     pub tabs: Vec<Tab>,
@@ -629,6 +637,8 @@ pub struct Ui {
     home_area: Rect,
     /// The command palette, while it is open.
     palette: Option<palette::Palette>,
+    /// The Home view: shown, quick connect, thumbnails, session clocks.
+    home: home::HomeState,
 }
 
 /// Title-row geometry in physical pixels for the frame hook.
@@ -710,6 +720,7 @@ impl Ui {
             home_content: 0,
             home_area: Rect::default(),
             palette: None,
+            home: home::HomeState::default(),
         };
         m.fields[Field::Password as usize] = TextField::secret();
         m.fields[Field::Master as usize] = TextField::secret();
@@ -717,11 +728,8 @@ impl Ui {
         m.fields[Field::NewMaster as usize] = TextField::secret();
         m.fields[Field::ImportPass as usize] = TextField::secret();
         m.store.adopt_groups();
-        if m.store.connections.is_empty() {
-            m.new_connection();
-        } else {
-            m.select(0);
-        }
+        // The Connections tab opens on the Home view.
+        m.go_home();
         if m.store.is_locked() {
             m.focus = Some(Field::Master);
         }
@@ -808,6 +816,7 @@ impl Ui {
         let Some(i) = self.tabs.iter().position(|t| t.id == id) else {
             return;
         };
+        self.session_ended(id);
         self.tabs.remove(i);
         if self.active == Some(id) {
             self.active = if self.tabs.is_empty() {
@@ -825,6 +834,7 @@ impl Ui {
         };
         self.selected = Some(i);
         self.group_edit = None;
+        self.home.showing = false;
         self.field_mut(Field::Name).set(&c.name);
         self.field_mut(Field::Host).set(&c.host);
         self.field_mut(Field::Port).set(&c.port.to_string());
@@ -855,6 +865,7 @@ impl Ui {
             return;
         };
         self.selected = None;
+        self.home.showing = false;
         self.group_edit = Some(Some(g.path.clone()));
         for f in FORM {
             self.field_mut(f).set("");
@@ -886,13 +897,10 @@ impl Ui {
         }
     }
 
-    fn new_connection(&mut self) {
-        self.new_connection_in("");
-    }
-
     /// A new connection; inside a group it inherits everything to start with.
     fn new_connection_in(&mut self, group: &str) {
         self.selected = None;
+        self.home.showing = false;
         self.group_edit = None;
         for f in FORM {
             self.field_mut(f).set("");
@@ -915,6 +923,7 @@ impl Ui {
     fn new_group(&mut self) {
         let parent = self.context_group();
         self.selected = None;
+        self.home.showing = false;
         self.group_edit = Some(None);
         self.group_color = None;
         for f in FORM {
@@ -1008,6 +1017,12 @@ impl Ui {
             );
         }
         let (width, height) = self.form_size();
+        // Pin and history belong to the saved connection, not the form.
+        let kept = self
+            .selected
+            .and_then(|i| self.store.connections.get(i))
+            .map(|c| (c.pinned, c.last_used, c.last_duration))
+            .unwrap_or_default();
         Ok(Connection {
             name,
             host,
@@ -1023,6 +1038,9 @@ impl Ui {
             inherit,
             opens: self.opens,
             apps: self.apps.clone(),
+            pinned: kept.0,
+            last_used: kept.1,
+            last_duration: kept.2,
         })
     }
 
@@ -1262,14 +1280,9 @@ impl Ui {
                     format!("Deleted group {path}; its connections moved up."),
                     Tone::Muted,
                 );
-                if self.store.connections.is_empty() {
-                    self.new_connection();
-                } else {
-                    self.select(0);
-                }
-                return;
+                return self.go_home();
             }
-            Some(None) => return self.new_connection(),
+            Some(None) => return self.go_home(),
             None => {}
         }
         let Some(i) = self.selected else { return };
@@ -1278,11 +1291,7 @@ impl Ui {
             return self.set_message(e, Tone::Danger);
         }
         self.set_message(format!("Deleted {}.", gone.name), Tone::Muted);
-        if self.store.connections.is_empty() {
-            self.new_connection();
-        } else {
-            self.select(i.min(self.store.connections.len() - 1));
-        }
+        self.go_home();
     }
 
     fn connect(&mut self) -> Option<Action> {
@@ -1338,6 +1347,10 @@ impl Ui {
             typed
         };
         self.set_message(format!("Connecting to {}…", r.host), Tone::Muted);
+        if self.selected.is_none() {
+            // Not saved: the Home view offers to save it.
+            self.home_note_unsaved(&c);
+        }
         Some(session_action(&r, &password, first.as_ref()))
     }
 
@@ -1515,6 +1528,9 @@ impl Ui {
         if self.vault_setup {
             return vec![Field::Master, Field::MasterConfirm];
         }
+        if self.home_visible() {
+            return vec![Field::Quick];
+        }
         match self.form_page {
             0 => {}
             3 if !self.form_inherit().sharing => return vec![Field::FormDrive],
@@ -1596,7 +1612,7 @@ impl Ui {
                 self.focus = Some(f);
                 if let Some(&(_, r)) = self.field_rects.iter().find(|(ff, _)| *ff == f) {
                     let display = self.field(f).display();
-                    let size = FIELD_TEXT * self.scale;
+                    let size = field_text(f) * self.scale;
                     let rel = (x - r.x) as f32 + self.field_scroll(f, r, te, fonts);
                     let mut caret = 0;
                     let mut prefix = String::new();
@@ -1900,7 +1916,7 @@ impl Ui {
             Hit::Connect => return self.connect(),
             Hit::Save => self.save(),
             Hit::Delete => self.delete(),
-            Hit::Home => self.active = None,
+            Hit::Home => self.go_home(),
             Hit::Tab(id) => self.active = Some(id),
             Hit::CloseTab(id) => return Some(Action::CloseTab(id)),
             Hit::Drawer => self.drawer = !self.drawer,
@@ -2014,6 +2030,7 @@ impl Ui {
             Hit::RailFocus(id, w) => return Some(Action::RailFocus(id, w)),
             Hit::RailClose(id, w) => return Some(Action::RailClose(id, w)),
             Hit::Palette => self.open_palette(None),
+            Hit::HomeView(h) => return self.home_activate(h),
         }
         None
     }
@@ -2071,10 +2088,8 @@ impl Ui {
                 "Master password set. Passwords you save are encrypted.",
                 Tone::Muted,
             );
-        } else if self.store.connections.is_empty() {
-            self.new_connection();
         } else {
-            self.select(0);
+            self.go_home();
         }
     }
 
@@ -2085,8 +2100,7 @@ impl Ui {
     }
 
     pub fn vault_locked(&mut self) {
-        self.selected = None;
-        self.new_connection();
+        self.go_home();
         self.focus = Some(Field::Master);
         self.set_message("Locked.", Tone::Muted);
     }
@@ -2122,6 +2136,7 @@ impl Ui {
     /// After an import: keep the selection valid.
     pub fn refresh_selection(&mut self) {
         if self.selected.is_none()
+            && !self.home.showing
             && !self.store.connections.is_empty()
             && self.group_edit.is_none()
         {
@@ -2168,6 +2183,10 @@ impl Ui {
         if self.palette.is_some() {
             return self.palette_key(k);
         }
+        let k = match self.home_key(k) {
+            Ok(done) => return done,
+            Err(k) => k,
+        };
         match k {
             Key::Palette => self.open_palette(None),
             Key::Enter if self.focus == Some(Field::DrivePath) => {
@@ -2280,7 +2299,7 @@ impl Ui {
     /// view; `inner` is the text rectangle.
     fn field_scroll(&self, f: Field, inner: Rect, te: &mut TextEngine, fonts: &Fonts) -> f32 {
         let tf = self.field(f);
-        let size = FIELD_TEXT * self.scale;
+        let size = field_text(f) * self.scale;
         let inner = inner.w as f32;
         let caret_x = te.measure(
             fonts.ui,
@@ -2431,6 +2450,7 @@ impl Ui {
                 self.paint_vault(cv, te, f, content)
             }
             None if self.settings_open => self.paint_settings(cv, te, f, content),
+            None if self.home.showing => self.paint_home_view(cv, te, f, content),
             None => self.paint_home(cv, te, f, content),
         }
         self.paint_status(cv, te, f, Rect::new(0, body_h, w, bar_h));
@@ -2548,6 +2568,10 @@ impl Ui {
             let row = Rect::new(area.x + p(44.0), 0, p(120.0), p(40.0));
             k.text_in(Font::Semi, size::HEADING, row, "rdpc", c.text);
         }
+        // The mark and the name lead Home.
+        let logo = Rect::new(area.x + p(8.0), p(4.0), p(84.0), p(32.0));
+        self.hits.push((logo, Hit::HomeView(home::HomeHit::Home)));
+        self.title_controls.push((logo.x, logo.right()));
         if self.store.is_vault() && !locked {
             let b = Button::ghost("Lock").icon(Icon::Lock);
             let bw = self.btn_w(te, f, &b);
@@ -2904,7 +2928,14 @@ impl Ui {
         let conn = self.store.resolve(&self.store.connections[i]);
         let color = self.store.connection_color(&self.store.connections[i]);
         let dot = self.connection_dot(&conn);
-        let actions = if hovered { p(64.0) } else { 0 };
+        let pinned = self.store.connections[i].pinned;
+        let actions = if hovered {
+            p(94.0)
+        } else if pinned {
+            p(18.0)
+        } else {
+            0
+        };
         let mut k = Kit::new(cv, te, f, s);
         let d = p(32.0);
         k.avatar(
@@ -2940,12 +2971,23 @@ impl Ui {
             c.text_muted,
             text_w,
         );
+        if pinned && !hovered {
+            k.icon(
+                Icon::StarFilled,
+                r.right() - p(24.0),
+                r.y + (r.h - p(12.0)) / 2,
+                12.0,
+                c.warning,
+            );
+        }
         self.hits.push((r.intersect(list), hit));
         if hovered {
             let b = p(28.0);
             let y = r.y + (r.h - b) / 2;
             let edit = Rect::new(r.right() - p(6.0) - b, y, b, b);
             let play = Rect::new(edit.x - p(2.0) - b, y, b, b);
+            let star = Rect::new(play.x - p(2.0) - b, y, b, b);
+            self.star_btn(cv, te, f, star.intersect(list), i);
             self.icon_btn(
                 cv,
                 te,
@@ -3876,11 +3918,14 @@ impl Ui {
         let old = cv.set_clip(area);
         let first_hit = self.hits.len();
         self.home_area = area;
-        let top = area.y - self.home_scroll;
+        // A breadcrumb row back to Home above the header.
+        let crumb = p(26.0);
+        let top = area.y - self.home_scroll + crumb;
         let x = area.x + p(40.0);
         let w = p(640.0).min(area.w - p(80.0)).max(p(300.0));
         let group_mode = self.group_edit.is_some();
         let open_group = self.group_edit.clone().flatten();
+        self.paint_crumbs(cv, te, f, x, top - crumb + p(14.0), w);
 
         // Header: avatar, title, one line about it with pills, and the
         // actions on the right.
@@ -3961,6 +4006,9 @@ impl Ui {
                 Button::new("Delete", Variant::DangerGhost).icon(Icon::Trash),
                 Hit::Delete,
             ));
+        }
+        if let (Some(i), false) = (self.selected, group_mode) {
+            buttons.push(self.star_button(i));
         }
         for (b, hit) in &buttons {
             let bw = self.btn_w(te, f, b);
@@ -4086,8 +4134,16 @@ impl Ui {
             );
         }
 
+        // Wide windows: what this connection will do, next to the form.
+        let mut bottom = y + p(56.0);
+        if !group_mode && area.w >= p(1100.0) {
+            let sx = x + w + p(32.0);
+            let sw = p(380.0).min(area.right() - p(40.0) - sx);
+            bottom = bottom.max(self.paint_summary(cv, te, f, sx, top + p(104.0), sw) + p(40.0));
+        }
+
         // Scrolling: remember the height, keep the offset in range, show a bar.
-        self.home_content = y + p(56.0) - top;
+        self.home_content = bottom - top + crumb;
         let max = (self.home_content - area.h).max(0);
         if self.home_scroll > max {
             self.home_scroll = max;
@@ -7013,8 +7069,12 @@ impl Ui {
             focus: focused,
             ..State::default()
         };
-        let inner = Kit::new(cv, te, f, s).field_frame(r, icon, st);
-        let size = FIELD_TEXT * s;
+        let mut inner = Kit::new(cv, te, f, s).field_frame(r, icon, st);
+        if field == Field::Quick {
+            // Room for the suggestion at the right.
+            inner.w -= self.home.reserve;
+        }
+        let size = field_text(field) * s;
         let tf = self.field(field).clone();
         let display = tf.display();
         // A saved password shows as dots, like a filled field; focusing it
@@ -7135,6 +7195,12 @@ impl Ui {
         Kit::new(cv, te, f, self.scale).icon_button(r, icon, variant, st);
         self.hits.push((r, hit));
     }
+}
+
+/// Text size of a field (logical px): the Home view's quick connect field
+/// is larger than the form's.
+fn field_text(f: Field) -> f32 {
+    if f == Field::Quick { 16.0 } else { FIELD_TEXT }
 }
 
 /// The app icon (14 px at 100 %) at (x, y).
@@ -7399,6 +7465,45 @@ pub fn sample_empty() -> Ui {
     m
 }
 
+/// The Home view with live sessions (one a RemoteApp), favourites,
+/// history and a few more connections; a fixed clock (a Saturday evening).
+pub fn sample_home() -> Ui {
+    let mut m = sample(false);
+    for (name, host, group, user) in [
+        ("SQL server", "sql-02.lab.local", "Work/Lab", r"LABuilder"),
+        ("Jump host", "jump.corp.example", "Work", r"CORPlex"),
+        ("Media PC", "192.168.1.40", "", "media"),
+        ("Home NAS", "nas.home.arpa", "", "admin"),
+    ] {
+        m.store.connections.push(Connection {
+            name: name.into(),
+            host: host.into(),
+            port: 3389,
+            user: user.into(),
+            group: group.into(),
+            inherit: if group.is_empty() {
+                Inherit::default()
+            } else {
+                Inherit::ALL
+            },
+            ..Default::default()
+        });
+    }
+    m.store.connections[5].kerberos = true;
+    sample_apps_session(&mut m, false);
+    m.home_sample(1_794_679_200 + 2 * 3600);
+    m.focus = Some(Field::Quick);
+    m.message = None;
+    m
+}
+
+/// The Home view with text typed into quick connect.
+pub fn sample_home_typed(text: &str) -> Ui {
+    let mut m = sample_home();
+    m.home_sample_typed(text);
+    m
+}
+
 /// Sample data for `--snapshot-ui`; never the user's saved connections.
 pub fn sample(session_tab: bool) -> Ui {
     let mut store = Store::memory(vec![
@@ -7450,6 +7555,7 @@ pub fn sample(session_tab: bool) -> Ui {
             inherit: Inherit::default(),
             opens: Opens::Desktop,
             apps: Vec::new(),
+            ..Default::default()
         },
         Connection {
             name: "Office apps".into(),
