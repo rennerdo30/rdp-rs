@@ -493,14 +493,7 @@ impl App {
             }
             WindowEvent::KeyboardInput { event, .. } => {
                 self.last_input = Instant::now();
-                if let Some(e) = session::key_event(&event) {
-                    self.send(id, vec![e]);
-                } else {
-                    let u = session::unicode_events(&event);
-                    if !u.is_empty() {
-                        self.send(id, u);
-                    }
-                }
+                self.session_key(id, &event);
             }
             _ => {}
         }

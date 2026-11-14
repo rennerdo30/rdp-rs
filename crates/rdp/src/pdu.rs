@@ -414,6 +414,9 @@ pub struct DemandActive {
     /// The server sent the Bitmap Cache Host Support Capability Set
     /// (2.2.7.2.1): it supports Revision 2 bitmap caches.
     pub bitmap_cache_host: bool,
+    /// inputFlags of the server's Input Capability Set (2.2.7.1.6), if it
+    /// sent one.
+    pub input_flags: Option<u16>,
 }
 
 /// Window List Capability Set fields (MS-RDPERP 2.2.1.1.2).
@@ -458,6 +461,7 @@ pub fn parse_demand_active(body: &[u8]) -> Result<DemandActive> {
         window_list: None,
         frame_ack: false,
         bitmap_cache_host: false,
+        input_flags: None,
     };
     for _ in 0..count {
         let ty = r.u16()?;
@@ -476,6 +480,9 @@ pub fn parse_demand_active(body: &[u8]) -> Result<DemandActive> {
         }
         if ty == crate::orders::CAPSTYPE_BITMAPCACHE_HOSTSUPPORT {
             da.bitmap_cache_host = true;
+        }
+        if ty == CAPSTYPE_INPUT {
+            da.input_flags = le16(cap, 0);
         }
         if ty == CAPSTYPE_RAIL {
             da.rail_support_level = crate::cursor::le32(cap, 0);
@@ -526,7 +533,7 @@ fn cap(out: &mut Vec<u8>, count: &mut u16, ty: u16, body: &[u8]) {
 fn capabilities(
     width: u16,
     height: u16,
-    keyboard_layout: u32,
+    keyboard: &crate::KeyboardInfo,
     bpp: u16,
     vc_compression: bool,
     rail: Option<&RailCaps>,
@@ -605,11 +612,12 @@ fn capabilities(
     // SCANCODES | MOUSEX | FASTPATH_INPUT | UNICODE | FASTPATH_INPUT2
     b.put_u16(0x003D);
     b.put_u16(0);
-    b.put_u32(keyboard_layout);
-    b.put_u32(4);
-    b.put_u32(0);
-    b.put_u32(12);
-    b.put_zeros(64);
+    // The same keyboard as the Client Core Data (2.2.7.1.6).
+    b.put_u32(keyboard.layout);
+    b.put_u32(keyboard.kind);
+    b.put_u32(keyboard.subtype);
+    b.put_u32(keyboard.function_keys);
+    b.put_bytes(&keyboard.ime_file_name_field());
     cap(&mut out, &mut n, CAPSTYPE_INPUT, &b);
 
     cap(&mut out, &mut n, CAPSTYPE_BRUSH, &[0, 0, 0, 0]);
@@ -692,11 +700,15 @@ pub fn confirm_active(
     bpp: u16,
     vc_compression: bool,
 ) -> Vec<u8> {
+    let keyboard = crate::KeyboardInfo {
+        layout: keyboard_layout,
+        ..Default::default()
+    };
     confirm_active_with(
         share_id,
         user_id,
         (width, height),
-        keyboard_layout,
+        &keyboard,
         bpp,
         vc_compression,
         None,
@@ -709,12 +721,12 @@ pub fn confirm_active_with(
     share_id: u32,
     user_id: u16,
     (width, height): (u16, u16),
-    keyboard_layout: u32,
+    keyboard: &crate::KeyboardInfo,
     bpp: u16,
     vc_compression: bool,
     rail: Option<&RailCaps>,
 ) -> Vec<u8> {
-    let (count, caps) = capabilities(width, height, keyboard_layout, bpp, vc_compression, rail);
+    let (count, caps) = capabilities(width, height, keyboard, bpp, vc_compression, rail);
     let source = b"RDPRS\0";
     let mut b = Vec::new();
     b.put_u32(share_id);
@@ -820,6 +832,54 @@ mod tests {
         assert_eq!(total, pdu.len());
         let combined = u16::from_le_bytes([pdu[14], pdu[15]]) as usize;
         assert_eq!(6 + 4 + 2 + 2 + 2 + 6 + combined, pdu.len());
+    }
+
+    #[test]
+    fn input_capability_carries_the_keyboard() {
+        let kb = crate::KeyboardInfo {
+            layout: 0x0000_0807,
+            kind: 8,
+            subtype: 3,
+            function_keys: 12,
+            ime_file_name: "K.IME".into(),
+        };
+        let pdu = confirm_active_with(1, 2, (640, 480), &kb, 32, false, None);
+        // TS_INPUT_CAPABILITYSET (2.2.7.1.6): type 13, length 88.
+        let at = pdu.windows(4).position(|w| w == [13, 0, 88, 0]).unwrap();
+        let b = &pdu[at + 4..at + 88];
+        let u32_at = |o: usize| u32::from_le_bytes(b[o..o + 4].try_into().unwrap());
+        assert_eq!(u16::from_le_bytes([b[0], b[1]]), 0x003D, "inputFlags");
+        assert_eq!(
+            (u32_at(4), u32_at(8), u32_at(12), u32_at(16)),
+            (0x0807, 8, 3, 12)
+        );
+        assert_eq!(&b[20..24], &[b'K', 0, b'.', 0]);
+    }
+
+    #[test]
+    fn demand_active_input_flags() {
+        let demand = |extra: &[u8], count: u16| {
+            let mut b = Vec::new();
+            b.put_u32(0x1234);
+            b.put_u16(0);
+            b.put_u16(0);
+            b.put_u16(count);
+            b.put_u16(0);
+            // Bitmap capability: 32 bpp, 800 x 600.
+            let mut bm = vec![0u8; 24];
+            bm[0] = 32;
+            bm[8..10].copy_from_slice(&800u16.to_le_bytes());
+            bm[10..12].copy_from_slice(&600u16.to_le_bytes());
+            b.put_u16(CAPSTYPE_BITMAP);
+            b.put_u16(28);
+            b.extend(bm);
+            b.extend(extra);
+            parse_demand_active(&b).unwrap()
+        };
+        assert_eq!(demand(&[], 1).input_flags, None);
+        let mut input = vec![13, 0, 88, 0, 0x35, 0x00];
+        input.resize(88, 0);
+        assert_eq!(demand(&input, 2).input_flags, Some(0x0035));
     }
 
     #[test]

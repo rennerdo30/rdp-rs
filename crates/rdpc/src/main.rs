@@ -26,6 +26,7 @@ mod fuzzy;
 mod h264_mf;
 mod icon;
 mod icons;
+mod keyboard;
 mod keyhook;
 mod kit;
 mod known_hosts;

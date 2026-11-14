@@ -12,8 +12,8 @@ use ffwd_render::{Canvas, FontId, Rect, TextEngine};
 use crate::icons::Icon;
 use crate::kit::{self, Button, Font, Hint as KitHint, Kit, Lead, Segment, State, Variant};
 use crate::store::{
-    AppEntry, COMPRESSION, Connection, Group, Inherit, Opens, PRESETS, Quality, SessionOptions,
-    Store, WinKeys, default_app_name, normalize_path, parent_of, preset_name,
+    AppEntry, COMPRESSION, Connection, Group, Inherit, KeyboardMode, Opens, PRESETS, Quality,
+    SessionOptions, Store, WinKeys, default_app_name, normalize_path, parent_of, preset_name,
 };
 use crate::text_field::TextField;
 use crate::theme::{self, ThemeChoice, Tone, pal, radius, size};
@@ -229,6 +229,8 @@ pub enum Hit {
     /// Windows key combinations: panel (live) and connection form.
     TabWinKeys(u64, usize),
     FormWinKeys(usize),
+    TabKeyboard(u64, usize),
+    FormKeyboard(usize),
     /// Quality: speed preset (index into PRESETS), colour depth, experience toggle.
     FormPreset(usize),
     FormDepth(usize),
@@ -351,6 +353,11 @@ pub struct Tab {
     pub cert: Option<CertPrompt>,
     /// Where Windows key combinations go (changeable live).
     pub win_keys: WinKeys,
+    /// How typing reaches the session (changeable live).
+    pub keyboard: KeyboardMode,
+    /// The keyboard layout (KLID) the session logged on with; None until
+    /// it is connected.
+    pub keyboard_layout: Option<u32>,
     /// The output device its sound plays on (None: default).
     pub speaker: Option<String>,
     /// Microphone on, and the device it records from (None: default).
@@ -394,6 +401,8 @@ struct TabView {
     state: TabState,
     host: String,
     win_keys: WinKeys,
+    keyboard: KeyboardMode,
+    keyboard_layout: Option<u32>,
     speaker: Option<String>,
     microphone: bool,
     mic: Option<String>,
@@ -780,6 +789,8 @@ impl Ui {
             quality_live: Quality::default(),
             cert: None,
             win_keys: WinKeys::default(),
+            keyboard: KeyboardMode::default(),
+            keyboard_layout: None,
             speaker: None,
             microphone: false,
             mic: None,
@@ -1792,6 +1803,11 @@ impl Ui {
                 t.win_keys = WinKeys::ALL[i];
             }
             Hit::FormWinKeys(i) => self.opts.win_keys = WinKeys::ALL[i],
+            Hit::TabKeyboard(id, i) => {
+                let t = self.tab_mut(id)?;
+                t.keyboard = KeyboardMode::ALL[i];
+            }
+            Hit::FormKeyboard(i) => self.opts.keyboard = KeyboardMode::ALL[i],
             Hit::BrowseForm => return Some(Action::Browse(None)),
             Hit::BrowseDrive(id) => return Some(Action::Browse(Some(id))),
             Hit::TabSpeaker(id, i) => {
@@ -4926,7 +4942,51 @@ impl Ui {
             q.touch,
             Hit::FormExperience(6),
         );
-        y + p(60.0)
+        y += p(60.0) + p(24.0);
+        self.keyboard_choice(
+            cv,
+            te,
+            f,
+            (x, y, w),
+            self.opts.keyboard,
+            true,
+            Hit::FormKeyboard,
+        )
+    }
+
+    /// The Keyboard choice (RDP-32): segments and one line on the chosen
+    /// one. `long`: the editor's full names. Returns the y below it.
+    #[allow(clippy::too_many_arguments)]
+    fn keyboard_choice(
+        &mut self,
+        cv: &mut Canvas,
+        te: &mut TextEngine,
+        f: &Fonts,
+        (x, mut y, w): (i32, i32, i32),
+        mode: KeyboardMode,
+        long: bool,
+        hit: impl Fn(usize) -> Hit,
+    ) -> i32 {
+        let s = self.scale;
+        let p = |v: f32| (v * s).round() as i32;
+        self.caption(cv, te, f, x, y, w, "Keyboard");
+        y += p(26.0);
+        let items: Vec<(String, bool, Hit)> = KeyboardMode::ALL
+            .iter()
+            .enumerate()
+            .map(|(i, k)| {
+                let name = match (long, k) {
+                    (true, KeyboardMode::Remote) => "Remote layout",
+                    (true, KeyboardMode::Translate) => "Translate typing",
+                    _ => k.label(),
+                };
+                (name.to_string(), mode == *k, hit(i))
+            })
+            .collect();
+        self.segmented(cv, te, f, Rect::new(x, y, w, p(34.0)), &items);
+        y += p(34.0);
+        self.hint(cv, te, f, x, y + p(20.0), w, mode.hint());
+        y + p(32.0)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -5994,6 +6054,8 @@ impl Ui {
             state: tab.state.clone(),
             host: tab.host.clone(),
             win_keys: tab.win_keys,
+            keyboard: tab.keyboard,
+            keyboard_layout: tab.keyboard_layout,
             speaker: tab.speaker.clone(),
             microphone: tab.microphone,
             mic: tab.mic.clone(),
@@ -6502,6 +6564,10 @@ impl Ui {
                 preset_name(t.quality_live.connection).to_string(),
             ),
         ]);
+        // The keyboard layout the session logged on with (RDP-32).
+        if let Some(l) = t.keyboard_layout {
+            rows.push((Icon::Keyboard, "Keyboard", crate::keyboard::layout_name(l)));
+        }
         // Network auto-detect results, once the server sent some.
         if let Some(n) = &t.network {
             rows.push((Icon::Network, "Network", n.clone()));
@@ -6552,6 +6618,34 @@ impl Ui {
             .collect();
         self.segmented(cv, te, f, Rect::new(x, y, w, p(34.0)), &items);
         y += p(34.0) + p(24.0);
+
+        y = self.keyboard_choice(cv, te, f, (x, y, w), t.keyboard, false, |i| {
+            Hit::TabKeyboard(id, i)
+        });
+        // Remote layout keeps the session's layout: after a switch on this
+        // PC only a reconnect gives it the new one.
+        let local = crate::keyboard::server_layout(crate::keyboard::local_klid());
+        if t.keyboard == KeyboardMode::Remote && t.keyboard_layout.is_some_and(|l| l != local) {
+            y += p(4.0);
+            let r = Rect::new(x, y, w, p(108.0));
+            Kit::new(cv, te, f, s).banner(
+                r,
+                Tone::Accent,
+                Icon::Refresh,
+                &format!("This PC types {}", crate::keyboard::layout_name(local)),
+                "Reconnect to give the session this layout.",
+            );
+            self.btn(
+                cv,
+                te,
+                f,
+                Rect::new(r.x + p(42.0), r.y + p(62.0), p(150.0), p(32.0)),
+                &Button::primary("Reconnect now").icon(Icon::Refresh),
+                Hit::Reconnect(id),
+            );
+            y += p(108.0);
+        }
+        y += p(12.0);
 
         self.caption(cv, te, f, x, y, w, "Actions");
         y += p(26.0);
@@ -7182,6 +7276,7 @@ pub fn sample_panel(page: u8, fullscreen: bool) -> Ui {
             // Redirected after logon, with network auto-detect results.
             t.redirected_to = Some("rdsh2.corp.example".into());
             t.network = Some("RTT 14 ms · 50.0 Mbit/s".into());
+            t.keyboard_layout = Some(0x0407);
         }
     }
     m

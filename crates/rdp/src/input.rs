@@ -10,6 +10,64 @@ pub const PTRFLAGS_BUTTON2: u16 = 0x2000;
 pub const PTRFLAGS_BUTTON3: u16 = 0x4000;
 pub const PTRFLAGS_DOWN: u16 = 0x8000;
 
+/// INPUT_FLAG_UNICODE of the Input Capability Set (MS-RDPBCGR 2.2.7.1.6):
+/// the server takes Unicode keyboard events. Without it the client MUST NOT
+/// send them.
+pub const INPUT_FLAG_UNICODE: u16 = 0x0010;
+
+/// The client keyboard the server sets the session up for: keyboardLayout,
+/// keyboardType, keyboardSubType, keyboardFunctionKey and imeFileName of the
+/// Client Core Data (MS-RDPBCGR 2.2.1.3.2), repeated in the Input Capability
+/// Set of the Confirm Active PDU (2.2.7.1.6).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeyboardInfo {
+    /// Active input locale identifier (Windows KLID), for example 0x00000407
+    /// German, 0x00000807 Swiss German, 0x00010409 United States-Dvorak.
+    pub layout: u32,
+    /// Keyboard type: 4 IBM enhanced (101/102 keys), 7 Japanese, 8 Korean.
+    pub kind: u32,
+    /// OEM keyboard subtype (Windows `GetKeyboardType(1)`).
+    pub subtype: u32,
+    /// Number of function keys.
+    pub function_keys: u32,
+    /// File name of the input method editor, for IME layouts; empty
+    /// otherwise. At most 31 UTF-16 units are sent.
+    pub ime_file_name: String,
+}
+
+impl Default for KeyboardInfo {
+    /// A US English 101/102-key keyboard.
+    fn default() -> Self {
+        Self {
+            layout: 0x0409,
+            kind: 4,
+            subtype: 0,
+            function_keys: 12,
+            ime_file_name: String::new(),
+        }
+    }
+}
+
+impl KeyboardInfo {
+    /// imeFileName: 32 UTF-16 units, null-terminated and zero-padded.
+    pub(crate) fn ime_file_name_field(&self) -> Vec<u8> {
+        let mut v = crate::cursor::utf16le(&self.ime_file_name);
+        v.truncate(62);
+        v.resize(64, 0);
+        v
+    }
+}
+
+/// Parses a keyboard layout name as Windows' `GetKeyboardLayoutNameW` gives
+/// it (KLID: up to 8 hex digits, "00000407"); None for anything else.
+pub fn parse_klid(name: &str) -> Option<u32> {
+    let s = name.trim_matches(|c: char| c == '\0' || c.is_whitespace());
+    if s.is_empty() || s.len() > 8 || !s.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    u32::from_str_radix(s, 16).ok()
+}
+
 #[derive(Debug, Clone, Copy)]
 pub enum InputEvent {
     /// Set-1 scancode; `extended` adds the E0 prefix.
@@ -131,6 +189,34 @@ mod tests {
         assert_eq!(pdu[0], 15 << 2);
         assert_eq!(pdu.len(), 2 + 15 * 7);
         assert_eq!(pdu[1] as usize, pdu.len());
+    }
+
+    #[test]
+    fn klid_names_parse() {
+        assert_eq!(parse_klid("00000407"), Some(0x0407));
+        assert_eq!(parse_klid("00000807"), Some(0x0807));
+        assert_eq!(parse_klid("00010409"), Some(0x0001_0409));
+        assert_eq!(parse_klid("a0000407"), Some(0xA000_0407));
+        // The 9-unit buffer keeps its terminator.
+        assert_eq!(parse_klid("00000411\0"), Some(0x0411));
+        assert_eq!(parse_klid(""), None);
+        assert_eq!(parse_klid("\0\0"), None);
+        assert_eq!(parse_klid("0000040G"), None);
+        assert_eq!(parse_klid("000000407"), None, "more than 8 digits");
+        assert_eq!(parse_klid("-0000407"), None);
+    }
+
+    #[test]
+    fn ime_file_name_is_a_fixed_terminated_field() {
+        let mut k = KeyboardInfo::default();
+        assert_eq!(k.ime_file_name_field(), vec![0; 64]);
+        k.ime_file_name = "IMJP.IME".into();
+        let f = k.ime_file_name_field();
+        assert_eq!(&f[..4], &[b'I', 0, b'M', 0]);
+        assert_eq!(f.len(), 64);
+        k.ime_file_name = "x".repeat(40);
+        let f = k.ime_file_name_field();
+        assert_eq!((f.len(), &f[62..]), (64, &[0u8, 0][..]));
     }
 
     #[test]

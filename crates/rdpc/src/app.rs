@@ -142,6 +142,9 @@ struct Session {
     spanned: bool,
     /// RemoteApp: its apps' windows on this PC's desktop (see `remoteapp`).
     rail: Option<crate::remoteapp::RailSession>,
+    /// Keyboard layout and typing translation state (see `keyboard`); a
+    /// cell because every send passes through it.
+    keys: std::cell::RefCell<crate::keyboard::Keys>,
 }
 
 #[derive(Clone, PartialEq)]
@@ -419,7 +422,9 @@ impl App {
         // Auto scale follows this PC's Windows scaling.
         cfg.scale = opts.scale.unwrap_or_else(|| self.auto_scale());
         cfg.verify_certificate = Some(certificate_check(self.proxy.clone(), self.next_id));
-        cfg.keyboard_layout = crate::keyhook::local_layout();
+        // This PC's keyboard layout, type and IME (RDP-32).
+        let (klid, keyboard) = crate::keyboard::local();
+        cfg.keyboard = keyboard;
         // Picture quality is fixed at logon; reconnects keep this config.
         opts.quality.apply(&mut cfg);
         // RemoteApp: the desktop is all monitors; apps get their own windows.
@@ -465,6 +470,7 @@ impl App {
         if let Some(w) = &mut self.win {
             w.ui.open_tab(id, name, cfg.host.clone(), fit);
         }
+        let sent_layout = cfg.keyboard.layout;
         let remote_app = rail.is_some();
         self.sessions.insert(
             id,
@@ -481,6 +487,7 @@ impl App {
                 cert_reply: None,
                 spanned: false,
                 rail,
+                keys: std::cell::RefCell::new(crate::keyboard::Keys::new(klid, sent_layout)),
             },
         );
         if remote_app {
@@ -540,6 +547,7 @@ impl App {
             t.quality = opts.quality;
             t.quality_live = opts.quality;
             t.win_keys = opts.win_keys;
+            t.keyboard = opts.keyboard;
             t.speaker = opts.speaker.clone();
             t.microphone = microphone;
             t.mic = opts.mic.clone();
@@ -573,6 +581,7 @@ impl App {
             drives: t.drives.iter().map(|d| d.path.clone()).collect(),
             quality: t.quality,
             win_keys: t.win_keys,
+            keyboard: t.keyboard,
             speaker: t.speaker.clone(),
             microphone: t.microphone,
             mic: t.mic.clone(),
@@ -608,6 +617,10 @@ impl App {
     fn reconnect_with(&mut self, id: u64, mut cfg: Config) {
         let opts = self.tab_options(id);
         cfg.scale = self.tab_scale(id);
+        // A reconnect takes this PC's layout as it is now.
+        let (klid, keyboard) = crate::keyboard::local();
+        cfg.keyboard = keyboard;
+        let keys = crate::keyboard::Keys::new(klid, cfg.keyboard.layout);
         if let Some(mut old) = self.sessions.get_mut(&id).and_then(|s| s.worker.take()) {
             old.close();
         }
@@ -618,6 +631,7 @@ impl App {
             s.fit_requested = None;
             s.cursor = RemoteCursor::Default;
             s.cursors.clear();
+            s.keys = std::cell::RefCell::new(keys);
         }
         self.rail_reset(id);
         if let Some(t) = self.win.as_mut().and_then(|w| w.ui.tab_mut(id)) {
@@ -630,9 +644,32 @@ impl App {
     }
 
     fn send(&self, id: u64, events: Vec<InputEvent>) {
-        if let Some(w) = self.sessions.get(&id).and_then(|s| s.worker.as_ref()) {
-            w.send(events);
+        if let Some(s) = self.sessions.get(&id) {
+            s.keys.borrow_mut().observe(&events);
+            if let Some(w) = s.worker.as_ref() {
+                w.send(events);
+            }
         }
+    }
+
+    /// A key for session `id`: a scancode, or the typed text as Unicode when
+    /// the tab's Keyboard setting translates (RDP-32).
+    fn session_key(&self, id: u64, ev: &winit::event::KeyEvent) {
+        let mode = self
+            .win
+            .as_ref()
+            .and_then(|m| m.ui.tabs.iter().find(|t| t.id == id))
+            .map(|t| t.keyboard)
+            .unwrap_or_default();
+        let Some(s) = self.sessions.get(&id) else {
+            return;
+        };
+        let input = crate::keyboard::KeyInput::of(ev);
+        let events = s
+            .keys
+            .borrow_mut()
+            .key(&input, mode, crate::keyboard::local_klid());
+        self.send(id, events);
     }
 
     fn message(&mut self, text: impl Into<String>, tone: Tone) {
@@ -1307,15 +1344,10 @@ impl App {
                 m.ui.open_palette(Some(id));
                 self.send(id, session::release_modifiers());
                 self.dirty();
-            } else if let Some(e) = session::key_event(&ev) {
-                self.send(id, vec![e]);
             } else {
-                // No scancode (touch keyboard, emoji panel, injected text):
-                // the characters go as Unicode input.
-                let u = session::unicode_events(&ev);
-                if !u.is_empty() {
-                    self.send(id, u);
-                }
+                // Scancodes, or Unicode by the tab's Keyboard setting and for
+                // keys without one (touch keyboard, emoji panel).
+                self.session_key(id, &ev);
             }
             return;
         }
@@ -1896,8 +1928,12 @@ impl ApplicationHandler<UserEvent> for App {
         let active = self.win.as_ref().and_then(|w| w.ui.active) == Some(id);
         match ev {
             session::Event::Connected(info) => {
+                let mut layout = None;
                 if let Some(s) = self.sessions.get_mut(&id) {
                     s.retries = 0;
+                    let keys = s.keys.get_mut();
+                    keys.connected(info.unicode_input());
+                    layout = Some(keys.sent_layout);
                 }
                 let mut host = self
                     .sessions
@@ -1909,6 +1945,7 @@ impl ApplicationHandler<UserEvent> for App {
                         height: info.height,
                         bpp: info.bpp,
                     };
+                    t.keyboard_layout = layout;
                     // After a redirection the session runs on the target.
                     if let Some(to) = &t.redirected_to {
                         host = to.clone();
@@ -2585,14 +2622,7 @@ impl App {
                 {
                     return self.unspan(id);
                 }
-                if let Some(e) = session::key_event(&event) {
-                    self.send(id, vec![e]);
-                } else {
-                    let u = session::unicode_events(&event);
-                    if !u.is_empty() {
-                        self.send(id, u);
-                    }
-                }
+                self.session_key(id, &event);
             }
             _ => {}
         }
