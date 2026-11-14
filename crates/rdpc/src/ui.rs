@@ -6372,6 +6372,7 @@ fn session_action(r: &Connection, password: &str, app: Option<&AppEntry>) -> Act
     let mut cfg = rdp::Config::new(&r.host, &r.user, password);
     cfg.port = r.port;
     cfg.remote_app = app.map(AppEntry::remote_app);
+    cfg.license_store = crate::settings::license_dir();
     #[cfg(windows)]
     if r.kerberos {
         cfg.auth = Some(crate::sspi::factory());

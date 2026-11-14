@@ -6,6 +6,143 @@ pub fn sha256(data: &[u8]) -> [u8; 32] {
     d.as_ref().try_into().expect("sha256 is 32 bytes")
 }
 
+/// SHA-1, for the licensing key derivation and MAC (MS-RDPELE 5.1.2, 5.1.5).
+pub fn sha1(data: &[u8]) -> [u8; 20] {
+    let d = ring::digest::digest(&ring::digest::SHA1_FOR_LEGACY_USE_ONLY, data);
+    d.as_ref().try_into().expect("sha1 is 20 bytes")
+}
+
+/// Textbook RSA as RDP uses it (MS-RDPBCGR 5.3.4.1, MS-RDPELE 5.1.1.1):
+/// `data`, the `modulus` and the result are unsigned little-endian
+/// integers, and there is no padding. The result has the modulus length
+/// plus the 8 zero bytes RDP appends. The exponent is the RSA public
+/// exponent (65537 in practice); the modulus is at most 4,096 bits.
+pub fn rsa_encrypt_le(data: &[u8], modulus: &[u8], exponent: u32) -> Option<Vec<u8>> {
+    let n = Big::from_le(modulus);
+    let bits = n.bits();
+    if !(64..=4096).contains(&bits) || exponent == 0 {
+        return None;
+    }
+    let m = Big::from_le(data);
+    if m.cmp(&n) != std::cmp::Ordering::Less {
+        return None;
+    }
+    let mut result = Big::from_le(&[1]);
+    for i in (0..32 - exponent.leading_zeros()).rev() {
+        result = result.mul(&result).rem(&n);
+        if exponent >> i & 1 != 0 {
+            result = result.mul(&m).rem(&n);
+        }
+    }
+    let len = bits.div_ceil(8);
+    let mut out = result.to_le(len);
+    out.resize(len + 8, 0);
+    Some(out)
+}
+
+/// Unsigned big integer, 32-bit limbs, least significant first. Only what
+/// public-key RSA needs; the operands are public, so nothing here has to
+/// run in constant time.
+#[derive(Clone, Debug)]
+struct Big(Vec<u32>);
+
+impl Big {
+    fn from_le(b: &[u8]) -> Big {
+        let mut v: Vec<u32> = b
+            .chunks(4)
+            .map(|c| {
+                let mut w = [0u8; 4];
+                w[..c.len()].copy_from_slice(c);
+                u32::from_le_bytes(w)
+            })
+            .collect();
+        while v.last() == Some(&0) {
+            v.pop();
+        }
+        Big(v)
+    }
+
+    fn to_le(&self, len: usize) -> Vec<u8> {
+        let mut out: Vec<u8> = self.0.iter().flat_map(|w| w.to_le_bytes()).collect();
+        out.resize(len, 0);
+        out
+    }
+
+    fn bits(&self) -> usize {
+        self.0
+            .last()
+            .map_or(0, |&top| self.0.len() * 32 - top.leading_zeros() as usize)
+    }
+
+    fn bit(&self, i: usize) -> bool {
+        self.0.get(i / 32).is_some_and(|w| w >> (i % 32) & 1 != 0)
+    }
+
+    fn cmp(&self, o: &Big) -> std::cmp::Ordering {
+        self.0
+            .len()
+            .cmp(&o.0.len())
+            .then_with(|| self.0.iter().rev().cmp(o.0.iter().rev()))
+    }
+
+    fn mul(&self, o: &Big) -> Big {
+        let mut r = vec![0u32; self.0.len() + o.0.len()];
+        for (i, &a) in self.0.iter().enumerate() {
+            let mut carry = 0u64;
+            for (j, &b) in o.0.iter().enumerate() {
+                let t = a as u64 * b as u64 + r[i + j] as u64 + carry;
+                r[i + j] = t as u32;
+                carry = t >> 32;
+            }
+            r[i + o.0.len()] = carry as u32;
+        }
+        let mut b = Big(r);
+        b.trim();
+        b
+    }
+
+    fn trim(&mut self) {
+        while self.0.last() == Some(&0) {
+            self.0.pop();
+        }
+    }
+
+    /// `self mod n` by binary long division (shift in one bit, subtract).
+    fn rem(&self, n: &Big) -> Big {
+        let mut r = Big(Vec::with_capacity(n.0.len() + 1));
+        for i in (0..self.bits()).rev() {
+            r.shl1(self.bit(i));
+            if r.cmp(n) != std::cmp::Ordering::Less {
+                r.sub(n);
+            }
+        }
+        r
+    }
+
+    fn shl1(&mut self, low: bool) {
+        let mut carry = low as u32;
+        for w in &mut self.0 {
+            let next = *w >> 31;
+            *w = *w << 1 | carry;
+            carry = next;
+        }
+        if carry != 0 {
+            self.0.push(carry);
+        }
+    }
+
+    /// `self -= o`, with `self >= o`.
+    fn sub(&mut self, o: &Big) {
+        let mut borrow = 0i64;
+        for i in 0..self.0.len() {
+            let t = self.0[i] as i64 - o.0.get(i).copied().unwrap_or(0) as i64 - borrow;
+            borrow = (t < 0) as i64;
+            self.0[i] = t.rem_euclid(1 << 32) as u32;
+        }
+        self.trim();
+    }
+}
+
 pub fn random<const N: usize>() -> [u8; N] {
     use ring::rand::SecureRandom;
     let mut b = [0u8; N];
@@ -243,6 +380,31 @@ mod tests {
             hex(&hmac_md5(b"Jefe", b"what do ya want for nothing?")),
             "750c783e6ab0b503eaa86e310a5db738"
         );
+    }
+
+    #[test]
+    fn sha1_vector() {
+        assert_eq!(
+            hex(&sha1(b"abc")),
+            "a9993e364706816aba3e25717850c26c9cd0d89d"
+        );
+    }
+
+    #[test]
+    fn rsa_small_key() {
+        // n = 61 * 53 * 65537 * 65539 * 4294967291 (76 bits), e = 17: 65^17 mod n,
+        // little-endian, plus the 8 zero bytes.
+        let n: u128 = 61 * 53 * 65537 * 65539 * 4_294_967_291;
+        let want = (0..17).fold(1u128, |a, _| a * 65 % n);
+        let c = rsa_encrypt_le(&[65], &n.to_le_bytes(), 17).unwrap();
+        let len = (128 - n.leading_zeros() as usize).div_ceil(8);
+        assert_eq!(c.len(), len + 8);
+        let mut got = [0u8; 16];
+        got[..len].copy_from_slice(&c[..len]);
+        assert_eq!(u128::from_le_bytes(got), want);
+        assert!(c[len..].iter().all(|&b| b == 0));
+        // Data not below the modulus is refused.
+        assert!(rsa_encrypt_le(&n.to_le_bytes(), &n.to_le_bytes(), 17).is_none());
     }
 
     #[test]

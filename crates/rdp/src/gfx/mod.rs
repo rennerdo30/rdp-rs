@@ -35,6 +35,7 @@ pub mod nsc;
 pub mod pdu;
 pub mod progressive;
 pub mod rfx;
+pub mod rfx_msg;
 pub mod surface;
 pub mod zgfx;
 

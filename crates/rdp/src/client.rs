@@ -110,6 +110,13 @@ pub struct Config {
     /// instead of a desktop. The client opens the `rail` channel itself;
     /// [`Client::rail`] gives its handle.
     pub remote_app: Option<crate::RemoteApp>,
+    /// Advertise surface commands with RemoteFX and NSCodec (MS-RDPBCGR
+    /// 2.2.9.2, MS-RDPRFX). With [`crate::Graphics::Gfx`] too, the server
+    /// picks; it prefers the graphics pipeline.
+    pub surface_commands: bool,
+    /// Directory for client licenses and the client hardware id
+    /// (MS-RDPELE 3.3.1.8, 3.3.1.9); None keeps nothing on disk.
+    pub license_store: Option<std::path::PathBuf>,
 }
 
 impl Config {
@@ -140,6 +147,8 @@ impl Config {
             redirection: None,
             redirects: 0,
             remote_app: None,
+            surface_commands: true,
+            license_store: None,
         }
     }
 }
@@ -276,6 +285,8 @@ pub struct Client {
     host: String,
     /// The session ended for a Server Redirection PDU to follow (3.2.5.13).
     follow: bool,
+    /// Surface command state, when [`Config::surface_commands`] is set.
+    surface: Option<crate::surfcmd::SurfaceCommands>,
 }
 
 /// Connection-sequence traffic that is not the I/O channel PDU being waited
@@ -399,6 +410,13 @@ fn send_io(f: &mut Framer, user_id: u16, io: u16, data: &[u8]) -> Result<()> {
         if data.starts_with(&[0x40, 0x00]) {
             trace!(
                 "send {} bytes on channel {io}: [client info, redacted]",
+                data.len()
+            );
+        } else if data.starts_with(&[0x80, 0x00]) {
+            // Licensing PDUs (SEC_LICENSE_PKT) carry the encrypted
+            // premaster secret, the license and the hardware id.
+            trace!(
+                "send {} bytes on channel {io}: [licensing, redacted]",
                 data.len()
             );
         } else {
@@ -750,7 +768,21 @@ impl Client {
                 "Standard Security Server Redirection PDU (needs Standard RDP Security)".into(),
             ));
         } else {
-            pdu::process_license(&data)?;
+            // Licensing (MS-RDPELE): usually one "valid client" alert, else
+            // the full exchange.
+            let store = cfg.license_store.as_deref();
+            let mut lic = crate::license::Licensing::new(store, &user, &cfg.client_name);
+            let mut data = data;
+            loop {
+                let (send, step) = lic.process(&data);
+                for msg in send {
+                    send_io(&mut f, user_id, io, &msg)?;
+                }
+                if step? == crate::license::Step::Done {
+                    break;
+                }
+                data = read_io(&mut f, io, deadline, &mut early)?;
+            }
         }
 
         // 6. Capability exchange; a Server Redirection PDU may come instead (3.2.5.13.1)
@@ -835,6 +867,9 @@ impl Client {
             autodetect: std::mem::take(&mut early.autodetect),
             host,
             follow: false,
+            surface: cfg
+                .surface_commands
+                .then(crate::surfcmd::SurfaceCommands::default),
         };
         // 7. Finalization; the Font Map reply is handled by the session loop.
         client.activate(&demand)?;
@@ -873,6 +908,14 @@ impl Client {
             self.bulk.max() != Compression::Off,
             rail_caps.as_ref(),
         );
+        let confirm = match &mut self.surface {
+            Some(s) => {
+                s.frame_ack = demand.frame_ack;
+                let sets = crate::surfcmd::client_capability_sets();
+                crate::surfcmd::append_capability_sets(confirm, &sets)
+            }
+            None => confirm,
+        };
         send_io(&mut self.f, self.user_id, self.io_channel, &confirm)?;
         self.send_data(pdu::PDUTYPE2_SYNCHRONIZE, &pdu::synchronize())?;
         self.send_data(
@@ -1175,6 +1218,7 @@ impl Client {
                 fastpath::UPDATETYPE_ORDERS => {
                     self.window_orders(crate::rail::orders::parse_fastpath_orders(&data))
                 }
+                crate::surfcmd::UPDATETYPE_SURFCMDS => self.surface_commands(&data, out)?,
                 0x5..=0xC => match self.pointers.fast_path(code, &data) {
                     Ok(Some(p)) => out.pointer = Some(p),
                     Ok(None) => {}
@@ -1183,6 +1227,30 @@ impl Client {
                 },
                 _ => {} // pointer, palette, synchronize
             }
+        }
+        Ok(())
+    }
+
+    /// Draws a surface commands update (MS-RDPBCGR 2.2.9.1.2.1.10) and
+    /// acknowledges finished frames (MS-RDPRFX 2.2.3.1). A bad update is
+    /// traced and dropped; it never ends the session.
+    fn surface_commands(&mut self, data: &[u8], out: &mut PollOutcome) -> Result<()> {
+        let Some(s) = &mut self.surface else {
+            trace!("surface commands not negotiated, update ignored");
+            return Ok(());
+        };
+        let before = out.damage.len();
+        let acks = match s.apply(data, &mut self.fb, &mut out.damage) {
+            Ok(acks) => acks,
+            Err(e) => {
+                trace!("surface commands update ignored: {e}");
+                Vec::new()
+            }
+        };
+        out.updated |= out.damage.len() > before;
+        for id in acks {
+            let body = crate::surfcmd::frame_acknowledge(id);
+            self.send_data(crate::surfcmd::PDUTYPE2_FRAME_ACKNOWLEDGE, &body)?;
         }
         Ok(())
     }

@@ -408,6 +408,9 @@ pub struct DemandActive {
     pub rail_support_level: Option<u32>,
     /// The Window List Capability Set (MS-RDPERP 2.2.1.1.2).
     pub window_list: Option<WindowListCaps>,
+    /// The server sent the Frame Acknowledge Capability Set (MS-RDPRFX
+    /// 2.2.1.3): it takes TS_FRAME_ACKNOWLEDGE_PDUs.
+    pub frame_ack: bool,
 }
 
 /// Window List Capability Set fields (MS-RDPERP 2.2.1.1.2).
@@ -450,6 +453,7 @@ pub fn parse_demand_active(body: &[u8]) -> Result<DemandActive> {
         bpp: 0,
         rail_support_level: None,
         window_list: None,
+        frame_ack: false,
     };
     for _ in 0..count {
         let ty = r.u16()?;
@@ -462,6 +466,9 @@ pub fn parse_demand_active(body: &[u8]) -> Result<DemandActive> {
             da.bpp = le16(cap, 0).unwrap();
             da.width = le16(cap, 8).unwrap();
             da.height = le16(cap, 10).unwrap();
+        }
+        if ty == crate::surfcmd::CAPSETTYPE_FRAME_ACKNOWLEDGE {
+            da.frame_ack = true;
         }
         if ty == CAPSTYPE_RAIL {
             da.rail_support_level = crate::cursor::le32(cap, 0);

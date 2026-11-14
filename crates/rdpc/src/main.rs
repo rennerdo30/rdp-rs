@@ -262,6 +262,7 @@ fn main() {
     let mut cfg = Config::new(&args.host, &args.user, &password);
     cfg.port = args.port;
     cfg.domain = args.domain.clone();
+    cfg.license_store = settings::license_dir();
     if let Some((host, port)) = &args.gateway {
         let mut gw = rdp::GatewayConfig::new(host, &args.user, &password);
         gw.port = *port;

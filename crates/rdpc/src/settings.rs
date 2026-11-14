@@ -35,6 +35,13 @@ pub fn log_path() -> Option<std::path::PathBuf> {
         })
 }
 
+/// The RDS client license store (MS-RDPELE): `%LOCALAPPDATA%\rdp-rs\licenses`.
+pub fn license_dir() -> Option<std::path::PathBuf> {
+    std::env::var_os("LOCALAPPDATA")
+        .or_else(|| std::env::var_os("HOME"))
+        .map(|p| std::path::PathBuf::from(p).join("rdp-rs").join("licenses"))
+}
+
 /// Turns protocol tracing and the log file on or off.
 pub fn apply_logging(on: bool) {
     rdp::set_verbose(on);

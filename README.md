@@ -28,7 +28,7 @@ Of the 38 features a full RDP client offers (below), 22 are done and 3 partly (6
 |  | TLS and NLA (CredSSP with NTLMv2) | ✅ | MS-CSSP, MS-NLMP |
 |  | Kerberos authentication | ✅ | MS-KILE via Windows SSPI Negotiate; single sign-on |
 |  | Legacy RDP security (RC4, no TLS) | — | MS-RDPBCGR 5.3 |
-|  | Licensing | ◐ | MS-RDPELE: the TLS 'valid client' path only |
+|  | Licensing | ✅ | MS-RDPELE: 'valid client', new and upgraded licenses with platform challenge; licenses kept in `%LOCALAPPDATA%\rdp-rs\licenses` |
 |  | Auto-reconnect and heartbeat | ✅ | MS-RDPBCGR 5.5, 2.2.16 |
 |  | Server certificate check | ✅ | trust on first use |
 |  | Session broker redirection | ✅ | MS-RDPBCGR 2.2.13: followed while connecting and mid-session |
@@ -42,7 +42,7 @@ Of the 38 features a full RDP client offers (below), 22 are done and 3 partly (6
 |  | Graphics pipeline: ZGFX, surfaces, ClearCodec, Progressive | ✅ | MS-RDPEGFX (experimental) |
 |  | H.264 AVC420 | ✅ | MS-RDPEGFX 2.2.4.4 |
 |  | H.264 AVC444 | ✅ | MS-RDPEGFX 2.2.4.5, 2.2.4.6 (AVC444v2) |
-|  | RemoteFX surface bits (RDP 7) | — | MS-RDPRFX |
+|  | RemoteFX surface bits (RDP 7) | ✅ | MS-RDPRFX, MS-RDPNSC: Set/Stream Surface Bits with RemoteFX and NSCodec, frame acknowledgement |
 |  | Pointer shapes | ✅ | MS-RDPBCGR 2.2.9.1.1.4 |
 |  | Display Control (resize, scaling) | ✅ | MS-RDPEDISP |
 |  | Multiple monitors | ✅ | MS-RDPBCGR 2.2.1.3.6: any chosen monitors, one window each |

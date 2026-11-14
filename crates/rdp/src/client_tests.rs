@@ -48,6 +48,7 @@ fn session() -> (Client, TcpStream) {
         autodetect: AutoDetect::default(),
         host: "broker.example".into(),
         follow: false,
+        surface: None,
     };
     (client, server)
 }
