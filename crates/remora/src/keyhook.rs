@@ -50,6 +50,11 @@ mod imp {
         ACTIVE.store(on, Ordering::Relaxed);
     }
 
+    /// Whether the hook takes Windows key combinations now.
+    pub fn is_active() -> bool {
+        ACTIVE.load(Ordering::Relaxed)
+    }
+
     /// Whether a key event belongs to the remote session.
     pub(super) fn grabs(vk: u32, alt: bool, ctrl: bool) -> bool {
         let vk = vk as u16;
@@ -82,7 +87,7 @@ mod imp {
 }
 
 #[cfg(windows)]
-pub use imp::{install, set_active};
+pub use imp::{install, is_active, set_active};
 
 #[cfg(not(windows))]
 pub fn install(_sink: impl Fn(u8, bool, bool) + Send + 'static) -> bool {
@@ -91,6 +96,11 @@ pub fn install(_sink: impl Fn(u8, bool, bool) + Send + 'static) -> bool {
 
 #[cfg(not(windows))]
 pub fn set_active(_on: bool) {}
+
+#[cfg(not(windows))]
+pub fn is_active() -> bool {
+    false
+}
 
 #[cfg(all(test, windows))]
 mod tests {

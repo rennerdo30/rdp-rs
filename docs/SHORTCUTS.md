@@ -26,8 +26,8 @@ Session page, or the command palette.
 
 **Windows key combinations** (Win, Alt+Tab, Alt+Esc, Ctrl+Esc, Alt+Space and
 the menu key) go where the connection's **Windows keys** setting says: to this
-PC, to the remote session, or to the remote session in full screen only (the
-default). Set it on the editor's Advanced page or in the side panel's Session
+PC, to the remote session whenever it has the keyboard (the default), or to the
+remote session in full screen only (as mstsc does). Set it on the editor's Advanced page or in the side panel's Session
 page.
 
 ## Everywhere in Remora

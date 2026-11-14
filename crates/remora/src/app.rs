@@ -747,6 +747,12 @@ impl App {
             return;
         };
         let input = crate::keyboard::KeyInput::of(ev);
+        // The Windows key reaches this window too while this PC keeps it
+        // (the hook is off): the local shell acts on it, so the session must
+        // not get it as well (RDP-53: both Start menus opened).
+        if !crate::keyhook::is_active() && input.scancode.is_some_and(crate::keyboard::is_win_key) {
+            return;
+        }
         let events = s
             .keys
             .borrow_mut()

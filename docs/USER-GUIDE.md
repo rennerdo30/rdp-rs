@@ -418,13 +418,14 @@ not recorded.
 Click into the remote picture to send your keyboard to the session;
 **Ctrl+Alt+Home** gives it back. [SHORTCUTS.md](SHORTCUTS.md) lists every key.
 
-Every session starts with this PC's keyboard layout. The **Keyboard** setting
-(on the editor's Experience page, and live on the side panel's Session page)
-decides what happens when the layouts differ:
+Remora asks for this PC's keyboard layout at connect, but the session keeps its
+own when the server lacks yours or when you reconnect to a session that already
+had one. The **Keyboard** setting (on the editor's Experience page, and live on
+the side panel's Session page) decides how keys go:
 
-- **Automatic** (the default): keys go as keys while the layouts match. When
-  you switch this PC to another layout, what you type is sent as text, so the
-  characters stay right.
+- **Automatic** (the default): what you type is sent as text, the characters
+  this PC's layout makes, so they come out right whatever layout the session
+  uses. Shortcuts, navigation and function keys stay keys.
 - **Remote**: always keys; the session's layout decides the characters.
 - **Translate**: text always as typed here; shortcuts and special keys stay
   keys.
@@ -432,9 +433,9 @@ decides what happens when the layouts differ:
 The touch keyboard and the emoji panel work too: their characters are sent as
 text.
 
-**Windows keys** such as Win, Alt+Tab and Alt+Esc go to this PC, to the
-session, or to the session only in full screen (the default); see the
-Advanced page.
+**Windows keys** such as Win, Win+R, Alt+Tab and Alt+Esc go to the session
+whenever it has the keyboard (the default), only in full screen, or stay on
+this PC; see the Advanced page.
 
 **Ctrl+Alt+Del**: the toolbar's keyboard button, the side panel, or the
 palette.

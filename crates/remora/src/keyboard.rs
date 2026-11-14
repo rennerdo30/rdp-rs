@@ -21,6 +21,11 @@ const WIN: [(u8, bool); 2] = [(0x5B, true), (0x5C, true)];
 const SHIFT: [(u8, bool); 2] = [(0x2A, false), (0x36, false)];
 const RIGHT_ALT: (u8, bool) = (0x38, true);
 
+/// Left or right Windows key.
+pub fn is_win_key(k: (u8, bool)) -> bool {
+    WIN.contains(&k)
+}
+
 fn is_modifier(k: (u8, bool)) -> bool {
     CTRL.contains(&k) || ALT.contains(&k) || WIN.contains(&k) || SHIFT.contains(&k)
 }
@@ -116,14 +121,17 @@ pub fn decide(k: &KeyInput, translate: bool, m: Mods) -> Decision {
     Decision::Scancode
 }
 
-/// Whether typing is translated: by the setting, and for Automatic when
-/// this PC's layout is not the one the session got at connect.
+/// Whether typing is translated. Automatic translates too: the session
+/// keeps its own layout whenever the server lacks this PC's (or the user
+/// reconnects to a session that already had one), and RDP tells the client
+/// nothing about the layout in use, so keys sent as scancodes typed the
+/// wrong characters (RDP-53: a Japanese PC into a German session). Only
+/// Remote sends every key as a key (games, raw key bindings).
 pub fn translating(mode: KeyboardMode, connect_klid: u32, local_klid: u32) -> bool {
+    let _ = (connect_klid, local_klid);
     match mode {
         KeyboardMode::Remote => false,
-        KeyboardMode::Translate => true,
-        // A custom layout went as its language's standard layout.
-        KeyboardMode::Auto => local_klid != connect_klid || is_custom(connect_klid),
+        KeyboardMode::Translate | KeyboardMode::Auto => true,
     }
 }
 
@@ -577,12 +585,14 @@ mod tests {
     }
 
     #[test]
-    fn automatic_follows_the_layout_switch() {
-        // Same layout as at connect: keys stay keys, as before.
+    fn automatic_sends_text_as_typed_here() {
+        // RDP-53: even with the layout sent at connect, the session may type
+        // with another one (a Japanese PC into a German session), so text
+        // goes as typed here from the start.
         let mut s = S::new(KeyboardMode::Auto, GERMAN);
-        assert_eq!(s.press(A, Some("a")), ["k1E+"]);
-        assert_eq!(s.release(A), ["k1E-"]);
-        // Switched to US English locally: text goes as typed here.
+        assert_eq!(s.press(A, Some("a")), ["u0061+", "u0061-"]);
+        assert_eq!(s.release(A), Vec::<String>::new());
+        // And after switching layouts locally too.
         s.local = US;
         assert_eq!(s.press(A, Some("a")), ["u0061+", "u0061-"]);
         assert_eq!(s.release(A), Vec::<String>::new());
@@ -740,10 +750,15 @@ mod tests {
     }
 
     #[test]
-    fn automatic_translates_from_a_custom_layout() {
-        assert!(!translating(KeyboardMode::Auto, GERMAN, GERMAN));
+    fn automatic_translates_whatever_the_layouts() {
+        // The session may keep its own layout whatever was sent at connect.
+        assert!(translating(KeyboardMode::Auto, GERMAN, GERMAN));
         assert!(translating(KeyboardMode::Auto, GERMAN, 0x0807));
         assert!(translating(KeyboardMode::Auto, 0xA000_0407, 0xA000_0407));
+        assert!(!translating(KeyboardMode::Remote, GERMAN, 0x0807));
+        assert!(translating(KeyboardMode::Translate, GERMAN, GERMAN));
+        assert!(is_win_key((0x5B, true)) && is_win_key((0x5C, true)));
+        assert!(!is_win_key((0x5B, false)), "not the extended key");
         assert!(!translating(KeyboardMode::Remote, GERMAN, US));
         assert!(translating(KeyboardMode::Translate, GERMAN, GERMAN));
     }

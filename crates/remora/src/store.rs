@@ -188,7 +188,8 @@ pub fn normalize_path(path: &str) -> String {
         .join("/")
 }
 
-/// What is written to disk (version 2). Version 1 was a bare list of connections.
+/// What is written to disk (version 3). Version 1 was a bare list of
+/// connections; version 2 had the old Windows keys default (below).
 #[derive(Serialize, Deserialize)]
 struct FileV2 {
     version: u32,
@@ -205,11 +206,29 @@ enum AnyFile {
     V1(Vec<Connection>),
 }
 
+/// The file format written now.
+const FILE_VERSION: u32 = 3;
+
 fn parse(bytes: &[u8]) -> Result<(Vec<Group>, Vec<Connection>), String> {
-    match serde_json::from_slice::<AnyFile>(bytes).map_err(|e| e.to_string())? {
-        AnyFile::V2(f) => Ok((f.groups, f.connections)),
-        AnyFile::V1(c) => Ok((Vec::new(), c)),
+    let (version, mut groups, mut connections) =
+        match serde_json::from_slice::<AnyFile>(bytes).map_err(|e| e.to_string())? {
+            AnyFile::V2(f) => (f.version, f.groups, f.connections),
+            AnyFile::V1(c) => (1, Vec::new(), c),
+        };
+    if version < 3 {
+        // Files before version 3 always wrote the then default, "full
+        // screen", so it says nothing about a choice: move them to today's
+        // default once (RDP-53). From version 3 on a full screen setting is
+        // the user's and stays.
+        let migrate = |o: &mut SessionOptions| {
+            if o.win_keys == WinKeys::FullScreen {
+                o.win_keys = WinKeys::Remote;
+            }
+        };
+        groups.iter_mut().for_each(|g| migrate(&mut g.options));
+        connections.iter_mut().for_each(|c| migrate(&mut c.options));
     }
+    Ok((groups, connections))
 }
 
 /// What a connection shares and how it scales, from the first moment of the
@@ -285,10 +304,12 @@ impl HelperOptions {
 pub enum WinKeys {
     /// This PC keeps them.
     Local,
-    /// The remote session gets them whenever it has the keyboard.
+    /// The remote session gets them whenever it has the keyboard (the
+    /// default: the status bar then says the keyboard goes to the session,
+    /// and Ctrl+Alt+Home gives it back).
+    #[default]
     Remote,
     /// The remote session gets them only in full screen (mstsc's default).
-    #[default]
     FullScreen,
 }
 
@@ -304,13 +325,14 @@ impl WinKeys {
     }
 }
 
-/// How keys reach the session when this PC's keyboard layout is not the
-/// session's (RDP-32). The session always starts with this PC's layout.
+/// How keys reach the session (RDP-32, RDP-53). Remora asks for this PC's
+/// layout at connect, but the session keeps its own when the server lacks
+/// it or the session already existed, and RDP does not say which is in use.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum KeyboardMode {
-    /// Keys as scancodes while the layouts match; text as typed here once
-    /// this PC switches to another layout.
+    /// Text as typed on this PC (Unicode); shortcuts and special keys stay
+    /// keys. (The server helper may later tell matching layouts apart.)
     #[default]
     Auto,
     /// Always scancodes: the session's layout decides the characters.
@@ -338,7 +360,7 @@ impl KeyboardMode {
     /// One line on what the choice does.
     pub fn hint(self) -> &'static str {
         match self {
-            KeyboardMode::Auto => "Keys as keys, or text once you switch layouts.",
+            KeyboardMode::Auto => "Text as typed here; shortcuts and other keys stay keys.",
             KeyboardMode::Remote => "Keys only; the session's layout picks characters.",
             KeyboardMode::Translate => "Text as typed here; shortcuts stay keys.",
         }
@@ -735,7 +757,7 @@ impl Store {
     /// The file contents; passwords only when they go into the vault.
     fn file_json(&self, with_passwords: bool) -> Result<Vec<u8>, String> {
         let mut file = FileV2 {
-            version: 2,
+            version: FILE_VERSION,
             groups: self.groups.clone(),
             connections: self.connections.clone(),
         };
@@ -1193,6 +1215,30 @@ mod tests {
             ["Work", "Work/Servers"]
         );
         assert_eq!(c2[0].group, "Work/Servers");
+    }
+
+    /// RDP-53: version 2 files wrote "full screen" as the default for every
+    /// connection; they move to "remote" once. A version 3 file keeps it.
+    #[test]
+    fn older_files_move_windows_keys_to_the_new_default_once() {
+        let v2 = br#"{"version":2,"groups":[{"path":"Work","options":{"win_keys":"full_screen"}}],
+            "connections":[
+              {"name":"a","host":"h","port":3389,"user":"u","width":0,"height":0,"options":{"win_keys":"full_screen"}},
+              {"name":"b","host":"h","port":3389,"user":"u","width":0,"height":0,"options":{"win_keys":"local"}}]}"#;
+        let (g, c) = parse(v2).unwrap();
+        assert_eq!(g[0].options.win_keys, WinKeys::Remote);
+        assert_eq!(
+            c[0].options.win_keys,
+            WinKeys::Remote,
+            "the old default moves"
+        );
+        assert_eq!(c[1].options.win_keys, WinKeys::Local, "a real choice stays");
+        // Chosen again and saved in today's format, full screen stays.
+        let mut s = store_with(vec![], c);
+        s.connections[0].options.win_keys = WinKeys::FullScreen;
+        let (_, back) = parse(&s.file_json(false).unwrap()).unwrap();
+        assert_eq!(back[0].options.win_keys, WinKeys::FullScreen);
+        assert_eq!(WinKeys::default(), WinKeys::Remote);
     }
 
     #[test]
