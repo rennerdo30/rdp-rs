@@ -35,7 +35,8 @@ page.
 |---|---|
 | **Ctrl+K** or **Ctrl+Shift+P** | Open the command palette |
 | **Ctrl+N** | New connection (in the group you are looking at) |
-| **Ctrl+F** | Filter the connections in the sidebar by name, address, user, group or app |
+| **Ctrl+F** | Filter the connections in the sidebar by name, address, user, group or app (unfolds a folded sidebar) |
+| **Ctrl+B** | Fold the sidebar to its icon rail, or unfold it |
 | **Ctrl+Tab** / **Ctrl+Shift+Tab** | Next / previous tab (the Connections tab included) |
 | **Ctrl+Shift+U** | Install the offered update |
 | **Up** / **Down** | Move through the sidebar's connections (when no text field has the cursor) |

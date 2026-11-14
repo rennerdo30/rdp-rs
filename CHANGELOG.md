@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- **A sidebar that folds and resizes, and a resizable side panel.** The menu button at the sidebar's top left, **Ctrl+B** or **Collapse sidebar** in the palette folds the sidebar to a narrow rail of icons with each connection's initials, live dot and a tooltip. Drag the sidebar's right edge (200 to 480 px; narrower folds it) and the session side panel's left edge (280 to 560 px); a double-click on an edge resets it. A fitted session is resized once when the drag ends. The fold and both widths are remembered.
+- **A connection's RemoteApp programs no longer depend on Opens.** They were listed only while the connection opened Apps, so listing them made **Connect** start the first app instead of the desktop, and switching back to Desktop hid them. Now **Opens** decides only what Connect does (the desktop by default), and the programs are listed under the connection in the sidebar, the editor and the palette whatever it opens; each starts its own RemoteApp window.
+
 ## 0.1.0-beta.3
 
 - **Servers whose picture encoding failed now connect.** Some Windows servers gave up about a second after logon with error 0x112F ("the server's graphics subsystem failed"). Remora now reconnects such a session once in compatible mode, without RemoteFX surface commands and drawing orders, as 0.1.0-beta.1 drew the screen, and keeps that mode for the tab's later reconnects.

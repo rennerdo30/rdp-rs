@@ -497,8 +497,16 @@ impl Ui {
     /// Everything the overlay paints now (pill with its shadow and menu,
     /// or the handle), for damage.
     pub fn overlay_rect(&self) -> Option<Rect> {
-        let l = self.toolbar.layout.as_ref()?;
-        Some(self.overlay_rect_of(l, self.pill_shown()))
+        // The rail's tooltip floats over the picture too.
+        let bar = self
+            .toolbar
+            .layout
+            .as_ref()
+            .map(|l| self.overlay_rect_of(l, self.pill_shown()));
+        match (bar, self.tip_bounds()) {
+            (Some(a), Some(b)) => Some(union(a, b)),
+            (a, b) => a.or(b),
+        }
     }
 
     fn overlay_rect_of(&self, l: &Layout, shown: bool) -> Rect {
@@ -800,12 +808,14 @@ impl Ui {
 
         let mut area = content;
         // The panel sits beside a running session only.
+        let mut panel_edge = None;
         if self.drawer && connected {
-            let dw = p(DRAWER_W).min(area.w / 2);
+            let dw = self.panel_px(area.w);
             let drawer = Rect::new(area.right() - dw, area.y, dw, area.h);
             area.w -= dw + 1;
             cv.fill(Rect::new(area.right(), area.y, 1, area.h), c.divider);
             self.paint_drawer(cv, te, f, drawer, id);
+            panel_edge = Some(area.right());
         }
         let mut pill_area = area;
         if connected && !picture {
@@ -879,6 +889,12 @@ impl Ui {
                 self.paint_failed(cv, te, f, area, id, &name, &host, &live, &why)
             }
             TabState::Ended(why) => self.paint_ended(cv, te, f, area, id, &host, &live, &why),
+        }
+        // The panel's left edge drags; last, so its grip wins over the
+        // picture and the panel beside it.
+        if let Some(x) = panel_edge {
+            self.dividers.panel_right = content.right();
+            self.paint_divider(cv, Divider::Panel, x, content.y, content.bottom());
         }
     }
 
@@ -992,6 +1008,7 @@ impl Ui {
         {
             self.paint_reconnect_card(cv, te, f, area, id, &attempt, &step);
         }
+        self.paint_tip(cv, te, f);
         let Some(l) = self.toolbar.layout.clone() else {
             return;
         };

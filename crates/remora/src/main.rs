@@ -446,6 +446,21 @@ fn snapshot_ui(path: &str, scale: f32) -> Result<(), Box<dyn std::error::Error>>
         ("-group", ui::sample_group),
         ("-apps-form", ui::sample_apps_form),
         ("-apps-session", ui::sample_apps_tab),
+        ("-desktop-apps", ui::sample_desktop_apps),
+        // The sidebar folded to its rail, and dragged wider (RDP-38).
+        ("-rail", || ui::sample_rail(false)),
+        ("-rail-session", || ui::sample_rail(true)),
+        ("-resized", ui::sample_resized),
+        ("-sidebar-narrow", || {
+            let mut m = ui::sample_settings(true);
+            m.sidebar_w = 200.0;
+            m
+        }),
+        ("-rail-vault", || {
+            let mut m = ui::sample_settings(true);
+            m.sidebar_collapsed = true;
+            m
+        }),
         ("-unlock", || {
             ui::Ui::new(store::Store::locked_sample(), 1.0)
         }),

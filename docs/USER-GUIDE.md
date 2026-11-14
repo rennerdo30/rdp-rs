@@ -29,6 +29,18 @@ Start with [Getting started](GETTING-STARTED.md).
   or press **Ctrl+K**, for the command palette; **Ctrl+F** filters the list)
   and **New connection**. At the bottom are **Settings** and a switch between
   the dark and light theme.
+  - **Fold it to a rail**: the menu button (three bars) at its top left, or
+    **Ctrl+B**, or **Collapse sidebar** in the command palette. The rail keeps
+    Home, search, **New connection**, Settings and the theme as icons, and
+    shows each connection as its initials with its live dot; point at one for
+    its name, address and apps, click it to open it. Connections that do not
+    fit become a **+N** button that unfolds the sidebar. The same button or
+    **Ctrl+B** unfolds it; **Ctrl+F** unfolds it to filter.
+  - **Resize it**: drag its right edge (the pointer turns into a resize
+    arrow), from 200 to 480 px wide. Dragging it narrower than that folds it
+    to the rail; dragging the rail's edge out unfolds it. A double-click on
+    the edge puts the default width back. Remora remembers the width and
+    whether the sidebar is folded.
 - **The tabs** at the top: **Connections** (Home, the editor and Settings),
   then one tab per session. **Ctrl+Tab** and **Ctrl+Shift+Tab** switch
   between them.
@@ -75,8 +87,12 @@ The editor has five pages.
 
 - **Name**, **Host** and port (3389 unless the server uses another), and
   **Group** (for example `Work/Servers`; empty for the top level).
-- **Opens**: **Desktop** for the whole remote desktop, or **Apps** for single
-  programs in their own windows (see [RemoteApp](#remoteapp)).
+- **Opens**: what **Connect** (and **Enter**) starts: **Desktop** (the
+  default) for the whole remote desktop, or **Apps** for the first of the
+  connection's programs in its own window (see [RemoteApp](#remoteapp)).
+- **Apps**: the connection's RemoteApp programs. They are listed under the
+  connection in the sidebar whatever it opens, and each one starts on its
+  own.
 - **Sign-in**: **User** (`name`, `DOMAIN\name` or `name@domain`) and
   **Password**.
   - **Save password** keeps the password in the encrypted vault. It asks you
@@ -193,6 +209,11 @@ or hold **Alt** to bring it back. Its buttons, from the left:
 
   ![The side panel's Session page](images/panel-session.webp)
 
+Drag the side panel's left edge to make it wider or narrower (280 to 560 px);
+a double-click on the edge puts the default width back, and Remora remembers
+the width. A desktop set to **Fit window** follows: it is resized to the new
+picture area once you let go of the edge.
+
 When the network drops, Remora reconnects on its own, up to five times. When a
 session fails or ends, the tab says why; see
 [Troubleshooting](TROUBLESHOOTING.md). Quitting Remora with sessions open
@@ -239,18 +260,20 @@ need a reconnect.
 
 ## RemoteApp
 
-A connection set to **Opens: Apps** starts single programs instead of the
-whole desktop. Each program window appears on your own desktop and taskbar,
-as if it ran on this PC.
+Any connection can start single programs instead of the whole desktop. Each
+program window appears on your own desktop and taskbar, as if it ran on this
+PC. A connection's programs are always listed under it, whether it opens the
+desktop or apps: **Opens** decides only what **Connect** does.
 
 ![The editor of an Apps connection with its programs](images/editor-apps.webp)
 
 - Add programs on the General page: a published name such as `||Ledger`, or
   a path on the server such as `C:\Tools\app.exe`, with optional arguments,
   working folder and display name. Then click **Add** and **Save**.
-- The programs appear under the connection in the sidebar. Click one to start
-  it; **Connect** starts the first. The first start signs in; later ones use
-  the running session.
+- The programs appear under the connection in the sidebar and in the command
+  palette. Click one to start it. **Connect** opens the desktop, or starts the
+  first program when **Opens** is **Apps**. The first program start signs in;
+  later ones use the running RemoteApp session.
 - The session's tab lists the open windows (**Focus**, **Close**) and the
   programs (**Start**, **Start another**), with a dot for running and
   starting.

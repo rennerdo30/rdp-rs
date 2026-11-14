@@ -457,7 +457,7 @@ fn chips(c: &Connection) -> Vec<(String, Tone, Lead)> {
             Lead::Icon(Icon::Shield),
         ));
     }
-    if c.opens == Opens::Apps {
+    if !c.apps.is_empty() {
         let n = c.apps.len();
         v.push((
             format!("{n} app{}", if n == 1 { "" } else { "s" }),
@@ -2388,8 +2388,9 @@ impl Ui {
                     c.warning,
                 );
             }
-            let sub = if conn.opens == Opens::Apps {
-                format!("{} · {} apps", conn.host, conn.apps.len())
+            let sub = if !conn.apps.is_empty() {
+                let n = conn.apps.len();
+                format!("{} · {n} app{}", conn.host, if n == 1 { "" } else { "s" })
             } else if conn.port != 3389 {
                 format!("{}:{}", conn.host, conn.port)
             } else {
