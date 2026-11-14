@@ -1,5 +1,6 @@
-//! The Windows folder picker for shared folders (rfd: the system's own
-//! IFileOpenDialog in folder mode).
+//! The Windows file and folder pickers (rfd: the system's own
+//! IFileOpenDialog): shared folders, backups, files to send to the server
+//! helper and the folder received files go to.
 //!
 //! The first file dialog in a process loads the shell's COM components,
 //! which takes seconds. So one long-lived picker thread joins a COM
@@ -11,7 +12,7 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 use std::sync::mpsc::{Sender, channel};
 
-type Done = Box<dyn FnOnce(Option<PathBuf>) + Send>;
+type Done = Box<dyn FnOnce(Vec<PathBuf>) + Send>;
 
 /// What the dialog picks.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -22,6 +23,10 @@ pub enum Pick {
     SaveBackup,
     /// A connections backup to read.
     OpenBackup,
+    /// Files to send to the server helper (several at once).
+    Files,
+    /// The folder received files go to.
+    DownloadFolder,
 }
 
 struct Request {
@@ -53,6 +58,26 @@ pub fn prewarm() {
     }
 }
 
+/// Opens the file picker for several files over `owner` and calls `done`
+/// with them (empty when it was cancelled).
+pub fn pick_files(owner: isize, done: impl FnOnce(Vec<PathBuf>) + Send + 'static) {
+    send(Pick::Files, owner, Box::new(done));
+}
+
+fn send(kind: Pick, owner: isize, done: Done) {
+    prewarm();
+    let slot = PICKER.lock().unwrap_or_else(|p| p.into_inner());
+    let req = Request { kind, owner, done };
+    match slot.as_ref() {
+        Some(tx) => {
+            if let Err(e) = tx.send(req) {
+                (e.0.done)(Vec::new());
+            }
+        }
+        None => (req.done)(Vec::new()),
+    }
+}
+
 /// Opens the folder picker over `owner` (an HWND) and calls `done` with the
 /// chosen folder, or None when it was cancelled.
 pub fn pick_folder(owner: isize, done: impl FnOnce(Option<PathBuf>) + Send + 'static) {
@@ -61,29 +86,29 @@ pub fn pick_folder(owner: isize, done: impl FnOnce(Option<PathBuf>) + Send + 'st
 
 /// Opens the dialog for `kind` over `owner` and calls `done` with the result.
 pub fn pick_with(kind: Pick, owner: isize, done: impl FnOnce(Option<PathBuf>) + Send + 'static) {
-    prewarm();
-    let slot = PICKER.lock().unwrap_or_else(|p| p.into_inner());
-    let req = Request {
+    send(
         kind,
         owner,
-        done: Box::new(done),
-    };
-    if let Some(tx) = slot.as_ref()
-        && let Err(e) = tx.send(req)
-    {
-        (e.0.done)(None);
-    }
+        Box::new(move |v: Vec<PathBuf>| done(v.into_iter().next())),
+    );
 }
 
-fn pick(kind: Pick, owner: isize) -> Option<PathBuf> {
+fn pick(kind: Pick, owner: isize) -> Vec<PathBuf> {
     #[cfg(windows)]
     {
         let mut dialog = rfd::FileDialog::new();
         if let Some(parent) = Owner::new(owner) {
             dialog = dialog.set_parent(&parent);
         }
-        match kind {
+        let one = match kind {
+            Pick::Files => {
+                return dialog
+                    .set_title("Send files to the server")
+                    .pick_files()
+                    .unwrap_or_default();
+            }
             Pick::Folder => dialog.set_title("Share a folder").pick_folder(),
+            Pick::DownloadFolder => dialog.set_title("Save received files in").pick_folder(),
             Pick::SaveBackup => dialog
                 .set_title("Export connections")
                 .set_file_name("remora-connections.rdpbackup")
@@ -93,12 +118,13 @@ fn pick(kind: Pick, owner: isize) -> Option<PathBuf> {
                 .set_title("Import connections")
                 .add_filter("Remora backup", &["rdpbackup", "bin"])
                 .pick_file(),
-        }
+        };
+        one.into_iter().collect()
     }
     #[cfg(not(windows))]
     {
         let _ = (kind, owner);
-        None
+        Vec::new()
     }
 }
 

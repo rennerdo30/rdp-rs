@@ -107,6 +107,10 @@ pub enum Command {
     SmartCards(u64),
     ShareFolder(u64),
     StopSharing(u64, usize),
+    /// The server helper: send files, show the transfers, forget it.
+    SendFiles(u64),
+    ShowTransfers(u64),
+    ForgetHelper(u64),
     Record(u64),
     /// Show or hide the session panel (its toolbar button, Ctrl+Alt+P).
     Panel,
@@ -156,6 +160,9 @@ impl Command {
             Command::SmartCards(id) => Hit::SmartCards(id),
             Command::ShareFolder(id) => Hit::BrowseDrive(id),
             Command::StopSharing(id, i) => Hit::RemoveDrive(id, i),
+            Command::SendFiles(id) => Hit::SendFiles(id),
+            Command::ShowTransfers(id) => Hit::ShowTransfers(id),
+            Command::ForgetHelper(id) => Hit::ForgetHelper(id),
             Command::Record(id) => Hit::Record(id),
             Command::Panel => Hit::Drawer,
             Command::PinPanel => Hit::PanelPin,
@@ -618,6 +625,51 @@ impl Ui {
                     Chip::None,
                     "Choose",
                 );
+                // The server helper's, only once one is there.
+                if t.helper.can_send() {
+                    push(
+                        Command::SendFiles(id),
+                        s,
+                        format!("Send files to {}…", t.host),
+                        "Copies files to the server through its helper".into(),
+                        "upload transfer copy file send helper",
+                        Lead::Icon(Icon::Upload, Tone::Accent),
+                        Chip::None,
+                        "Choose",
+                    );
+                }
+                if !t.helper.transfers.is_empty() {
+                    let n = t.helper.running();
+                    push(
+                        Command::ShowTransfers(id),
+                        s,
+                        "Show transfers".into(),
+                        if n > 0 {
+                            format!("{n} running")
+                        } else {
+                            "Files sent and received in this session".into()
+                        },
+                        "transfers downloads uploads files progress helper",
+                        Lead::Icon(Icon::Download, Tone::Neutral),
+                        Chip::None,
+                        "Show",
+                    );
+                }
+                if self
+                    .helper_pins
+                    .contains(&remora_link::server_id(&t.host, t.live.port))
+                {
+                    push(
+                        Command::ForgetHelper(id),
+                        s,
+                        "Forget paired helper".into(),
+                        format!("{} asks to pair again next time", t.host),
+                        "helper agent pairing unpair forget key",
+                        Lead::Icon(Icon::ShieldAlert, Tone::Danger),
+                        Chip::None,
+                        "Forget",
+                    );
+                }
                 for (i, d) in t.drives.iter().enumerate() {
                     push(
                         Command::StopSharing(id, i),

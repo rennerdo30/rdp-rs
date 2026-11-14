@@ -242,6 +242,37 @@ pub struct SessionOptions {
     /// Local monitors the session spans, by device name; empty: the window.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub monitors: Vec<String>,
+    /// What the server helper (remora-agent) may do; part of Sharing for
+    /// inheritance. Missing in older files: session info only.
+    #[serde(skip_serializing_if = "HelperOptions::is_default")]
+    pub helper: HelperOptions,
+}
+
+/// The server helper's switches for a connection (RDP-42/43/44). Session
+/// info is always allowed once a helper paired; everything else is off
+/// until the user switches it on.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HelperOptions {
+    /// Links clicked on the server open in this PC's browser (asks first).
+    pub open_links: bool,
+    /// ... without asking ("Always for this host"). Kept per connection:
+    /// a group's choice adds to it, never clears it.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub links_unasked: bool,
+    /// The server may offer files (each one is confirmed).
+    pub receive_files: bool,
+    /// Files dropped on the session go to the server.
+    pub send_files: bool,
+    /// Where received files go; None: `%USERPROFILE%\Downloads\Remora`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub download_dir: Option<String>,
+}
+
+impl HelperOptions {
+    pub fn is_default(&self) -> bool {
+        *self == HelperOptions::default()
+    }
 }
 
 /// Where Win, Alt+Tab and the like go, as mstsc's "Apply Windows key combinations".
@@ -903,6 +934,8 @@ impl Store {
             out.options.win_keys = own.win_keys;
             out.options.keyboard = own.keyboard;
             out.options.monitors = own.monitors;
+            // "Always for this host" stays the connection's own.
+            out.options.helper.links_unasked |= own.helper.links_unasked;
         }
         out
     }
@@ -1315,6 +1348,69 @@ mod tests {
             KeyboardMode::Translate,
             "sharing keeps the connection's own"
         );
+    }
+
+    #[test]
+    fn helper_options_round_trip_default_off_and_inherit_with_sharing() {
+        // Saved before the helper existed: everything off, nothing written.
+        let o: SessionOptions = serde_json::from_str(r#"{"clipboard":true}"#).unwrap();
+        assert_eq!(o.helper, HelperOptions::default());
+        assert!(!serde_json::to_string(&o).unwrap().contains("helper"));
+        let on = HelperOptions {
+            open_links: true,
+            links_unasked: false,
+            receive_files: true,
+            send_files: false,
+            download_dir: Some(r"D:\In".into()),
+        };
+        let o = SessionOptions {
+            helper: on.clone(),
+            ..Default::default()
+        };
+        let back: SessionOptions =
+            serde_json::from_str(&serde_json::to_string(&o).unwrap()).unwrap();
+        assert_eq!(back.helper, on);
+
+        // Inherited with Sharing, not with Display; "Always for this host"
+        // set on the connection survives the group's switches.
+        let g = Group {
+            path: "W".into(),
+            options: SessionOptions {
+                helper: on.clone(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let own = SessionOptions {
+            helper: HelperOptions {
+                open_links: false,
+                links_unasked: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let conn = |inherit| Connection {
+            group: "W".into(),
+            inherit,
+            options: own.clone(),
+            ..Default::default()
+        };
+        let s = store_with(vec![g], vec![]);
+        let sharing = s.resolve(&conn(Inherit {
+            sharing: true,
+            ..Default::default()
+        }));
+        assert!(sharing.options.helper.open_links && sharing.options.helper.receive_files);
+        assert!(sharing.options.helper.links_unasked, "own trust kept");
+        assert_eq!(
+            sharing.options.helper.download_dir.as_deref(),
+            Some(r"D:\In")
+        );
+        let display = s.resolve(&conn(Inherit {
+            display: true,
+            ..Default::default()
+        }));
+        assert_eq!(display.options.helper, own.helper, "display keeps its own");
     }
 
     #[test]

@@ -31,6 +31,7 @@ use crate::store::{SessionOptions, Store, WinKeys};
 use crate::theme::{ThemeChoice, Tone};
 use crate::ui::{self, Action, Fonts, Key, SharedDrive, TabState, Ui};
 
+mod helpers;
 mod rail;
 mod touch;
 
@@ -61,6 +62,11 @@ pub enum UserEvent {
     UpdateStarted(Result<(), String>),
     /// Time for a throttled Home thumbnail of a session (sent once).
     Thumb(u64),
+    /// A tab's server helper queued events.
+    Helper(u64),
+    /// Files picked to send to a tab's server; the download folder picked.
+    PickedFiles(u64, Vec<std::path::PathBuf>),
+    PickedDownloads(std::path::PathBuf),
 }
 
 /// Automatic reconnect attempts after a network drop, and the wait before each.
@@ -150,6 +156,8 @@ struct Session {
     /// The last picture of a dropped session, shown dimmed while it
     /// reconnects.
     last_fb: Option<rdp::Framebuffer>,
+    /// The tab's server helper, kept across its reconnects.
+    helper: helpers::TabHelper,
 }
 
 #[derive(Clone, PartialEq)]
@@ -210,6 +218,9 @@ pub struct App {
     settings: crate::settings::AppSettings,
     /// The last keyboard or mouse input (idle auto-lock).
     last_input: std::time::Instant,
+    /// Server helper progress: the last repaint, and one that waits.
+    helper_drawn: std::time::Instant,
+    helper_redraw: Option<std::time::Instant>,
     pub exit_code: i32,
 }
 
@@ -245,6 +256,8 @@ pub fn run(direct: Option<(String, Config)>) -> i32 {
         app_focus: None,
         settings: crate::settings::AppSettings::load(),
         last_input: std::time::Instant::now(),
+        helper_drawn: std::time::Instant::now(),
+        helper_redraw: None,
         exit_code: 0,
     };
     if let Err(e) = event_loop.run_app(&mut app) {
@@ -407,13 +420,18 @@ impl App {
         }
     }
 
-    fn spawn_worker(&self, id: u64, cfg: Config) -> (Worker, Controls) {
+    fn spawn_worker(
+        &self,
+        id: u64,
+        cfg: Config,
+        helper: &crate::helper::HelperHandle,
+    ) -> (Worker, Controls) {
         let proxy = self.proxy.clone();
-        let (channels, controls) = Controls::build(&cfg.client_name, self.hwnd());
+        let (channels, controls) = Controls::build(&cfg.client_name, self.hwnd(), helper);
         // The helper's key is pinned per server, like the certificate.
         controls.helper().set_server(
             remora_link::server_id(&cfg.host, cfg.port),
-            crate::store::data_dir().map(|d| d.join("helpers.json")),
+            crate::helper_app::pins_path(),
         );
         let worker = session::spawn(cfg, channels, move |ev| {
             let _ = proxy.send_event(UserEvent::Session(id, ev));
@@ -476,7 +494,8 @@ impl App {
         let fit = fit && span.is_empty();
         let id = self.next_id;
         self.next_id += 1;
-        let (worker, controls) = self.spawn_worker(id, cfg.clone());
+        let helper = self.new_helper(id);
+        let (worker, controls) = self.spawn_worker(id, cfg.clone(), &helper.handle);
         if let Some(w) = &mut self.win {
             w.ui.open_tab(id, name, cfg.host.clone(), fit);
             if let Some(t) = w.ui.tab_mut(id) {
@@ -502,6 +521,7 @@ impl App {
                 rail,
                 keys: std::cell::RefCell::new(crate::keyboard::Keys::new(klid, sent_layout)),
                 last_fb: None,
+                helper,
             },
         );
         if remote_app {
@@ -545,6 +565,10 @@ impl App {
         let printers = opts.printers && on(c.set_printers(true), "Printers");
         let smart_cards = opts.smart_cards && on(c.set_smart_cards(true), "Smart cards");
         let microphone = opts.microphone && on(c.set_microphone(true), "Microphone");
+        // The server helper may do what the connection allows (taken at
+        // its next HelloAck).
+        c.helper()
+            .set_capabilities(crate::helper_app::capabilities(&opts.helper));
         let mut drives = Vec::new();
         for path in &opts.drives {
             let name = drive_name(path);
@@ -571,6 +595,7 @@ impl App {
             t.printers = printers;
             t.smart_cards = smart_cards;
             t.drives = drives;
+            t.helper.opts = opts.helper.clone();
         }
         if !warn.is_empty() {
             self.message(warn.join(" · "), Tone::Warning);
@@ -601,6 +626,7 @@ impl App {
             mic: t.mic.clone(),
             // A reconnect keeps the session's monitors in its config.
             monitors: Vec::new(),
+            helper: t.helper.opts.clone(),
         }
     }
 
@@ -665,7 +691,12 @@ impl App {
         if let Some(mut old) = self.sessions.get_mut(&id).and_then(|s| s.worker.take()) {
             old.close();
         }
-        let (worker, controls) = self.spawn_worker(id, cfg);
+        // The same helper adapter: its transfers resume on the new
+        // connection once the helper is back.
+        let Some(helper) = self.sessions.get(&id).map(|s| s.helper.handle.clone()) else {
+            return;
+        };
+        let (worker, controls) = self.spawn_worker(id, cfg, &helper);
         if let Some(s) = self.sessions.get_mut(&id) {
             s.worker = Some(worker);
             s.controls = controls;
@@ -722,6 +753,9 @@ impl App {
     }
 
     fn handle_action(&mut self, action: Action) {
+        let Some(action) = self.helper_action(action) else {
+            return;
+        };
         match action {
             Action::ExecApp(id, app) => self.rail_exec(id, app),
             Action::RailFocus(id, w) => self.rail_focus(id, w),
@@ -846,6 +880,7 @@ impl App {
                 self.reconnect(id)
             }
             Action::CloseTab(id) => {
+                self.helper_closed(id);
                 if let Some(mut s) = self.sessions.remove(&id)
                     && let Some(w) = s.worker.as_mut()
                 {
@@ -1173,6 +1208,16 @@ impl App {
                 }
                 self.dirty();
             }
+            // Taken by `helper_action` above.
+            Action::HelperPairing(..)
+            | Action::AnswerLink { .. }
+            | Action::AcceptFile(..)
+            | Action::DeclineFile(..)
+            | Action::CancelTransfer(..)
+            | Action::ShowInFolder(_)
+            | Action::PickSendFiles(_)
+            | Action::BrowseDownloads
+            | Action::ForgetHelper(_) => {}
         }
     }
 
@@ -1481,7 +1526,8 @@ impl App {
             return self.set_fullscreen(!on);
         }
         let Some(m) = &mut self.win else { return };
-        let session = if m.ui.session_focus {
+        // Not while the server helper's pairing question is up.
+        let session = if m.ui.keys_to_session() {
             m.ui.session_area.map(|(id, _)| id)
         } else {
             None
@@ -1919,6 +1965,7 @@ impl ApplicationHandler<UserEvent> for App {
             self.open_span(el, spec);
         }
         self.sync_touch();
+        self.helper_tick();
         // Idle auto-lock of the vault.
         let lock_at = self.auto_lock_deadline();
         if lock_at.is_some_and(|t| std::time::Instant::now() >= t) {
@@ -1931,7 +1978,7 @@ impl ApplicationHandler<UserEvent> for App {
         }
         // RemoteApp sessions whose apps all closed end after a while.
         let rail_at = self.rail_timers();
-        let lock_at = [self.auto_lock_deadline(), rail_at]
+        let lock_at = [self.auto_lock_deadline(), rail_at, self.helper_redraw]
             .into_iter()
             .flatten()
             .min();
@@ -2025,6 +2072,7 @@ impl ApplicationHandler<UserEvent> for App {
                                 self.settings.panel_width,
                             );
                             ui.panel_pinned = self.settings.panel_pinned;
+                            ui.helper_pins = crate::helper_app::pinned_servers();
                             if self.settings.check_updates {
                                 check_for_update(
                                     self.proxy.clone(),
@@ -2060,6 +2108,14 @@ impl ApplicationHandler<UserEvent> for App {
     fn user_event(&mut self, el: &ActiveEventLoop, event: UserEvent) {
         let (id, ev) = match event {
             UserEvent::Session(id, ev) => (id, ev),
+            UserEvent::Helper(id) => return self.helper_events(id),
+            UserEvent::PickedFiles(id, files) => return self.send_files(id, files),
+            UserEvent::PickedDownloads(dir) => {
+                if let Some(m) = &mut self.win {
+                    m.ui.form_set_download_dir(dir.to_string_lossy().into_owned());
+                }
+                return self.dirty();
+            }
             UserEvent::Thumb(id) => {
                 if self.win.as_mut().is_some_and(|m| m.ui.thumb_tick(id)) {
                     self.make_thumb(id);
@@ -2117,7 +2173,7 @@ impl ApplicationHandler<UserEvent> for App {
                 let main = self
                     .win
                     .as_ref()
-                    .filter(|m| m.ui.session_focus)
+                    .filter(|m| m.ui.keys_to_session())
                     .and_then(|m| m.ui.session_area.map(|(id, _)| id));
                 if let Some(id) = self.app_focus.or(main) {
                     self.send(
@@ -2591,6 +2647,17 @@ impl App {
                     }
                 }
             }
+            // Files dragged over the window: the drop target shows over a
+            // session whose helper takes files (or says why it cannot).
+            WindowEvent::HoveredFile(_) => {
+                self.win.as_mut().unwrap().ui.dropping += 1;
+                self.dirty();
+            }
+            WindowEvent::HoveredFileCancelled => {
+                self.win.as_mut().unwrap().ui.dropping = 0;
+                self.dirty();
+            }
+            WindowEvent::DroppedFile(path) => self.dropped_file(path),
             WindowEvent::ModifiersChanged(mods) => self.mods = mods.state(),
             WindowEvent::KeyboardInput { event, .. } => {
                 self.last_input = std::time::Instant::now();

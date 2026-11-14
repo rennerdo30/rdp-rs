@@ -83,10 +83,14 @@ pub enum Icon {
     Unplug,
     /// Folds or unfolds the sidebar (three bars).
     Menu,
+    /// Send a file to the server.
+    Upload,
+    /// A web link (the server helper's link requests).
+    Link,
 }
 
 impl Icon {
-    pub const ALL: [Icon; 57] = [
+    pub const ALL: [Icon; 59] = [
         Icon::Plus,
         Icon::Search,
         Icon::Gear,
@@ -144,6 +148,8 @@ impl Icon {
         Icon::FileText,
         Icon::Unplug,
         Icon::Menu,
+        Icon::Upload,
+        Icon::Link,
     ];
 }
 
@@ -610,6 +616,23 @@ pub fn draw(cv: &mut Canvas, icon: Icon, x: f32, y: f32, size: f32, color: u32) 
             p.line(&[(8.0, 2.2), (8.0, 10.2)]);
             p.line(&[(4.6, 6.8), (8.0, 10.2), (11.4, 6.8)]);
             p.line(&[(2.8, 13.4), (13.2, 13.4)]);
+        }
+        Icon::Upload => {
+            p.line(&[(8.0, 10.6), (8.0, 2.6)]);
+            p.line(&[(4.6, 6.0), (8.0, 2.6), (11.4, 6.0)]);
+            p.line(&[(2.8, 13.4), (13.2, 13.4)]);
+        }
+        Icon::Link => {
+            // Two rounded links on the diagonal, joined in the middle.
+            let capsule = |a: (f32, f32), b: (f32, f32), r: f32| {
+                let t = (b.1 - a.1).atan2(b.0 - a.0).to_degrees();
+                let mut v = Pen::arc_pts(b, r, r, t - 90.0, t + 90.0);
+                v.extend(Pen::arc_pts(a, r, r, t + 90.0, t + 270.0));
+                v
+            };
+            p.shape(&capsule((3.9, 12.1), (7.0, 9.0), 2.3));
+            p.shape(&capsule((9.0, 7.0), (12.1, 3.9), 2.3));
+            p.line(&[(6.2, 9.8), (9.8, 6.2)]);
         }
         Icon::Command => {
             // A square whose sides run on into a loop at each corner.
