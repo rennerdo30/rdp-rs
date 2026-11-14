@@ -63,11 +63,6 @@ pub fn load_or_create(
     keyfile::load_or_create(AGENT, path, protector, generate)
 }
 
-/// Reads the key without making one (`remora-agent fingerprint`).
-pub fn load_existing(path: &Path, protector: &dyn Protector) -> io::Result<StaticKey> {
-    keyfile::load_existing(AGENT, path, protector)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

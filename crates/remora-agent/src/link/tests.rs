@@ -46,6 +46,20 @@ impl UiLog {
     }
 }
 
+/// Pinned clients in memory, shared with the test.
+#[derive(Clone, Default)]
+struct MemClients(Rc<RefCell<Vec<([u8; 32], String)>>>);
+
+impl ClientPins for MemClients {
+    fn is_pinned(&self, key: &[u8; 32]) -> bool {
+        self.0.borrow().iter().any(|(k, _)| k == key)
+    }
+    fn pin(&mut self, key: &[u8; 32], label: &str) -> io::Result<()> {
+        self.0.borrow_mut().push((*key, label.to_string()));
+        Ok(())
+    }
+}
+
 struct MemFiles {
     dir: MemDir,
     sources: BTreeMap<PathBuf, (Vec<u8>, u64)>,
@@ -358,6 +372,7 @@ impl Remora {
 struct Net {
     agent: LinkProtocol,
     ui: UiLog,
+    clients: MemClients,
     files_dir: MemDir,
     remora: Remora,
     now: Instant,
@@ -381,14 +396,17 @@ impl Net {
             dir: files_dir.clone(),
             sources,
         };
+        let clients = MemClients::default();
         let agent = LinkProtocol::new(
             StaticKey::generate().unwrap(),
             Box::new(ui.clone()),
             Box::new(files),
+            Box::new(clients.clone()),
         );
         Net {
             agent,
             ui,
+            clients,
             files_dir,
             remora,
             now: Instant::now(),
@@ -531,9 +549,9 @@ impl Net {
         self.settle();
     }
 
-    /// Lets the Bulk link come up past the agent's grace.
-    fn grace(&mut self) {
-        self.advance(LINK_GRACE);
+    /// The agent's timer fires (no time passes).
+    fn tick(&mut self) {
+        self.agent_event(AgentEvent::Timer);
     }
 }
 
@@ -576,43 +594,102 @@ fn first_contact_shows_the_same_code_and_needs_both_confirmations() {
     assert_eq!(n.opens_requested, vec![Channel::Bulk]);
     assert!(n.agent.bulk_ready());
     assert!(n.remora.bulk.as_ref().unwrap().is_ready());
-    n.grace();
+    n.tick();
     assert!(!n.agent.engine.is_connected());
     // Now the user confirms on the server too.
     n.answer_locally(true);
     assert_eq!(n.ui.take(), vec![Ui::Close]);
     assert!(n.agent.server_to_client_allowed());
-    n.grace();
+    // Both confirmed: the client key is pinned here, and Remora heard so.
+    assert_eq!(n.clients.0.borrow().len(), 1);
+    assert_eq!(n.clients.0.borrow()[0].0, n.remora.key.public());
+    assert!(
+        n.remora
+            .got
+            .iter()
+            .any(|(_, m)| *m == Message::PeerPairing(PairingStatus::Confirmed))
+    );
+    // The transfer link comes up with the answer (no grace).
     assert!(n.agent.engine.is_connected());
 }
 
 #[test]
-fn transfer_link_waits_for_the_grace() {
+fn the_helper_asks_for_an_unknown_client_before_hello() {
+    let n = paired_net(Remora::new());
+    let first_pairing = n
+        .remora
+        .got
+        .iter()
+        .position(|(_, m)| matches!(m, Message::PeerPairing(_)))
+        .unwrap();
+    let hello = n
+        .remora
+        .got
+        .iter()
+        .position(|(_, m)| matches!(m, Message::Hello(_)))
+        .unwrap();
+    assert!(first_pairing < hello, "Remora learns it before Hello");
+    assert_eq!(
+        n.remora.got[first_pairing].1,
+        Message::PeerPairing(PairingStatus::Confirm)
+    );
+}
+
+#[test]
+fn the_client_is_pinned_only_after_both_users_confirmed() {
     let mut r = Remora::new();
-    r.auto_confirm = Some(true);
+    r.auto_confirm = None; // Remora's user has not answered yet
     let mut n = paired_net(r);
     n.answer_locally(true);
-    assert!(n.agent.bulk_ready());
-    assert!(!n.agent.engine.is_connected(), "not before the grace");
-    assert!(n.agent.next_deadline().unwrap() <= n.now + LINK_GRACE);
-    n.advance(LINK_GRACE / 2);
-    assert!(!n.agent.engine.is_connected());
-    n.advance(LINK_GRACE / 2);
-    assert!(n.agent.engine.is_connected());
+    assert!(n.clients.0.borrow().is_empty(), "not before Remora's user");
+    n.remora.user_answer(true);
+    n.settle();
+    assert_eq!(n.clients.0.borrow().len(), 1);
 }
 
 #[test]
-fn known_key_shows_nothing_and_blocks_server_to_client_data() {
+fn a_pinned_client_reconnects_silently_with_server_to_client_data() {
+    let mut n = paired_net(Remora::new());
+    n.answer_locally(true);
+    n.drop_link();
+    n.ui.take();
+    // Reconnect: Remora knows the helper and the helper knows Remora.
+    n.connect(snapshot(PolicyFlags::default()));
+    assert!(n.ui.take().is_empty(), "no dialog on either side");
+    assert!(
+        n.remora
+            .got
+            .iter()
+            .rev()
+            .any(|(_, m)| *m == Message::PeerPairing(PairingStatus::Known))
+    );
+    assert!(n.agent.server_to_client_allowed());
+    n.agent_event(AgentEvent::OpenUrl {
+        id: 3,
+        url: "https://e.example/".into(),
+    });
+    assert_eq!(n.url_results, vec![(3, UrlOutcome::Forwarded)]);
+}
+
+/// Review 2: `Pairing{Known}` from a client key the helper never pinned (a
+/// TLS-terminating proxy playing Remora, or a reinstalled Remora) gets the
+/// dialog here, and nothing leaves the server before the user answers.
+#[test]
+fn known_from_an_unpinned_client_shows_the_dialog_and_blocks_server_to_client_data() {
     let mut r = Remora::new();
     r.auto_confirm = Some(true);
     let mut n = paired_net(r);
     n.answer_locally(true);
     n.drop_link();
     n.ui.take();
-    // Reconnect: Remora knows the key now.
+    // Same helper key pinned in "Remora", but another client key.
+    n.remora.key = StaticKey::generate().unwrap();
     n.connect(snapshot(PolicyFlags::default()));
-    assert!(n.ui.take().is_empty(), "no dialog for a known key");
-    assert!(n.agent.acked().is_some());
+    assert!(
+        matches!(n.ui.take().as_slice(), [Ui::Show(..)]),
+        "dialog here"
+    );
+    assert!(n.agent.acked().is_some(), "Remora said Known and acked");
     assert!(!n.agent.server_to_client_allowed());
     // Links and downloads are refused locally; nothing goes to Remora.
     let before = n.remora.got.len();
@@ -837,7 +914,7 @@ fn open_url_round_trip_timeout_and_refusals() {
 fn upload_survives_a_drop_and_resumes() {
     let mut n = paired_net(Remora::new());
     n.answer_locally(true);
-    n.grace();
+    n.tick();
     let file = data(BLOCK_SIZE as usize + 700_000, 3);
     // Remora sends a file to the server.
     n.remora
@@ -855,7 +932,7 @@ fn upload_survives_a_drop_and_resumes() {
     n.drop_link();
     // Reconnect: known key, the transfer resumes at the verified block.
     n.connect(snapshot(PolicyFlags::default()));
-    n.grace();
+    n.tick();
     for _ in 0..10 {
         n.advance(POLL_INTERVAL);
     }
@@ -876,8 +953,8 @@ fn upload_survives_a_drop_and_resumes() {
 #[test]
 fn upload_offered_before_the_link_is_up_waits_and_completes() {
     // Remora's link is up as soon as its Bulk is; ours waits for the
-    // answer on the server and the grace. A new offer in that window must
-    // not end up accepted-but-paused.
+    // answer on the server. An offer in that window is accepted while the
+    // link is down and asks for its data when the link comes up (RDP-43).
     let mut n = paired_net(Remora::new());
     assert!(n.remora.engine.is_connected());
     assert!(!n.agent.engine.is_connected());
@@ -887,14 +964,14 @@ fn upload_offered_before_the_link_is_up_waits_and_completes() {
         .send("early.txt", Box::new(MemSource::new(file.clone(), 9)))
         .unwrap();
     n.settle();
-    assert_eq!(n.agent.held_offers.len(), 1);
-    assert!(n.files_dir.names().is_empty(), "nothing written yet");
+    assert!(
+        !n.files_dir.names().iter().any(|f| f == "early.txt"),
+        "nothing stored yet"
+    );
     n.answer_locally(true);
-    n.grace();
     for _ in 0..5 {
         n.advance(POLL_INTERVAL);
     }
-    assert!(n.agent.held_offers.is_empty());
     assert!(
         n.files_dir.get("early.txt") == Some(file),
         "folder has {:?}",
@@ -911,7 +988,7 @@ fn download_survives_a_drop_and_resumes() {
     let mut n = Net::new(Remora::new(), sources);
     n.connect(snapshot(PolicyFlags::default()));
     n.answer_locally(true);
-    n.grace();
+    n.tick();
     n.cut_after = Some(20);
     n.agent_event(AgentEvent::SendFiles {
         id: 11,
@@ -938,7 +1015,7 @@ fn download_survives_a_drop_and_resumes() {
     n.remora.pinned = None;
     n.connect(snapshot(PolicyFlags::default()));
     n.answer_locally(true);
-    n.grace();
+    n.tick();
     for _ in 0..10 {
         n.advance(POLL_INTERVAL);
     }
@@ -951,7 +1028,7 @@ fn download_survives_a_drop_and_resumes() {
 }
 
 #[test]
-fn known_reconnect_cancels_pending_downloads() {
+fn a_new_client_key_gets_no_pending_download_without_the_server_user() {
     let file = data(300_000, 1);
     let mut sources = BTreeMap::new();
     sources.insert(PathBuf::from(r"C:\a.bin"), (file, 5));
@@ -965,11 +1042,26 @@ fn known_reconnect_cancels_pending_downloads() {
     });
     assert_eq!(n.agent.engine.active(), 1);
     n.drop_link();
+    // Another client key says Known: the download waits for the answer
+    // here, and is never offered to that client before it.
+    n.remora.key = StaticKey::generate().unwrap();
+    let before = n.remora.got.len();
     n.connect(snapshot(PolicyFlags::default()));
-    n.grace();
-    // Known pairing: the queued download is dropped, never re-offered.
-    assert_eq!(n.agent.engine.active(), 0);
+    n.tick();
+    assert_eq!(n.agent.engine.active(), 1, "paused, not lost");
+    assert!(
+        !n.remora.got[before..]
+            .iter()
+            .any(|(_, m)| matches!(m, Message::FileOffer(_)))
+    );
+    // Rejected here: the session closes, still nothing sent.
+    n.answer_locally(false);
     assert!(n.remora.dir.get("a.bin").is_none());
+    assert!(
+        !n.remora.got[before..]
+            .iter()
+            .any(|(_, m)| matches!(m, Message::FileOffer(_)))
+    );
 }
 
 #[test]

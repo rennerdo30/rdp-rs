@@ -23,7 +23,7 @@ use crate::framing::{DvcPipe, MessagePipe};
 use crate::info::CpuTimes;
 use crate::keystore::{self, KeyOrigin};
 use crate::lifecycle::{LifeAction, Lifecycle, SessionChange};
-use crate::link::LinkProtocol;
+use crate::link::{FileClients, LinkProtocol};
 use crate::links;
 use crate::seam::{Action, AgentEvent, Channel, Protocol, SendOutcome, UrlOutcome};
 use crate::{info, warn};
@@ -165,6 +165,7 @@ fn event_loop(key: StaticKey) -> i32 {
         key,
         Box::new(WinPairingUi::new(tx.clone())),
         Box::new(WinFiles),
+        Box::new(FileClients(keystore::default_clients_path())),
     ));
     let window = match window::spawn(tx.clone()) {
         Ok(w) => Some(w),

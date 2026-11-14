@@ -16,6 +16,7 @@
 #![cfg_attr(not(windows), allow(dead_code))]
 
 mod cli;
+mod clients;
 mod files;
 mod framing;
 mod info;

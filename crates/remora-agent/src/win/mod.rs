@@ -148,8 +148,65 @@ pub fn main() -> i32 {
                 Command::RegisterLinks { dry_run } => apply::register_links(dry_run),
                 Command::UnregisterLinks { dry_run } => apply::unregister_links(dry_run),
                 Command::SessionInfo => apply::print_session_info(),
+                Command::Fingerprint => print_fingerprint(),
+                Command::Clients => clients_command(|p| crate::clients::list(p)),
+                Command::ForgetClient(fp) => {
+                    clients_command(|p| crate::clients::forget(p, &fp).map(|s| s + "\n"))
+                }
+                Command::TrustClient(fp) => clients_command(|p| {
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map_or(0, |d| d.as_secs());
+                    crate::clients::trust(p, &fp, now).map(|s| s + "\n")
+                }),
                 Command::Run | Command::OpenUrl(_) | Command::Send(_) => unreachable!(),
             }
+        }
+    }
+}
+
+/// `remora-agent fingerprint`: the helper key's fingerprint (the key is
+/// made now if the agent never ran, exactly as `run` would).
+fn print_fingerprint() -> i32 {
+    let Some(path) = crate::keystore::default_key_path() else {
+        eprintln!("remora-agent: LOCALAPPDATA is not set");
+        return 1;
+    };
+    let generate =
+        || remora_link::StaticKey::generate().map_err(|e| std::io::Error::other(e.to_string()));
+    match crate::keystore::load_or_create(&path, &dpapi::Dpapi, &generate) {
+        Ok(k) if k.save_error.is_none() => {
+            println!("{}", remora_link::fingerprint(&k.key.public()));
+            0
+        }
+        Ok(k) => {
+            eprintln!(
+                "remora-agent: the key could not be saved ({}); no lasting fingerprint",
+                k.save_error.unwrap_or_default()
+            );
+            1
+        }
+        Err(e) => {
+            eprintln!("remora-agent: {e}");
+            1
+        }
+    }
+}
+
+/// Runs a client-list command on `agent-clients.json` and prints its text.
+fn clients_command(f: impl FnOnce(&std::path::Path) -> Result<String, String>) -> i32 {
+    let Some(path) = crate::keystore::default_clients_path() else {
+        eprintln!("remora-agent: LOCALAPPDATA is not set");
+        return 1;
+    };
+    match f(&path) {
+        Ok(text) => {
+            print!("{text}");
+            0
+        }
+        Err(e) => {
+            eprintln!("remora-agent: {e}");
+            1
         }
     }
 }
