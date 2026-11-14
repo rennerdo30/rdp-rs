@@ -16,7 +16,7 @@
 
 #[cfg(windows)]
 mod imp {
-    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Mutex, OnceLock};
 
     use windows_sys::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
@@ -27,7 +27,7 @@ mod imp {
     };
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         CallNextHookEx, DispatchMessageW, GetMessageW, HC_ACTION, HHOOK, KBDLLHOOKSTRUCT,
-        LLKHF_ALTDOWN, LLKHF_EXTENDED, LLKHF_INJECTED, MSG, PostThreadMessageW, SetWindowsHookExW,
+        LLKHF_ALTDOWN, LLKHF_EXTENDED, MSG, PostThreadMessageW, SetWindowsHookExW,
         UnhookWindowsHookEx, WH_KEYBOARD_LL, WM_APP, WM_KEYDOWN, WM_SYSKEYDOWN,
     };
 
@@ -41,31 +41,6 @@ mod imp {
     const REINSTALL: u32 = WM_APP + 1;
     /// Posted to the hook thread: unhook.
     const UNHOOK: u32 = WM_APP + 2;
-    /// Diagnostics (RDP-53): hook calls so far, and when the last one ran
-    /// (milliseconds since the process started).
-    static CALLS: AtomicU64 = AtomicU64::new(0);
-    static LAST_MS: AtomicU64 = AtomicU64::new(0);
-    static START: OnceLock<std::time::Instant> = OnceLock::new();
-
-    fn now_ms() -> u64 {
-        START
-            .get_or_init(std::time::Instant::now)
-            .elapsed()
-            .as_millis() as u64
-    }
-
-    /// (hook calls so far, milliseconds since the last one).
-    pub fn calls() -> (u64, u64) {
-        let last = LAST_MS.load(Ordering::Relaxed);
-        (CALLS.load(Ordering::Relaxed), now_ms().saturating_sub(last))
-    }
-
-    /// Keys whose virtual-key code says nothing about what is typed: logged
-    /// in the diagnostics. Letters, digits, numpad and punctuation never are.
-    fn loggable(vk: u32) -> bool {
-        !matches!(vk, 0x30..=0x39 | 0x41..=0x5A | 0x60..=0x6F | 0xBA..=0xC0 | 0xDB..=0xDF | 0xE2)
-    }
-
     fn hook() -> HHOOK {
         // SAFETY: a valid hook procedure that lives for the whole process;
         // the module handle of this executable.
@@ -164,27 +139,6 @@ mod imp {
         // SAFETY: for HC_ACTION, lparam points to a KBDLLHOOKSTRUCT owned by
         // the caller for the duration of the call.
         unsafe {
-            if code == HC_ACTION as i32 {
-                let k = &*(lparam as *const KBDLLHOOKSTRUCT);
-                CALLS.fetch_add(1, Ordering::Relaxed);
-                LAST_MS.store(now_ms(), Ordering::Relaxed);
-                // Diagnostics (RDP-53): never letters, digits or punctuation.
-                if loggable(k.vkCode) {
-                    rdp::trace!(
-                        "keyhook: vk {:#04x} sc {:#04x} {} (active {}, injected {}, flags {:#x})",
-                        k.vkCode,
-                        k.scanCode,
-                        if matches!(wparam as u32, WM_KEYDOWN | WM_SYSKEYDOWN) {
-                            "down"
-                        } else {
-                            "up"
-                        },
-                        ACTIVE.load(Ordering::Relaxed),
-                        k.flags & LLKHF_INJECTED != 0,
-                        k.flags
-                    );
-                }
-            }
             if code == HC_ACTION as i32 && ACTIVE.load(Ordering::Relaxed) {
                 let k = &*(lparam as *const KBDLLHOOKSTRUCT);
                 let alt = k.flags & LLKHF_ALTDOWN != 0;
@@ -207,7 +161,7 @@ mod imp {
 }
 
 #[cfg(windows)]
-pub use imp::{calls, install, is_active, reinstall, set_active};
+pub use imp::{install, is_active, reinstall, set_active};
 
 #[cfg(not(windows))]
 pub fn install(_sink: impl Fn(u8, bool, bool) + Send + 'static) -> bool {
@@ -224,11 +178,6 @@ pub fn is_active() -> bool {
 
 #[cfg(not(windows))]
 pub fn reinstall() {}
-
-#[cfg(not(windows))]
-pub fn calls() -> (u64, u64) {
-    (0, 0)
-}
 
 #[cfg(all(test, windows))]
 mod tests {
