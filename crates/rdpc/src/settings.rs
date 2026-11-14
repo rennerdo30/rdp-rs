@@ -42,6 +42,25 @@ pub fn license_dir() -> Option<std::path::PathBuf> {
         .map(|p| std::path::PathBuf::from(p).join("rdp-rs").join("licenses"))
 }
 
+/// The persistent bitmap cache of one server (MS-RDPEGDI 3.2.1.4):
+/// `%LOCALAPPDATA%\rdp-rs\bitmap-cache\<host hash>`, the hash being the
+/// first 8 bytes of SHA-256 over the lower-case `host:port`.
+pub fn bitmap_cache_dir(host: &str, port: u16) -> Option<std::path::PathBuf> {
+    let key = format!("{}:{port}", host.to_lowercase());
+    let hash: String = rdp::crypto::sha256(key.as_bytes())[..8]
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    std::env::var_os("LOCALAPPDATA")
+        .or_else(|| std::env::var_os("HOME"))
+        .map(|p| {
+            std::path::PathBuf::from(p)
+                .join("rdp-rs")
+                .join("bitmap-cache")
+                .join(hash)
+        })
+}
+
 /// Turns protocol tracing and the log file on or off.
 pub fn apply_logging(on: bool) {
     rdp::set_verbose(on);

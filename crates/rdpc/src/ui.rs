@@ -6373,6 +6373,7 @@ fn session_action(r: &Connection, password: &str, app: Option<&AppEntry>) -> Act
     cfg.port = r.port;
     cfg.remote_app = app.map(AppEntry::remote_app);
     cfg.license_store = crate::settings::license_dir();
+    cfg.bitmap_cache_dir = crate::settings::bitmap_cache_dir(&r.host, r.port);
     #[cfg(windows)]
     if r.kerberos {
         cfg.auth = Some(crate::sspi::factory());
