@@ -336,3 +336,57 @@ File transfer: feed received file messages to `Engine::handle`, call
 channel each one names (`Message::channel()`), and read
 `Engine::next_event()`. Call `Engine::set_connected(true)` once Ctl is
 paired and Bulk is ready, `false` when either drops.
+
+## 12. The helper's behaviour (remora-agent)
+
+How `remora-agent` (`crates/remora-agent/src/link.rs`) uses this
+contract. Nothing here changes the wire format or Remora's obligations.
+
+- **Channels:** Ctl opens on every client connect; Bulk opens only after
+  `HelloAck` accepted `FILE_UP` or `FILE_DOWN`, as initiator with
+  `Binding { bulk_token, expected_remote: Remora's Ctl key }`. Ctl closing
+  (or failing) closes Bulk. A second Ctl open drops all Ctl state and
+  starts again from the handshake.
+- **Hello** goes out right after the SAS step, once the agent has a session
+  snapshot (taken when Ctl opens). File bits are not offered when policy
+  disables clipboard or drive redirection; if that policy appears during a
+  session, file transfer stops at once and Bulk closes.
+- **Server-side confirmation (interim, until Remora has a persistent key
+  the helper pins; section 9 "Client authentication"):** on `Pairing{Confirm}`
+  the helper shows the SAS with Confirm and Reject. Data from the server to
+  the client (`FileOffer` as sender, i.e. `FILE_DOWN`, and `OpenUrl`) is
+  sent only after the local user confirmed in **this** Ctl session.
+  `Pairing{Known}` alone allows session info and receiving files
+  (`FILE_UP`), nothing that leaves the server; queued outgoing transfers
+  are cancelled in such a session. Reject (or closing the dialog) sends
+  `Error{PAIRING_REJECTED}` and closes Ctl. While the answer is pending the
+  transfer engine stays disconnected.
+- **Transfer link grace:** after its Bulk handshake the helper waits 1 s
+  before `Engine::set_connected(true)`. The initiator finishes the
+  handshake first, and Ctl (PRI_MED) can overtake Bulk (PRI_LOW); a
+  `FileOffer` that reached Remora before Bulk message 3 would be accepted
+  while Remora's link is down, and Remora's engine waits for a re-offer
+  that never comes. (Open point: a contract-level fix, for example the
+  receiver sending `FileAccept` for accepted, paused transfers when its
+  link comes up.)
+- **Heartbeat** every 10 s after `HelloAck`; `SessionInfo` every 5 s (and
+  on lock changes) if accepted. No idle timeout closes the channel.
+- **Links:** `OpenUrl` with a fresh non-zero `request_id`. `Opened` or
+  `Declined` → the link is handled by Remora; `Invalid` or `Disabled` →
+  the server's own fallback browser opens it. Remora answers after its user
+  decided, so after 2 s without an answer the link counts as handed over
+  (never opened twice). At most 8 links wait at a time.
+- **Receiving:** every offer is accepted into `<Downloads>\From Remora`
+  (free space via `GetDiskFreeSpaceExW`); completed files get a
+  `Zone.Identifier` stream with `ZoneId=3`. An offer that arrives while the
+  helper's own transfer link is still down (grace, unanswered dialog) is
+  held, at most 32, and handed to the engine when the link comes up, for
+  the same engine gap as above in the other direction.
+- **Sending:** `remora-agent send <files>` (the Send To shortcut) passes
+  absolute paths over the agent's per-session pipe (`RMS1` request, at most
+  64 paths and 64 KiB per request). The agent opens each without following
+  reparse points and sends regular disk files only, never names ending in
+  `.remora-part`, `.remora-part.meta` or `.tmp`.
+- **Unknown types** get `Unsupported`; client-bound types arriving at the
+  helper get `Error{PROTOCOL}`; file messages before `HelloAck` get
+  `Error{NOT_ALLOWED}`; none of these closes the channel.
