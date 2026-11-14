@@ -32,6 +32,7 @@ use crate::theme;
 use crate::ui::{self, Action, Fonts, Key, SharedDrive, TabState, Ui};
 
 mod rail;
+mod touch;
 
 pub enum UserEvent {
     Session(u64, session::Event),
@@ -1574,6 +1575,7 @@ impl ApplicationHandler<UserEvent> for App {
         for spec in std::mem::take(&mut self.pending_spans) {
             self.open_span(el, spec);
         }
+        self.sync_touch();
         // Idle auto-lock of the vault.
         let lock_at = self.auto_lock_deadline();
         if lock_at.is_some_and(|t| std::time::Instant::now() >= t) {

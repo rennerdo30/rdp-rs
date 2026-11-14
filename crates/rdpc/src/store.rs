@@ -274,6 +274,9 @@ pub struct Quality {
     pub compression: Comp,
     /// Graphics pipeline (MS-RDPEGFX, H.264) instead of bitmap updates.
     pub gfx: bool,
+    /// Touch and pen go to the session as touch and pen (MS-RDPEI) when the
+    /// server offers it; off, they act as the mouse. Applies live.
+    pub touch: bool,
 }
 
 /// Bulk compression setting, saved by name.
@@ -347,6 +350,7 @@ impl Quality {
             visual_styles: e.visual_styles,
             compression: Comp::Off,
             gfx: false,
+            touch: true,
         }
     }
 
@@ -1140,6 +1144,22 @@ mod tests {
         r.options.quality.apply(&mut cfg);
         assert_eq!(cfg.color_depth, 16);
         assert_eq!(cfg.experience.performance_flags() & 1, 1, "wallpaper off");
+    }
+
+    #[test]
+    fn touch_is_on_unless_saved_off() {
+        assert!(Quality::default().touch);
+        assert!(Quality::preset(1, 16).touch);
+        // Saved before the setting existed.
+        let o: SessionOptions =
+            serde_json::from_str(r#"{"quality":{"connection":1,"color_depth":16}}"#).unwrap();
+        assert!(o.quality.touch);
+        let off = Quality {
+            touch: false,
+            ..Quality::default()
+        };
+        let back: Quality = serde_json::from_str(&serde_json::to_string(&off).unwrap()).unwrap();
+        assert!(!back.touch);
     }
 
     #[test]

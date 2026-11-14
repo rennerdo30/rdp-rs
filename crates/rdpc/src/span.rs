@@ -188,6 +188,18 @@ impl SpanWin {
         self.first && self.revealed && y < self.bar_h()
     }
 
+    /// The client rectangle (x, y, w, h) where touch reaches the session:
+    /// the whole window, below the bar while it shows.
+    pub fn touch_area(&self) -> (i32, i32, i32, i32) {
+        let (w, h) = (self.size.0 as i32, self.size.1 as i32);
+        let top = if self.first && self.revealed {
+            self.bar_h().min(h)
+        } else {
+            0
+        };
+        (0, top, w, h - top)
+    }
+
     pub fn button_at(&self, x: i32, y: i32) -> Option<BarButton> {
         self.buttons
             .iter()
