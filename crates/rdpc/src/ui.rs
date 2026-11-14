@@ -6829,7 +6829,7 @@ mod tests {
         m.activate(Hit::FormExperience(6));
         assert!(!m.opts.quality.touch);
         assert!(m.opts.quality.visual_styles, "row 5 untouched");
-        m.activate(Hit::FormPreset(4));
+        m.activate(Hit::FormPreset(PRESETS.len() - 1)); // Modem
         assert_eq!(m.opts.quality.connection, 1);
         assert!(!m.opts.quality.touch, "a speed preset keeps the choice");
         m.activate(Hit::FormExperience(6));
