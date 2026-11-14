@@ -9,10 +9,14 @@ const CS_CORE: u16 = 0xC001;
 const CS_SECURITY: u16 = 0xC002;
 const CS_NET: u16 = 0xC003;
 const CS_CLUSTER: u16 = 0xC004;
+/// Client Message Channel Data (2.2.1.3.7).
+const CS_MCS_MSGCHANNEL: u16 = 0xC006;
 
 const SC_CORE: u16 = 0x0C01;
 const SC_SECURITY: u16 = 0x0C02;
 const SC_NET: u16 = 0x0C03;
+/// Server Message Channel Data (2.2.1.4.5).
+const SC_MCS_MSGCHANNEL: u16 = 0x0C04;
 
 const RNS_UD_COLOR_8BPP: u16 = 0xCA01;
 const RNS_UD_SAS_DEL: u16 = 0xAA03;
@@ -29,6 +33,8 @@ const RNS_UD_CS_SUPPORT_DYNVC_GFX_PROTOCOL: u16 = 0x0100;
 const RNS_UD_CS_SUPPORT_HEARTBEAT_PDU: u16 = 0x0400;
 /// The client handles the Monitor Layout PDU (MS-RDPBCGR 2.2.1.3.2, 2.2.12.1).
 const RNS_UD_CS_SUPPORT_MONITOR_LAYOUT_PDU: u16 = 0x0040;
+/// The client takes part in network characteristics detection (2.2.1.3.2, 2.2.14).
+const RNS_UD_CS_SUPPORT_NETCHAR_AUTODETECT: u16 = 0x0080;
 
 pub struct ClientSettings<'a> {
     pub width: u16,
@@ -117,6 +123,11 @@ pub fn client_data_blocks(s: &ClientSettings) -> Vec<u8> {
                 RNS_UD_CS_SUPPORT_DYNVC_GFX_PROTOCOL
             } else {
                 0
+            }
+            | if autodetect(s) {
+                RNS_UD_CS_SUPPORT_NETCHAR_AUTODETECT
+            } else {
+                0
             },
     );
     core.put_zeros(64); // clientDigProductId
@@ -149,6 +160,12 @@ pub fn client_data_blocks(s: &ClientSettings) -> Vec<u8> {
     }
     block(&mut out, CS_NET, &net);
 
+    // Auto-detect PDUs travel on the message channel (2.2.14.3); asking for
+    // it is the Client Message Channel Data, flags unused and zero (2.2.1.3.7).
+    if autodetect(s) {
+        block(&mut out, CS_MCS_MSGCHANNEL, &[0; 4]);
+    }
+
     block(&mut out, CS_CLUSTER, &cluster_data(s));
 
     if let Some(d) = s.monitors {
@@ -156,6 +173,11 @@ pub fn client_data_blocks(s: &ClientSettings) -> Vec<u8> {
         out.extend(crate::monitor::client_monitor_ex_data(d, s.scale));
     }
     out
+}
+
+/// Network auto-detection is on for CONNECTION_TYPE_AUTODETECT (2.2.1.3.2).
+fn autodetect(s: &ClientSettings) -> bool {
+    s.connection_type == crate::ConnectionType::Auto
 }
 
 /// TS_UD_CS_CLUSTER body (2.2.1.3.5): redirection version 4, plus the
@@ -199,6 +221,9 @@ pub struct ServerData {
     pub channel_ids: Vec<u16>,
     pub encryption_method: u32,
     pub encryption_level: u32,
+    /// The MCS message channel (2.2.1.4.5); None when the server sent none
+    /// or sent zero (then it is not joined).
+    pub message_channel: Option<u16>,
 }
 
 /// Parses the GCC Conference Create Response user data.
@@ -235,6 +260,7 @@ pub fn parse_conference_create_response(data: &[u8]) -> Result<ServerData> {
                     sd.channel_ids.push(b.u16()?);
                 }
             }
+            SC_MCS_MSGCHANNEL => sd.message_channel = Some(b.u16()?).filter(|&c| c != 0),
             _ => {}
         }
     }
@@ -300,5 +326,45 @@ mod tests {
             ..redirected
         };
         assert_eq!(cluster(&smartcard), (0x4F, 2));
+
+        // Auto: NETCHAR_AUTODETECT in earlyCapabilityFlags and the message
+        // channel block (2.2.1.3.7) before the cluster block.
+        let msg = [0x06, 0xC0, 8, 0, 0, 0, 0, 0];
+        assert!(!b.windows(8).any(|w| w == msg));
+        let auto = ClientSettings {
+            connection_type: crate::ConnectionType::Auto,
+            ..smartcard
+        };
+        let a = client_data_blocks(&auto);
+        assert_eq!(u16::from_le_bytes([a[144], a[145]]), 0x04AB);
+        assert_eq!(a[210], 7, "CONNECTION_TYPE_AUTODETECT");
+        assert_eq!(b[210], 6, "CONNECTION_TYPE_LAN");
+        assert_eq!(&a[a.len() - 20..a.len() - 12], &msg);
+        assert_eq!(cluster(&auto), (0x4F, 2));
+    }
+
+    /// Server data with SC_CORE, SC_NET and SC_MCS_MSGCHANNEL (2.2.1.4.5).
+    fn server_data(msg_channel: u16) -> Vec<u8> {
+        let mut blocks = vec![0x01, 0x0C, 8, 0, 4, 0, 8, 0];
+        blocks.extend([0x03, 0x0C, 8, 0, 0xEB, 0x03, 0, 0]);
+        blocks.extend([0x04, 0x0C, 6, 0]);
+        blocks.extend(msg_channel.to_le_bytes());
+        let mut d = b"McDn".to_vec();
+        put_per_len(&mut d, blocks.len());
+        d.extend(blocks);
+        d
+    }
+
+    #[test]
+    fn server_message_channel_is_parsed() {
+        let sd = parse_conference_create_response(&server_data(0x03EC)).unwrap();
+        assert_eq!((sd.io_channel, sd.message_channel), (0x03EB, Some(0x03EC)));
+        // Zero: the channel MUST NOT be joined.
+        let sd = parse_conference_create_response(&server_data(0)).unwrap();
+        assert_eq!(sd.message_channel, None);
+        // Truncated block: an error, not a panic.
+        let mut bad = server_data(0x03EC);
+        bad.truncate(bad.len() - 1);
+        assert!(parse_conference_create_response(&bad).is_err());
     }
 }

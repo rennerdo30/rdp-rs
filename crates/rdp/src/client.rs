@@ -3,6 +3,7 @@
 use std::net::{TcpStream, ToSocketAddrs};
 use std::time::{Duration, Instant};
 
+use crate::autodetect::{AutoDetect, NetworkCharacteristics};
 use crate::channel::{self, ChannelOut, Slot, StaticChannel};
 use crate::codec;
 use crate::compress::{Compression, Decompressor};
@@ -97,10 +98,14 @@ pub struct Config {
     pub auth: Option<crate::AuthFactory>,
     /// Connect as told by a Server Redirection PDU (MS-RDPBCGR 3.2.5.13):
     /// its target, routing token, credentials and session id. Set by
-    /// [`Client::connect_with`] between hops; set it yourself from
-    /// [`Client::redirection`] to follow a redirection after activation, or
-    /// to reconnect with an LB_NOREDIRECT routing token.
+    /// [`Client::connect_with`] between hops and by
+    /// [`Client::follow_redirection`] after activation; set it yourself from
+    /// [`Client::redirection`] to reconnect with an LB_NOREDIRECT routing token.
     pub redirection: Option<Redirection>,
+    /// Server redirections already followed to get here, counted against
+    /// [`redirect::MAX_REDIRECTS`] across connect-time and mid-session hops.
+    /// 0 for a new connection; set by the redirection code.
+    pub redirects: usize,
     /// RemoteApp mode (MS-RDPERP): start this program in seamless windows
     /// instead of a desktop. The client opens the `rail` channel itself;
     /// [`Client::rail`] gives its handle.
@@ -133,6 +138,7 @@ impl Config {
             monitors: Vec::new(),
             auth: None,
             redirection: None,
+            redirects: 0,
             remote_app: None,
         }
     }
@@ -166,6 +172,9 @@ pub struct PollOutcome {
     pub monitors: Option<Vec<crate::Monitor>>,
     /// RemoteApp window and channel events, in order (MS-RDPERP).
     pub rail: Vec<crate::RailEvent>,
+    /// The server sent a new Network Characteristics Result (MS-RDPBCGR
+    /// 2.2.14.1.5); the merged values so far.
+    pub network: Option<NetworkCharacteristics>,
 }
 
 /// Why a session ended, and whether an auto-reconnect (MS-RDPBCGR 5.5) fits.
@@ -258,6 +267,43 @@ pub struct Client {
     redirection: Option<Redirection>,
     /// RemoteApp window model, when [`Config::remote_app`] is set.
     rail: Option<crate::RailHandle>,
+    /// The MCS message channel (2.2.1.4.5), if the server opened one.
+    message_channel: Option<u16>,
+    /// Network auto-detection answers and results (2.2.14).
+    autodetect: AutoDetect,
+    /// The server this connection reached; a redirection without a target
+    /// goes back to it (1.3.8).
+    host: String,
+    /// The session ended for a Server Redirection PDU to follow (3.2.5.13).
+    follow: bool,
+}
+
+/// Connection-sequence traffic that is not the I/O channel PDU being waited
+/// for: virtual channel data kept for the session, and message channel PDUs
+/// (connect-time auto-detection, 2.2.14) answered on the spot.
+struct EarlyIo {
+    queued: Vec<(u16, Vec<u8>)>,
+    user_id: u16,
+    message_channel: Option<u16>,
+    autodetect: AutoDetect,
+}
+
+impl EarlyIo {
+    /// Handles one PDU that is not for the I/O channel.
+    fn take(&mut self, f: &mut Framer, channel: u16, data: &[u8]) -> Result<()> {
+        if Some(channel) == self.message_channel {
+            if let Some(rsp) = self.autodetect.on_pdu(data, Instant::now()) {
+                send_io(f, self.user_id, channel, &rsp)?;
+            }
+            return Ok(());
+        }
+        trace!(
+            "channel {channel}: {} bytes before activation, queued",
+            data.len()
+        );
+        self.queued.push((channel, data.to_vec()));
+        Ok(())
+    }
 }
 
 /// One connection attempt's end: a session, or a redirection to follow
@@ -380,13 +426,9 @@ fn read_mcs(f: &mut Framer, deadline: Instant) -> Result<Vec<u8>> {
 /// Reads the next I/O channel PDU during the connection sequence. Virtual
 /// channel traffic that arrives this early (for example the device
 /// redirection or clipboard handshake) is kept in `early` and delivered to
-/// its channel once the session exists.
-fn read_io(
-    f: &mut Framer,
-    io: u16,
-    deadline: Instant,
-    early: &mut Vec<(u16, Vec<u8>)>,
-) -> Result<Vec<u8>> {
+/// its channel once the session exists; auto-detect requests on the message
+/// channel are answered at once (1.3.1.1, connect-time auto-detection).
+fn read_io(f: &mut Framer, io: u16, deadline: Instant, early: &mut EarlyIo) -> Result<Vec<u8>> {
     loop {
         let payload = read_mcs(f, deadline)?;
         match mcs::parse_domain_pdu(&payload)? {
@@ -394,11 +436,8 @@ fn read_io(
                 return Ok(data.to_vec());
             }
             DomainPdu::SendDataIndication { channel, data } => {
-                trace!(
-                    "channel {channel}: {} bytes before activation, queued",
-                    data.len()
-                );
-                early.push((channel, data.to_vec()));
+                let data = data.to_vec();
+                early.take(f, channel, &data)?;
             }
             DomainPdu::DisconnectProviderUltimatum { reason } => {
                 return Err(Error::Disconnected(format!(
@@ -408,6 +447,26 @@ fn read_io(
             DomainPdu::Other(c) => trace!("ignoring MCS PDU choice {c}"),
         }
     }
+}
+
+/// The configuration for the next hop of a redirection chain, connect-time
+/// or mid-session alike: the redirection, sent by `from`, counted against
+/// [`redirect::MAX_REDIRECTS`] (3.2.5.13).
+fn next_hop(cfg: &Config, to: Redirection, from: String) -> Result<Config> {
+    let hop = cfg.redirects + 1;
+    if hop > redirect::MAX_REDIRECTS {
+        return Err(Error::Protocol(format!(
+            "more than {} server redirections",
+            redirect::MAX_REDIRECTS
+        )));
+    }
+    trace!("{}", to.hop_trace(hop));
+    let mut next = cfg.clone();
+    // A redirection without a target goes back to its sender (1.3.8).
+    next.host = from;
+    next.redirection = Some(to);
+    next.redirects = hop;
+    Ok(next)
 }
 
 fn split_user(cfg: &Config) -> (String, String) {
@@ -452,25 +511,35 @@ impl Client {
             None => None,
         };
         let mut cfg = cfg.clone();
-        for hop in 1.. {
-            let (to, from, back) =
-                match Self::connect_hop(&cfg, handlers, gfx.clone(), rail.clone())? {
-                    Hop::Done(client) => return Ok(*client),
-                    Hop::Redirect(to, from, back) => (to, from, back),
-                };
-            if hop > redirect::MAX_REDIRECTS {
-                return Err(Error::Protocol(format!(
-                    "more than {} server redirections",
-                    redirect::MAX_REDIRECTS
-                )));
+        loop {
+            match Self::connect_hop(&cfg, handlers, gfx.clone(), rail.clone())? {
+                Hop::Done(client) => return Ok(*client),
+                Hop::Redirect(to, from, back) => {
+                    cfg = next_hop(&cfg, *to, from)?;
+                    handlers = back;
+                }
             }
-            trace!("{}", to.hop_trace(hop));
-            // A redirection without a target goes back to its sender (1.3.8).
-            cfg.host = from;
-            cfg.redirection = Some(*to);
-            handlers = back;
         }
-        unreachable!("the hop loop returns")
+    }
+
+    /// The configuration that follows the Server Redirection PDU which ended
+    /// this session after activation (Enhanced Security Server Redirection,
+    /// 2.2.13.3.1, 3.2.5.13): the same settings, with the redirection's
+    /// target, routing token, credentials and session id, and the hop count
+    /// so far. Connect it with [`Client::connect_with`] and new channel
+    /// handlers (these ones have session state); that runs the same hop loop
+    /// as a connect-time redirection. `cfg` is the configuration this session
+    /// was connected with. None when the session did not end for a
+    /// redirection; an error past [`redirect::MAX_REDIRECTS`] hops.
+    pub fn follow_redirection(&self, cfg: &Config) -> Option<Result<Config>> {
+        let to = self.redirection.clone().filter(|_| self.follow)?;
+        Some(next_hop(cfg, to, self.host.clone()))
+    }
+
+    /// The latest network characteristics the server reported (2.2.14.1.5),
+    /// with [`crate::ConnectionType::Auto`]; all None until then.
+    pub fn network(&self) -> NetworkCharacteristics {
+        self.autodetect.network()
     }
 
     fn connect_hop(
@@ -617,6 +686,8 @@ impl Client {
         f.write(&x224::data(&mcs::attach_user_request()))?;
         let user_id = mcs::parse_attach_user_confirm(&read_mcs(&mut f, deadline)?)?;
         let mut channels = vec![user_id, server.io_channel];
+        // The message channel, if any, is joined too (2.2.1.4.5, 3.2.5.3.8).
+        channels.extend(server.message_channel);
         channels.extend(&server.channel_ids);
         for ch in channels {
             f.write(&x224::data(&mcs::channel_join_request(user_id, ch)))?;
@@ -626,7 +697,12 @@ impl Client {
         let io = server.io_channel;
 
         // 5. Client info and licensing
-        let mut early = Vec::new();
+        let mut early = EarlyIo {
+            queued: Vec::new(),
+            user_id,
+            message_channel: server.message_channel,
+            autodetect: AutoDetect::default(),
+        };
         let info = pdu::ClientInfo {
             domain: &domain,
             user: &user,
@@ -755,10 +831,14 @@ impl Client {
             monitor_layout: Vec::new(),
             redirection: informational,
             rail,
+            message_channel: early.message_channel,
+            autodetect: std::mem::take(&mut early.autodetect),
+            host,
+            follow: false,
         };
         // 7. Finalization; the Font Map reply is handled by the session loop.
         client.activate(&demand)?;
-        for (channel, data) in early {
+        for (channel, data) in early.queued {
             client.channel_data(channel, &data)?;
         }
         client.f.set_read_timeout(Duration::from_millis(2))?;
@@ -833,10 +913,12 @@ impl Client {
             match self.f.read_frame(None) {
                 Ok(Some(Frame::X224(v))) => {
                     self.last_seen = Instant::now();
+                    self.autodetect.received(v.len());
                     self.handle_x224(&v, &mut out)?
                 }
                 Ok(Some(Frame::FastPath(v))) => {
                     self.last_seen = Instant::now();
+                    self.autodetect.received(v.len());
                     self.handle_fastpath(&v, &mut out)?
                 }
                 Ok(None) => {
@@ -935,6 +1017,12 @@ impl Client {
                 let data = data.to_vec();
                 self.handle_share(&data, out)
             }
+            DomainPdu::SendDataIndication { channel, data }
+                if Some(channel) == self.message_channel =>
+            {
+                let data = data.to_vec();
+                self.message_channel_pdu(channel, &data, out)
+            }
             DomainPdu::SendDataIndication { channel, data } => {
                 let data = data.to_vec();
                 self.channel_data(channel, &data)
@@ -949,6 +1037,31 @@ impl Client {
             }
             DomainPdu::Other(_) => Ok(()),
         }
+    }
+
+    /// A message channel PDU after activation (2.2.1.4.5): a heartbeat
+    /// (2.2.16.1) or an auto-detect request (2.2.14.3), answered on the same
+    /// channel. Anything else there is ignored.
+    fn message_channel_pdu(
+        &mut self,
+        channel: u16,
+        data: &[u8],
+        out: &mut PollOutcome,
+    ) -> Result<()> {
+        if let Some(hb) = pdu::parse_heartbeat(data) {
+            if self.heartbeat != Some(hb) {
+                trace!("server heartbeat: {hb:?}");
+            }
+            self.heartbeat = Some(hb);
+            return Ok(());
+        }
+        if let Some(rsp) = self.autodetect.on_pdu(data, Instant::now()) {
+            send_io(&mut self.f, self.user_id, channel, &rsp)?;
+        }
+        if let Some(n) = self.autodetect.take_update() {
+            out.network = Some(n);
+        }
+        Ok(())
     }
 
     fn handle_share(&mut self, data: &[u8], out: &mut PollOutcome) -> Result<()> {
@@ -986,6 +1099,7 @@ impl Client {
                         let follow = !to.no_redirect();
                         trace!("{}", to.hop_trace(1));
                         self.redirection = Some(to);
+                        self.follow = follow;
                         if follow {
                             let text = "the server redirected the session to another server";
                             let cause = CloseCause::Ultimatum(text);

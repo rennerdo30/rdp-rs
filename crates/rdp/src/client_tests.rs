@@ -44,6 +44,10 @@ fn session() -> (Client, TcpStream) {
         monitor_layout: Vec::new(),
         redirection: None,
         rail: None,
+        message_channel: None,
+        autodetect: AutoDetect::default(),
+        host: "broker.example".into(),
+        follow: false,
     };
     (client, server)
 }
@@ -348,6 +352,112 @@ fn redirection_after_activation_ends_the_session() {
     assert!(closed.text.contains("redirected"), "{closed:?}");
     let r = client.redirection().unwrap();
     assert_eq!((r.session_id, r.no_redirect()), (5, false));
+}
+
+#[test]
+fn mid_session_redirection_continues_the_hop_chain() {
+    let mut cfg = Config::new("broker.example", "user", "pw");
+    cfg.redirects = 1; // one connect-time hop already
+    let (mut client, _server) = session();
+    let mut out = PollOutcome::default();
+    assert!(client.follow_redirection(&cfg).is_none(), "no redirection yet");
+    // LB_NOREDIRECT is information only: nothing to follow.
+    client
+        .handle_share(&redirection_pdu(0x80), &mut out)
+        .unwrap();
+    assert!(client.follow_redirection(&cfg).is_none());
+    // A real one: the next hop goes back to the sender (no target, 1.3.8),
+    // with the redirection and the hop count, other settings unchanged.
+    client.handle_share(&redirection_pdu(0), &mut out).unwrap();
+    let next = client.follow_redirection(&cfg).unwrap().unwrap();
+    assert_eq!(next.host, "broker.example");
+    assert_eq!(next.redirects, 2);
+    assert_eq!(next.redirection.as_ref().unwrap().session_id, 5);
+    assert_eq!((next.username.as_str(), next.password.as_str()), ("user", "pw"));
+    // The hop limit counts across connect-time and mid-session hops.
+    let mut far = cfg.clone();
+    far.redirects = redirect::MAX_REDIRECTS;
+    let Some(Err(err)) = client.follow_redirection(&far) else {
+        panic!("hop limit not enforced");
+    };
+    assert!(err.to_string().contains("more than 3"), "{err}");
+}
+
+/// An MCS Send Data Indication from the server on `channel` (T.125 SDin).
+fn indication(channel: u16, data: &[u8]) -> Vec<u8> {
+    let mut ind = vec![0x68, 0x00, 0x01];
+    ind.extend(channel.to_be_bytes());
+    ind.push(0x70);
+    mcs::put_per_len(&mut ind, data.len());
+    ind.extend_from_slice(data);
+    x224::data(&ind)
+}
+
+/// Reads one client Send Data Request: (channel, user data).
+fn read_request(server: &mut TcpStream) -> (u16, Vec<u8>) {
+    use std::io::Read;
+    server
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let mut head = [0u8; 4];
+    server.read_exact(&mut head).unwrap();
+    let mut frame = vec![0u8; u16::from_be_bytes([head[2], head[3]]) as usize - 4];
+    server.read_exact(&mut frame).unwrap();
+    let m = &frame[3..];
+    assert_eq!(m[0] >> 2, 25, "Send Data Request");
+    let channel = u16::from_be_bytes([m[3], m[4]]);
+    let (len, n) = mcs::read_per_len(m, 6).unwrap();
+    (channel, m[6 + n..6 + n + len].to_vec())
+}
+
+#[test]
+fn message_channel_auto_detect_is_answered_and_reported() {
+    let (mut client, mut server) = session();
+    client.message_channel = Some(1004);
+    // RTT Measure Request (2.2.14.1.1), seq 7, after the connection sequence.
+    let rtt = [0x00, 0x10, 0x00, 0x00, 0x06, 0x00, 0x07, 0x00, 0x01, 0x00];
+    server.write_all(&indication(1004, &rtt)).unwrap();
+    let mut answered = None;
+    for _ in 0..100 {
+        assert!(client.poll(Duration::from_millis(20)).unwrap().closed.is_none());
+        server.set_nonblocking(true).unwrap();
+        let ready = server.peek(&mut [0u8; 1]).is_ok();
+        server.set_nonblocking(false).unwrap();
+        if ready {
+            answered = Some(read_request(&mut server));
+            break;
+        }
+    }
+    // The RTT Measure Response on the message channel (2.2.14.4, 2.2.14.2.1).
+    let (channel, data) = answered.expect("RTT answered");
+    // Network Characteristics Result (2.2.14.1.5), 0x0880: 2000 kbps, 25 ms.
+    let mut result = vec![0x00, 0x10, 0x00, 0x00, 0x0E, 0x00, 0x08, 0x00, 0x80, 0x08];
+    result.extend(2000u32.to_le_bytes());
+    result.extend(25u32.to_le_bytes());
+    server.write_all(&indication(1004, &result)).unwrap();
+    let mut network = None;
+    for _ in 0..100 {
+        network = client.poll(Duration::from_millis(20)).unwrap().network;
+        if network.is_some() {
+            break;
+        }
+    }
+    assert_eq!(channel, 1004);
+    assert_eq!(data, [0x00, 0x20, 0x00, 0x00, 0x06, 0x01, 0x07, 0x00, 0x00, 0x00]);
+    let n = network.expect("network characteristics reported");
+    assert_eq!((n.bandwidth_kbps, n.average_rtt_ms), (Some(2000), Some(25)));
+    assert_eq!(client.network(), n);
+    // A heartbeat on the message channel (2.2.16.1) is taken as one.
+    server
+        .write_all(&indication(1004, &[0x00, 0x40, 0, 0, 0, 5, 3, 10]))
+        .unwrap();
+    for _ in 0..50 {
+        client.poll(Duration::from_millis(20)).unwrap();
+        if client.heartbeat.is_some() {
+            break;
+        }
+    }
+    assert_eq!(client.heartbeat.map(|h| h.period), Some(5));
 }
 
 /// A New Window order (MS-RDPERP 2.2.1.3.1.2.1) with only a title.

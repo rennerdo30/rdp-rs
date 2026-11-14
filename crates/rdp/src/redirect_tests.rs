@@ -450,11 +450,29 @@ struct Seen {
     connection_request: Vec<u8>,
     connect_initial: Vec<u8>,
     client_info: Vec<u8>,
+    /// Channels the client joined.
+    joined: Vec<u16>,
+    /// The client's answer on the message channel, if a request was sent.
+    autodetect_response: Option<(u16, Vec<u8>)>,
 }
+
+/// The fake server's message channel (Server Message Channel Data, 2.2.1.4.5).
+const MSG_CHANNEL: u16 = 1006;
 
 /// Plays a TLS-only RDP server up to the Client Info PDU, then sends `reply`
 /// on the I/O channel (if any) and closes.
 fn fake_server(sock: TcpStream, tls: Arc<rustls::ServerConfig>, reply: Option<&[u8]>) -> Seen {
+    fake_server_with(sock, tls, reply, None)
+}
+
+/// [`fake_server`] that also opens a message channel and, after the Client
+/// Info PDU, sends `autodetect` there and reads the client's answer.
+fn fake_server_with(
+    sock: TcpStream,
+    tls: Arc<rustls::ServerConfig>,
+    reply: Option<&[u8]>,
+    autodetect: Option<&[u8]>,
+) -> Seen {
     let mut seen = Seen::default();
     let mut sock = sock;
     seen.connection_request = read_tpkt(&mut sock).unwrap();
@@ -471,6 +489,10 @@ fn fake_server(sock: TcpStream, tls: Arc<rustls::ServerConfig>, reply: Option<&[
     let mut blocks = Vec::new();
     blocks.extend([0x01, 0x0C, 8, 0, 4, 0, 8, 0]);
     blocks.extend([0x03, 0x0C, 12, 0, 0xEB, 0x03, 2, 0, 0xEC, 0x03, 0xED, 0x03]);
+    if autodetect.is_some() {
+        blocks.extend([0x04, 0x0C, 6, 0]);
+        blocks.extend(MSG_CHANNEL.to_le_bytes());
+    }
     let mut gcc = b"McDn".to_vec();
     mcs::put_per_len(&mut gcc, blocks.len());
     gcc.extend(blocks);
@@ -493,6 +515,7 @@ fn fake_server(sock: TcpStream, tls: Arc<rustls::ServerConfig>, reply: Option<&[
         match m[0] >> 2 {
             14 => {
                 // Channel Join Confirm for the requested channel.
+                seen.joined.push(u16::from_be_bytes([m[3], m[4]]));
                 let c = [0x3E, 0, m[1], m[2], m[3], m[4], m[3], m[4]];
                 s.write_all(&x224::data(&c)).unwrap();
             }
@@ -503,6 +526,20 @@ fn fake_server(sock: TcpStream, tls: Arc<rustls::ServerConfig>, reply: Option<&[
             }
             other => panic!("unexpected MCS PDU {other}"),
         }
+    }
+    if let Some(req) = autodetect {
+        let mut ind = vec![0x68, 0x00, 0x01];
+        ind.extend(MSG_CHANNEL.to_be_bytes());
+        ind.push(0x70);
+        mcs::put_per_len(&mut ind, req.len());
+        ind.extend_from_slice(req);
+        s.write_all(&x224::data(&ind)).unwrap();
+        let frame = read_tpkt(&mut s).unwrap();
+        let m = &frame[7..];
+        assert_eq!(m[0] >> 2, 25, "Send Data Request");
+        let (len, n) = mcs::read_per_len(m, 6).unwrap();
+        let channel = u16::from_be_bytes([m[3], m[4]]);
+        seen.autodetect_response = Some((channel, m[6 + n..6 + n + len].to_vec()));
     }
     if let Some(data) = reply {
         let mut ind = vec![0x68, 0x00, 0x01, 0x03, 0xEB, 0x70];
@@ -699,4 +736,37 @@ fn redirect_loops_stop_after_the_hop_limit() {
         err.to_string().contains("more than 3 server redirections"),
         "{err}"
     );
+}
+
+#[test]
+fn connect_time_auto_detect_is_answered_on_the_message_channel() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    // RTT Measure Request during connect-time auto-detection (2.2.14.1.1,
+    // requestType 0x1001), seq 0x0102, in a Server Auto-Detect Request PDU.
+    let rtt = [0x00, 0x10, 0x00, 0x00, 0x06, 0x00, 0x02, 0x01, 0x01, 0x10];
+    let server = std::thread::spawn(move || {
+        let sock = accept(&listener, Duration::from_secs(20)).expect("connection");
+        fake_server_with(sock, server_config(), None, Some(&rtt))
+    });
+    let mut cfg = client_config(port, Arc::new(Mutex::new(Vec::new())));
+    cfg.connection_type = crate::ConnectionType::Auto;
+    let channels: Vec<Box<dyn StaticChannel>> = vec![Box::new(Named("chan1"))];
+    let err = Client::connect_with(&cfg, channels)
+        .err()
+        .expect("the server hangs up");
+    let seen = server.join().unwrap();
+    // The client asked for the message channel (2.2.1.3.7) ...
+    assert!(contains(&seen.connect_initial, &[0x06, 0xC0, 8, 0, 0, 0, 0, 0]));
+    // ... joined it (3.2.5.3.8) ...
+    assert!(seen.joined.contains(&MSG_CHANNEL), "{:?}", seen.joined);
+    // ... and answered on it with an RTT Measure Response (2.2.14.4, 2.2.14.2.1).
+    assert_eq!(
+        seen.autodetect_response,
+        Some((
+            MSG_CHANNEL,
+            vec![0x00, 0x20, 0x00, 0x00, 0x06, 0x01, 0x02, 0x01, 0x00, 0x00]
+        ))
+    );
+    assert!(!err.to_string().contains("auto-detect"), "{err}");
 }
