@@ -31,10 +31,10 @@ Of the 38 features a full RDP client offers (below), 22 are done and 3 partly (6
 |  | Licensing | ◐ | MS-RDPELE: the TLS 'valid client' path only |
 |  | Auto-reconnect and heartbeat | ✅ | MS-RDPBCGR 5.5, 2.2.16 |
 |  | Server certificate check | ✅ | trust on first use |
-|  | Session broker redirection | ◐ | MS-RDPBCGR 2.2.13: followed while connecting, not yet mid-session |
+|  | Session broker redirection | ✅ | MS-RDPBCGR 2.2.13: followed while connecting and mid-session |
 |  | RD Gateway | ◐ | MS-TSGU: HTTP/WebSocket with NTLM; no RPC over HTTP, no UDP |
 |  | UDP transport and multitransport | — | MS-RDPEMT, MS-RDPEUDP |
-|  | Network auto-detect | — | MS-RDPBCGR 2.2.14 |
+|  | Network auto-detect | ✅ | MS-RDPBCGR 2.2.14: "Detect automatically" speed; RTT and bandwidth answered, results in the session panel |
 | Graphics | Bitmap updates (planar, interleaved RLE) | ✅ | MS-RDPBCGR, MS-RDPEGDI |
 |  | Bulk compression (MPPC, NCRUSH, XCRUSH) | ✅ | MS-RDPBCGR 3.1.8, MS-RDPEGDI |
 |  | Drawing orders and glyph cache | — | MS-RDPEGDI |
