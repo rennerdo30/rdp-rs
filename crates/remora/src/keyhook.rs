@@ -6,6 +6,12 @@
 //! session has the keyboard and the connection's setting allows it), a
 //! low-level keyboard hook takes them first, hands their scancodes to Remora
 //! and keeps them from the local shell. Everything else passes untouched.
+//!
+//! The hook runs on its own thread with its own message loop. On the window
+//! thread a busy frame (connecting, a large picture) delayed it past the
+//! low-level hook timeout, and Windows then removes such a hook silently
+//! for good: the local shell got the Windows key while Remora also sent it
+//! on, and both Start menus opened (RDP-53).
 
 #[cfg(windows)]
 mod imp {
@@ -14,36 +20,81 @@ mod imp {
 
     use windows_sys::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
     use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+    use windows_sys::Win32::System::Threading::GetCurrentThreadId;
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
         GetAsyncKeyState, VK_APPS, VK_CONTROL, VK_ESCAPE, VK_LWIN, VK_RWIN, VK_SPACE, VK_TAB,
     };
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        CallNextHookEx, HC_ACTION, KBDLLHOOKSTRUCT, LLKHF_ALTDOWN, LLKHF_EXTENDED, LLKHF_INJECTED,
-        SetWindowsHookExW, WH_KEYBOARD_LL, WM_KEYDOWN, WM_SYSKEYDOWN,
+        CallNextHookEx, DispatchMessageW, GetMessageW, HC_ACTION, HHOOK, KBDLLHOOKSTRUCT,
+        LLKHF_ALTDOWN, LLKHF_EXTENDED, LLKHF_INJECTED, MSG, PostThreadMessageW, SetWindowsHookExW,
+        UnhookWindowsHookEx, WH_KEYBOARD_LL, WM_APP, WM_KEYDOWN, WM_SYSKEYDOWN,
     };
 
     type Sink = Box<dyn Fn(u8, bool, bool) + Send>;
 
     static ACTIVE: AtomicBool = AtomicBool::new(false);
     static SINK: OnceLock<Mutex<Sink>> = OnceLock::new();
+    /// The hook thread's id, for [`reinstall`].
+    static THREAD: OnceLock<u32> = OnceLock::new();
+    /// Posted to the hook thread: unhook and hook again.
+    const REINSTALL: u32 = WM_APP + 1;
 
-    /// Installs the hook on the calling thread (it needs that thread's
-    /// message loop: the window's event loop). `sink(scancode, extended, down)`.
-    pub fn install(sink: impl Fn(u8, bool, bool) + Send + 'static) -> bool {
-        if SINK.set(Mutex::new(Box::new(sink))).is_err() {
-            return true;
-        }
+    fn hook() -> HHOOK {
         // SAFETY: a valid hook procedure that lives for the whole process;
         // the module handle of this executable.
-        let hook = unsafe {
+        unsafe {
             SetWindowsHookExW(
                 WH_KEYBOARD_LL,
                 Some(hook_proc),
                 GetModuleHandleW(std::ptr::null()),
                 0,
             )
-        };
-        !hook.is_null()
+        }
+    }
+
+    /// Starts the hook on its own thread. `sink(scancode, extended, down)`
+    /// runs there and must return at once (it only queues an event).
+    pub fn install(sink: impl Fn(u8, bool, bool) + Send + 'static) -> bool {
+        if SINK.set(Mutex::new(Box::new(sink))).is_err() {
+            return true;
+        }
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel::<bool>();
+        let spawned = std::thread::Builder::new()
+            .name("keyhook".into())
+            .spawn(move || {
+                // SAFETY: plain call.
+                let _ = THREAD.set(unsafe { GetCurrentThreadId() });
+                let mut h = hook();
+                let _ = ready_tx.send(!h.is_null());
+                // SAFETY: this thread's message loop; the hook procedure is
+                // called from inside GetMessageW.
+                unsafe {
+                    let mut msg: MSG = std::mem::zeroed();
+                    while GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) > 0 {
+                        if msg.hwnd.is_null() && msg.message == REINSTALL {
+                            if !h.is_null() {
+                                UnhookWindowsHookEx(h);
+                            }
+                            h = hook();
+                            rdp::trace!("keyhook: reinstalled ({})", !h.is_null());
+                            continue;
+                        }
+                        DispatchMessageW(&msg);
+                    }
+                }
+            });
+        spawned.is_ok()
+            && ready_rx
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap_or(false)
+    }
+
+    /// Hooks again (Windows may have dropped the hook without telling).
+    pub fn reinstall() {
+        if let Some(&tid) = THREAD.get() {
+            // SAFETY: posting to our hook thread's queue.
+            unsafe { PostThreadMessageW(tid, REINSTALL, 0, 0) };
+        }
     }
 
     pub fn set_active(on: bool) {
@@ -87,7 +138,7 @@ mod imp {
 }
 
 #[cfg(windows)]
-pub use imp::{install, is_active, set_active};
+pub use imp::{install, is_active, reinstall, set_active};
 
 #[cfg(not(windows))]
 pub fn install(_sink: impl Fn(u8, bool, bool) + Send + 'static) -> bool {
@@ -101,6 +152,9 @@ pub fn set_active(_on: bool) {}
 pub fn is_active() -> bool {
     false
 }
+
+#[cfg(not(windows))]
+pub fn reinstall() {}
 
 #[cfg(all(test, windows))]
 mod tests {

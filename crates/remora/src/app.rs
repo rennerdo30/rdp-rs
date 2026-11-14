@@ -747,10 +747,15 @@ impl App {
             return;
         };
         let input = crate::keyboard::KeyInput::of(ev);
-        // The Windows key reaches this window too while this PC keeps it
-        // (the hook is off): the local shell acts on it, so the session must
-        // not get it as well (RDP-53: both Start menus opened).
-        if !crate::keyhook::is_active() && input.scancode.is_some_and(crate::keyboard::is_win_key) {
+        // A Windows key the hook took never reaches this window. One that
+        // does went to the local shell too, so it is never sent on (RDP-53:
+        // both Start menus opened). If the hook should have taken it,
+        // Windows dropped the hook: install it again.
+        if input.scancode.is_some_and(crate::keyboard::is_win_key) {
+            if input.down && crate::keyhook::is_active() {
+                rdp::trace!("keyhook: a Windows key passed the active hook; reinstalling");
+                crate::keyhook::reinstall();
+            }
             return;
         }
         let events = s

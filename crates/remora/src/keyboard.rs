@@ -118,7 +118,24 @@ pub fn decide(k: &KeyInput, translate: bool, m: Mods) -> Decision {
     if types_text(k.text) {
         return Decision::Unicode { wrap: altgr };
     }
+    // A key of the typing block that types nothing here (an IME key such
+    // as Japanese 半角/全角 on scancode 0x29, which the IME also sends by
+    // itself when the window gets the focus back) would type the remote
+    // layout's character for that position: `^` on German (RDP-53).
+    if k.scancode.is_some_and(is_typing_key) && !altgr {
+        return Decision::Swallow;
+    }
     Decision::Scancode
+}
+
+/// The keys of the main typing block (set-1 scancodes, not extended): the
+/// digit row, the three letter rows with their punctuation, the ISO key
+/// left of Z and the JIS keys `ろ` and `¥`. As scancodes they type
+/// whatever the remote layout puts there.
+pub fn is_typing_key(k: (u8, bool)) -> bool {
+    let (sc, extended) = k;
+    !extended
+        && matches!(sc, 0x02..=0x0D | 0x10..=0x1B | 0x1E..=0x29 | 0x2B..=0x35 | 0x56 | 0x73 | 0x7D)
 }
 
 /// Whether typing is translated. Automatic translates too: the session
@@ -600,6 +617,30 @@ mod tests {
         s.mode = KeyboardMode::Remote;
         assert_eq!(s.press(A, Some("a")), ["k1E+"]);
         assert_eq!(s.release(A), ["k1E-"]);
+    }
+
+    /// RDP-53: the Japanese IME key 半角/全角 (scancode 0x29) types no text
+    /// here; sent as a key it typed `^` in a German session.
+    #[test]
+    fn text_less_typing_keys_are_not_sent_as_keys() {
+        let mut s = S::new(KeyboardMode::Auto, GERMAN);
+        assert!(s.press((0x29, false), None).is_empty(), "IME key swallowed");
+        assert!(s.release((0x29, false)).is_empty(), "and its release");
+        // Shortcuts on that key stay keys.
+        assert_eq!(s.press((0x1D, false), None), ["k1D+"]);
+        assert_eq!(s.press((0x29, false), None), ["k29+"]);
+        assert_eq!(s.release((0x29, false)), ["k29-"]);
+        assert_eq!(s.release((0x1D, false)), ["k1D-"]);
+        // Keys outside the typing block still go as keys (F1, arrows).
+        assert_eq!(s.press((0x3B, false), None), ["k3B+"]);
+        assert_eq!(s.press((0x48, true), None), ["k48e+"]);
+        // Remote sends every key.
+        s.mode = KeyboardMode::Remote;
+        assert_eq!(s.press((0x29, false), None), ["k29+"]);
+        assert!(
+            is_typing_key((0x1E, false)) && !is_typing_key((0x1C, false)),
+            "Enter is not"
+        );
     }
 
     #[test]
