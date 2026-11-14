@@ -5,6 +5,7 @@ Every release needs the owner's yes. CI builds and tests the packages and prepar
 ## What is released
 
 - **Remora for Windows (x64):** a per-user setup and a portable zip.
+- **The server helper (x64):** `remora-agent-<version>-windows-x64.exe`, to copy onto a server as `remora-agent.exe` (also in the zip; the setup installs Remora only). Listed in `SHA256SUMS.txt`; no updater reads it.
 - **Not packaged:** macOS and Linux. The `rdp` protocol library builds and is tested there in CI, but Remora, the client, is a Windows program today (window chrome, clipboard, printers, smart cards and sound use Windows APIs) and is neither built nor tested there, so the release has no archives for them.
 
 ## Versions
@@ -26,7 +27,7 @@ There is one version for the whole workspace: `version` under `[workspace.packag
    ```
 3. **The release workflow runs** ([`.github/workflows/release.yml`](../.github/workflows/release.yml)):
    - It checks that the tag matches the workspace version.
-   - It builds `remora-<version>-setup.exe` (per-user NSIS 3.13 setup), its legacy copy `rdpc-<version>-setup.exe` (see below) and `remora-<version>-windows-x64.zip`.
+   - It builds `remora-<version>-setup.exe` (per-user NSIS 3.13 setup), its legacy copy `rdpc-<version>-setup.exe` (see below), `remora-<version>-windows-x64.zip` (Remora and the helper) and `remora-agent-<version>-windows-x64.exe`.
    - It runs the installer lifecycle test on the disposable runner: install, reinstall, a running Remora blocks setup, the update from the published rdpc 0.1.0-beta.1 (including a running rdpc and partly removed rdpc installs), uninstall leaves nothing.
    - Every package carries `LICENSE.txt` (both licence texts) and `THIRD-PARTY-NOTICES.txt` (cargo-about, `about.toml`).
    - It checks that the legacy copy is byte-identical, writes one `SHA256SUMS.txt` over all packages and creates a **draft** release with the changelog section as notes.

@@ -50,7 +50,7 @@ jobs:
         with:
           tool: cargo-about@0.9.3
       - name: Release build
-        run: cargo build --release --locked -p remora
+        run: cargo build --release --locked -p remora -p remora-agent
       - name: Package (pinned NSIS 3.13)
         shell: pwsh
         run: |
@@ -70,6 +70,7 @@ jobs:
           path: |
             artifacts/installer/remora-*-setup.exe
             artifacts/installer/remora-*-windows-x64.zip
+            artifacts/installer/remora-agent-*-windows-x64.exe
             artifacts/installer/rdpc-*-setup.exe
           if-no-files-found: error
 
@@ -110,6 +111,7 @@ jobs:
             echo "**Install:** Windows: run remora-$version-setup.exe (per user, no admin rights) or unpack the zip."
             echo "Installed copies update themselves; every download is checked against SHA256SUMS.txt."
             echo "rdpc-$version-setup.exe is the same file under rdpc's old name, so installed rdpc copies update to Remora."
+            echo "**Server helper:** copy remora-agent-$version-windows-x64.exe onto the Windows server as remora-agent.exe (for example to %LOCALAPPDATA%\Programs\Remora) and run \`remora-agent install\` there; it is also in the zip."
           } >> notes.md
           flags=(--draft --verify-tag --title "Remora $RELEASE_TAG" --notes-file notes.md)
           case "$RELEASE_TAG" in *-*) flags+=(--prerelease) ;; esac
