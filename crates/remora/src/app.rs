@@ -434,6 +434,10 @@ impl App {
             remora_link::pin_id(&cfg.host, cfg.port, &account(&cfg.domain, &cfg.username)),
             crate::helper_app::pins_path(),
         );
+        // Remora's persistent key, so the helper can pin this PC.
+        controls
+            .helper()
+            .set_client(crate::link_key::key(), &cfg.client_name);
         let worker = session::spawn(cfg, channels, move |ev| {
             let _ = proxy.send_event(UserEvent::Session(id, ev));
         });
@@ -570,6 +574,10 @@ impl App {
         // its next HelloAck).
         c.helper()
             .set_capabilities(crate::helper_app::capabilities(&opts.helper));
+        c.helper().set_pairing_policy(
+            crate::helper_app::attempts_path(),
+            crate::helper_app::expected_fingerprint(&opts.helper),
+        );
         let mut drives = Vec::new();
         for path in &opts.drives {
             let name = drive_name(path);

@@ -56,6 +56,7 @@
 
 pub mod error;
 pub mod frame;
+pub mod keyfile;
 pub mod msg;
 pub mod pins;
 pub mod session;

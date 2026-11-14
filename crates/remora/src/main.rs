@@ -34,6 +34,7 @@ mod keyboard;
 mod keyhook;
 mod kit;
 mod known_hosts;
+mod link_key;
 mod mic;
 mod monitors;
 mod picker;

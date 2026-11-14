@@ -244,6 +244,11 @@ pub struct HelperView {
     pub aborted: u32,
     /// Second helper instances refused.
     pub refusals: u32,
+    /// The helper key's fingerprint (`ab12 cd34 …`), once its handshake ran.
+    pub fingerprint: Option<String>,
+    /// The helper asked its own user to confirm this PC; nothing leaves the
+    /// server before that answer.
+    pub server_pending: bool,
 }
 
 impl HelperView {
@@ -309,7 +314,14 @@ impl HelperView {
         let next = match s {
             HelperState::NotPresent => Status::Absent,
             HelperState::Handshaking => Status::Handshaking,
-            HelperState::AwaitingPairing { sas, changed } => Status::Pairing { sas, changed },
+            HelperState::AwaitingPairing {
+                sas,
+                changed,
+                fingerprint,
+            } => {
+                self.fingerprint = Some(fingerprint);
+                Status::Pairing { sas, changed }
+            }
             HelperState::Paired => Status::Paired,
             HelperState::Failed(why) => Status::Failed(why),
             HelperState::PairingBlocked => Status::Blocked,
@@ -2040,6 +2052,7 @@ pub fn sample_helper_form(confirm: bool) -> Ui {
         receive_files: true,
         send_files: false,
         download_dir: None,
+        fingerprint: None,
     };
     let host = m.field(Field::Host).text.trim().to_string();
     let port = m.field(Field::Port).text.trim().parse().unwrap_or(3389);
@@ -2221,6 +2234,7 @@ mod tests {
             HelperEvent::State(H::AwaitingPairing {
                 sas: Sas(1),
                 changed: false,
+                fingerprint: "ab12 cd34".into(),
             }),
             now(),
         );
@@ -2234,6 +2248,7 @@ mod tests {
             HelperEvent::State(H::AwaitingPairing {
                 sas: Sas(2),
                 changed: false,
+                fingerprint: "ab12 cd34".into(),
             }),
             now(),
         );

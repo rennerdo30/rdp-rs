@@ -204,6 +204,23 @@ pub fn pins_path() -> Option<PathBuf> {
     crate::store::data_dir().map(|d| d.join("helpers.json"))
 }
 
+/// The log of pairings that ended unanswered (`helper-attempts.json`).
+pub fn attempts_path() -> Option<PathBuf> {
+    crate::store::data_dir().map(|d| d.join("helper-attempts.json"))
+}
+
+/// The helper fingerprint an admin set for a connection. One that does not
+/// parse matches no key (fail closed: the helper is refused, never paired
+/// by code instead).
+pub fn expected_fingerprint(o: &HelperOptions) -> Option<[u8; remora_link::FINGERPRINT_LEN]> {
+    let text = o
+        .fingerprint
+        .as_deref()
+        .map(str::trim)
+        .filter(|t| !t.is_empty())?;
+    Some(remora_link::parse_fingerprint(text).unwrap_or([0; remora_link::FINGERPRINT_LEN]))
+}
+
 /// Servers with a paired helper (`host:port`, lower case), for any user.
 pub fn pinned_servers() -> HashSet<String> {
     pins_path()

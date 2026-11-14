@@ -227,10 +227,16 @@ fn first_contact_needs_the_sas_then_pins_the_key() {
     let key = StaticKey::generate().unwrap();
     let mut h = r.connect(key.clone());
     let state = r.handle.state();
-    let HelperState::AwaitingPairing { sas, changed } = state else {
+    let HelperState::AwaitingPairing {
+        sas,
+        changed,
+        fingerprint,
+    } = state
+    else {
         panic!("{state:?}")
     };
     assert!(!changed);
+    assert_eq!(fingerprint, remora_link::fingerprint(&key.public()));
     assert_eq!(Some(sas), h.sas, "both ends show the same SAS");
     assert!(h.got.contains(&Message::Pairing(PairingStatus::Confirm)));
     // The helper's Hello waits for the user; no HelloAck yet.
@@ -359,12 +365,14 @@ fn an_unreadable_pin_store_is_treated_as_changed() {
     let mut r = Rig::new("bad-store");
     std::fs::write(r.dir.join("helpers.json"), b"garbage").unwrap();
     r.handle.set_transport_protocol(1);
-    let _h = r.connect(StaticKey::generate().unwrap());
+    let mut h = r.connect(StaticKey::generate().unwrap());
     assert!(matches!(
         r.handle.state(),
         HelperState::AwaitingPairing { changed: true, .. }
     ));
-    // Confirming does not overwrite the unreadable file.
+    // The helper knows this PC; confirming here would pin...
+    r.send(&mut h, Message::PeerPairing(PairingStatus::Known));
+    // ...but does not overwrite the unreadable file.
     assert!(r.handle.confirm_pairing(shown(&r.handle)).is_err());
     assert_eq!(
         std::fs::read(r.dir.join("helpers.json")).unwrap(),
@@ -688,4 +696,231 @@ fn the_event_queue_stays_bounded() {
         })
         .collect();
     assert_eq!(infos, vec![MAX_EVENTS as u32 + 49]);
+}
+
+/// A man in the middle's try: the handshake and the SAS commitment run,
+/// Remora answers with its nonce, and the attacker (who now knows the
+/// code) drops the channel instead of revealing.
+fn grind_once(r: &mut Rig, key: &StaticKey) -> rdp::Result<()> {
+    let mut out = DvcOut::default();
+    r.ctl.opened(&mut out)?;
+    let (mut s, first) = SecureSession::initiator(Channel::Ctl, key, Binding::default()).unwrap();
+    r.ctl.process(&first, &mut out)?;
+    let msg2 = out.take();
+    let mut to_client = Vec::new();
+    for ev in s.on_message(&msg2[0]).unwrap() {
+        if let Event::Send(b) = ev {
+            to_client.push(b);
+        }
+    }
+    for m in to_client {
+        r.ctl.process(&m, &mut out)?;
+    }
+    // Remora sent its nonce; the attacker learns the code and aborts.
+    assert_eq!(out.take().len(), 1, "SasNonce");
+    r.ctl.closed();
+    Ok(())
+}
+
+#[test]
+fn two_aborted_pairings_refuse_the_helper_for_the_connection() {
+    let mut r = Rig::new("grind");
+    r.handle.set_transport_protocol(1);
+    let mitm = StaticKey::generate().unwrap();
+    grind_once(&mut r, &mitm).unwrap();
+    assert_eq!(r.handle.state(), HelperState::NotPresent);
+    grind_once(&mut r, &mitm).unwrap();
+    assert_eq!(r.handle.state(), HelperState::PairingBlocked);
+    // Remora::Ctl is refused for the rest of this connection...
+    let mut out = DvcOut::default();
+    assert!(r.ctl.opened(&mut out).is_err());
+    assert_eq!(r.handle.state(), HelperState::PairingBlocked);
+    // ...also for a helper it knows.
+    let known = StaticKey::generate().unwrap();
+    let mut s = PinStore::new();
+    s.pin("server:3389", &known.public(), 1);
+    s.save(&r.dir.join("helpers.json")).unwrap();
+    assert!(r.ctl.opened(&mut out).is_err());
+    // A new connection starts the per-connection count over.
+    let mut fresh = r.handle.reattach();
+    r.bulk = fresh.pop().unwrap();
+    r.ctl = fresh.pop().unwrap();
+    r.handle.set_transport_protocol(1);
+    let _h = r.connect(known);
+    assert_eq!(r.handle.state(), HelperState::Paired);
+}
+
+#[test]
+fn a_known_helper_or_the_users_own_answer_is_not_an_abort() {
+    let mut r = Rig::new("not-abort");
+    r.handle.set_transport_protocol(1);
+    let key = StaticKey::generate().unwrap();
+    // The user rejects twice: two answers, no block.
+    for _ in 0..2 {
+        let _h = r.connect(key.clone());
+        r.handle.reject_pairing(shown(&r.handle));
+        r.ctl.closed();
+    }
+    assert_ne!(r.handle.state(), HelperState::PairingBlocked);
+    // A pinned helper that closes early is not counted either.
+    let mut s = PinStore::new();
+    s.pin("server:3389", &key.public(), 1);
+    s.save(&r.dir.join("helpers.json")).unwrap();
+    for _ in 0..3 {
+        grind_once(&mut r, &key).unwrap();
+    }
+    assert_eq!(r.handle.state(), HelperState::NotPresent);
+}
+
+#[test]
+fn three_aborts_in_a_day_block_pairing_with_the_server_until_retried() {
+    let mut r = Rig::new("grind-server");
+    let attempts = r.dir.join("helper-attempts.json");
+    r.handle.set_pairing_policy(Some(attempts.clone()), None);
+    let mitm = StaticKey::generate().unwrap();
+    // One abort per connection, three connections.
+    for _ in 0..3 {
+        r.handle.set_transport_protocol(1);
+        grind_once(&mut r, &mitm).unwrap();
+        let mut fresh = r.handle.reattach();
+        r.bulk = fresh.pop().unwrap();
+        r.ctl = fresh.pop().unwrap();
+    }
+    assert!(remora_link::AttemptLog::is_blocked(
+        &attempts,
+        "server:3389"
+    ));
+    // A new connection: an unpinned key is refused right after the
+    // handshake, before any code exists.
+    r.handle.set_transport_protocol(1);
+    let mut out = DvcOut::default();
+    r.ctl.opened(&mut out).unwrap();
+    let (mut s, first) = SecureSession::initiator(Channel::Ctl, &mitm, Binding::default()).unwrap();
+    r.ctl.process(&first, &mut out).unwrap();
+    let msg2 = out.take();
+    let mut sends = Vec::new();
+    for ev in s.on_message(&msg2[0]).unwrap() {
+        if let Event::Send(b) = ev {
+            sends.push(b);
+        }
+    }
+    assert!(r.ctl.process(&sends[0], &mut out).is_err(), "closed");
+    assert!(out.is_empty(), "no SAS nonce was sent");
+    assert_eq!(r.handle.state(), HelperState::PairingBlocked);
+    // The user retries from the helper card: pairing works again.
+    r.ctl.closed();
+    r.handle.retry_pairing().unwrap();
+    assert!(!remora_link::AttemptLog::is_blocked(
+        &attempts,
+        "server:3389"
+    ));
+    assert_eq!(r.handle.state(), HelperState::NotPresent);
+    let _h = r.connect(StaticKey::generate().unwrap());
+    assert!(matches!(
+        r.handle.state(),
+        HelperState::AwaitingPairing { .. }
+    ));
+}
+
+#[test]
+fn an_admin_set_fingerprint_pins_only_that_key_without_a_code() {
+    let mut r = Rig::new("admin-pin");
+    let key = StaticKey::generate().unwrap();
+    r.handle
+        .set_pairing_policy(None, Some(remora_link::fingerprint_bytes(&key.public())));
+    r.handle.set_transport_protocol(1);
+    let h = r.connect(key.clone());
+    assert!(h.got.contains(&Message::Pairing(PairingStatus::Known)));
+    assert_eq!(r.handle.state(), HelperState::Paired);
+    let pins = PinStore::load(&r.dir.join("helpers.json")).unwrap();
+    assert_eq!(pins.check("server:3389", &key.public()), PinCheck::Known);
+    // Any other key is refused outright: no code to compare, no question.
+    let mut r = Rig::new("admin-pin-2");
+    r.handle
+        .set_pairing_policy(None, Some(remora_link::fingerprint_bytes(&key.public())));
+    r.handle.set_transport_protocol(1);
+    let other = StaticKey::generate().unwrap();
+    let mut out = DvcOut::default();
+    r.ctl.opened(&mut out).unwrap();
+    let (mut s, first) =
+        SecureSession::initiator(Channel::Ctl, &other, Binding::default()).unwrap();
+    r.ctl.process(&first, &mut out).unwrap();
+    let msg2 = out.take();
+    let sends: Vec<_> = s
+        .on_message(&msg2[0])
+        .unwrap()
+        .into_iter()
+        .filter_map(|e| match e {
+            Event::Send(b) => Some(b),
+            _ => None,
+        })
+        .collect();
+    assert!(r.ctl.process(&sends[0], &mut out).is_err());
+    assert!(matches!(r.handle.state(), HelperState::Failed(_)));
+}
+
+/// The helper does not know this PC (1.1 `PeerPairing{Confirm}`): Remora
+/// shows its code even for a pinned helper, and a new helper is pinned only
+/// once the server's user confirmed too.
+#[test]
+fn the_helpers_own_confirmation_shows_the_code_and_gates_the_pin() {
+    let mut r = Rig::new("peer-pair");
+    r.handle
+        .set_client(StaticKey::generate().unwrap(), "LAPTOP-7");
+    r.handle.set_transport_protocol(1);
+    let key = StaticKey::generate().unwrap();
+    let mut h = r.connect(key.clone());
+    assert!(h.got.contains(&Message::ClientName {
+        name: "LAPTOP-7".into()
+    }));
+    r.send(&mut h, Message::PeerPairing(PairingStatus::Confirm));
+    assert!(r.handle.server_pending());
+    r.handle.confirm_pairing(shown(&r.handle)).unwrap();
+    let mut hello11 = hello(cap::ALL, 0);
+    if let Message::Hello(x) = &mut hello11 {
+        x.minor = 1;
+    }
+    r.send(&mut h, hello11);
+    let pins = r.dir.join("helpers.json");
+    assert!(
+        PinStore::load(&pins).unwrap().iter().next().is_none(),
+        "not pinned before the server's user confirmed"
+    );
+    r.send(&mut h, Message::PeerPairing(PairingStatus::Confirmed));
+    assert!(!r.handle.server_pending());
+    assert_eq!(
+        PinStore::load(&pins)
+            .unwrap()
+            .check("server:3389", &key.public()),
+        PinCheck::Known
+    );
+
+    // Next session: the helper is pinned here, but the server forgot this
+    // PC; Remora still shows the code for the server's user to compare.
+    let mut r2 = Rig::new("peer-pair-2");
+    std::fs::copy(&pins, r2.dir.join("helpers.json")).unwrap();
+    r2.handle.set_transport_protocol(1);
+    let mut h2 = r2.connect(key);
+    assert_eq!(r2.handle.state(), HelperState::Paired);
+    r2.send(&mut h2, Message::PeerPairing(PairingStatus::Confirm));
+    assert!(matches!(
+        r2.handle.state(),
+        HelperState::AwaitingPairing { changed: false, .. }
+    ));
+    r2.handle.confirm_pairing(shown(&r2.handle)).unwrap();
+    r2.pump(&mut h2);
+    assert!(h2.got.contains(&Message::Pairing(PairingStatus::Confirmed)));
+}
+
+#[test]
+fn the_pre_tls_buffer_is_capped_in_bytes() {
+    let mut r = Rig::new("pre-tls-bytes");
+    let mut out = DvcOut::default();
+    r.ctl.opened(&mut out).unwrap();
+    let big = vec![0u8; 1 << 20];
+    r.ctl.process(&big, &mut out).unwrap();
+    r.ctl.process(&big, &mut out).unwrap();
+    // Two messages, 2 MiB: the third byte over closes the channel.
+    r.ctl.process(&[0], &mut out).unwrap_err();
+    assert!(matches!(r.handle.state(), HelperState::Failed(_)));
 }
