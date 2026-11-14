@@ -2557,57 +2557,17 @@ impl Ui {
 
 // ---- Snapshot samples --------------------------------------------------
 
-/// A made-up desktop picture for snapshot thumbnails: a wallpaper, two
-/// windows and a taskbar, in the given accent colour.
+/// A made-up desktop picture for snapshot thumbnails: the session view's
+/// sample desktop with its wallpaper in the given accent colour.
 fn sample_desktop(w: usize, h: usize, accent: u32) -> Vec<u32> {
     let mut px = vec![0u32; w * h];
-    for y in 0..h {
-        for x in 0..w {
-            // A diagonal wallpaper wash.
-            let t = ((x + y) * 255 / (w + h)) as u32;
-            px[y * w + x] = theme::mix(0x10233f, accent, t / 2);
-        }
-    }
-    let mut rect = |x0: usize, y0: usize, rw: usize, rh: usize, color: u32| {
-        for y in y0..(y0 + rh).min(h) {
-            for x in x0..(x0 + rw).min(w) {
-                px[y * w + x] = color;
-            }
-        }
-    };
-    rect(w / 10, h / 8, w / 2, h / 2, 0xf3f3f3);
-    rect(w / 10, h / 8, w / 2, h / 22, 0xdadada);
-    for i in 0..6 {
-        rect(
-            w / 10 + w / 30,
-            h / 8 + h / 12 + i * h / 20,
-            w / 3 - (i % 3) * w / 20,
-            h / 60,
-            0xb8c0cc,
-        );
-    }
-    rect(w * 5 / 12, h * 3 / 10, w / 2, h / 2, 0x1e1e1e);
-    rect(w * 5 / 12, h * 3 / 10, w / 2, h / 22, 0x323232);
-    for i in 0..7 {
-        let c = [0x4ec9b0, 0x9cdcfe, 0xce9178, 0xdcdcaa][i % 4];
-        rect(
-            w * 5 / 12 + w / 30 + (i % 3) * w / 40,
-            h * 3 / 10 + h / 12 + i * h / 22,
-            w / 5 + (i * 7 % 5) * w / 40,
-            h / 70,
-            c,
-        );
-    }
-    rect(0, h - h / 18, w, h / 18, 0x202020);
-    for i in 0..5 {
-        rect(
-            w / 2 - w / 10 + i * w / 25,
-            h - h / 22,
-            w / 40,
-            h / 30,
-            [accent, 0x4c8dff, 0xf0b230, 0xe0e0e0, 0x48c774][i],
-        );
-    }
+    let mut cv = Canvas::new(&mut px, w, h);
+    super::session_view::paint_sample_picture(
+        &mut cv,
+        Rect::new(0, 0, w as i32, h as i32),
+        accent,
+        None,
+    );
     px
 }
 

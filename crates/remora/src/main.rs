@@ -492,6 +492,49 @@ fn snapshot_ui(path: &str, scale: f32) -> Result<(), Box<dyn std::error::Error>>
         ("-empty-1920", ui::sample_empty, 1920.0, 1080.0),
         ("-editor-1920", || ui::sample_form(0), 1920.0, 1080.0),
     ];
+    // The website and user guide set (scripts/screenshots.ps1): whole
+    // windows with the sample remote desktop, at 1280 x 800 logical px
+    // (1440 x 900 for the editor, wide enough for its Summary column).
+    let site: [SizedScreen; 13] = [
+        (
+            "-site-session",
+            || sv::sample_toolbar(true, false, false),
+            1280.0,
+            800.0,
+        ),
+        ("-site-home", ui::sample_home, 1280.0, 800.0),
+        (
+            "-site-quick",
+            || ui::sample_home_typed("off"),
+            1280.0,
+            800.0,
+        ),
+        (
+            "-site-palette",
+            || ui::sample_palette(true, ""),
+            1280.0,
+            800.0,
+        ),
+        (
+            "-site-connecting",
+            || sv::sample_connecting(false),
+            1280.0,
+            800.0,
+        ),
+        ("-site-failed", || sv::sample_failed(3), 1280.0, 800.0),
+        ("-site-monitors", || ui::sample_form(1), 1280.0, 800.0),
+        ("-site-apps", ui::sample_apps_tab, 1280.0, 800.0),
+        ("-site-sharing", || ui::sample(true), 1280.0, 800.0),
+        (
+            "-site-quality",
+            || ui::sample_panel(2, false),
+            1280.0,
+            800.0,
+        ),
+        ("-site-vault", || ui::sample_settings(true), 1280.0, 800.0),
+        ("-site-cert", || ui::sample_cert(false), 1280.0, 800.0),
+        ("-site-editor", || ui::sample_form(0), 1440.0, 900.0),
+    ];
     // One error screen per kind of failure.
     let failures: [Screen; 10] = [
         || sv::sample_failed(0),
@@ -528,6 +571,17 @@ fn snapshot_ui(path: &str, scale: f32) -> Result<(), Box<dyn std::error::Error>>
             m.custom_frame = cfg!(windows);
             let mut px = vec![0u32; w * h];
             m.paint(&mut Canvas::new(&mut px, w, h), &mut te, &fonts);
+            let out = path.replace(".png", &format!("{suffix}{light}.png"));
+            write_png(&out, w, h, &px)?;
+            eprintln!("saved {w}x{h} snapshot to {out}");
+        }
+        for (suffix, make, lw, lh) in site {
+            let (w, h) = ((lw * scale) as usize, (lh * scale) as usize);
+            let mut m = make();
+            m.scale = scale;
+            m.custom_frame = cfg!(windows);
+            let mut px = vec![0u32; w * h];
+            m.paint_snapshot(&mut Canvas::new(&mut px, w, h), &mut te, &fonts);
             let out = path.replace(".png", &format!("{suffix}{light}.png"));
             write_png(&out, w, h, &px)?;
             eprintln!("saved {w}x{h} snapshot to {out}");

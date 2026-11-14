@@ -465,7 +465,12 @@ pub fn paint_sample(
     f: &Fonts,
 ) {
     let mut cv = Canvas::new(px, w, h);
-    session_view::paint_sample_picture(&mut cv, Rect::new(0, 0, w as i32, h as i32));
+    session_view::paint_sample_picture(
+        &mut cv,
+        Rect::new(0, 0, w as i32, h as i32),
+        session_view::SAMPLE_TINT,
+        Some((&mut *te, f)),
+    );
     let pill = layout(te, f, s, w, title);
     paint_bar(&mut cv, s, &pill, shown, None, te, f);
 }
