@@ -86,6 +86,10 @@ impl App {
             effects.extend(t.helper.apply(ev, now));
         }
         t.helper.refusals = h.second_instance_refusals();
+        t.helper.server_pending = h.server_pending();
+        if let Some(fp) = h.helper_fingerprint() {
+            t.helper.fingerprint = Some(fp);
+        }
         if t.helper.paired() {
             t.helper.accepted = h.accepted_capabilities();
             t.helper.hello = h.hello().map(|x| HelloView {
@@ -328,6 +332,19 @@ impl App {
                         }
                     },
                 );
+            }
+            Action::RetryHelperPairing(id) => {
+                // Handled: nothing to do for a closed tab.
+                let h = self.helper_of(id)?;
+                match h.retry_pairing() {
+                    Ok(()) => self.message(
+                        "Pairing allowed again; the helper's next attempt asks you.",
+                        Tone::Muted,
+                    ),
+                    Err(e) => self.message(format!("Server helper: {e}."), Tone::Warning),
+                }
+                self.helper_events(id);
+                self.dirty();
             }
             Action::ForgetHelper(server) => {
                 let r = helper_app::pins_path()

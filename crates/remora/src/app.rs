@@ -428,11 +428,16 @@ impl App {
     ) -> (Worker, Controls) {
         let proxy = self.proxy.clone();
         let (channels, controls) = Controls::build(&cfg.client_name, self.hwnd(), helper);
-        // The helper's key is pinned per server, like the certificate.
+        // The helper's key is pinned per server and user (each user of a
+        // server runs their own helper), like the certificate.
         controls.helper().set_server(
-            remora_link::server_id(&cfg.host, cfg.port),
+            remora_link::pin_id(&cfg.host, cfg.port, &account(&cfg.domain, &cfg.username)),
             crate::helper_app::pins_path(),
         );
+        // Remora's persistent key, so the helper can pin this PC.
+        controls
+            .helper()
+            .set_client(crate::link_key::key(), &cfg.client_name);
         let worker = session::spawn(cfg, channels, move |ev| {
             let _ = proxy.send_event(UserEvent::Session(id, ev));
         });
@@ -569,6 +574,10 @@ impl App {
         // its next HelloAck).
         c.helper()
             .set_capabilities(crate::helper_app::capabilities(&opts.helper));
+        c.helper().set_pairing_policy(
+            crate::helper_app::attempts_path(),
+            crate::helper_app::expected_fingerprint(&opts.helper),
+        );
         let mut drives = Vec::new();
         for path in &opts.drives {
             let name = drive_name(path);
@@ -1217,7 +1226,8 @@ impl App {
             | Action::ShowInFolder(_)
             | Action::PickSendFiles(_)
             | Action::BrowseDownloads
-            | Action::ForgetHelper(_) => {}
+            | Action::ForgetHelper(_)
+            | Action::RetryHelperPairing(_) => {}
         }
     }
 
@@ -2073,6 +2083,7 @@ impl ApplicationHandler<UserEvent> for App {
                             );
                             ui.panel_pinned = self.settings.panel_pinned;
                             ui.helper_pins = crate::helper_app::pinned_servers();
+                            ui.client_fp = crate::link_key::fingerprint();
                             if self.settings.check_updates {
                                 check_for_update(
                                     self.proxy.clone(),
@@ -3119,4 +3130,15 @@ fn show_in_explorer(file: &std::path::Path) {
     }
     #[cfg(not(windows))]
     let _ = std::process::Command::new("xdg-open").arg(dir).spawn();
+}
+
+/// `DOMAIN\user`, or the user name alone when it already says where it
+/// belongs (`DOMAIN\user`, `user@domain`): the user part of a helper pin.
+fn account(domain: &str, user: &str) -> String {
+    let (d, u) = (domain.trim(), user.trim());
+    if u.is_empty() || d.is_empty() || u.contains(['\\', '@']) {
+        u.to_string()
+    } else {
+        format!("{d}\\{u}")
+    }
 }

@@ -33,10 +33,7 @@ pub fn zone_stream(file: &Path) -> PathBuf {
 /// Names the transfer engine uses for its own working files. Never offered,
 /// and receivers refuse them.
 pub fn reserved_name(name: &str) -> bool {
-    let l = name.to_ascii_lowercase();
-    [".remora-part", ".remora-part.meta", ".tmp"]
-        .iter()
-        .any(|s| l.ends_with(s))
+    remora_link::transfer::path::is_working_file(name)
 }
 
 /// What the agent knows about a file opened for sending (from the handle,

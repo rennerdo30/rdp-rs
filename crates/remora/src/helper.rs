@@ -9,7 +9,17 @@
 //! - End-to-end encryption on top of TLS ([`remora_link::SecureSession`]);
 //!   any decryption or protocol failure closes the channel.
 //! - First contact needs the user to confirm the SAS; then the helper's
-//!   key is pinned per server. A changed key asks again with a warning.
+//!   key is pinned per server and user. A changed key asks again with a
+//!   warning. An admin may set the helper's fingerprint for a connection
+//!   instead: then only that key is accepted and no code is compared.
+//! - Pairings that end before the user answered are counted (an attacker
+//!   in the middle could otherwise retry silently until the codes match):
+//!   two per connection refuse the helper for the rest of it, three per
+//!   server within a day block pairing with that server until the user
+//!   retries (HELPER-PROTOCOL.md 3.3).
+//! - Remora's own Noise key is persistent (DPAPI-protected by the app) so
+//!   the helper can pin it too; the helper sends data to the client only
+//!   once it has (HELPER-PROTOCOL.md 4, 9).
 //! - Every helper message is untrusted: one instance per session (a second
 //!   channel open is refused), only the capabilities the user enabled
 //!   (default: session info only), links and received files go to the app
@@ -30,18 +40,22 @@ use remora_link::msg::{
     ErrorMsg, Hello, HelloAck, PairingStatus, SessionInfo, TransferId, UrlStatus, err,
 };
 use remora_link::transfer::io::{FsDir, FsSource};
-use remora_link::transfer::{CHUNK_SIZE, Engine, TransferEvent, WINDOW};
+use remora_link::transfer::worker::{EngineWorker, Posted};
+use remora_link::transfer::{CHUNK_SIZE, TransferEvent, WINDOW};
 use remora_link::{
     Binding, Channel, Event, Message, PinCheck, PinStore, Sas, SecureSession, StaticKey, cap,
     policy,
 };
 
-/// Messages kept while the connection's security is not yet known.
+/// Messages kept while the connection's security is not yet known...
 const MAX_BUFFERED: usize = 16;
+/// ...and their bytes at most (a handshake is a few hundred bytes).
+const MAX_BUFFERED_BYTES: usize = 2 << 20;
+/// Pairings per RDP connection that may end before the user answered;
+/// then `Remora::Ctl` is refused for the rest of the connection.
+pub const MAX_ABORTS_PER_CONNECTION: u32 = 2;
 /// The client's heartbeat interval once paired.
 const HEARTBEAT: Duration = Duration::from_secs(10);
-/// File bytes read per Bulk tick (client-to-server pacing on top of credit).
-const BULK_BUDGET: usize = 512 << 10;
 /// Reassembly cap for the helper channels: the largest encrypted message
 /// plus slack (the DVC default is 16 MiB).
 pub const HELPER_MAX_MESSAGE: usize = remora_link::MAX_WIRE + 4096;
@@ -63,12 +77,15 @@ pub enum HelperState {
     AwaitingPairing {
         sas: Sas,
         changed: bool,
+        /// The helper key's fingerprint, for comparing out of band.
+        fingerprint: String,
     },
     /// Paired and HelloAck sent (or waiting for the helper's Hello).
     Paired,
     Failed(String),
-    /// Pairing refused for this connection: too many attempts ended before
-    /// the user answered (set by the attempt limit; reconnect to try again).
+    /// Pairing refused: too many attempts ended before the user answered
+    /// (two on this connection, or three with this server within a day).
+    /// [`HelperHandle::retry_pairing`] lifts it.
     PairingBlocked,
 }
 
@@ -102,6 +119,7 @@ struct Link {
     close: bool,
     /// Received while the transport was unknown.
     buffered: VecDeque<Vec<u8>>,
+    buffered_bytes: usize,
 }
 
 type PathHook = Arc<dyn Fn(&Path) + Send + Sync>;
@@ -116,8 +134,31 @@ struct Core {
     user_caps: u32,
     server_id: Option<String>,
     pins_path: Option<PathBuf>,
+    /// The aborted-pairing log (`helper-attempts.json`).
+    attempts_path: Option<PathBuf>,
+    /// An admin-set helper fingerprint: only that key, no SAS.
+    expected: Option<[u8; remora_link::FINGERPRINT_LEN]>,
     transport: Transport,
+    /// Remora's static key: persistent, so the helper can pin it.
     client_key: StaticKey,
+    /// This PC's name, a label for the helper's list of clients.
+    client_name: String,
+    /// Pairings on this connection that ended before the user answered.
+    aborts: u32,
+    /// [`MAX_ABORTS_PER_CONNECTION`] reached: Ctl is refused.
+    blocked: bool,
+    /// A pairing with an unpinned key runs and the user has not answered:
+    /// if Ctl ends now, it counts as aborted.
+    pairing_open: bool,
+    /// The SAS of this Ctl session.
+    sas: Option<Sas>,
+    /// The user confirmed the code in this Ctl session.
+    user_confirmed: bool,
+    /// The helper has (or now pinned) this client's key: `PeerPairing`
+    /// Known or Confirmed, or a 1.0 helper that never says.
+    peer_ok: bool,
+    /// The helper asked its own user and the answer is not in yet.
+    server_pending: bool,
     ctl: Option<Link>,
     bulk: Option<Link>,
     state: HelperState,
@@ -133,7 +174,9 @@ struct Core {
     next_heartbeat: Option<Instant>,
     heartbeat_seq: u32,
     open_urls: Vec<u32>,
-    engine: Engine,
+    /// The transfer engine on its own thread: the session thread only
+    /// posts received file messages and sends what the engine queued.
+    engine: EngineWorker,
     events: VecDeque<HelperEvent>,
     /// Second channel opens refused so far (one event is queued at a time).
     refusals: u32,
@@ -205,6 +248,37 @@ impl Core {
         }
     }
 
+    /// Ctl is ending (closed or failed). A pairing still open counts as
+    /// aborted; returns whether pairing is now blocked.
+    fn end_pairing(&mut self) -> bool {
+        if !std::mem::take(&mut self.pairing_open) {
+            return false;
+        }
+        self.aborts += 1;
+        if self.aborts >= MAX_ABORTS_PER_CONNECTION {
+            self.blocked = true;
+        }
+        let persisted = match (&self.attempts_path, &self.server_id) {
+            (Some(p), Some(id)) => {
+                remora_link::AttemptLog::record_abort(p, id, now_secs()).unwrap_or(false)
+            }
+            _ => false,
+        };
+        rdp::trace!(
+            "helper: pairing ended before the user answered ({} on this connection)",
+            self.aborts
+        );
+        self.blocked || persisted
+    }
+
+    /// Pairing with this server is blocked across connections.
+    fn server_blocked(&self) -> bool {
+        match (&self.attempts_path, &self.server_id) {
+            (Some(p), Some(id)) => remora_link::AttemptLog::is_blocked(p, id),
+            _ => false,
+        }
+    }
+
     fn link(&mut self, ch: Channel) -> &mut Option<Link> {
         match ch {
             Channel::Ctl => &mut self.ctl,
@@ -221,8 +295,24 @@ impl Core {
             if let Some(l) = &mut self.bulk {
                 l.close = true;
             }
-            self.set_state(HelperState::Failed(why));
+            if self.end_pairing() {
+                self.set_state(HelperState::PairingBlocked);
+            } else {
+                self.set_state(HelperState::Failed(why));
+            }
         }
+        self.update_engine_link();
+    }
+
+    /// Closes Ctl (and Bulk) because pairing is blocked.
+    fn block(&mut self) {
+        for ch in [Channel::Ctl, Channel::Bulk] {
+            if let Some(l) = self.link(ch) {
+                l.close = true;
+            }
+        }
+        self.pairing_open = false;
+        self.set_state(HelperState::PairingBlocked);
         self.update_engine_link();
     }
 
@@ -253,7 +343,11 @@ impl Core {
         self.flush_engine();
     }
 
+    /// Sends what the transfer worker queued and takes its events.
     fn flush_engine(&mut self) {
+        // Tests drive the adapter step by step: let the worker catch up.
+        #[cfg(test)]
+        self.engine.sync(Duration::from_secs(10));
         for m in self.engine.take_messages() {
             self.send(0, &m);
         }
@@ -268,6 +362,10 @@ impl Core {
         }
         if self.transport == Transport::Insecure {
             return Err("the connection is not TLS-protected".into());
+        }
+        if ch == Channel::Ctl && self.blocked {
+            self.set_state(HelperState::PairingBlocked);
+            return Err("pairing blocked: too many aborted attempts".into());
         }
         let binding = match ch {
             Channel::Ctl => Binding::default(),
@@ -291,6 +389,7 @@ impl Core {
             out: Vec::new(),
             close: false,
             buffered: VecDeque::new(),
+            buffered_bytes: 0,
         });
         if ch == Channel::Ctl {
             self.reset_ctl();
@@ -310,6 +409,11 @@ impl Core {
         self.session_info = None;
         self.next_heartbeat = None;
         self.open_urls.clear();
+        self.pairing_open = false;
+        self.sas = None;
+        self.user_confirmed = false;
+        self.peer_ok = false;
+        self.server_pending = false;
     }
 
     fn closed(&mut self, ch: Channel) {
@@ -318,8 +422,14 @@ impl Core {
             if let Some(l) = &mut self.bulk {
                 l.close = true;
             }
+            let blocked = self.end_pairing();
             self.reset_ctl();
-            if !matches!(self.state, HelperState::Failed(_)) {
+            if blocked {
+                self.set_state(HelperState::PairingBlocked);
+            } else if !matches!(
+                self.state,
+                HelperState::Failed(_) | HelperState::PairingBlocked
+            ) {
                 self.set_state(HelperState::NotPresent);
             }
         }
@@ -334,11 +444,16 @@ impl Core {
         }
         match transport {
             Transport::Insecure => self.fail(ch, "the connection is not TLS-protected".into()),
-            Transport::Unknown if l.buffered.len() >= MAX_BUFFERED => self.fail(
-                ch,
-                "too many messages before the connection was checked".into(),
-            ),
-            Transport::Unknown => l.buffered.push_back(wire.to_vec()),
+            Transport::Unknown
+                if l.buffered.len() >= MAX_BUFFERED
+                    || l.buffered_bytes + wire.len() > MAX_BUFFERED_BYTES =>
+            {
+                self.fail(ch, "too much data before the connection was checked".into())
+            }
+            Transport::Unknown => {
+                l.buffered_bytes += wire.len();
+                l.buffered.push_back(wire.to_vec());
+            }
             Transport::Secure => self.process(ch, wire),
         }
     }
@@ -348,6 +463,7 @@ impl Core {
         for ch in [Channel::Ctl, Channel::Bulk] {
             let Some(l) = self.link(ch) else { continue };
             let pending: Vec<_> = l.buffered.drain(..).collect();
+            l.buffered_bytes = 0;
             if t == Transport::Insecure {
                 self.fail(ch, "the connection is not TLS-protected".into());
                 continue;
@@ -376,8 +492,9 @@ impl Core {
                 }
                 Event::Established { remote_static } => match ch {
                     Channel::Ctl => {
-                        self.helper_key = Some(remote_static);
-                        self.pin = Some(self.check_pin(&remote_static));
+                        if !self.established(remote_static) {
+                            return;
+                        }
                     }
                     Channel::Bulk => self.update_engine_link(),
                 },
@@ -387,8 +504,13 @@ impl Core {
                     Channel::Bulk => {
                         // Only file data travels on Bulk; the session
                         // already refused Ctl-only types.
-                        if !self.engine.handle(&msg) {
-                            self.send_unsupported(&msg);
+                        match self.engine.post(&msg) {
+                            Posted::Queued => {}
+                            Posted::NotFile => self.send_unsupported(&msg),
+                            Posted::Overflow => {
+                                return self
+                                    .fail(Channel::Bulk, "file data beyond every credit".into());
+                            }
                         }
                         self.flush_engine();
                     }
@@ -413,30 +535,132 @@ impl Core {
         }
     }
 
+    /// The Ctl handshake proved the helper's key: check it against the pin
+    /// store (or the admin-set fingerprint) and the attempt limit. False
+    /// when the session was closed.
+    fn established(&mut self, key: [u8; 32]) -> bool {
+        self.helper_key = Some(key);
+        let mut pin = self.check_pin(&key);
+        if let Some(want) = self.expected {
+            if remora_link::fingerprint_bytes(&key) != want {
+                self.fail(
+                    Channel::Ctl,
+                    "the helper's fingerprint is not the one set for this connection".into(),
+                );
+                return false;
+            }
+            // The admin's pin stands for the SAS: pin exactly this key.
+            if pin != PinCheck::Known
+                && let (Some(p), Some(id)) = (&self.pins_path, &self.server_id)
+            {
+                let _ = PinStore::update(p, |s| s.pin(id, &key, now_secs()));
+            }
+            pin = PinCheck::Known;
+        }
+        if pin != PinCheck::Known {
+            if self.blocked || self.server_blocked() {
+                self.block();
+                return false;
+            }
+            self.pairing_open = true;
+        }
+        self.pin = Some(pin);
+        true
+    }
+
+    /// The fingerprint of the helper key of this Ctl session.
+    fn helper_fingerprint(&self) -> String {
+        self.helper_key
+            .map(|k| remora_link::fingerprint(&k))
+            .unwrap_or_default()
+    }
+
     fn on_sas(&mut self, sas: Sas) {
+        self.sas = Some(sas);
+        if !self.client_name.is_empty() {
+            let name =
+                remora_link::wire::truncate(&self.client_name, remora_link::msg::MAX_CLIENT_NAME)
+                    .to_string();
+            self.send(0, &Message::ClientName { name });
+        }
+        let fingerprint = self.helper_fingerprint();
         match self.pin.clone() {
             Some(PinCheck::Known) => {
                 self.send(0, &Message::Pairing(PairingStatus::Known));
-                if let (Some(p), Some(id)) = (&self.pins_path, &self.server_id)
-                    && let Ok(mut s) = PinStore::load(p)
-                {
-                    s.touch(id, now_secs());
-                    let _ = s.save(p);
+                if let (Some(p), Some(id)) = (&self.pins_path, &self.server_id) {
+                    let _ = PinStore::update(p, |s| s.touch(id, now_secs()));
                 }
                 self.paired();
             }
             Some(PinCheck::Changed { .. }) => {
                 self.send(0, &Message::Pairing(PairingStatus::Confirm));
-                self.set_state(HelperState::AwaitingPairing { sas, changed: true });
+                self.set_state(HelperState::AwaitingPairing {
+                    sas,
+                    changed: true,
+                    fingerprint,
+                });
             }
             Some(PinCheck::New) | None => {
                 self.send(0, &Message::Pairing(PairingStatus::Confirm));
                 self.set_state(HelperState::AwaitingPairing {
                     sas,
                     changed: false,
+                    fingerprint,
                 });
             }
         }
+    }
+
+    /// The helper's side of pairing (1.1).
+    fn on_peer_pairing(&mut self, st: PairingStatus) {
+        match st {
+            PairingStatus::Known | PairingStatus::Confirmed => {
+                self.peer_ok = true;
+                self.server_pending = false;
+                if let Err(e) = self.maybe_pin() {
+                    rdp::trace!("helper: {e}");
+                }
+            }
+            PairingStatus::Confirm => {
+                self.server_pending = true;
+                // The helper does not know this PC and shows its code; the
+                // user needs Remora's code to compare, also for a helper
+                // Remora knows.
+                if let (Some(sas), HelperState::Paired) = (self.sas, &self.state) {
+                    if !self.ack_sent {
+                        self.paired = false;
+                    }
+                    let fingerprint = self.helper_fingerprint();
+                    self.set_state(HelperState::AwaitingPairing {
+                        sas,
+                        changed: false,
+                        fingerprint,
+                    });
+                }
+            }
+            PairingStatus::Rejected => self.server_pending = false,
+        }
+    }
+
+    /// Pins the helper key once both users confirmed: here, and on the
+    /// server (or the helper already knew this PC). A 1.0 helper never
+    /// says; its pairing needs Remora's confirmation only.
+    fn maybe_pin(&mut self) -> Result<(), String> {
+        let peer_ok = self.peer_ok || self.hello.as_ref().is_some_and(|h| h.minor == 0);
+        if !self.user_confirmed || !peer_ok || self.pin == Some(PinCheck::Known) {
+            return Ok(());
+        }
+        let Some(key) = self.helper_key else {
+            return Ok(());
+        };
+        self.pin = Some(PinCheck::Known);
+        let (Some(p), Some(id)) = (self.pins_path.clone(), self.server_id.clone()) else {
+            return Ok(());
+        };
+        // An unreadable store is not overwritten (it may hold other
+        // servers); the pairing then holds for this session only.
+        PinStore::update(&p, |s| s.pin(&id, &key, now_secs()))
+            .map_err(|e| format!("paired for this session only: {e}"))
     }
 
     fn paired(&mut self) {
@@ -510,9 +734,13 @@ impl Core {
                     return self.send_error(err::PROTOCOL, "second Hello");
                 }
                 self.hello = Some(h);
+                if let Err(e) = self.maybe_pin() {
+                    rdp::trace!("helper: {e}");
+                }
                 self.send_ack();
             }
             Message::Heartbeat { .. } => {}
+            Message::PeerPairing(st) => self.on_peer_pairing(st),
             Message::Unknown { ty } => self.send(0, &Message::Unsupported { ty }),
             Message::Unsupported { .. } | Message::Error(_) => {}
             // Everything below needs a paired helper and an accepted capability.
@@ -547,7 +775,7 @@ impl Core {
             | Message::FileCredit { .. }
             | Message::FileCancel { .. }
             | Message::FileComplete { .. }) => {
-                self.engine.handle(&m);
+                self.engine.post(&m);
                 self.flush_engine();
             }
             // Client-to-helper messages coming back are protocol errors.
@@ -573,10 +801,8 @@ impl Core {
                     self.next_heartbeat = Some(Instant::now() + HEARTBEAT);
                 }
             }
-            Channel::Bulk => {
-                self.engine.poll(BULK_BUDGET);
-                self.flush_engine();
-            }
+            // The worker reads ahead; this thread only moves its messages.
+            Channel::Bulk => self.flush_engine(),
         }
     }
 
@@ -652,7 +878,8 @@ pub struct HelperHandle {
 
 impl HelperHandle {
     /// A helper listener: enabled, session info allowed, nothing else until
-    /// the user switches it on. The client's Noise key is fresh per handle.
+    /// the user switches it on. The client's Noise key is fresh until the
+    /// app sets the persistent one ([`HelperHandle::set_client`]).
     pub fn new() -> HelperHandle {
         let client_key = StaticKey::generate().expect("OS random generator");
         HelperHandle {
@@ -662,8 +889,18 @@ impl HelperHandle {
                 user_caps: cap::SESSION_INFO,
                 server_id: None,
                 pins_path: None,
+                attempts_path: None,
+                expected: None,
                 transport: Transport::Unknown,
                 client_key,
+                client_name: String::new(),
+                aborts: 0,
+                blocked: false,
+                pairing_open: false,
+                sas: None,
+                user_confirmed: false,
+                peer_ok: false,
+                server_pending: false,
                 ctl: None,
                 bulk: None,
                 state: HelperState::NotPresent,
@@ -679,7 +916,7 @@ impl HelperHandle {
                 next_heartbeat: None,
                 heartbeat_seq: 0,
                 open_urls: Vec::new(),
-                engine: Engine::default(),
+                engine: EngineWorker::default(),
                 events: VecDeque::new(),
                 refusals: 0,
                 notify: None,
@@ -714,19 +951,22 @@ impl HelperHandle {
     /// handlers. File transfers are kept, paused, and resume once the helper
     /// is paired again on the new connection (docs/HELPER-PROTOCOL.md 8).
     /// Handlers of the old connection do nothing from now on, even if its
-    /// session thread still runs. The client's Noise key is new, as for any
-    /// connection.
+    /// session thread still runs. The per-connection attempt limit starts
+    /// over; the per-server one does not.
     pub fn reattach(&self) -> Vec<Box<dyn DynamicChannel>> {
         {
             let mut c = self.lock();
             c.generation = c.generation.wrapping_add(1);
             c.ctl = None;
             c.bulk = None;
+            // A pairing cut off with the whole connection still counts for
+            // the server (dropping the RDP connection must not be a free
+            // retry); the per-connection count starts over below.
+            c.end_pairing();
             c.reset_ctl();
             c.transport = Transport::Unknown;
-            if let Ok(k) = StaticKey::generate() {
-                c.client_key = k;
-            }
+            c.aborts = 0;
+            c.blocked = false;
             c.set_state(HelperState::NotPresent);
             c.update_engine_link();
         }
@@ -765,6 +1005,54 @@ impl HelperHandle {
         c.pins_path = pins_path;
     }
 
+    /// Remora's persistent static key and this PC's name (the label the
+    /// helper keeps for it).
+    pub fn set_client(&self, key: StaticKey, name: &str) {
+        let mut c = self.lock();
+        c.client_key = key;
+        c.client_name = name.to_string();
+    }
+
+    /// The aborted-pairing log, and an admin-set helper fingerprint for
+    /// this connection (only that key is accepted, without a SAS).
+    pub fn set_pairing_policy(
+        &self,
+        attempts_path: Option<PathBuf>,
+        expected: Option<[u8; remora_link::FINGERPRINT_LEN]>,
+    ) {
+        let mut c = self.lock();
+        c.attempts_path = attempts_path;
+        c.expected = expected;
+    }
+
+    /// The user asks to pair again after [`HelperState::PairingBlocked`]:
+    /// the server's aborted attempts and this connection's are forgotten,
+    /// and the helper's next open is answered.
+    pub fn retry_pairing(&self) -> Result<(), String> {
+        let mut c = self.lock();
+        c.aborts = 0;
+        c.blocked = false;
+        let r = match (&c.attempts_path, &c.server_id) {
+            (Some(p), Some(id)) => remora_link::AttemptLog::clear(p, id).map_err(|e| e.to_string()),
+            _ => Ok(()),
+        };
+        if c.state == HelperState::PairingBlocked {
+            c.set_state(HelperState::NotPresent);
+        }
+        r
+    }
+
+    /// The fingerprint of the helper key seen on this connection.
+    pub fn helper_fingerprint(&self) -> Option<String> {
+        self.lock().helper_key.map(|k| remora_link::fingerprint(&k))
+    }
+
+    /// The helper asked its own user to confirm this PC and has no answer
+    /// yet: nothing leaves the server until then.
+    pub fn server_pending(&self) -> bool {
+        self.lock().server_pending
+    }
+
     /// The negotiated RDP security protocol (`ConnectionInfo::protocol`).
     /// Until this is called nothing is answered; `PROTOCOL_RDP` (no TLS)
     /// closes the helper channels for good.
@@ -777,9 +1065,13 @@ impl HelperHandle {
         self.lock().set_transport(t);
     }
 
-    /// Called (on the session thread) whenever an event is queued.
+    /// Called (on the session thread, or the transfer worker's) whenever
+    /// an event is queued.
     pub fn set_notify(&self, f: impl Fn() + Send + Sync + 'static) {
-        self.lock().notify = Some(Arc::new(f));
+        let f: Notify = Arc::new(f);
+        let mut c = self.lock();
+        c.engine.set_notify(f.clone());
+        c.notify = Some(f);
     }
 
     /// Called with the full path of every received file: the app adds the
@@ -822,7 +1114,12 @@ impl HelperHandle {
     }
 
     pub fn next_event(&self) -> Option<HelperEvent> {
-        self.lock().events.pop_front()
+        let mut c = self.lock();
+        if c.events.is_empty() {
+            // The worker's news (it woke the app through the notify hook).
+            c.flush_engine();
+        }
+        c.events.pop_front()
     }
 
     /// The user confirmed that the code `shown` matches the helper's: pin
@@ -838,21 +1135,13 @@ impl HelperHandle {
             }
             _ => return Err("no pairing to confirm".into()),
         }
-        let key = c.helper_key.ok_or("no helper key")?;
-        let mut saved = Ok(());
-        if let (Some(p), Some(id)) = (c.pins_path.clone(), c.server_id.clone()) {
-            // An unreadable store is not overwritten (it may hold other
-            // servers); the pairing then holds for this session only.
-            saved = PinStore::load(&p)
-                .and_then(|mut s| {
-                    s.pin(&id, &key, now_secs());
-                    s.save(&p)
-                })
-                .map_err(|e| format!("paired for this session only: {e}"));
-        }
+        c.helper_key.ok_or("no helper key")?;
+        c.pairing_open = false;
+        c.user_confirmed = true;
         c.send(0, &Message::Pairing(PairingStatus::Confirmed));
         c.paired();
-        saved
+        // Pinned once the server's side confirmed too (or knew this PC).
+        c.maybe_pin()
     }
 
     /// The code `shown` did not match or the user declined: close the
@@ -862,6 +1151,8 @@ impl HelperHandle {
         if !matches!(&c.state, HelperState::AwaitingPairing { sas, .. } if *sas == shown) {
             return;
         }
+        // The user's own answer: not an aborted attempt.
+        c.pairing_open = false;
         c.send(0, &Message::Pairing(PairingStatus::Rejected));
         c.send_error(err::PAIRING_REJECTED, "pairing rejected");
         c.fail(Channel::Ctl, "pairing rejected".into());
@@ -894,15 +1185,15 @@ impl HelperHandle {
     }
 
     /// Accepts an offered file into `folder` (the user's chosen folder).
+    /// Returns at once: a resume re-reads the part file on the transfer
+    /// worker, outside this lock and off the session thread; problems come
+    /// back as a `Failed` transfer event.
     pub fn accept_file(&self, id: TransferId, folder: &Path) -> Result<(), String> {
         let mut c = self.lock();
         let dir = c.fs_dir(folder);
-        let r = c
-            .engine
-            .accept(id, Box::new(dir))
-            .map_err(|e| e.to_string());
+        c.engine.accept(id, Box::new(dir));
         c.flush_engine();
-        r
+        Ok(())
     }
 
     pub fn reject_file(&self, id: TransferId) {

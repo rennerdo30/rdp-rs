@@ -288,6 +288,27 @@ If the key is different from last time, Remora warns: **The server helper's
 key changed**. A reinstalled helper does this, but so does an attack; here
 Enter and Esc both mean **Don't pair**, and only **Pair anyway** pairs.
 
+The helper remembers this PC too. A helper that does not know this PC yet
+(another PC of yours, a reinstalled Remora) shows its code on the server
+again, and Remora shows its code even for a helper it knows; until you
+confirm on the server, the helper sends no files or links here (the card
+says **Paired here, now confirm the code on the server**).
+
+The code on the server reaches you inside the remote picture, which a
+machine in the middle could redraw. Where that matters, compare the
+**fingerprint** instead: Remora shows the helper's under the code and on the
+helper card; on the server, `remora-agent fingerprint` prints it. An
+administrator can enter it as the connection's **Fingerprint** under
+**Server helper** on the editor's Sharing page: Remora then accepts only
+that helper and asks no code. The other way round, *Settings > Security*
+shows this PC's fingerprint for `remora-agent trust-client` on the server.
+
+If pairing attempts keep ending before you answered (twice in one
+connection, or three times a day with one server), someone may be trying
+codes until one matches: Remora stops pairing and the helper card says
+**Pairing blocked**. **Retry pairing** there (or **Retry helper pairing**
+in the palette) allows it again; do that only if you expect the helper.
+
 To forget a paired helper: **Forget…** on the editor's Sharing page, or
 **Forget paired helper** in the command palette. Its next session asks to
 pair again.
@@ -309,7 +330,10 @@ until you switch it on; a change applies from the next connection.
   each file. Files go only into **Save received files in** (default
   `Downloads\Remora`), are never written over (a second copy becomes
   `name (2).ext`), and are marked as downloaded from the Internet, so
-  Windows and Office treat them with care.
+  Windows and Office treat them with care. Shortcuts and similar files
+  Explorer would act on (`.lnk`, `.url`, `.scf`, `desktop.ini` ...) are
+  saved with `.download` appended. With this switch off, an offered file is
+  refused and Remora says so once.
 - **Send files to the server**: drop files onto the session (the drop target
   says where they go, or why it cannot take them), or **Send files to…** on
   the side panel's Sharing page or in the palette.

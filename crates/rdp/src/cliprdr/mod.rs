@@ -375,6 +375,13 @@ impl StaticChannel for Cliprdr {
         "cliprdr"
     }
 
+    /// Clipboard data arrives as one Format Data Response: a full-screen
+    /// bitmap of an 8K desktop is about 130 MB, so this channel allows
+    /// more than the 16 MiB default (file contents come in 1 MiB ranges).
+    fn max_message_size(&self) -> usize {
+        256 << 20
+    }
+
     fn options(&self) -> u32 {
         // mstsc: 0xC0A00000. COMPRESS_RDP only matters when bulk compression is
         // negotiated (it is not), so channel data still arrives uncompressed.

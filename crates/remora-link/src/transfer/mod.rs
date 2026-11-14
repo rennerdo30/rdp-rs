@@ -24,18 +24,27 @@
 //! - **Integrity:** BLAKE3 per 4 MiB block, compared as each block ends;
 //!   the root is BLAKE3 over the size and every block hash. A bad block
 //!   rewinds to its start (new epoch, at most [`MAX_BLOCK_RETRIES`] times).
-//! - **Resume:** the receiver keeps `<name>.remora-part.meta`, a JSON
-//!   sidecar with the verified block hashes. After a reconnect the sender
-//!   offers the same id again; the receiver re-checks the part file against
-//!   the sidecar and accepts at the verified offset. The sender continues
-//!   only if the source's size and mtime are unchanged.
+//! - **Resume:** the receiver keeps `<name>.remora-part.meta`, a sidecar
+//!   log: a JSON header line, then one line per verified block hash,
+//!   appended as each block verifies (rewritten compactly when a transfer
+//!   opens or resumes). After a reconnect the sender offers the same id
+//!   again and the receiver re-sends its `FileAccept` for every accepted,
+//!   paused transfer; the receiver re-checks the part file against the
+//!   sidecar and accepts at the verified offset. A sidecar resumes only the
+//!   transfer it names, under the offered name or one of its numbered
+//!   variants. The sender continues only if the source's size and mtime
+//!   are unchanged.
 //! - **Epochs:** every FileAccept starts a new epoch; data and credits of
 //!   older epochs are ignored, so nothing in flight before a rewind counts.
 //! - **Names:** checked by [`path::check_name`]; an existing file is never
-//!   replaced: the receiver picks `name (2).ext` and so on.
+//!   replaced: the receiver picks `name (2).ext` and so on. Types the shell
+//!   acts on by merely showing a folder (`.lnk`, `.url`, `.scf`, ...) are
+//!   stored with `.download` appended ([`path::stored_name`]). Only files a
+//!   transfer created itself are ever deleted by it.
 
 pub mod io;
 pub mod path;
+pub mod worker;
 
 use std::collections::{BTreeMap, VecDeque};
 
@@ -160,15 +169,40 @@ pub fn new_id() -> crate::Result<TransferId> {
     Ok(id)
 }
 
+/// The sidecar's first line. Each further line is one verified block hash
+/// (64 lower-case hex digits and a newline), appended in block order.
 #[derive(Serialize, Deserialize)]
-struct Meta {
+struct MetaHeader {
     v: u32,
     id: String,
     name: String,
     size: u64,
     mtime: u64,
     block: u32,
-    blocks: Vec<String>,
+}
+
+/// Sidecar format version (2: header line plus appended hash lines).
+const META_VERSION: u32 = 2;
+
+/// A parsed sidecar: the header and the block hashes up to the first
+/// incomplete or malformed line (a crash mid-append loses only that line).
+fn parse_meta(bytes: &[u8]) -> Option<(MetaHeader, Vec<[u8; 32]>)> {
+    let end = bytes.iter().position(|&b| b == b'\n')?;
+    let header: MetaHeader = serde_json::from_slice(&bytes[..end]).ok()?;
+    if header.v != META_VERSION {
+        return None;
+    }
+    let mut hashes = Vec::new();
+    let mut rest = &bytes[end + 1..];
+    // Only lines that end in a newline count.
+    while let Some(n) = rest.iter().position(|&b| b == b'\n') {
+        let Some(h) = std::str::from_utf8(&rest[..n]).ok().and_then(unhex::<32>) else {
+            break;
+        };
+        hashes.push(h);
+        rest = &rest[n + 1..];
+    }
+    Some((header, hashes))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -217,6 +251,9 @@ struct Receiving {
     hasher: blake3::Hasher,
     hashes: Vec<[u8; 32]>,
     retries: u32,
+    /// The part file and sidecar are this transfer's own (created by it, or
+    /// its resumed sidecar): only then may a failure delete them.
+    owns_files: bool,
 }
 
 impl Receiving {
@@ -224,24 +261,51 @@ impl Receiving {
         (self.hashes.len() as u64 * BLOCK_SIZE as u64).min(self.offer.size)
     }
 
-    fn meta(&self) -> Meta {
-        Meta {
-            v: 1,
+    /// Writes the whole sidecar (header and every verified hash) at once.
+    fn save_meta(&mut self) -> std::io::Result<()> {
+        let header = MetaHeader {
+            v: META_VERSION,
             id: hex(&self.offer.id),
             name: self.name.clone(),
             size: self.offer.size,
             mtime: self.offer.mtime,
             block: self.offer.block_size,
-            blocks: self.hashes.iter().map(|h| hex(h)).collect(),
+        };
+        let mut data = serde_json::to_vec(&header).map_err(std::io::Error::other)?;
+        data.push(b'\n');
+        for h in &self.hashes {
+            data.extend_from_slice(hex(h).as_bytes());
+            data.push(b'\n');
+        }
+        let name = format!("{}{META_SUFFIX}", self.name);
+        match self.dir.as_mut() {
+            Some(d) => d.write_small(&name, &data),
+            None => Ok(()),
         }
     }
 
-    fn save_meta(&mut self) -> std::io::Result<()> {
-        let json = serde_json::to_vec(&self.meta()).map_err(std::io::Error::other)?;
+    /// Appends the newest verified block hash to the sidecar.
+    fn append_meta(&mut self) -> std::io::Result<()> {
+        let Some(h) = self.hashes.last() else {
+            return Ok(());
+        };
+        let mut line = hex(h).into_bytes();
+        line.push(b'\n');
         let name = format!("{}{META_SUFFIX}", self.name);
         match self.dir.as_mut() {
-            Some(d) => d.write_small(&name, &json),
+            Some(d) => d.append(&name, &line),
             None => Ok(()),
+        }
+    }
+
+    /// The `FileAccept` in force, sent again when a re-offer arrives before
+    /// any data of its epoch (no need for a new epoch then).
+    fn current_accept(&self) -> Message {
+        Message::FileAccept {
+            id: self.offer.id,
+            epoch: self.epoch,
+            offset: self.written,
+            limit: self.limit,
         }
     }
 
@@ -266,6 +330,9 @@ impl Receiving {
 
     fn remove_files(&mut self) {
         self.part = None;
+        if !self.owns_files {
+            return;
+        }
         if let Some(d) = self.dir.as_mut() {
             let _ = d.remove(&format!("{}{PART_SUFFIX}", self.name));
             let _ = d.remove(&format!("{}{META_SUFFIX}", self.name));
@@ -285,7 +352,7 @@ pub struct Engine {
     /// FileComplete in a disconnect) is answered with FileComplete again.
     completed: VecDeque<TransferId>,
     out: Vec<Message>,
-    events: VecDeque<TransferEvent>,
+    pub(crate) events: VecDeque<TransferEvent>,
     buf: Vec<u8>,
 }
 
@@ -369,6 +436,28 @@ impl Engine {
             s.epoch = 0;
             self.out.push(Message::FileOffer(s.offer.clone()));
         }
+        // Accepted incoming transfers ask for their data again: one
+        // accepted while the link was down would otherwise wait for a
+        // re-offer the sender never makes (it sent its offer before).
+        let window = self.limits.window;
+        let paused: Vec<_> = self
+            .receiving
+            .iter()
+            .filter(|(_, r)| r.state == RecvState::Paused)
+            .map(|(id, _)| *id)
+            .collect();
+        for id in paused {
+            let r = self.receiving.get_mut(&id).expect("listed above");
+            match r.rewind(window) {
+                Ok(m) => self.out.push(m),
+                Err(e) => self.fail_receive(id, reason::IO, &e.to_string(), true),
+            }
+        }
+    }
+
+    /// The directions currently allowed: `(send, receive)`.
+    pub fn permissions(&self) -> (bool, bool) {
+        (self.allow_send, self.allow_receive)
     }
 
     pub fn is_connected(&self) -> bool {
@@ -376,7 +465,18 @@ impl Engine {
     }
 
     /// Offers a file. `name` is the plain name the receiver will see.
-    pub fn send(&mut self, name: &str, mut source: Box<dyn Source>) -> crate::Result<TransferId> {
+    pub fn send(&mut self, name: &str, source: Box<dyn Source>) -> crate::Result<TransferId> {
+        self.send_with_id(new_id()?, name, source)
+    }
+
+    /// [`Engine::send`] with an id chosen by the caller (a worker hands
+    /// the id out before the engine sees the file).
+    pub fn send_with_id(
+        &mut self,
+        id: TransferId,
+        name: &str,
+        mut source: Box<dyn Source>,
+    ) -> crate::Result<TransferId> {
         if !self.allow_send {
             return Err(crate::Error::State("sending files is switched off"));
         }
@@ -385,8 +485,11 @@ impl Engine {
         }
         path::check_name(name).map_err(|e| crate::Error::Malformed(e.to_string()))?;
         let (size, mtime) = source.stat()?;
+        if self.sending.contains_key(&id) {
+            return Err(crate::Error::State("transfer id in use"));
+        }
         let offer = FileOffer {
-            id: new_id()?,
+            id,
             name: name.to_string(),
             size,
             mtime,
@@ -480,6 +583,11 @@ impl Engine {
     /// Ids of transfers in progress (either direction).
     pub fn active(&self) -> usize {
         self.sending.len() + self.receiving.len()
+    }
+
+    /// An outgoing transfer is sending data (the worker keeps pumping).
+    pub fn sending_active(&self) -> bool {
+        self.sending.values().any(|s| s.state == SendState::Sending)
     }
 
     fn progress(&mut self, id: TransferId, direction: Direction, done: u64, total: u64) {
@@ -618,6 +726,14 @@ impl Engine {
                 self.fail_receive(o.id, reason::SOURCE_CHANGED, "the offer changed", true);
                 return;
             }
+            // A re-offer before any data of the epoch in force: the same
+            // FileAccept again (the sender takes any epoch after it
+            // reconnected, and ignores it if it is already sending it).
+            if r.state == RecvState::Receiving && r.written == r.verified() {
+                let m = r.current_accept();
+                self.out.push(m);
+                return;
+            }
             // Resume after a reconnect.
             let window = self.limits.window;
             match r.rewind(window) {
@@ -626,24 +742,33 @@ impl Engine {
             }
             return;
         }
-        let reject = |code| Message::FileReject {
-            id: o.id,
-            reason: code,
+        // Refused before the user sees it: the peer hears why, and the app
+        // gets a Failed event (no Offered came first) to say so once.
+        let refused = match () {
+            _ if !self.allow_receive => Some((reason::DISABLED, "receiving files is off")),
+            _ if o.block_size != BLOCK_SIZE => Some((reason::PROTOCOL, "unsupported block size")),
+            _ if self.receiving.len() >= MAX_ACTIVE => Some((reason::BUSY, "too many transfers")),
+            _ => None,
         };
-        if !self.allow_receive {
-            self.out.push(reject(reason::DISABLED));
-            return;
-        }
-        if o.block_size != BLOCK_SIZE {
-            self.out.push(reject(reason::PROTOCOL));
-            return;
-        }
-        if self.receiving.len() >= MAX_ACTIVE {
-            self.out.push(reject(reason::BUSY));
+        if let Some((code, detail)) = refused {
+            self.out.push(Message::FileReject {
+                id: o.id,
+                reason: code,
+            });
+            self.events.push_back(TransferEvent::Failed {
+                id: o.id,
+                direction: Direction::Receive,
+                reason: code,
+                by_peer: false,
+                detail: detail.into(),
+            });
             return;
         }
         if let Err(e) = path::check_name(&o.name) {
-            self.out.push(reject(reason::BAD_NAME));
+            self.out.push(Message::FileReject {
+                id: o.id,
+                reason: reason::BAD_NAME,
+            });
             self.events.push_back(TransferEvent::Failed {
                 id: o.id,
                 direction: Direction::Receive,
@@ -667,6 +792,7 @@ impl Engine {
                 hasher: blake3::Hasher::new(),
                 hashes: Vec::new(),
                 retries: 0,
+                owns_files: false,
             },
         );
         self.events.push_back(TransferEvent::Offered {
@@ -882,11 +1008,12 @@ impl Engine {
             return;
         }
         r.hashes.push(mine);
+        // The part is on disk before the sidecar says so.
         let saved = r
             .part
             .as_mut()
             .map_or(Ok(()), |p| p.sync())
-            .and_then(|()| r.save_meta());
+            .and_then(|()| r.append_meta());
         if let Err(e) = saved {
             self.fail_receive(id, reason::IO, &e.to_string(), true);
         }
@@ -938,29 +1065,36 @@ fn feed(s: &mut Sending, data: &[u8]) {
 }
 
 /// Picks the target name, or finds a resumable part, and opens it. Errors
-/// carry a [`reason`] code.
+/// carry a [`reason`] code. Files are created with `create_new` only, so a
+/// transfer owns exactly the part and sidecar it made or resumed.
 fn open_target(r: &mut Receiving, taken: &[String]) -> Result<(), (u8, String)> {
     let dir = r.dir.as_mut().expect("set by accept");
     let io = |e: std::io::Error| (reason::IO, e.to_string());
-    // A sidecar for this id: resume.
+    let size = r.offer.size;
+    // The name the file is stored under (dangerous types get ".download").
+    let base = path::stored_name(&r.offer.name);
+    // A sidecar of this transfer under the stored name or one of its
+    // numbered variants: resume. Any other sidecar is not this offer's,
+    // whatever it says (it may have been planted by an earlier transfer).
     let id_hex = hex(&r.offer.id);
     for name in dir.list().map_err(io)? {
         let Some(target) = name.strip_suffix(META_SUFFIX) else {
             continue;
         };
+        if !path::is_variant(target, &base) || taken.iter().any(|t| t == target) {
+            continue;
+        }
         let Ok(bytes) = dir.read_small(&name) else {
             continue;
         };
-        let Ok(meta) = serde_json::from_slice::<Meta>(&bytes) else {
+        let Some((meta, recorded)) = parse_meta(&bytes) else {
             continue;
         };
-        if meta.v != 1
-            || meta.id != id_hex
-            || meta.size != r.offer.size
+        if meta.id != id_hex
+            || meta.size != size
             || meta.mtime != r.offer.mtime
             || meta.block != r.offer.block_size
             || meta.name != target
-            || path::check_name(target).is_err()
         {
             continue;
         }
@@ -970,39 +1104,41 @@ fn open_target(r: &mut Receiving, taken: &[String]) -> Result<(), (u8, String)> 
         // Re-verify the recorded blocks against the part file.
         let mut hashes = Vec::new();
         let mut block = vec![0u8; BLOCK_SIZE as usize];
-        for (i, h) in meta.blocks.iter().enumerate() {
-            let Some(want) = unhex::<32>(h) else { break };
+        for (i, want) in recorded.iter().enumerate() {
             let start = i as u64 * BLOCK_SIZE as u64;
-            let len = (block_end(start, r.offer.size) - start) as usize;
-            if start >= r.offer.size || part.read_at(start, &mut block[..len]).map_err(io)? != len {
+            // More hashes than the size has blocks: the rest is not ours.
+            if start >= size {
                 break;
             }
-            if *blake3::hash(&block[..len]).as_bytes() != want {
+            let len = (block_end(start, size) - start) as usize;
+            if part.read_at(start, &mut block[..len]).map_err(io)? != len {
                 break;
             }
-            hashes.push(want);
+            if blake3::hash(&block[..len]).as_bytes() != want {
+                break;
+            }
+            hashes.push(*want);
         }
-        let verified = (hashes.len() as u64 * BLOCK_SIZE as u64).min(r.offer.size);
-        if dir
-            .free_space()
-            .is_some_and(|free| free < r.offer.size - verified)
-        {
+        let verified = (hashes.len() as u64 * BLOCK_SIZE as u64).min(size);
+        if dir.free_space().is_some_and(|free| free < size - verified) {
             return Err((reason::NO_SPACE, "not enough free space".into()));
         }
         r.name = target.to_string();
         r.hashes = hashes;
         r.part = Some(part);
+        r.owns_files = true;
+        // Compact the log to what was verified now.
         r.save_meta().map_err(io)?;
         return Ok(());
     }
-    if dir.free_space().is_some_and(|free| free < r.offer.size) {
+    if dir.free_space().is_some_and(|free| free < size) {
         return Err((reason::NO_SPACE, "not enough free space".into()));
     }
     for n in 1..=1000u32 {
         let cand = if n == 1 {
-            r.offer.name.clone()
+            base.clone()
         } else {
-            path::numbered(&r.offer.name, n)
+            path::numbered(&base, n)
         };
         if path::check_name(&cand).is_err() {
             break;
@@ -1023,6 +1159,7 @@ fn open_target(r: &mut Receiving, taken: &[String]) -> Result<(), (u8, String)> 
         };
         r.name = cand;
         r.part = Some(part);
+        r.owns_files = true;
         r.save_meta().map_err(io)?;
         return Ok(());
     }
@@ -1030,18 +1167,22 @@ fn open_target(r: &mut Receiving, taken: &[String]) -> Result<(), (u8, String)> 
 }
 
 /// Renames the verified part to its final name, never replacing a file.
+/// The part gets the Mark-of-the-Web first (an NTFS stream stays with the
+/// file through the rename), and the stored file again after it.
 fn finish(r: &mut Receiving) -> std::io::Result<String> {
     if let Some(mut p) = r.part.take() {
         p.sync()?;
     }
+    let base = path::stored_name(&r.offer.name);
     let dir = r.dir.as_mut().expect("receiving has a folder");
     let part_name = format!("{}{PART_SUFFIX}", r.name);
+    dir.mark(&part_name);
     let mut last = None;
     for n in 1..=1000u32 {
         let cand = if n == 1 {
             r.name.clone()
         } else {
-            path::numbered(&r.offer.name, n)
+            path::numbered(&base, n)
         };
         match dir.rename_new(&part_name, &cand) {
             Ok(()) => {

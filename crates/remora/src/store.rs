@@ -267,6 +267,10 @@ pub struct HelperOptions {
     /// Where received files go; None: `%USERPROFILE%\Downloads\Remora`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub download_dir: Option<String>,
+    /// An admin-set helper fingerprint (`remora-agent fingerprint` on the
+    /// server): only that helper key is accepted, and no code is compared.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fingerprint: Option<String>,
 }
 
 impl HelperOptions {
@@ -1362,6 +1366,7 @@ mod tests {
             receive_files: true,
             send_files: false,
             download_dir: Some(r"D:\In".into()),
+            fingerprint: None,
         };
         let o = SessionOptions {
             helper: on.clone(),

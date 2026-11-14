@@ -204,23 +204,36 @@ pub fn pins_path() -> Option<PathBuf> {
     crate::store::data_dir().map(|d| d.join("helpers.json"))
 }
 
-/// Servers with a paired helper (`host:port`, lower case).
+/// The log of pairings that ended unanswered (`helper-attempts.json`).
+pub fn attempts_path() -> Option<PathBuf> {
+    crate::store::data_dir().map(|d| d.join("helper-attempts.json"))
+}
+
+/// The helper fingerprint an admin set for a connection. One that does not
+/// parse matches no key (fail closed: the helper is refused, never paired
+/// by code instead).
+pub fn expected_fingerprint(o: &HelperOptions) -> Option<[u8; remora_link::FINGERPRINT_LEN]> {
+    let text = o
+        .fingerprint
+        .as_deref()
+        .map(str::trim)
+        .filter(|t| !t.is_empty())?;
+    Some(remora_link::parse_fingerprint(text).unwrap_or([0; remora_link::FINGERPRINT_LEN]))
+}
+
+/// Servers with a paired helper (`host:port`, lower case), for any user.
 pub fn pinned_servers() -> HashSet<String> {
     pins_path()
         .and_then(|p| PinStore::load(&p).ok())
-        .map(|s| s.iter().map(|(k, _)| k.clone()).collect())
+        .map(|s| s.servers().into_iter().collect())
         .unwrap_or_default()
 }
 
-/// Forgets the helper pinned for `server` in the store at `path`: its next
-/// session asks to pair again. False when none was pinned.
+/// Forgets the helpers pinned for `server` (`host:port`, every user) in the
+/// store at `path`: their next session asks to pair again. False when none
+/// was pinned. Merged with other windows' changes under the store's lock.
 pub fn forget_pin(path: &Path, server: &str) -> Result<bool, String> {
-    let mut s = PinStore::load(path).map_err(|e| e.to_string())?;
-    if !s.forget(server) {
-        return Ok(false);
-    }
-    s.save(path).map_err(|e| e.to_string())?;
-    Ok(true)
+    PinStore::update(path, |s| s.forget_server(server) > 0).map_err(|e| e.to_string())
 }
 
 #[cfg(test)]
@@ -332,12 +345,17 @@ mod tests {
         let p = d.join("helpers.json");
         let mut s = PinStore::new();
         s.pin("a:3389", &[1; 32], 1);
+        s.pin("alice@a:3389", &[3; 32], 1);
         s.pin("b:3389", &[2; 32], 1);
         s.save(&p).unwrap();
         assert_eq!(forget_pin(&p, "a:3389"), Ok(true));
         assert_eq!(forget_pin(&p, "a:3389"), Ok(false));
         let back = PinStore::load(&p).unwrap();
         assert!(back.get("a:3389").is_none() && back.get("b:3389").is_some());
+        assert!(
+            back.get("alice@a:3389").is_none(),
+            "every user of the server"
+        );
         let _ = std::fs::remove_dir_all(&d);
     }
 }

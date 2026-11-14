@@ -22,7 +22,9 @@ use crate::wire::{Put, Reader};
 /// Major protocol version. A different major closes the channel.
 pub const PROTO_MAJOR: u16 = 1;
 /// Minor protocol version. Minors only add optional messages and fields.
-pub const PROTO_MINOR: u16 = 0;
+/// 1.1 adds [`Message::PeerPairing`] and [`Message::ClientName`] (the
+/// helper pins Remora's client key).
+pub const PROTO_MINOR: u16 = 1;
 
 // Session messages (handled inside SecureSession).
 pub const SAS_COMMIT: u16 = 0x0001;
@@ -35,6 +37,10 @@ pub const HEARTBEAT: u16 = 0x0102;
 pub const PAIRING: u16 = 0x0103;
 pub const UNSUPPORTED: u16 = 0x0104;
 pub const ERROR: u16 = 0x0105;
+/// 1.1: the helper's side of pairing (helper → Remora).
+pub const PEER_PAIRING: u16 = 0x0106;
+/// 1.1: Remora's name for the helper's client list (Remora → helper).
+pub const CLIENT_NAME: u16 = 0x0107;
 // Session information.
 pub const SESSION_INFO: u16 = 0x0200;
 // Links.
@@ -92,6 +98,8 @@ pub mod err {
 
 /// Longest helper version string.
 pub const MAX_VERSION_TEXT: usize = 64;
+/// Longest client name ([`Message::ClientName`]).
+pub const MAX_CLIENT_NAME: usize = 64;
 /// Longest error text.
 pub const MAX_TEXT: usize = 1024;
 /// Longest URL.
@@ -266,6 +274,17 @@ pub enum Message {
         ty: u16,
     },
     Error(ErrorMsg),
+    /// Helper → Remora (1.1), right after the SAS step and before `Hello`:
+    /// `Known` — the helper has Remora's client key pinned; `Confirm` — it
+    /// does not, so it shows its code and asks its user (Remora shows its
+    /// code too); `Confirmed` — the user on the server confirmed and the
+    /// helper pinned the client key; `Rejected` — refused there.
+    PeerPairing(PairingStatus),
+    /// Remora → helper (1.1), with `Pairing`: the client's name, a label for
+    /// the helper's list of pinned clients (never trusted for anything).
+    ClientName {
+        name: String,
+    },
     SessionInfo(SessionInfo),
     OpenUrl {
         url: String,
@@ -351,6 +370,8 @@ impl Message {
             Message::Pairing(_) => PAIRING,
             Message::Unsupported { .. } => UNSUPPORTED,
             Message::Error(_) => ERROR,
+            Message::PeerPairing(_) => PEER_PAIRING,
+            Message::ClientName { .. } => CLIENT_NAME,
             Message::SessionInfo(_) => SESSION_INFO,
             Message::OpenUrl { .. } => OPEN_URL,
             Message::OpenUrlResult(_) => OPEN_URL_RESULT,
@@ -409,7 +430,13 @@ impl Message {
                 p.put_bytes(&a.bulk_token);
             }
             Message::Heartbeat { seq } => p.put_u32(*seq),
-            Message::Pairing(s) => p.put_u8(s.to_u8()),
+            Message::Pairing(s) | Message::PeerPairing(s) => p.put_u8(s.to_u8()),
+            Message::ClientName { name } => {
+                if name.len() > MAX_CLIENT_NAME {
+                    return Err(Error::TooLarge(name.len()));
+                }
+                p.put_str(name, MAX_CLIENT_NAME);
+            }
             Message::Unsupported { ty } => p.put_u16(*ty),
             Message::Error(e) => {
                 p.put_u32(e.code);
@@ -523,6 +550,10 @@ impl Message {
             }),
             HEARTBEAT => Message::Heartbeat { seq: r.u32()? },
             PAIRING => Message::Pairing(PairingStatus::from_u8(r.u8()?)?),
+            PEER_PAIRING => Message::PeerPairing(PairingStatus::from_u8(r.u8()?)?),
+            CLIENT_NAME => Message::ClientName {
+                name: r.str(MAX_CLIENT_NAME)?,
+            },
             UNSUPPORTED => Message::Unsupported { ty: r.u16()? },
             ERROR => Message::Error(ErrorMsg {
                 code: r.u32()?,
@@ -618,6 +649,10 @@ mod tests {
                 window: 2 << 20,
                 bulk_token: [9; 32],
             }),
+            Message::PeerPairing(PairingStatus::Confirm),
+            Message::ClientName {
+                name: "LAPTOP-7".into(),
+            },
             Message::Heartbeat { seq: 42 },
             Message::Pairing(PairingStatus::Confirm),
             Message::Unsupported { ty: 0x7777 },

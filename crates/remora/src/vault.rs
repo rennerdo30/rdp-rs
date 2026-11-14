@@ -188,8 +188,9 @@ pub fn unprotect_key(_blob: &[u8]) -> Option<VaultKey> {
     None
 }
 
+/// DPAPI for the current user; also protects the Remora-Link client key.
 #[cfg(windows)]
-mod dpapi {
+pub(crate) mod dpapi {
     use windows_sys::Win32::Foundation::{HLOCAL, LocalFree};
     use windows_sys::Win32::Security::Cryptography::{
         CRYPT_INTEGER_BLOB, CRYPTPROTECT_UI_FORBIDDEN, CryptProtectData, CryptUnprotectData,

@@ -244,6 +244,14 @@ pub struct HelperView {
     pub aborted: u32,
     /// Second helper instances refused.
     pub refusals: u32,
+    /// The helper key's fingerprint (`ab12 cd34 …`), once its handshake ran.
+    pub fingerprint: Option<String>,
+    /// The helper asked its own user to confirm this PC; nothing leaves the
+    /// server before that answer.
+    pub server_pending: bool,
+    /// A server offer was refused unseen because receiving is off: said
+    /// once per tab, quietly.
+    pub refused_said: bool,
 }
 
 impl HelperView {
@@ -309,7 +317,14 @@ impl HelperView {
         let next = match s {
             HelperState::NotPresent => Status::Absent,
             HelperState::Handshaking => Status::Handshaking,
-            HelperState::AwaitingPairing { sas, changed } => Status::Pairing { sas, changed },
+            HelperState::AwaitingPairing {
+                sas,
+                changed,
+                fingerprint,
+            } => {
+                self.fingerprint = Some(fingerprint);
+                Status::Pairing { sas, changed }
+            }
             HelperState::Paired => Status::Paired,
             HelperState::Failed(why) => Status::Failed(why),
             HelperState::PairingBlocked => Status::Blocked,
@@ -440,6 +455,8 @@ impl HelperView {
                     self.offers.remove(i);
                 }
                 let mut fx = vec![Effect::Release(id)];
+                let said = self.refused_said;
+                let mut say = false;
                 match self.row(id, direction) {
                     Some(r) => {
                         let mut why = reason_text(code, by_peer);
@@ -454,7 +471,30 @@ impl HelperView {
                             Tone::Warning,
                         ));
                     }
+                    // Refused before anyone saw it: receiving is off here.
+                    None if code == reason::DISABLED
+                        && direction == Direction::Receive
+                        && !by_peer
+                        && !said =>
+                    {
+                        say = true;
+                        fx.push(Effect::Notice(
+                            "The server offered a file; receiving files is off for this connection."
+                                .into(),
+                            Tone::Muted,
+                        ));
+                    }
+                    None if code == reason::BUSY && direction == Direction::Receive && !by_peer => {
+                        fx.push(Effect::Notice(
+                            "The server offered another file while 32 were waiting; it was refused."
+                                .into(),
+                            Tone::Warning,
+                        ));
+                    }
                     None => {}
+                }
+                if say {
+                    self.refused_said = true;
                 }
                 fx
             }
@@ -684,7 +724,7 @@ fn offer_buttons(id: u64, i: usize) -> [(Button<'static>, Hit); 2] {
 }
 
 const MODAL_W: f32 = 460.0;
-const MODAL_H: f32 = 344.0;
+const MODAL_H: f32 = 364.0;
 
 impl Ui {
     /// The active tab's helper asks to pair: its card is up and takes the
@@ -896,6 +936,10 @@ impl Ui {
                 self.forget = Some((server, t.host.clone()));
                 None
             }
+            Hit::RetryHelperPairing(id) => {
+                let t = self.tab_mut(id)?;
+                (t.helper.status == Status::Blocked).then_some(Action::RetryHelperPairing(id))
+            }
             Hit::FormHelper(i) => {
                 let h = &mut self.opts.helper;
                 match i {
@@ -968,7 +1012,8 @@ impl Ui {
         }
         if let (Some(r), Some((sas, changed))) = (ov.modal, view.pairing()) {
             Kit::new(cv, te, f, self.scale).scrim(ov.area);
-            self.paint_pairing(cv, te, f, r, &host, sas, changed);
+            let fp = view.fingerprint.clone().unwrap_or_default();
+            self.paint_pairing(cv, te, f, r, &host, sas, changed, &fp);
         } else if let Some(hint) = &ov.drop {
             self.paint_drop(cv, te, f, ov.area, &host, hint);
         } else {
@@ -1038,6 +1083,7 @@ impl Ui {
         host: &str,
         sas: Sas,
         changed: bool,
+        fingerprint: &str,
     ) {
         let s = self.scale;
         let c = pal();
@@ -1113,6 +1159,21 @@ impl Ui {
         let digits = if changed { c.danger } else { c.text };
         k.text(Font::Semi, big, cx, base, a, digits, gw + p(4.0));
         k.text(Font::Semi, big, cx + gw + gap, base, b, digits, well.w);
+        // The key's fingerprint, to compare out of band (remora-agent
+        // fingerprint on the server): small, under the code.
+        if !fingerprint.is_empty() {
+            let line = format!("Helper fingerprint  {fingerprint}");
+            let fw = k.measure(Font::Regular, 11.0, &line).min(tw);
+            k.text(
+                Font::Regular,
+                11.0,
+                x + (tw - fw) / 2,
+                well.bottom() + p(20.0),
+                &line,
+                c.text_muted,
+                tw,
+            );
+        }
         let hints: [kit::Hint; 4] = if changed {
             [
                 kit::Hint::Keys("Enter"),
@@ -1128,7 +1189,7 @@ impl Ui {
                 kit::Hint::Text("doesn't"),
             ]
         };
-        k.hints(x, r.y + p(262.0), tw, &hints);
+        k.hints(x, r.y + p(282.0), tw, &hints);
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1306,6 +1367,13 @@ impl Ui {
         self.caption(cv, te, f, x, y, w, "Server helper");
         y += p(26.0);
         let (icon, tone, title, sub) = match &v.status {
+            // Paired here; the helper still waits for its own user.
+            Status::Paired if v.server_pending => (
+                Icon::Shield,
+                Tone::Warning,
+                "Paired here".to_string(),
+                "Now confirm the code on the server".into(),
+            ),
             Status::Paired => (
                 Icon::ShieldCheck,
                 Tone::Success,
@@ -1337,7 +1405,7 @@ impl Ui {
                 Icon::ShieldAlert,
                 Tone::Danger,
                 "Pairing blocked".into(),
-                "Too many attempts ended unanswered; reconnect to try again".into(),
+                "Too many unanswered tries".into(),
             ),
             Status::Absent => (
                 Icon::Shield,
@@ -1398,6 +1466,20 @@ impl Ui {
         if v.refusals > 0 {
             notes.push(("A second helper was refused".into(), Tone::Warning));
         }
+        // The key's fingerprint in two lines of five groups (never cut).
+        let fp_lines = v
+            .fingerprint
+            .as_ref()
+            .filter(|_| !matches!(v.status, Status::Absent | Status::Blocked))
+            .map(|fp| {
+                let g: Vec<&str> = fp.split(' ').collect();
+                let half = g.len().div_ceil(2);
+                (g[..half].join(" "), g[half..].join(" "))
+            });
+        let blocked = v.status == Status::Blocked;
+        if blocked {
+            notes.push(("Retry only if you expect this helper".into(), Tone::Danger));
+        }
         let allowed = (v.status == Status::Paired).then(|| {
             let mut a = Vec::new();
             if v.accepted & cap::OPEN_URL != 0 {
@@ -1418,8 +1500,14 @@ impl Ui {
         let mut heights = vec![p(58.0)];
         heights.extend(std::iter::repeat_n(p(38.0), rows.len()));
         heights.extend(std::iter::repeat_n(p(38.0), notes.len()));
+        if fp_lines.is_some() {
+            heights.push(p(52.0));
+        }
         if allowed.is_some() {
             heights.push(p(52.0));
+        }
+        if blocked {
+            heights.push(p(56.0));
         }
         let cells = self.card(cv, x, y, w, &heights);
         let mut k = Kit::new(cv, te, f, s);
@@ -1507,8 +1595,34 @@ impl Ui {
                 c.text_secondary,
             );
         }
+        if let Some((l1, l2)) = &fp_lines {
+            let r = cells[i];
+            i += 1;
+            k.text(
+                Font::Regular,
+                12.5,
+                r.x + p(14.0),
+                r.y + p(22.0),
+                "Fingerprint",
+                c.text_muted,
+                p(90.0),
+            );
+            for (n, line) in [l1, l2].into_iter().enumerate() {
+                let lw = k.measure(Font::Regular, 11.5, line).min(r.w - p(120.0));
+                k.text(
+                    Font::Regular,
+                    11.5,
+                    r.right() - p(14.0) - lw,
+                    r.y + p(21.0) + n as i32 * p(16.0),
+                    line,
+                    c.text_secondary,
+                    lw + 1,
+                );
+            }
+        }
         if let Some(a) = &allowed {
             let r = cells[i];
+            i += 1;
             k.text(
                 Font::Regular,
                 12.5,
@@ -1536,6 +1650,23 @@ impl Ui {
                 "Change it in the connection's Sharing settings",
                 c.text_muted,
                 r.w - p(28.0),
+            );
+        }
+        if blocked {
+            let r = cells[i];
+            let b = Button::secondary("Retry pairing").icon(Icon::Refresh);
+            self.btn(
+                cv,
+                te,
+                f,
+                Rect::new(
+                    r.x + p(12.0),
+                    r.y + (r.h - p(34.0)) / 2,
+                    r.w - p(24.0),
+                    p(34.0),
+                ),
+                &b,
+                Hit::RetryHelperPairing(id),
             );
         }
         y + heights.iter().sum::<i32>() + p(24.0)
@@ -1765,6 +1896,32 @@ impl Ui {
             }
         }
         y += cells.len() as i32 * p(58.0);
+        // An admin's pin: the helper key this connection accepts (no code).
+        if self.group_edit.is_none() {
+            y += p(12.0);
+            let cells = self.card(cv, x, y, w, &[p(52.0)]);
+            self.field_row_i(
+                cv,
+                te,
+                f,
+                cells[0],
+                "Fingerprint",
+                Some(Icon::ShieldCheck),
+                Field::HelperFingerprint,
+                "Optional: from remora-agent fingerprint",
+            );
+            y += p(52.0);
+            self.hint(
+                cv,
+                te,
+                f,
+                x,
+                y + p(20.0),
+                w,
+                "Set it and only that helper is accepted, without comparing codes.",
+            );
+            y += p(28.0);
+        }
         let host = self.field(Field::Host).text.trim().to_string();
         let port = self.field(Field::Port).text.trim().parse().unwrap_or(3389);
         if !host.is_empty()
@@ -1971,12 +2128,19 @@ fn sample_with(status: Status) -> Ui {
     m
 }
 
+/// A sample helper fingerprint.
+const SAMPLE_FP: &str = "3f9a 07c2 b18e 5d40 9e6b a2f1 0c77 e43d 1b25 86f9";
+
 /// The pairing question over the session; `changed`: the key changed.
 pub fn sample_pairing(changed: bool) -> Ui {
-    sample_with(Status::Pairing {
+    let mut m = sample_with(Status::Pairing {
         sas: Sas(482_913),
         changed,
-    })
+    });
+    if let Some(t) = m.tab_mut(1) {
+        t.helper.fingerprint = Some(SAMPLE_FP.into());
+    }
+    m
 }
 
 /// A link and a file offer waiting over the running session.
@@ -2012,7 +2176,11 @@ pub fn sample_drop(on: bool) -> Ui {
 /// Sharing page with transfers.
 pub fn sample_helper_panel(page: u8, paired: bool) -> Ui {
     let mut m = if paired {
-        sample_with(Status::Paired)
+        let mut m = sample_with(Status::Paired);
+        if let Some(t) = m.tab_mut(1) {
+            t.helper.fingerprint = Some(SAMPLE_FP.into());
+        }
+        m
     } else {
         let mut m = sample_with(Status::Failed("pairing rejected".into()));
         if let Some(t) = m.tab_mut(1) {
@@ -2030,6 +2198,28 @@ pub fn sample_helper_panel(page: u8, paired: bool) -> Ui {
     m
 }
 
+/// The Session page with pairing blocked after aborted attempts, or a
+/// helper still waiting for its own user's answer (`pending`).
+pub fn sample_helper_blocked(pending: bool) -> Ui {
+    let mut m = if pending {
+        let mut m = sample_with(Status::Paired);
+        if let Some(t) = m.tab_mut(1) {
+            t.helper.fingerprint = Some(SAMPLE_FP.into());
+            t.helper.server_pending = true;
+        }
+        m
+    } else {
+        let mut m = sample_with(Status::Blocked);
+        if let Some(t) = m.tab_mut(1) {
+            t.helper.aborted = 2;
+        }
+        m
+    };
+    m.drawer_page = 3;
+    m.session_focus = false;
+    m
+}
+
 /// The editor's Sharing page with the helper switches on and a paired
 /// helper to forget; with `confirm`, the forget question over it.
 pub fn sample_helper_form(confirm: bool) -> Ui {
@@ -2040,7 +2230,9 @@ pub fn sample_helper_form(confirm: bool) -> Ui {
         receive_files: true,
         send_files: false,
         download_dir: None,
+        fingerprint: None,
     };
+    m.field_mut(Field::HelperFingerprint).set(SAMPLE_FP);
     let host = m.field(Field::Host).text.trim().to_string();
     let port = m.field(Field::Port).text.trim().parse().unwrap_or(3389);
     m.helper_pins.insert(remora_link::server_id(&host, port));
@@ -2221,6 +2413,7 @@ mod tests {
             HelperEvent::State(H::AwaitingPairing {
                 sas: Sas(1),
                 changed: false,
+                fingerprint: "ab12 cd34".into(),
             }),
             now(),
         );
@@ -2234,6 +2427,7 @@ mod tests {
             HelperEvent::State(H::AwaitingPairing {
                 sas: Sas(2),
                 changed: false,
+                fingerprint: "ab12 cd34".into(),
             }),
             now(),
         );
@@ -2471,6 +2665,62 @@ mod tests {
             _ => panic!("forget"),
         }
         assert!(m.helper_pins.is_empty());
+    }
+
+    #[test]
+    fn a_blocked_pairing_offers_retry_on_the_card_and_in_the_palette() {
+        let mut m = sample_helper_blocked(false);
+        let Some((mut te, fonts)) = painted(&mut m, 1320, 860) else {
+            return;
+        };
+        assert!(matches!(
+            click(&mut m, &mut te, &fonts, Hit::RetryHelperPairing(1)),
+            Some(Action::RetryHelperPairing(1))
+        ));
+        // Only while blocked.
+        let mut m = sample_helper_panel(3, true);
+        assert!(m.activate_helper(Hit::RetryHelperPairing(1)).is_none());
+        let m = sample_helper_blocked(false);
+        assert!(
+            m.palette_entries()
+                .into_iter()
+                .map(|e| e.cmd)
+                .any(|c| matches!(c, super::super::palette::Command::RetryHelperPairing(1)))
+        );
+    }
+
+    #[test]
+    fn an_offer_refused_unseen_is_said_once_quietly() {
+        let mut v = HelperView::default();
+        let refused = |id: u8| {
+            HelperEvent::Transfer(TransferEvent::Failed {
+                id: [id; 16],
+                direction: Direction::Receive,
+                reason: reason::DISABLED,
+                by_peer: false,
+                detail: String::new(),
+            })
+        };
+        let fx = v.apply(refused(1), now());
+        assert!(
+            fx.iter()
+                .any(|e| matches!(e, Effect::Notice(_, Tone::Muted))),
+            "{fx:?}"
+        );
+        let fx = v.apply(refused(2), now());
+        assert!(!fx.iter().any(|e| matches!(e, Effect::Notice(..))), "once");
+    }
+
+    #[test]
+    fn the_editor_keeps_a_valid_helper_fingerprint_only() {
+        let mut m = super::super::sample_form(3);
+        m.field_mut(Field::HelperFingerprint).set("not hex");
+        assert!(m.form().is_err());
+        m.field_mut(Field::HelperFingerprint).set(SAMPLE_FP);
+        let c = m.form().unwrap();
+        assert_eq!(c.options.helper.fingerprint.as_deref(), Some(SAMPLE_FP));
+        m.field_mut(Field::HelperFingerprint).set("  ");
+        assert_eq!(m.form().unwrap().options.helper.fingerprint, None);
     }
 
     #[test]

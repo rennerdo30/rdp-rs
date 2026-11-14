@@ -38,6 +38,8 @@ pub trait TargetDir: Send {
     fn read_small(&self, name: &str) -> io::Result<Vec<u8>>;
     /// Replaces a small file (the sidecar) atomically where possible.
     fn write_small(&mut self, name: &str, data: &[u8]) -> io::Result<()>;
+    /// Appends to an existing small file (one sidecar record).
+    fn append(&mut self, name: &str, data: &[u8]) -> io::Result<()>;
     fn remove(&mut self, name: &str) -> io::Result<()>;
     /// Renames `from` to `to`; fails with `AlreadyExists` instead of
     /// replacing an existing `to`.
@@ -48,8 +50,13 @@ pub trait TargetDir: Send {
     fn free_space(&self) -> Option<u64> {
         None
     }
-    /// A file was stored under `name`. The client marks it with the
-    /// Mark-of-the-Web here (app layer).
+    /// The verified part file `name` is about to be renamed to its final
+    /// name: mark it (Mark-of-the-Web) now, so the stored file never exists
+    /// without it where the mark survives a rename (NTFS streams do).
+    fn mark(&mut self, _name: &str) {}
+    /// A file was stored under `name`. The app marks it with the
+    /// Mark-of-the-Web here too (the fallback where [`TargetDir::mark`]
+    /// could not carry over).
     fn finished(&mut self, _name: &str) {}
 }
 
@@ -61,6 +68,7 @@ pub struct MemDir {
     files: Arc<Mutex<BTreeMap<String, Vec<u8>>>>,
     free: Option<u64>,
     finished: Arc<Mutex<Vec<String>>>,
+    marked: Arc<Mutex<Vec<String>>>,
     /// Fail every write after this many bytes (simulated full disk).
     fail_writes_after: Option<u64>,
 }
@@ -89,6 +97,14 @@ impl MemDir {
 
     pub fn names(&self) -> Vec<String> {
         self.lock().keys().cloned().collect()
+    }
+
+    /// Names passed to [`TargetDir::mark`].
+    pub fn marked_names(&self) -> Vec<String> {
+        self.marked
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
     }
 
     /// Names passed to [`TargetDir::finished`].
@@ -189,6 +205,13 @@ impl TargetDir for MemDir {
         self.put(name, data.to_vec());
         Ok(())
     }
+    fn append(&mut self, name: &str, data: &[u8]) -> io::Result<()> {
+        self.lock()
+            .get_mut(name)
+            .ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))?
+            .extend_from_slice(data);
+        Ok(())
+    }
     fn remove(&mut self, name: &str) -> io::Result<()> {
         self.lock()
             .remove(name)
@@ -211,6 +234,12 @@ impl TargetDir for MemDir {
     }
     fn free_space(&self) -> Option<u64> {
         self.free
+    }
+    fn mark(&mut self, name: &str) {
+        self.marked
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .push(name.to_string());
     }
     fn finished(&mut self, name: &str) {
         self.finished
@@ -278,7 +307,8 @@ impl FsDir {
         self
     }
 
-    /// Called with the full path of every stored file.
+    /// The Mark-of-the-Web hook: called with the full path of the verified
+    /// part file right before its rename, and of the stored file after it.
     pub fn on_finished(mut self, f: impl FnMut(&Path) + Send + 'static) -> FsDir {
         self.on_finished = Some(Box::new(f));
         self
@@ -351,10 +381,33 @@ impl TargetDir for FsDir {
         std::fs::read(self.path(name)?)
     }
     fn write_small(&mut self, name: &str, data: &[u8]) -> io::Result<()> {
+        use std::io::Write;
         let p = self.path(name)?;
-        let tmp = self.path(&format!("{name}.tmp"))?;
-        std::fs::write(&tmp, data)?;
-        std::fs::rename(&tmp, &p)
+        // A fresh temporary name, created new: never truncates or follows a
+        // file someone placed there (received names never end in ".tmp").
+        let mut suffix = [0u8; 8];
+        crate::random(&mut suffix).map_err(|e| io::Error::other(e.to_string()))?;
+        let tmp = self.path(&format!("{name}.{}.tmp", crate::wire::hex(&suffix)))?;
+        let written = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)
+            .and_then(|mut f| f.write_all(data));
+        if let Err(e) = written {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(e);
+        }
+        std::fs::rename(&tmp, &p).inspect_err(|_| {
+            let _ = std::fs::remove_file(&tmp);
+        })
+    }
+    fn append(&mut self, name: &str, data: &[u8]) -> io::Result<()> {
+        use std::io::Write;
+        // Only an existing sidecar is appended to (never created here).
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(self.path(name)?)?
+            .write_all(data)
     }
     fn remove(&mut self, name: &str) -> io::Result<()> {
         std::fs::remove_file(self.path(name)?)
@@ -388,6 +441,14 @@ impl TargetDir for FsDir {
     }
     fn free_space(&self) -> Option<u64> {
         self.free_space.as_ref().and_then(|f| f(&self.root))
+    }
+    fn mark(&mut self, name: &str) {
+        if let (Some(f), Ok(p)) = (
+            self.on_finished.as_mut(),
+            self.root.join(name).canonicalize(),
+        ) {
+            f(&p);
+        }
     }
     fn finished(&mut self, name: &str) {
         if let (Some(f), Ok(p)) = (
@@ -459,6 +520,54 @@ mod tests {
         for bad in ["../x", "a\\b", "c:x", "..", ""] {
             assert!(d.create_new(bad).is_err(), "{bad:?}");
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The sidecar's temporary file is new each time: a planted
+    /// `<name>.tmp` (or a link there) is neither truncated nor followed.
+    #[test]
+    fn write_small_never_touches_an_existing_tmp() {
+        let dir = std::env::temp_dir().join(format!("remora-link-small-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut d = FsDir::new(&dir);
+        std::fs::write(dir.join("a.meta.tmp"), b"someone else's").unwrap();
+        d.write_small("a.meta", b"one").unwrap();
+        d.write_small("a.meta", b"two").unwrap();
+        assert_eq!(std::fs::read(dir.join("a.meta")).unwrap(), b"two");
+        assert_eq!(
+            std::fs::read(dir.join("a.meta.tmp")).unwrap(),
+            b"someone else's"
+        );
+        // Nothing else is left behind.
+        let mut names = d.list().unwrap();
+        names.sort();
+        assert_eq!(names, ["a.meta", "a.meta.tmp"]);
+        d.append("a.meta", b"+3").unwrap();
+        assert_eq!(std::fs::read(dir.join("a.meta")).unwrap(), b"two+3");
+        assert!(d.append("missing", b"x").is_err(), "append never creates");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The Mark-of-the-Web hook sees the part file before the rename and
+    /// the stored file after it.
+    #[test]
+    fn the_part_is_marked_before_its_rename() {
+        let dir = std::env::temp_dir().join(format!("remora-link-mark-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let s2 = seen.clone();
+        let mut d = FsDir::new(&dir).on_finished(move |p| {
+            s2.lock()
+                .unwrap()
+                .push(p.file_name().unwrap().to_string_lossy().into_owned());
+        });
+        d.create_new("r.pdf.remora-part").unwrap();
+        d.mark("r.pdf.remora-part");
+        d.rename_new("r.pdf.remora-part", "r.pdf").unwrap();
+        d.finished("r.pdf");
+        assert_eq!(*seen.lock().unwrap(), ["r.pdf.remora-part", "r.pdf"]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

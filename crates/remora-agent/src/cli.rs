@@ -19,6 +19,15 @@ Usage:
   remora-agent send <file>...        Send files to the PC Remora connects from
                                      (what \"Send to my PC (Remora)\" runs).
   remora-agent session-info          Print the session information the agent reports.
+  remora-agent fingerprint           Print this helper's key fingerprint, to compare
+                                     with Remora's helper card or to set it as the
+                                     connection's expected helper in Remora.
+  remora-agent clients               List the Remora clients paired with this helper.
+  remora-agent forget-client <fingerprint>
+                                     Unpair a client: it must confirm the code again.
+  remora-agent trust-client <fingerprint>
+                                     Pair a client by the fingerprint Remora shows in
+                                     Settings > Security (no code to compare here).
   remora-agent --version | --help
 
 The agent never needs administrator rights and opens no network ports.
@@ -37,6 +46,10 @@ pub enum Command {
     OpenUrl(String),
     Send(Vec<String>),
     SessionInfo,
+    Fingerprint,
+    Clients,
+    ForgetClient(String),
+    TrustClient(String),
     Version,
     Help,
 }
@@ -88,6 +101,12 @@ pub fn parse<S: AsRef<str>>(args: &[S]) -> Result<Command, String> {
             files => Ok(Command::Send(files.iter().map(|f| f.to_string()).collect())),
         },
         "session-info" => none(rest, Command::SessionInfo),
+        "fingerprint" => none(rest, Command::Fingerprint),
+        "clients" => none(rest, Command::Clients),
+        // A fingerprint is pasted as one argument or as its ten groups.
+        "forget-client" if !rest.is_empty() => Ok(Command::ForgetClient(rest.join(" "))),
+        "trust-client" if !rest.is_empty() => Ok(Command::TrustClient(rest.join(" "))),
+        "forget-client" | "trust-client" => Err(format!("{first} takes a fingerprint")),
         "--version" | "-V" | "version" => none(rest, Command::Version),
         "--help" | "-h" | "/?" | "help" => Ok(Command::Help),
         other => Err(format!("unknown command: {other}")),
@@ -130,5 +149,17 @@ mod tests {
         assert!(parse(&["run", "x"]).is_err());
         assert!(parse(&["bogus"]).is_err());
         assert_eq!(parse(&["--version"]), Ok(Command::Version));
+        assert_eq!(parse(&["fingerprint"]), Ok(Command::Fingerprint));
+        assert_eq!(parse(&["clients"]), Ok(Command::Clients));
+        assert_eq!(
+            parse(&["forget-client", "ab12", "cd34"]),
+            Ok(Command::ForgetClient("ab12 cd34".into()))
+        );
+        assert_eq!(
+            parse(&["trust-client", "ab12cd34"]),
+            Ok(Command::TrustClient("ab12cd34".into()))
+        );
+        assert!(parse(&["trust-client"]).is_err());
+        assert!(parse(&["clients", "x"]).is_err());
     }
 }

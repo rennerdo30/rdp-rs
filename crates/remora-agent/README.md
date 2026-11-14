@@ -19,14 +19,20 @@ Supported: Windows 10/11 Pro and Enterprise, Remote Desktop Session Host, Remote
 
 The agent has one key per user, made on first start and kept DPAPI-protected (only your account on this server can read it) in `%LOCALAPPDATA%\rdp-rs\agent-key.bin`.
 
-The first time Remora meets the agent (or when the agent's key changed), both show the same six-digit code:
+Remora has a key of its own too. The first time Remora and the agent meet (or when either key changed), both show the same six-digit code:
 
 - Remora asks you to compare it.
 - On the server, a small **"Remora Agent: pair with Remora"** window shows the code with **Confirm** and **Reject**.
 
 Confirm in **both** places only if the codes match. Reject (or closing the server window, or five minutes without an answer) ends the connection.
 
-After that Remora remembers the agent and does not ask again. **Until Remora also has a key the agent can remember, the agent sends files and links to your PC only in a session where you confirmed the code on the server.** On a later reconnect without a code (Remora already knows the agent), session information and files from Remora still work, but Send To and links answer "not connected". This is deliberate: the agent cannot yet tell your Remora from a machine in the middle that ends TLS; a later version adds that.
+After both confirmed, each side remembers the other and later sessions pair silently. The agent keeps the Remora PCs you confirmed in `%LOCALAPPDATA%\rdp-rs\agent-clients.json`. **Files and links go from the server to your PC only if the agent knows that PC's key**: a Remora it does not know (another PC, a reinstalled Remora, or a machine in the middle that ends TLS) gets the server window again, even if Remora itself already knows the agent, and nothing leaves the server before you confirm there.
+
+**The code on the server travels in the remote picture.** A machine in the middle that rewrites the RDP connection could also draw a fake server window with a matching code. Where that matters, compare fingerprints over another path instead:
+
+- `remora-agent fingerprint` prints this agent's fingerprint (`3f9a 07c2 …`). Compare it with the one in Remora's pairing dialog or helper card, or have it set as the connection's **helper fingerprint** in Remora (editor, Sharing page): Remora then accepts only this agent and asks no code.
+- `remora-agent trust-client <fingerprint>` pairs a Remora PC by the fingerprint Remora shows in *Settings > Security*; that PC then gets no server window.
+- `remora-agent clients` lists the paired Remora PCs; `remora-agent forget-client <fingerprint>` unpairs one.
 
 If the key file is damaged or cannot be decrypted (for example after an administrator reset your password), the agent makes a new key, keeps the old file as `agent-key.bin.old` and logs it; Remora then warns that the agent's key changed and asks you to compare codes again.
 
@@ -36,10 +42,11 @@ If the key file is damaged or cannot be decrypted (for example after an administ
 
 - An existing file is never replaced: the new one is saved as `name (2).ext`, and so on.
 - Files are written as `name.remora-part` with a `name.remora-part.meta` record and renamed when complete and verified (BLAKE3 per 4 MiB block). A dropped connection resumes from the last verified block after you reconnect, also after a restart of the agent.
+- Names ending in `.remora-part`, `.remora-part.meta` or `.tmp` are refused. Shortcuts and other files Explorer acts on when it shows a folder (`.lnk`, `.url`, `.scf`, `.website`, `.library-ms`, `.searchConnector-ms`, `.appref-ms`, `.settingcontent-ms`, `desktop.ini`) are saved with `.download` appended.
 - Free space is checked first.
 - Received files get the Mark-of-the-Web (`Zone.Identifier`, Internet zone), like a download: Windows warns before running them and Office opens them in Protected View.
 
-**From the server to your PC:** select files in Explorer, then **Send To > Send to my PC (Remora)**, or run `remora-agent send <file>...`. Remora asks you where to save them. Only regular files are sent in this version: no folders, links or devices. If Remora is not connected, has not allowed files to your PC, or the code was not confirmed on the server in this session, a short message says so.
+**From the server to your PC:** select files in Explorer, then **Send To > Send to my PC (Remora)**, or run `remora-agent send <file>...`. Remora asks you where to save them. Only regular files are sent in this version: no folders, links or devices. If Remora is not connected, has not allowed files to your PC, or is not a paired PC (confirm the code on the server first), a short message says so.
 
 ## Install
 
@@ -98,5 +105,6 @@ These need a Windows RDP host and a Remora client with the matching listener:
 - the read semantics: one `CHANNEL_PDU_HEADER` per `ReadFile`, chunks up to `CHANNEL_CHUNK_LENGTH`, and 1 MiB writes in one `WriteFile`;
 - RemoteApp detection (`rdpshell.exe` / `rdpinit.exe` in the session);
 - the pairing dialog (topmost, closes when Remora rejects or disconnects), the Send To shortcut, DPAPI key storage across logons;
+- client pinning end to end: first contact (both dialogs), a silent reconnect, a second Remora PC (server dialog again), `fingerprint`, `clients`, `forget-client`, `trust-client`;
 - file transfer both ways, a transfer resumed after a disconnect, and the Mark-of-the-Web on received files;
 - the link registration in Default apps on Windows 10, Windows 11 and Windows Server.

@@ -1358,7 +1358,8 @@ impl Client {
         if slot.failed {
             return Ok(());
         }
-        let msg = match slot.defrag.feed(chunk, &mut self.bulk) {
+        let cap = slot.handler.max_message_size();
+        let msg = match slot.defrag.feed(chunk, &mut self.bulk, cap) {
             Ok(Some(m)) => m,
             Ok(None) => return Ok(()),
             Err(e) => {

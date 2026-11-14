@@ -10,26 +10,32 @@
 //! 2. `Hello` right after the SAS (capabilities, policy, OS build, session
 //!    kind, version). File bits are not offered when policy disables
 //!    clipboard or drive redirection.
-//! 3. `Pairing`: `Known` → nothing to show; `Confirm` → the SAS dialog
-//!    with Confirm and Reject until the user answers it here, Remora
-//!    rejects, or the channel closes. Reject here (or closing the dialog)
-//!    closes the channel. While the answer is pending no file data moves.
+//! 3. `PeerPairing` (1.1) right after the SAS, before `Hello`: `Known` when
+//!    Remora's client key is pinned here ([`ClientPins`]), else `Confirm`
+//!    and the SAS dialog at once. `Pairing` from Remora: `Known` → nothing
+//!    more to show; `Confirm` → the SAS dialog (if not up already) until
+//!    the user answers it here, Remora rejects, or the channel closes.
+//!    Reject here (or closing the dialog) closes the channel. While the
+//!    answer is pending no file data moves. Once both users confirmed, the
+//!    client key is pinned here and `PeerPairing{Confirmed}` tells Remora.
 //! 4. `HelloAck`: the accepted capabilities, the bulk token. A usable file
 //!    capability opens `Remora::Bulk` ([`Action::OpenChannel`]), bound to
 //!    the token and to Remora's Ctl key.
 //! 5. Heartbeats every 10 s, `SessionInfo` on every tick if accepted,
 //!    `OpenUrl` for links, file transfer through `remora_link::Engine`.
 //!
-//! # Server-to-client data needs a local confirmation
+//! # Server-to-client data goes only to a pinned client
 //!
-//! Remora's Noise key is fresh per connection, so the helper cannot tell
-//! the real client from a TLS-terminating proxy playing it, and
-//! `Pairing{Known}` proves nothing to the helper (HELPER-PROTOCOL.md 9).
-//! Until Remora has a persistent client key the helper pins, data that
-//! leaves the server (file offers, `FILE_DOWN`, and links, `OPEN_URL`) is
-//! sent only after the user confirmed the code **on the server** in this
-//! Ctl session ([`LinkProtocol::server_to_client_allowed`]). Session info
-//! and files coming from Remora (`FILE_UP`) need only Remora's pairing.
+//! Remora has a persistent client key (DPAPI-protected on the client). The
+//! helper pins it per user ([`ClientPins`], `agent-clients.json`) after the
+//! user confirmed the code on the server and Remora's user confirmed too;
+//! an admin can pre-seed it with `remora-agent trust-client`. Data that
+//! leaves the server (file offers, `FILE_DOWN`, and links, `OPEN_URL`) goes
+//! only to a client key pinned here
+//! ([`LinkProtocol::server_to_client_allowed`], the single gate), never on
+//! `Pairing{Known}` alone: a TLS-terminating proxy playing the client has
+//! another key and gets the dialog. Session info and files coming from
+//! Remora (`FILE_UP`) need only Remora's pairing.
 //!
 //! Any session error closes that channel (and Bulk with Ctl); the next
 //! open starts from scratch. The engine lives across channel sessions, so
@@ -45,7 +51,8 @@ use remora_link::msg::{
     UrlStatus, err,
 };
 use remora_link::transfer::io::{Source, TargetDir};
-use remora_link::transfer::{Direction, Engine, TransferEvent};
+use remora_link::transfer::worker::{EngineWorker, Posted};
+use remora_link::transfer::{Direction, TransferEvent};
 use remora_link::{Binding, Event, Message, Sas, SecureSession, StaticKey, cap, policy};
 
 use crate::info::{SessionInfo, SessionKind};
@@ -59,20 +66,11 @@ pub const HEARTBEAT: Duration = Duration::from_secs(10);
 /// the link counts as forwarded and is not opened locally as well. Below
 /// the pipe's 3 s answer timeout.
 pub const URL_ANSWER_WAIT: Duration = Duration::from_secs(2);
-/// File bytes read per engine poll.
-pub const POLL_BUDGET: usize = 4 << 20;
-/// How often transfers are pumped without a message from Remora.
+/// How often transfers are pumped without a message from Remora (the
+/// worker also wakes the loop through [`LinkProtocol::set_transfer_notify`]).
 pub const POLL_INTERVAL: Duration = Duration::from_millis(200);
 /// Links waiting for Remora's answer at a time (Remora queues 8 too).
 const MAX_PENDING_URLS: usize = 8;
-/// Wait between our Bulk handshake finishing and the first file message on
-/// Ctl. The initiator finishes first (it writes handshake message 3), and
-/// Ctl (PRI_MED) can overtake Bulk (PRI_LOW): a `FileOffer` that reaches
-/// Remora before message 3 would be accepted while Remora's link is still
-/// down, and Remora's engine then waits for a new offer that never comes.
-/// The grace makes that ordering practically certain; the contract gap is
-/// reported on RDP-43.
-pub const LINK_GRACE: Duration = Duration::from_secs(1);
 
 /// Shows the pairing code in the user's session and asks the user there.
 pub trait PairingUi {
@@ -83,6 +81,40 @@ pub trait PairingUi {
     fn show_sas(&mut self, ticket: u64, sas: Sas);
     /// Pairing ended (rejected, channel gone, answered). Idempotent.
     fn close_sas(&mut self);
+}
+
+/// The Remora clients the user confirmed on this server.
+pub trait ClientPins {
+    /// This client key is pinned (confirmed here before, or pre-seeded).
+    fn is_pinned(&self, key: &[u8; 32]) -> bool;
+    /// Pins it, with the client's name as a label.
+    fn pin(&mut self, key: &[u8; 32], label: &str) -> io::Result<()>;
+}
+
+/// [`ClientPins`] in `agent-clients.json` (read fresh each time, so a
+/// `trust-client` or `forget-client` takes effect on the next session).
+pub struct FileClients(pub Option<PathBuf>);
+
+impl ClientPins for FileClients {
+    fn is_pinned(&self, key: &[u8; 32]) -> bool {
+        // An unreadable store pins nobody (fail closed: the dialog shows).
+        self.0
+            .as_deref()
+            .is_some_and(|p| remora_link::ClientStore::load(p).is_ok_and(|s| s.is_pinned(key)))
+    }
+    fn pin(&mut self, key: &[u8; 32], label: &str) -> io::Result<()> {
+        let Some(p) = &self.0 else {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "no settings folder",
+            ));
+        };
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        remora_link::ClientStore::update(p, |s| s.pin(key, label, now))
+            .map_err(|e| io::Error::other(e.to_string()))
+    }
 }
 
 /// The file system as the transfers see it.
@@ -114,6 +146,12 @@ struct Ctl {
     ticket: Option<u64>,
     /// The user confirmed the code on the server in this session.
     local_confirmed: bool,
+    /// Remora's client key is pinned here (before, or now by both users).
+    client_known: bool,
+    /// Remora paired on its side (`Pairing` Known or Confirmed).
+    remora_ok: bool,
+    /// Remora's name for itself (`ClientName`), the pin's label.
+    client_name: String,
     /// Accepted capabilities and the bulk token, after `HelloAck`.
     ack: Option<(u32, [u8; 32])>,
     next_heartbeat: Option<Instant>,
@@ -129,7 +167,10 @@ pub struct LinkProtocol {
     key: StaticKey,
     ui: Box<dyn PairingUi>,
     files: Box<dyn Files>,
-    engine: Engine,
+    clients: Box<dyn ClientPins>,
+    /// The transfer engine on its own thread: reads, writes and re-hashes
+    /// never hold up this loop (heartbeats, links, pairing).
+    engine: EngineWorker,
     ctl: Option<Ctl>,
     bulk: Option<SecureSession>,
     /// Bulk was asked for and not closed since.
@@ -140,12 +181,6 @@ pub struct LinkProtocol {
     sas_shown: bool,
     next_ticket: u64,
     next_poll: Option<Instant>,
-    /// When the engine's link goes up ([`LINK_GRACE`]).
-    link_up_at: Option<Instant>,
-    /// Remora's offers that arrived while our link was still down: an
-    /// engine accepts those into a paused state that only a new offer
-    /// resumes, so they wait here until the link is up.
-    held_offers: Vec<Message>,
     /// The time of the event being handled.
     now: Instant,
 }
@@ -214,12 +249,18 @@ pub fn wire_info(i: &SessionInfo) -> WireInfo {
 }
 
 impl LinkProtocol {
-    pub fn new(key: StaticKey, ui: Box<dyn PairingUi>, files: Box<dyn Files>) -> LinkProtocol {
+    pub fn new(
+        key: StaticKey,
+        ui: Box<dyn PairingUi>,
+        files: Box<dyn Files>,
+        clients: Box<dyn ClientPins>,
+    ) -> LinkProtocol {
         LinkProtocol {
             key,
             ui,
             files,
-            engine: Engine::default(),
+            clients,
+            engine: EngineWorker::default(),
             ctl: None,
             bulk: None,
             bulk_wanted: false,
@@ -229,10 +270,14 @@ impl LinkProtocol {
             sas_shown: false,
             next_ticket: 1,
             next_poll: None,
-            link_up_at: None,
-            held_offers: Vec::new(),
             now: Instant::now(),
         }
+    }
+
+    /// Called on the transfer worker's thread when it has messages or
+    /// events: the event loop should feed a `Timer` soon.
+    pub fn set_transfer_notify(&self, f: impl Fn() + Send + Sync + 'static) {
+        self.engine.set_notify(std::sync::Arc::new(f));
     }
 
     /// [`Protocol::on_event`] with an explicit clock (tests).
@@ -278,13 +323,13 @@ impl LinkProtocol {
     }
 
     /// Whether data may go from the server to the client (file offers,
-    /// links) in this Ctl session: only after the user confirmed the code
-    /// on the server. The single gate for every server-to-client feature;
-    /// a later client key pinned by the helper can widen it.
+    /// links) in this Ctl session: only to a client key pinned here, and
+    /// not while the pairing dialog waits for an answer. The single gate
+    /// for every server-to-client feature.
     pub fn server_to_client_allowed(&self) -> bool {
         self.ctl
             .as_ref()
-            .is_some_and(|c| c.local_confirmed && c.session.is_ready())
+            .is_some_and(|c| c.client_known && c.ticket.is_none() && c.session.is_ready())
     }
 
     /// (send, receive) file rights in force.
@@ -304,12 +349,21 @@ impl LinkProtocol {
     }
 
     /// Applies the file rights to the engine and opens Bulk when one is
-    /// usable. Taking the send right away cancels outgoing transfers.
+    /// usable. Taking the send right away cancels outgoing transfers; while
+    /// the dialog waits, the send right is left as it is (a paused download
+    /// must not be cancelled just because the answer is not in yet).
     fn apply_rights(&mut self, out: &mut Vec<Action>) {
-        let (send, receive) = self.file_rights();
-        if !self.answer_pending() {
-            self.engine.set_permissions(send, receive);
+        if self.acked().is_none() {
+            // Rights come with HelloAck; until then nothing changes.
+            return;
         }
+        let (send, receive) = self.file_rights();
+        let keep_send = if self.answer_pending() {
+            self.engine.permissions().0
+        } else {
+            send
+        };
+        self.engine.set_permissions(keep_send, receive);
         if (send || receive) && !self.bulk_wanted && self.ctl.is_some() {
             self.bulk_wanted = true;
             out.push(Action::OpenChannel(Channel::Bulk));
@@ -317,30 +371,17 @@ impl LinkProtocol {
         self.update_link();
     }
 
-    /// Brings the engine's link up (after [`LINK_GRACE`]) or down (at once).
+    /// Brings the engine's link up or down. Offers accepted while it was
+    /// down ask for their data on link-up (the engine re-sends its
+    /// `FileAccept`), so no grace or holding of offers is needed.
     fn update_link(&mut self) {
         let (send, receive) = self.file_rights();
         let want = (send || receive) && self.bulk_ready() && !self.answer_pending();
-        if !want {
-            self.link_up_at = None;
-            if self.engine.is_connected() {
-                info!("file transfer link down");
-            }
-            self.engine.set_connected(false);
+        if want == self.engine.is_connected() {
             return;
         }
-        if self.engine.is_connected() {
-            return;
-        }
-        let at = *self.link_up_at.get_or_insert(self.now + LINK_GRACE);
-        if self.now >= at {
-            self.link_up_at = None;
-            info!("file transfer link up");
-            self.engine.set_connected(true);
-            for m in std::mem::take(&mut self.held_offers) {
-                self.engine.handle(&m);
-            }
-        }
+        info!("file transfer link {}", if want { "up" } else { "down" });
+        self.engine.set_connected(want);
     }
 
     fn close_ui(&mut self) {
@@ -354,7 +395,6 @@ impl LinkProtocol {
     /// pauses transfers and closes Bulk. Does not close Ctl itself.
     fn drop_ctl(&mut self, out: &mut Vec<Action>) {
         self.ctl = None;
-        self.held_offers.clear();
         self.close_ui();
         for (_, u) in std::mem::take(&mut self.urls) {
             out.push(Action::OpenUrlResult {
@@ -453,6 +493,9 @@ impl LinkProtocol {
                     pairing: Pairing::Waiting,
                     ticket: None,
                     local_confirmed: false,
+                    client_known: false,
+                    remora_ok: false,
+                    client_name: String::new(),
                     ack: None,
                     next_heartbeat: None,
                     heartbeat_seq: 0,
@@ -482,10 +525,29 @@ impl LinkProtocol {
                 Event::Send(b) => out.push(Action::Send(Channel::Ctl, b)),
                 Event::Established { remote_static } => {
                     ctl.remora_key = Some(remote_static);
-                    info!("Remora::Ctl handshake done");
+                    ctl.client_known = self.clients.is_pinned(&remote_static);
+                    info!(
+                        "Remora::Ctl handshake done (client {})",
+                        if ctl.client_known {
+                            "known"
+                        } else {
+                            "not known here"
+                        }
+                    );
                 }
                 Event::Sas(sas) => {
                     ctl.sas = Some(sas);
+                    let known = ctl.client_known;
+                    let st = if known {
+                        PairingStatus::Known
+                    } else {
+                        PairingStatus::Confirm
+                    };
+                    self.send(0, &Message::PeerPairing(st), out);
+                    if !known {
+                        // This client needs the user here, whatever Remora says.
+                        self.show_dialog();
+                    }
                     self.maybe_hello(out);
                 }
                 Event::Message { request_id, msg } => self.on_ctl_msg(request_id, msg, now, out),
@@ -519,6 +581,11 @@ impl LinkProtocol {
             Message::Pairing(st) => self.on_pairing(st, out),
             Message::HelloAck(a) => self.on_ack(a, now, out),
             Message::Heartbeat { .. } => {}
+            Message::ClientName { name } => {
+                if let Some(ctl) = self.ctl.as_mut() {
+                    ctl.client_name = name;
+                }
+            }
             Message::OpenUrlResult(status) => self.on_url_result(request_id, status, out),
             Message::Error(e) => {
                 warn!("Remora reported error {}", e.code);
@@ -538,22 +605,7 @@ impl LinkProtocol {
             | Message::FileCancel { .. }
             | Message::FileComplete { .. }) => {
                 if self.acked().is_some() {
-                    match &m {
-                        Message::FileOffer(o) if !self.engine.is_connected() => {
-                            if self.held_offers.len() < remora_link::transfer::MAX_ACTIVE {
-                                self.held_offers.push(m);
-                            } else {
-                                let busy = Message::FileReject {
-                                    id: o.id,
-                                    reason: remora_link::transfer::reason::BUSY,
-                                };
-                                self.send(0, &busy, out);
-                            }
-                        }
-                        _ => {
-                            self.engine.handle(&m);
-                        }
-                    }
+                    self.engine.post(&m);
                 } else {
                     self.send_error(err::NOT_ALLOWED, "not paired", out);
                 }
@@ -567,6 +619,46 @@ impl LinkProtocol {
         }
     }
 
+    /// Shows the SAS dialog for this Ctl session (once).
+    fn show_dialog(&mut self) {
+        let Some(ctl) = self.ctl.as_mut() else {
+            return;
+        };
+        let Some(sas) = ctl.sas else {
+            return;
+        };
+        if ctl.ticket.is_some() || ctl.local_confirmed {
+            return;
+        }
+        let ticket = self.next_ticket;
+        self.next_ticket += 1;
+        ctl.ticket = Some(ticket);
+        self.close_ui();
+        self.ui.show_sas(ticket, sas);
+        self.sas_shown = true;
+    }
+
+    /// Pins Remora's client key once both users confirmed (the dialog here
+    /// and Remora's `Pairing` Known or Confirmed).
+    fn maybe_pin_client(&mut self) {
+        let Some(ctl) = self.ctl.as_mut() else {
+            return;
+        };
+        if ctl.client_known || !ctl.local_confirmed || !ctl.remora_ok {
+            return;
+        }
+        let Some(key) = ctl.remora_key else {
+            return;
+        };
+        ctl.client_known = true;
+        let label = ctl.client_name.clone();
+        match self.clients.pin(&key, &label) {
+            Ok(()) => info!("Remora client pinned"),
+            // It still counts for this session; the next one asks again.
+            Err(e) => warn!("Remora client not saved ({e}); pinned for this session"),
+        }
+    }
+
     fn on_pairing(&mut self, st: PairingStatus, out: &mut Vec<Action>) {
         let Some(ctl) = self.ctl.as_mut() else {
             return;
@@ -574,28 +666,25 @@ impl LinkProtocol {
         match st {
             PairingStatus::Known => {
                 ctl.pairing = Pairing::Paired;
+                ctl.remora_ok = true;
                 info!("pairing: known to Remora");
+                self.maybe_pin_client();
             }
             PairingStatus::Confirm => {
                 if ctl.pairing != Pairing::Waiting {
                     return self.send_error(err::PROTOCOL, "unexpected Pairing", out);
                 }
                 ctl.pairing = Pairing::Confirming;
-                if let Some(sas) = ctl.sas {
-                    info!("pairing: Remora asks the user to compare codes");
-                    let ticket = self.next_ticket;
-                    self.next_ticket += 1;
-                    ctl.ticket = Some(ticket);
-                    self.close_ui();
-                    self.ui.show_sas(ticket, sas);
-                    self.sas_shown = true;
-                }
+                info!("pairing: Remora asks the user to compare codes");
+                self.show_dialog();
             }
             PairingStatus::Confirmed => {
                 // Remora's user confirmed; the dialog here stays until the
-                // user answers it too (server-to-client data needs that).
+                // user answers it too.
                 ctl.pairing = Pairing::Paired;
+                ctl.remora_ok = true;
                 info!("pairing: confirmed in Remora");
+                self.maybe_pin_client();
             }
             PairingStatus::Rejected => {
                 info!("pairing: rejected in Remora");
@@ -618,9 +707,12 @@ impl LinkProtocol {
         self.close_ui();
         if confirmed {
             info!("pairing: confirmed on the server");
+            self.send(0, &Message::PeerPairing(PairingStatus::Confirmed), out);
+            self.maybe_pin_client();
             self.apply_rights(out);
         } else {
             info!("pairing: rejected on the server");
+            self.send(0, &Message::PeerPairing(PairingStatus::Rejected), out);
             self.send_error(err::PAIRING_REJECTED, "rejected on the server", out);
             self.fail(Channel::Ctl, "pairing rejected on the server", out);
         }
@@ -642,10 +734,12 @@ impl LinkProtocol {
         };
         // Remora answers only once paired on its side.
         ctl.pairing = Pairing::Paired;
+        ctl.remora_ok = true;
         let caps = a.capabilities & offered;
         ctl.ack = Some((caps, a.bulk_token));
         ctl.next_heartbeat = Some(now + HEARTBEAT);
         info!("paired; Remora accepted capabilities {caps:#x}");
+        self.maybe_pin_client();
         if a.max_chunk < remora_link::transfer::CHUNK_SIZE {
             // The engine's chunk is fixed for its lifetime (transfers resume
             // across sessions). Remora 1.0 always accepts 256 KiB.
@@ -727,12 +821,16 @@ impl LinkProtocol {
                     self.update_link();
                 }
                 Event::Sas(_) => {}
-                Event::Message { msg, .. } => {
-                    if !self.engine.handle(&msg) {
-                        // Unknown types only: the session refuses Ctl types.
+                Event::Message { msg, .. } => match self.engine.post(&msg) {
+                    Posted::Queued => {}
+                    // Unknown types only: the session refuses Ctl types.
+                    Posted::NotFile => {
                         self.send(0, &Message::Unsupported { ty: msg.ty() }, out);
                     }
-                }
+                    Posted::Overflow => {
+                        return self.fail(Channel::Bulk, "file data beyond every credit", out);
+                    }
+                },
             }
         }
     }
@@ -835,9 +933,7 @@ impl LinkProtocol {
                 debug!("transfer {} name {name}", tid(&id));
                 match self.files.receive_dir() {
                     Ok(dir) => {
-                        if let Err(e) = self.engine.accept(id, dir) {
-                            warn!("transfer {}: {e}", tid(&id));
-                        }
+                        self.engine.accept(id, dir);
                     }
                     Err(e) => {
                         warn!("transfer {}: no receive folder: {e}", tid(&id));
@@ -875,10 +971,12 @@ impl LinkProtocol {
         }
     }
 
-    /// Moves file data and the engine's messages, handles its events.
+    /// Sends the worker's messages and handles its events.
     fn pump(&mut self, out: &mut Vec<Action>) {
-        self.engine.poll(POLL_BUDGET);
         for _ in 0..64 {
+            // Tests drive the protocol step by step: let the worker catch up.
+            #[cfg(test)]
+            self.engine.sync(Duration::from_secs(10));
             let mut busy = false;
             while let Some(e) = self.engine.next_event() {
                 busy = true;
@@ -921,9 +1019,6 @@ impl LinkProtocol {
                 });
             }
         }
-        if self.link_up_at.is_some() {
-            self.update_link();
-        }
         self.pump(out);
         self.next_poll =
             (self.engine.active() > 0 && self.engine.is_connected()).then(|| now + POLL_INTERVAL);
@@ -932,10 +1027,7 @@ impl LinkProtocol {
     fn deadline(&self) -> Option<Instant> {
         let hb = self.ctl.as_ref().and_then(|c| c.next_heartbeat);
         let url = self.urls.values().map(|u| u.deadline).min();
-        [hb, url, self.next_poll, self.link_up_at]
-            .into_iter()
-            .flatten()
-            .min()
+        [hb, url, self.next_poll].into_iter().flatten().min()
     }
 }
 

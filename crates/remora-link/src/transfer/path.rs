@@ -19,7 +19,17 @@
 //! - reserved device names, with or without an extension and in any case:
 //!   CON, PRN, AUX, NUL, COM0..COM9, LPT0..LPT9 (also with superscript
 //!   digits ¹ ² ³), CONIN$, CONOUT$;
-//! - names over 255 UTF-16 units.
+//! - names over 255 UTF-16 units;
+//! - the engine's own working files: names ending in `.remora-part`,
+//!   `.remora-part.meta` or `.tmp` (any case), so a transfer can never
+//!   deliver a part file or sidecar that a later transfer would resume.
+//!
+//! Accepted names of types the Windows shell acts on just by showing the
+//! folder (shortcuts, Internet shortcuts, Explorer command files, library
+//! and search connector descriptions, `desktop.ini`) are stored with
+//! `.download` appended ([`stored_name`]): Explorer then treats them as
+//! plain data and never resolves an icon or target from them (the NTLM
+//! leak class of `.url`/`.scf`/`.library-ms` files).
 
 use std::fmt;
 
@@ -33,6 +43,8 @@ pub enum NameError {
     TrailingDotOrSpace,
     Reserved,
     TooLong,
+    /// A transfer working file name (`.remora-part`, `.remora-part.meta`, `.tmp`).
+    WorkingFile,
 }
 
 impl fmt::Display for NameError {
@@ -46,6 +58,7 @@ impl fmt::Display for NameError {
             NameError::TrailingDotOrSpace => f.write_str("the name ends in a dot or space"),
             NameError::Reserved => f.write_str("the name is a reserved device name"),
             NameError::TooLong => f.write_str("the name is longer than 255 characters"),
+            NameError::WorkingFile => f.write_str("the name is a transfer working file"),
         }
     }
 }
@@ -83,7 +96,53 @@ pub fn check_name(name: &str) -> Result<(), NameError> {
     if is_reserved(name) {
         return Err(NameError::Reserved);
     }
+    if is_working_file(name) {
+        return Err(NameError::WorkingFile);
+    }
     Ok(())
+}
+
+/// Suffixes of the engine's working files (compared without case).
+pub const WORKING_SUFFIXES: [&str; 3] = [".remora-part", ".remora-part.meta", ".tmp"];
+
+/// A name the engine uses for its own files.
+pub fn is_working_file(name: &str) -> bool {
+    let l = name.to_lowercase();
+    WORKING_SUFFIXES.iter().any(|s| l.ends_with(s))
+}
+
+/// Extensions the Windows shell acts on when it merely lists or previews
+/// a folder (compared without case).
+pub const SHELL_ACTIVE: [&str; 9] = [
+    ".lnk",
+    ".url",
+    ".scf",
+    ".website",
+    ".library-ms",
+    ".searchconnector-ms",
+    ".appref-ms",
+    ".settingcontent-ms",
+    ".desktop.ini",
+];
+
+/// Appended to a [`SHELL_ACTIVE`] name or `desktop.ini`.
+pub const NEUTRAL_SUFFIX: &str = ".download";
+
+/// The name a received file is stored under: the offered name, with
+/// [`NEUTRAL_SUFFIX`] appended when Explorer would act on it.
+pub fn stored_name(offered: &str) -> String {
+    let l = offered.to_lowercase();
+    if l == "desktop.ini" || SHELL_ACTIVE.iter().any(|e| l.ends_with(e)) {
+        format!("{offered}{NEUTRAL_SUFFIX}")
+    } else {
+        offered.to_string()
+    }
+}
+
+/// `candidate` is `base` or one of its [`numbered`] alternatives (2..=1000),
+/// the only names a transfer of `base` may be stored or resumed under.
+pub fn is_variant(candidate: &str, base: &str) -> bool {
+    candidate == base || (2..=1000).any(|n| numbered(base, n) == candidate)
 }
 
 /// Windows device names. The part before the first dot counts, with
@@ -190,11 +249,56 @@ mod tests {
         for (name, want) in cases {
             assert_eq!(check_name(name).as_ref(), Err(want), "{name:?}");
         }
+        for working in [
+            "evil.exe.remora-part",
+            "evil.exe.remora-part.meta",
+            "x.REMORA-PART",
+            "x.Remora-Part.Meta",
+            "notes.tmp",
+            "NOTES.TMP",
+        ] {
+            assert_eq!(check_name(working), Err(WorkingFile), "{working:?}");
+        }
         let long = "a".repeat(256);
         assert_eq!(check_name(&long), Err(TooLong));
         assert_eq!(check_name(&"a".repeat(255)), Ok(()));
         // 255 UTF-16 units of a character outside the BMP is 510 units.
         assert_eq!(check_name(&"😀".repeat(128)), Err(TooLong));
+    }
+
+    #[test]
+    fn shell_active_types_get_a_neutral_suffix() {
+        for (name, stored) in [
+            ("a.lnk", "a.lnk.download"),
+            ("Report.URL", "Report.URL.download"),
+            ("x.scf", "x.scf.download"),
+            ("y.website", "y.website.download"),
+            ("Docs.library-ms", "Docs.library-ms.download"),
+            ("s.searchConnector-ms", "s.searchConnector-ms.download"),
+            ("app.appref-ms", "app.appref-ms.download"),
+            ("c.SettingContent-ms", "c.SettingContent-ms.download"),
+            ("desktop.ini", "desktop.ini.download"),
+            ("Desktop.INI", "Desktop.INI.download"),
+            ("folder.desktop.ini", "folder.desktop.ini.download"),
+            ("report.pdf", "report.pdf"),
+            ("url.txt", "url.txt"),
+            ("my.lnk.txt", "my.lnk.txt"),
+            ("notdesktop.ini", "notdesktop.ini"),
+        ] {
+            assert_eq!(stored_name(name), stored, "{name:?}");
+            assert_eq!(check_name(&stored_name(name)), Ok(()), "{name:?}");
+        }
+    }
+
+    #[test]
+    fn variants_are_the_name_and_its_numbers_only() {
+        assert!(is_variant("report.pdf", "report.pdf"));
+        assert!(is_variant("report (2).pdf", "report.pdf"));
+        assert!(is_variant("report (1000).pdf", "report.pdf"));
+        assert!(!is_variant("report (1001).pdf", "report.pdf"));
+        assert!(!is_variant("report (1).pdf", "report.pdf"));
+        assert!(!is_variant("evil.exe", "report.pdf"));
+        assert!(!is_variant("report.pdf.exe", "report.pdf"));
     }
 
     #[test]
