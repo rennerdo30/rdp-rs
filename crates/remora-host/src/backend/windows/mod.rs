@@ -46,14 +46,18 @@ fn first_frame_uniform(c: &mut dyn Capturer) -> Option<bool> {
     None
 }
 
-/// Some display drivers give Desktop Duplication a black picture while GDI
-/// sees the desktop (the Venera virtio-gpu driver in QEMU guests): true when
-/// a probe duplication's first frame is one colour and GDI's is not.
+/// Some display drivers give Desktop Duplication no usable picture while
+/// GDI sees the desktop (the Venera virtio-gpu driver in QEMU guests: black
+/// frames, or AcquireNextFrame failing over and over with
+/// DXGI_ERROR_KEYED_MUTEX_ABANDONED): true when a probe duplication's first
+/// frame is one colour or never comes, and GDI's first frame is a picture.
+/// A working duplication delivers the whole screen as its first frame at
+/// once, also on a still desktop.
 fn duplication_is_blank() -> bool {
     let Ok(mut probe) = DuplicationCapturer::new() else {
         return false;
     };
-    if first_frame_uniform(&mut probe) != Some(true) {
+    if first_frame_uniform(&mut probe) == Some(false) {
         return false;
     }
     drop(probe);
@@ -73,7 +77,7 @@ pub fn backend(mode: CaptureMode) -> io::Result<Backend> {
         CaptureMode::Dxgi => Some(DuplicationCapturer::new()?),
         CaptureMode::Auto if duplication_is_blank() => {
             info!(
-                "Desktop Duplication delivers a black picture on this display driver while GDI sees the desktop; capturing with GDI"
+                "Desktop Duplication gives no picture on this display driver (black or no frames) while GDI sees the desktop; capturing with GDI"
             );
             None
         }

@@ -130,7 +130,9 @@ try {
     if (-not $fingerprint) { throw "no certificate fingerprint from the guest: $fp" }
     # The server logs to stderr; the clone tool's log shows stdout.
     $bg = Clone @('exec-background', "C:\remora\remora-host.exe run --data-dir $data --capture $Capture --verbose 2>&1")
-    $serverId = ([regex]::Match($bg, '[A-Za-z0-9_-]+')).Value
+    # exec-background prints the run id alone on its first line.
+    $serverId = ($bg -split "`r?`n")[0].Trim()
+    if ($serverId -notmatch '^[A-Za-z0-9_-]+$') { throw "no run id from exec-background: $bg" }
     $addr = (Clone @('addr')).Trim()
     $hostPart, $portPart = $addr.Split(':')
     Write-Host "Server starting in the guest, reachable at $addr, certificate $fingerprint"
