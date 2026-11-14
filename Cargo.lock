@@ -1458,36 +1458,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "rdpc"
-version = "0.1.0-beta.1"
-dependencies = [
- "argon2",
- "chacha20poly1305",
- "ffwd-render",
- "png",
- "rdp",
- "rdpc-update",
- "rfd",
- "rpassword",
- "serde",
- "serde_json",
- "softbuffer",
- "windows",
- "windows-sys 0.61.2",
- "winit",
- "zeroize",
-]
-
-[[package]]
-name = "rdpc-update"
-version = "0.1.0-beta.1"
-dependencies = [
- "serde_json",
- "sha2",
- "windows-sys 0.61.2",
-]
-
-[[package]]
 name = "redox_syscall"
 version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1512,6 +1482,36 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "580c875845b41ecb1564ad1ae4703044cef774145e3d7a94dc2b3fa7c97868fd"
 dependencies = [
  "bitflags 2.13.2",
+]
+
+[[package]]
+name = "remora"
+version = "0.1.0-beta.1"
+dependencies = [
+ "argon2",
+ "chacha20poly1305",
+ "ffwd-render",
+ "png",
+ "rdp",
+ "remora-update",
+ "rfd",
+ "rpassword",
+ "serde",
+ "serde_json",
+ "softbuffer",
+ "windows",
+ "windows-sys 0.61.2",
+ "winit",
+ "zeroize",
+]
+
+[[package]]
+name = "remora-update"
+version = "0.1.0-beta.1"
+dependencies = [
+ "serde_json",
+ "sha2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

@@ -1,8 +1,11 @@
 # Builds the Windows packages into artifacts/installer:
-#   rdpc-<version>-setup.exe, rdpc-<version>-windows-x64.zip, SHA256SUMS.txt
-# Build only: never installs rdpc, never runs the setup, never changes PATH.
+#   remora-<version>-setup.exe, remora-<version>-windows-x64.zip,
+#   rdpc-<version>-setup.exe (a byte-identical copy of the setup under the
+#   name rdpc 0.1.0-beta.1's updater looks for; docs/RELEASING.md) and
+#   SHA256SUMS.txt over all of them.
+# Build only: never installs Remora, never runs the setup, never changes PATH.
 #
-#   scripts\package.ps1 [-MakeNsis <makensis.exe>] [-BinDir <folder with rdpc.exe>]
+#   scripts\package.ps1 [-MakeNsis <makensis.exe>] [-BinDir <folder with remora.exe>]
 #
 # NSIS 3.13 (zlib licence, a build tool, not shipped): scripts/fetch-nsis.ps1
 # downloads the pinned portable ZIP; on the owner PC it is already at
@@ -11,7 +14,7 @@
 # when it is installed (CI); otherwise a local test notice is written.
 [CmdletBinding()]
 param(
-    [string]$MakeNsis = $(if ($env:RDPC_MAKENSIS) { $env:RDPC_MAKENSIS } else { 'E:/Development/_cache/tools/nsis-3.13/makensis.exe' }),
+    [string]$MakeNsis = $(if ($env:REMORA_MAKENSIS) { $env:REMORA_MAKENSIS } else { 'E:/Development/_cache/tools/nsis-3.13/makensis.exe' }),
     [string]$BinDir
 )
 $ErrorActionPreference = 'Stop'
@@ -25,7 +28,7 @@ if (!(Test-Path -LiteralPath $MakeNsis -PathType Leaf)) {
     throw "NSIS compiler not found at '$MakeNsis'. Run scripts/fetch-nsis.ps1 -Destination <folder> and pass -MakeNsis."
 }
 $commit = & git -C $root rev-parse --short HEAD 2>$null
-Write-Host "rdpc $version from commit $(if ($commit) { $commit } else { 'unknown' })"
+Write-Host "Remora $version from commit $(if ($commit) { $commit } else { 'unknown' })"
 
 function Invoke-Bounded([string]$File, [string[]]$Arguments, [int]$Seconds) {
     $info = [Diagnostics.ProcessStartInfo]::new($File)
@@ -54,12 +57,12 @@ function Invoke-Bounded([string]$File, [string[]]$Arguments, [int]$Seconds) {
 
 $cargo = (Get-Command cargo -ErrorAction Stop).Source
 if (!$BinDir) {
-    Invoke-Bounded $cargo @('build', '--release', '--locked', '-j', '8', '-p', 'rdpc') 3600 | Out-Null
+    Invoke-Bounded $cargo @('build', '--release', '--locked', '-j', '8', '-p', 'remora') 3600 | Out-Null
     $meta = Invoke-Bounded $cargo @('metadata', '--format-version', '1', '--no-deps') 120 | ConvertFrom-Json
     $BinDir = Join-Path $meta.target_directory 'release'
 }
-$exe = Join-Path $BinDir 'rdpc.exe'
-if (!(Test-Path -LiteralPath $exe -PathType Leaf)) { throw "Missing rdpc.exe in $BinDir" }
+$exe = Join-Path $BinDir 'remora.exe'
+if (!(Test-Path -LiteralPath $exe -PathType Leaf)) { throw "Missing remora.exe in $BinDir" }
 
 $out = Join-Path $root 'artifacts/installer'
 New-Item -ItemType Directory -Force -Path $out | Out-Null
@@ -68,7 +71,7 @@ New-Item -ItemType Directory -Path $stage | Out-Null
 Copy-Item -LiteralPath $exe -Destination $stage
 # rdp-rs is dual-licensed; LICENSE.txt carries both texts (the setup shows it).
 $sep = "`r`n" + ('=' * 80) + "`r`n"
-$license = "rdp-rs (rdpc) is licensed under either of the MIT license or the Apache License, Version 2.0, at your option." +
+$license = "rdp-rs (Remora) is licensed under either of the MIT license or the Apache License, Version 2.0, at your option." +
     $sep + (Get-Content -LiteralPath (Join-Path $root 'LICENSE-MIT') -Raw) +
     $sep + (Get-Content -LiteralPath (Join-Path $root 'LICENSE-APACHE') -Raw)
 [IO.File]::WriteAllText((Join-Path $stage 'LICENSE.txt'), ($license -replace "`r?`n", "`r`n"))
@@ -77,17 +80,24 @@ if (Get-Command cargo-about -ErrorAction SilentlyContinue) {
     Invoke-Bounded $cargo @('about', 'generate', '-o', $notices, (Join-Path $root 'about.hbs')) 600 | Out-Null
 } else {
     Write-Warning 'cargo-about is not installed: writing a local test notice. Release builds generate the real one in CI.'
-    "Third-party notices are generated in CI release builds.`r`nThis is a local test package of rdpc $version." | Set-Content -LiteralPath $notices -Encoding utf8
+    "Third-party notices are generated in CI release builds.`r`nThis is a local test package of Remora $version." | Set-Content -LiteralPath $notices -Encoding utf8
 }
 
-$setup = Join-Path $out "rdpc-$version-setup.exe"
-Invoke-Bounded $MakeNsis @('-V3', "-DVERSION=$version", "-DVI_VERSION=$numeric", "-DSRC=$stage", "-DOUTFILE=$setup", (Join-Path $root 'installer/rdpc.nsi')) 300 | Out-Null
-$zip = Join-Path $out "rdpc-$version-windows-x64.zip"
+$setup = Join-Path $out "remora-$version-setup.exe"
+Invoke-Bounded $MakeNsis @('-V3', "-DVERSION=$version", "-DVI_VERSION=$numeric", "-DSRC=$stage", "-DOUTFILE=$setup", (Join-Path $root 'installer/remora.nsi')) 300 | Out-Null
+$zip = Join-Path $out "remora-$version-windows-x64.zip"
 if (Test-Path -LiteralPath $zip) { Remove-Item -LiteralPath $zip }
 Compress-Archive -Path (Join-Path $stage '*') -DestinationPath $zip
 Remove-Item -LiteralPath $stage -Recurse -Force
+# Legacy asset: rdpc (the app's name before Remora) updates only from a setup
+# named rdpc-<version>-setup.exe. The same bytes under that name let its
+# updater find, verify and run this setup, which moves the install to Remora.
+# Publish it until the owner drops it (docs/RELEASING.md).
+$legacy = Join-Path $out "rdpc-$version-setup.exe"
+Copy-Item -LiteralPath $setup -Destination $legacy -Force
+if ((Get-FileHash -LiteralPath $legacy).Hash -ne (Get-FileHash -LiteralPath $setup).Hash) { throw "$legacy differs from $setup" }
 
-$lines = foreach ($f in @($setup, $zip)) {
+$lines = foreach ($f in @($setup, $legacy, $zip)) {
     $h = (Get-FileHash -LiteralPath $f -Algorithm SHA256).Hash.ToLowerInvariant()
     Write-Host ('{0:N0} bytes  {1}' -f (Get-Item -LiteralPath $f).Length, $f)
     "$h  $(Split-Path -Leaf $f)"

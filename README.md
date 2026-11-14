@@ -1,4 +1,4 @@
-<p align="center"><img src="assets/logo.svg" width="96" height="96" alt="rdp-rs logo"></p>
+<p align="center"><img src="assets/logo.svg" width="96" height="96" alt="Remora logo"></p>
 
 # rdp-rs
 
@@ -9,6 +9,9 @@ clipboard, drive redirection and live resize are all implemented here, down to
 MD4, MD5, HMAC-MD5, RC4 and the ASN.1 DER/BER/PER encodings. Only TLS
 ([rustls](https://github.com/rustls/rustls)) and SHA-256/randomness
 ([ring](https://github.com/briansmith/ring)) come from crates.
+
+**Remora** is the Windows app built on it: a connection manager with session
+tabs. See [docs/INSTALL.md](docs/INSTALL.md) to install it.
 
 > **Status: beta ([0.1.0-beta.1](https://github.com/rennerdo30/rdp-rs/releases)).**
 > It connects to Windows with NLA and is usable day to day through the bitmap
@@ -95,8 +98,8 @@ it has not yet been tried against every kind of Windows server.
 | Crate | What |
 |---|---|
 | [`crates/rdp`](crates/rdp) | Protocol library: connection sequence, session loop, codecs, virtual channels (`cliprdr`, `rdpdr`, `drdynvc`, Display Control). No UI. |
-| [`crates/rdpc`](crates/rdpc) | Windows client: connection manager and session tabs, headless PNG screenshot. |
-| [`crates/rdpc-update`](crates/rdpc-update) | Update checks: GitHub release discovery, version order, checksums, bounded HTTPS downloads. |
+| [`crates/remora`](crates/remora) | Remora, the Windows client: connection manager and session tabs, headless PNG screenshot. |
+| [`crates/remora-update`](crates/remora-update) | Remora's update checks: GitHub release discovery, version order, checksums, bounded HTTPS downloads. |
 
 ## Build and run
 
@@ -104,20 +107,20 @@ Requires the Rust toolchain pinned in `rust-toolchain.toml` (rustup installs it)
 
 ```
 # connection manager
-cargo run -p rdpc
+cargo run -p remora
 
 # one session straight from the command line (password from RDP_PASSWORD or a prompt)
-cargo run -p rdpc -- 192.168.1.20 -u DOMAIN\user
-cargo run -p rdpc -- 192.168.1.20:3390 -u user -d DOMAIN --size 1600x900
+cargo run -p remora -- 192.168.1.20 -u DOMAIN\user
+cargo run -p remora -- 192.168.1.20:3390 -u user -d DOMAIN --size 1600x900
 
 # headless: wait until the screen settles, save a PNG, disconnect
-cargo run -p rdpc -- 192.168.1.20 -u DOMAIN\user --screenshot desk.png --wait 15
+cargo run -p remora -- 192.168.1.20 -u DOMAIN\user --screenshot desk.png --wait 15
 
 # protocol trace to stderr (sent PDUs as hex; the Client Info PDU with the password is redacted)
-cargo run -p rdpc -- 192.168.1.20 -u DOMAIN\user -v
+cargo run -p remora -- 192.168.1.20 -u DOMAIN\user -v
 
 # render the UI offscreen with sample data
-cargo run -p rdpc -- --snapshot-ui ui.png --scale 1.5
+cargo run -p remora -- --snapshot-ui ui.png --scale 1.5
 ```
 
 In `cmd.exe`, write `DOMAIN\user` without quotes (cmd keeps single quotes literally).

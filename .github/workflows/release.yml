@@ -3,7 +3,7 @@ name: release
 # A version tag builds and tests the Windows packages and attaches them to a
 # DRAFT GitHub release. Publishing the draft is the owner's yes
 # (docs/RELEASING.md); nothing here publishes. A tag with "-" (0.2.0-beta.1)
-# becomes a prerelease. Only rdpc for Windows is packaged: the client is a
+# becomes a prerelease. Only Remora for Windows is packaged: the client is a
 # Windows program today; the rdp library is a source crate.
 on:
   push:
@@ -50,7 +50,7 @@ jobs:
         with:
           tool: cargo-about@0.9.3
       - name: Release build
-        run: cargo build --release --locked -p rdpc
+        run: cargo build --release --locked -p remora
       - name: Package (pinned NSIS 3.13)
         shell: pwsh
         run: |
@@ -61,13 +61,16 @@ jobs:
         shell: pwsh
         run: |
           $v = $env:RELEASE_TAG.TrimStart('v')
-          ./scripts/test-installer.ps1 -Setup (Resolve-Path "artifacts/installer/rdpc-$v-setup.exe") -Version $v
+          ./scripts/test-installer.ps1 -Setup (Resolve-Path "artifacts/installer/remora-$v-setup.exe") -Version $v
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: windows
+          # rdpc-*-setup.exe: the legacy copy for rdpc 0.1.0-beta.1's updater
+          # (docs/RELEASING.md); keep it until the owner drops it.
           path: |
+            artifacts/installer/remora-*-setup.exe
+            artifacts/installer/remora-*-windows-x64.zip
             artifacts/installer/rdpc-*-setup.exe
-            artifacts/installer/rdpc-*-windows-x64.zip
           if-no-files-found: error
 
   draft:
@@ -96,15 +99,19 @@ jobs:
         run: |
           set -euo pipefail
           version="${RELEASE_TAG#v}"
-          # One checksum file over every package: the updater's contract.
-          (cd dist && sha256sum rdpc-* > SHA256SUMS.txt && cat SHA256SUMS.txt)
+          # The legacy setup name must carry the very same bytes: rdpc's
+          # updater checks it against its own line in SHA256SUMS.txt.
+          cmp "dist/remora-$version-setup.exe" "dist/rdpc-$version-setup.exe"
+          # One checksum file over every package: the updaters' contract.
+          (cd dist && sha256sum remora-* rdpc-* > SHA256SUMS.txt && cat SHA256SUMS.txt)
           awk -v v="$version" '$0 ~ "^## "v"[[:space:]]*$" {on=1; next} /^## / {on=0} on' CHANGELOG.md > notes.md || true
           {
             echo
-            echo "**Install:** Windows: run the setup (per user, no admin rights) or unpack the zip."
+            echo "**Install:** Windows: run remora-$version-setup.exe (per user, no admin rights) or unpack the zip."
             echo "Installed copies update themselves; every download is checked against SHA256SUMS.txt."
+            echo "rdpc-$version-setup.exe is the same file under rdpc's old name, so installed rdpc copies update to Remora."
           } >> notes.md
-          flags=(--draft --verify-tag --title "rdpc $RELEASE_TAG" --notes-file notes.md)
+          flags=(--draft --verify-tag --title "Remora $RELEASE_TAG" --notes-file notes.md)
           case "$RELEASE_TAG" in *-*) flags+=(--prerelease) ;; esac
           if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
             # Never touch a published release; refresh only a draft.

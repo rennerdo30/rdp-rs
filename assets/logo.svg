@@ -1,9 +1,29 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
-  <title>rdp-rs</title>
-  <!-- Keep in sync with crates/rdpc/src/icon.rs, which draws the same geometry. -->
-  <rect x="8" y="8" width="240" height="240" rx="56" fill="#4fb8c9"/>
-  <rect x="48" y="60" width="160" height="112" rx="18" fill="#0b1a1e"/>
-  <rect x="114" y="170" width="28" height="22" fill="#0b1a1e"/>
-  <rect x="80" y="188" width="96" height="16" rx="8" fill="#0b1a1e"/>
-  <path d="M106 98 L124 116 L106 134 M134 98 L152 116 L134 134" fill="none" stroke="#4fb8c9" stroke-width="14" stroke-linecap="round" stroke-linejoin="round"/>
+  <title>Remora</title>
+  <!-- Keep in sync with crates/remora/src/icon.rs, which draws the same geometry
+       (there the joints between body, tail and disc are slightly filleted). -->
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="0" y2="256" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#43cabd"/>
+      <stop offset="1" stop-color="#2ab4a7"/>
+    </linearGradient>
+  </defs>
+  <rect x="8" y="8" width="240" height="240" rx="56" fill="url(#tile)"/>
+  <!-- The remora: forked tail, body (the screen) with a rounded snout, suction disc. -->
+  <g fill="#03211d">
+    <polygon points="82,108 34,70 50,128 34,186 82,148" stroke="#03211d" stroke-width="12" stroke-linejoin="round"/>
+    <path d="M92 80H156A52 52 0 0 1 207.85 128H208A48 48 0 0 1 160 176H92A28 28 0 0 1 64 148V108A28 28 0 0 1 92 80Z"/>
+    <rect x="110" y="60" width="78" height="28" rx="14"/>
+  </g>
+  <!-- Ridges of the disc. -->
+  <g fill="#2ec4b6">
+    <rect x="125" y="67" width="6" height="14" rx="3"/>
+    <rect x="139" y="67" width="6" height="14" rx="3"/>
+    <rect x="153" y="67" width="6" height="14" rx="3"/>
+    <rect x="167" y="67" width="6" height="14" rx="3"/>
+  </g>
+  <!-- Screen glass with a reflection, and the eye. -->
+  <rect x="80" y="96" width="80" height="64" rx="10" fill="#d6f7f3"/>
+  <polygon points="94,96 126,96 94,128" fill="#effcfa" fill-opacity="0.7"/>
+  <circle cx="184" cy="114" r="10" fill="#d6f7f3"/>
 </svg>

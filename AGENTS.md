@@ -5,7 +5,7 @@ Read `E:/Development/AGENTS.md` and `E:/Development/general-agent-rules.md` firs
 ## Project
 
 - RDP client written from the Microsoft Open Specifications (MS-RDPBCGR, MS-CSSP, MS-NLMP, MS-RDPEGDI, MS-RDPECLIP, MS-RDPEFS, MS-RDPEDYC, MS-RDPEDISP, ...). Cite the spec section in doc comments for every PDU.
-- Crates: `crates/rdp` (protocol library, no UI), `crates/rdpc` (manager and session windows: winit + softbuffer + `ffwd-render`).
+- Crates: `crates/rdp` (protocol library, no UI), `crates/remora` (the Remora app: manager and session windows: winit + softbuffer + `ffwd-render`).
 - Pair Desk project: `rdp-rs` (issues `RDP-n`). Every change belongs to an issue.
 
 ## Build and test
@@ -24,4 +24,4 @@ Read `E:/Development/AGENTS.md` and `E:/Development/general-agent-rules.md` firs
 
 ## UI rules
 
-- Renderer path of ffwd decision 0001: no frame loop, damage-only presents, solid fills (cheap over RDP). Agent runs never open visible windows; use `rdpc --snapshot-ui` for look review.
+- Renderer path of ffwd decision 0001: no frame loop, damage-only presents, solid fills (cheap over RDP). Agent runs never open visible windows; use `remora --snapshot-ui` for look review.
