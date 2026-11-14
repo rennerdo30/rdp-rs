@@ -37,6 +37,9 @@ pub struct Controls {
     /// Touch and pen over `Microsoft::Windows::RDS::Input` (MS-RDPEI); only
     /// declared when this PC has a digitizer (MS-RDPEI 3.3.3).
     touch: Option<rdp::TouchHandle>,
+    /// The server helper (`Remora::Ctl`, `Remora::Bulk`); inert unless a
+    /// helper opens its channels on a TLS-protected connection.
+    helper: crate::helper::HelperHandle,
 }
 
 impl Controls {
@@ -75,6 +78,8 @@ impl Controls {
             dynamic.push(Box::new(channel));
             handle
         });
+        let helper = crate::helper::HelperHandle::new();
+        dynamic.extend(helper.channels());
         // Same channels and order as mstsc: rdpdr, rdpsnd, cliprdr, drdynvc.
         let channels: Vec<Box<dyn StaticChannel>> = vec![
             Box::new(rdpdr),
@@ -94,6 +99,7 @@ impl Controls {
             printers: Mutex::new(Vec::new()),
             smart_card: Mutex::new(None),
             touch,
+            helper,
         };
         if let Some(&device) = CLI_MICROPHONE.get() {
             controls.set_microphone_device(device);
@@ -180,6 +186,11 @@ impl Controls {
     pub fn request_resize(&self, width: u32, height: u32) -> bool {
         self.display.request_resize(width, height);
         true
+    }
+
+    /// The server helper: pairing, session info, links and file transfer.
+    pub fn helper(&self) -> &crate::helper::HelperHandle {
+        &self.helper
     }
 
     /// Touch and pen input to the session, when this PC has a digitizer.

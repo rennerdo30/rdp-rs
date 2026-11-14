@@ -26,6 +26,7 @@ mod frame;
 mod fuzzy;
 #[cfg(windows)]
 mod h264_mf;
+mod helper;
 mod icon;
 mod icons;
 mod keyboard;

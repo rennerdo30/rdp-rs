@@ -410,6 +410,11 @@ impl App {
     fn spawn_worker(&self, id: u64, cfg: Config) -> (Worker, Controls) {
         let proxy = self.proxy.clone();
         let (channels, controls) = Controls::build(&cfg.client_name, self.hwnd());
+        // The helper's key is pinned per server, like the certificate.
+        controls.helper().set_server(
+            remora_link::server_id(&cfg.host, cfg.port),
+            crate::store::data_dir().map(|d| d.join("helpers.json")),
+        );
         let worker = session::spawn(cfg, channels, move |ev| {
             let _ = proxy.send_event(UserEvent::Session(id, ev));
         });
@@ -2229,6 +2234,9 @@ impl ApplicationHandler<UserEvent> for App {
             session::Event::Connected(info) => {
                 let mut layout = None;
                 if let Some(s) = self.sessions.get_mut(&id) {
+                    // Fail closed: the helper channels answer only once the
+                    // connection is known to be TLS-protected.
+                    s.controls.helper().set_transport_protocol(info.protocol);
                     s.retries = 0;
                     s.last_fb = None;
                     let keys = s.keys.get_mut();

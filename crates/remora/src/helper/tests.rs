@@ -1,0 +1,506 @@
+//! The client adapter against a simulated helper built from remora-link.
+
+use super::*;
+use remora_link::msg::SessionKind;
+use remora_link::transfer::io::MemSource;
+
+/// The helper side of one channel, driven by hand.
+struct FakeHelper {
+    ctl: SecureSession,
+    bulk: Option<SecureSession>,
+    key: StaticKey,
+    /// Decoded messages the client sent on Ctl / Bulk.
+    got: Vec<Message>,
+    sas: Option<Sas>,
+}
+
+struct Rig {
+    handle: HelperHandle,
+    ctl: Box<dyn DynamicChannel>,
+    bulk: Box<dyn DynamicChannel>,
+    dir: PathBuf,
+}
+
+fn temp_dir(tag: &str) -> PathBuf {
+    let d = std::env::temp_dir().join(format!(
+        "remora-helper-{tag}-{}-{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(&d).unwrap();
+    d
+}
+
+impl Rig {
+    fn new(tag: &str) -> Rig {
+        let handle = HelperHandle::new();
+        let dir = temp_dir(tag);
+        handle.set_server("server:3389".into(), Some(dir.join("helpers.json")));
+        let mut ch = handle.channels();
+        let bulk = ch.pop().unwrap();
+        let ctl = ch.pop().unwrap();
+        Rig {
+            handle,
+            ctl,
+            bulk,
+            dir,
+        }
+    }
+
+    /// Opens Ctl and runs the handshake with `key`. Returns the helper.
+    fn connect(&mut self, key: StaticKey) -> FakeHelper {
+        let mut out = DvcOut::default();
+        self.ctl.opened(&mut out).unwrap();
+        assert!(out.is_empty());
+        let (ctl, first) =
+            SecureSession::initiator(Channel::Ctl, &key, Binding::default()).unwrap();
+        let mut h = FakeHelper {
+            ctl,
+            bulk: None,
+            key,
+            got: Vec::new(),
+            sas: None,
+        };
+        self.exchange(&mut h, Channel::Ctl, vec![first]);
+        h
+    }
+
+    /// Delivers helper messages to the client and the answers back, until quiet.
+    fn exchange(&mut self, h: &mut FakeHelper, ch: Channel, mut msgs: Vec<Vec<u8>>) {
+        for _ in 0..50 {
+            let mut out = DvcOut::default();
+            let chan = match ch {
+                Channel::Ctl => &mut self.ctl,
+                Channel::Bulk => &mut self.bulk,
+            };
+            for m in msgs.drain(..) {
+                chan.process(&m, &mut out).unwrap();
+            }
+            chan.tick(&mut out).unwrap();
+            let answers = out.take();
+            if answers.is_empty() {
+                return;
+            }
+            for a in answers {
+                let sess = match ch {
+                    Channel::Ctl => &mut h.ctl,
+                    Channel::Bulk => h.bulk.as_mut().unwrap(),
+                };
+                for ev in sess.on_message(&a).unwrap() {
+                    match ev {
+                        Event::Send(b) => msgs.push(b),
+                        Event::Sas(s) => h.sas = Some(s),
+                        Event::Message { msg, .. } => h.got.push(msg),
+                        Event::Established { .. } => {}
+                    }
+                }
+            }
+        }
+        panic!("no quiet point");
+    }
+
+    /// Runs Ctl and Bulk ticks and moves everything until quiet.
+    fn pump(&mut self, h: &mut FakeHelper) {
+        self.exchange(h, Channel::Ctl, vec![]);
+        if h.bulk.is_some() {
+            self.exchange(h, Channel::Bulk, vec![]);
+        }
+        self.exchange(h, Channel::Ctl, vec![]);
+    }
+
+    fn send(&mut self, h: &mut FakeHelper, msg: Message) {
+        let ch = msg.channel();
+        let wire = match ch {
+            Channel::Ctl => h.ctl.send(1, &msg).unwrap(),
+            Channel::Bulk => h.bulk.as_mut().unwrap().send(1, &msg).unwrap(),
+        };
+        self.exchange(h, ch, vec![wire]);
+    }
+
+    fn events(&self) -> Vec<HelperEvent> {
+        std::iter::from_fn(|| self.handle.next_event()).collect()
+    }
+
+    /// Ctl paired and HelloAck received; returns the HelloAck.
+    fn pair_and_hello(&mut self, h: &mut FakeHelper, offer: u32, policy_bits: u32) -> HelloAck {
+        if matches!(self.handle.state(), HelperState::AwaitingPairing { .. }) {
+            self.handle.confirm_pairing().unwrap();
+            self.pump(h);
+        }
+        self.send(h, hello(offer, policy_bits));
+        h.got
+            .iter()
+            .find_map(|m| match m {
+                Message::HelloAck(a) => Some(a.clone()),
+                _ => None,
+            })
+            .expect("HelloAck")
+    }
+
+    fn open_bulk(&mut self, h: &mut FakeHelper, token: [u8; 32]) {
+        let mut out = DvcOut::default();
+        self.bulk.opened(&mut out).unwrap();
+        let (bulk, first) = SecureSession::initiator(
+            Channel::Bulk,
+            &h.key,
+            Binding {
+                bulk_token: Some(token),
+                expected_remote: None,
+            },
+        )
+        .unwrap();
+        h.bulk = Some(bulk);
+        self.exchange(h, Channel::Bulk, vec![first]);
+    }
+}
+
+impl Drop for Rig {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+fn hello(caps: u32, policy_bits: u32) -> Message {
+    Message::Hello(Hello {
+        major: 1,
+        minor: 0,
+        helper_version: "0.1.0".into(),
+        os_build: 26100,
+        session_kind: SessionKind::Desktop,
+        capabilities: caps,
+        policy: policy_bits,
+    })
+}
+
+#[test]
+fn nothing_is_answered_before_the_connection_is_known_to_be_tls() {
+    let mut r = Rig::new("tls-wait");
+    let key = StaticKey::generate().unwrap();
+    let mut out = DvcOut::default();
+    r.ctl.opened(&mut out).unwrap();
+    let (_s, first) = SecureSession::initiator(Channel::Ctl, &key, Binding::default()).unwrap();
+    r.ctl.process(&first, &mut out).unwrap();
+    r.ctl.tick(&mut out).unwrap();
+    assert!(out.is_empty(), "no answer while the transport is unknown");
+    // TLS confirmed: the buffered handshake is answered.
+    r.handle.set_transport_protocol(1);
+    r.ctl.tick(&mut out).unwrap();
+    assert_eq!(out.take().len(), 1, "handshake message 2");
+}
+
+#[test]
+fn a_connection_without_tls_closes_the_helper_channels() {
+    let mut r = Rig::new("no-tls");
+    let key = StaticKey::generate().unwrap();
+    let mut out = DvcOut::default();
+    r.ctl.opened(&mut out).unwrap();
+    let (_s, first) = SecureSession::initiator(Channel::Ctl, &key, Binding::default()).unwrap();
+    r.ctl.process(&first, &mut out).unwrap();
+    r.handle.set_transport_protocol(0); // PROTOCOL_RDP
+    assert!(r.ctl.tick(&mut out).is_err(), "closed");
+    assert!(out.is_empty(), "never answered");
+    // A later open is refused at once.
+    assert!(r.ctl.opened(&mut out).is_err());
+}
+
+#[test]
+fn switched_off_refuses_the_channel() {
+    let mut r = Rig::new("off");
+    r.handle.set_enabled(false);
+    let mut out = DvcOut::default();
+    assert!(r.ctl.opened(&mut out).is_err());
+}
+
+#[test]
+fn first_contact_needs_the_sas_then_pins_the_key() {
+    let mut r = Rig::new("pair");
+    r.handle.set_transport_protocol(1);
+    let key = StaticKey::generate().unwrap();
+    let mut h = r.connect(key.clone());
+    let state = r.handle.state();
+    let HelperState::AwaitingPairing { sas, changed } = state else {
+        panic!("{state:?}")
+    };
+    assert!(!changed);
+    assert_eq!(Some(sas), h.sas, "both ends show the same SAS");
+    assert!(h.got.contains(&Message::Pairing(PairingStatus::Confirm)));
+    // The helper's Hello waits for the user; no HelloAck yet.
+    r.send(&mut h, hello(cap::ALL, 0));
+    assert!(!h.got.iter().any(|m| matches!(m, Message::HelloAck(_))));
+    r.handle.confirm_pairing().unwrap();
+    r.pump(&mut h);
+    assert!(h.got.contains(&Message::Pairing(PairingStatus::Confirmed)));
+    let ack = h
+        .got
+        .iter()
+        .find_map(|m| match m {
+            Message::HelloAck(a) => Some(a.clone()),
+            _ => None,
+        })
+        .unwrap();
+    // Default user setting: session info only.
+    assert_eq!(ack.capabilities, cap::SESSION_INFO);
+    assert_eq!(r.handle.state(), HelperState::Paired);
+    let pins = PinStore::load(&r.dir.join("helpers.json")).unwrap();
+    assert_eq!(pins.check("server:3389", &key.public()), PinCheck::Known);
+
+    // A second session with the same helper key pairs silently.
+    let mut r2 = Rig::new("pair-2");
+    std::fs::copy(r.dir.join("helpers.json"), r2.dir.join("helpers.json")).unwrap();
+    r2.handle.set_transport_protocol(1);
+    let mut h2 = r2.connect(key);
+    assert!(h2.got.contains(&Message::Pairing(PairingStatus::Known)));
+    assert_eq!(r2.handle.state(), HelperState::Paired);
+    r2.send(&mut h2, hello(cap::ALL, 0));
+    assert!(h2.got.iter().any(|m| matches!(m, Message::HelloAck(_))));
+}
+
+#[test]
+fn a_changed_key_warns_and_reject_closes() {
+    let mut r = Rig::new("changed");
+    let mut pins = PinStore::new();
+    pins.pin("server:3389", &[7; 32], 1);
+    pins.save(&r.dir.join("helpers.json")).unwrap();
+    r.handle.set_transport_protocol(1);
+    let mut h = r.connect(StaticKey::generate().unwrap());
+    assert!(matches!(
+        r.handle.state(),
+        HelperState::AwaitingPairing { changed: true, .. }
+    ));
+    r.handle.reject_pairing();
+    let mut out = DvcOut::default();
+    assert!(r.ctl.tick(&mut out).is_err(), "channel closes");
+    for m in out.take() {
+        for ev in h.ctl.on_message(&m).unwrap() {
+            if let Event::Message { msg, .. } = ev {
+                h.got.push(msg);
+            }
+        }
+    }
+    assert!(h.got.contains(&Message::Pairing(PairingStatus::Rejected)));
+    assert!(matches!(r.handle.state(), HelperState::Failed(_)));
+    // The old pin is untouched.
+    let pins = PinStore::load(&r.dir.join("helpers.json")).unwrap();
+    assert_eq!(pins.check("server:3389", &[7; 32]), PinCheck::Known);
+}
+
+#[test]
+fn an_unreadable_pin_store_is_treated_as_changed() {
+    let mut r = Rig::new("bad-store");
+    std::fs::write(r.dir.join("helpers.json"), b"garbage").unwrap();
+    r.handle.set_transport_protocol(1);
+    let _h = r.connect(StaticKey::generate().unwrap());
+    assert!(matches!(
+        r.handle.state(),
+        HelperState::AwaitingPairing { changed: true, .. }
+    ));
+    // Confirming does not overwrite the unreadable file.
+    assert!(r.handle.confirm_pairing().is_err());
+    assert_eq!(
+        std::fs::read(r.dir.join("helpers.json")).unwrap(),
+        b"garbage"
+    );
+    assert_eq!(r.handle.state(), HelperState::Paired);
+}
+
+#[test]
+fn capabilities_follow_user_setting_and_policy() {
+    let mut r = Rig::new("caps");
+    r.handle.set_transport_protocol(1);
+    r.handle.set_capabilities(cap::ALL);
+    let mut h = r.connect(StaticKey::generate().unwrap());
+    // Drive clipboard disabled by policy: no file transfer at all.
+    let ack = r.pair_and_hello(&mut h, cap::ALL, policy::CLIPBOARD_DISABLED);
+    assert_eq!(ack.capabilities, cap::SESSION_INFO | cap::OPEN_URL);
+    assert_eq!(r.handle.accepted_capabilities(), ack.capabilities);
+}
+
+#[test]
+fn messages_before_pairing_are_refused() {
+    let mut r = Rig::new("early");
+    r.handle.set_transport_protocol(1);
+    let mut h = r.connect(StaticKey::generate().unwrap());
+    r.send(
+        &mut h,
+        Message::OpenUrl {
+            url: "https://example.org".into(),
+        },
+    );
+    assert!(
+        h.got
+            .iter()
+            .any(|m| matches!(m, Message::Error(e) if e.code == err::NOT_ALLOWED))
+    );
+    assert!(
+        !r.events()
+            .iter()
+            .any(|e| matches!(e, HelperEvent::OpenUrl { .. }))
+    );
+}
+
+#[test]
+fn session_info_unknown_types_and_links() {
+    let mut r = Rig::new("msgs");
+    r.handle.set_transport_protocol(1);
+    r.handle.set_capabilities(cap::SESSION_INFO | cap::OPEN_URL);
+    let mut h = r.connect(StaticKey::generate().unwrap());
+    r.pair_and_hello(&mut h, cap::ALL, 0);
+    let info = SessionInfo {
+        locked: true,
+        idle_ms: 10,
+        cpu_percent: 5,
+        mem_used: 1,
+        mem_total: 2,
+    };
+    r.send(&mut h, Message::SessionInfo(info.clone()));
+    assert_eq!(r.handle.session_info(), Some(info));
+    // A type from a newer helper: answered with Unsupported, the channel
+    // stays open. (SecureSession::send cannot encode an unknown type, so the
+    // decoded message is handed to the Ctl handler directly.)
+    r.handle.lock().on_ctl(0, Message::Unknown { ty: 0x7ABC });
+    r.pump(&mut h);
+    assert!(h.got.contains(&Message::Unsupported { ty: 0x7ABC }));
+    // Links: only http(s) reach the app, the app answers.
+    r.send(
+        &mut h,
+        Message::OpenUrl {
+            url: "file:///C:/Windows/System32/calc.exe".into(),
+        },
+    );
+    assert!(h.got.contains(&Message::OpenUrlResult(UrlStatus::Invalid)));
+    r.send(
+        &mut h,
+        Message::OpenUrl {
+            url: "https://example.org/a".into(),
+        },
+    );
+    let ev = r.events();
+    let (rid, url) = ev
+        .iter()
+        .find_map(|e| match e {
+            HelperEvent::OpenUrl { request_id, url } => Some((*request_id, url.clone())),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(url, "https://example.org/a");
+    r.handle.answer_url(rid, UrlStatus::Opened);
+    r.pump(&mut h);
+    assert!(h.got.contains(&Message::OpenUrlResult(UrlStatus::Opened)));
+}
+
+#[test]
+fn bulk_requires_the_paired_helper() {
+    // Before pairing: Bulk is refused.
+    let mut r = Rig::new("bulk-early");
+    r.handle.set_transport_protocol(1);
+    let _h = r.connect(StaticKey::generate().unwrap());
+    let mut out = DvcOut::default();
+    assert!(r.bulk.opened(&mut out).is_err());
+
+    // After pairing, a different helper key on Bulk fails the handshake.
+    let mut r = Rig::new("bulk-other");
+    r.handle.set_transport_protocol(1);
+    let mut h = r.connect(StaticKey::generate().unwrap());
+    let ack = r.pair_and_hello(&mut h, cap::ALL, 0);
+    let mut out = DvcOut::default();
+    r.bulk.opened(&mut out).unwrap();
+    let other = StaticKey::generate().unwrap();
+    let (mut s, first) = SecureSession::initiator(
+        Channel::Bulk,
+        &other,
+        Binding {
+            bulk_token: Some(ack.bulk_token),
+            expected_remote: None,
+        },
+    )
+    .unwrap();
+    r.bulk.process(&first, &mut out).unwrap();
+    let msg2 = out.take();
+    let ev = s.on_message(&msg2[0]).unwrap();
+    let Some(Event::Send(msg3)) = ev.into_iter().find(|e| matches!(e, Event::Send(_))) else {
+        panic!("message 3")
+    };
+    assert!(r.bulk.process(&msg3, &mut out).is_err(), "wrong helper key");
+}
+
+#[test]
+fn download_end_to_end_into_the_chosen_folder() {
+    let mut r = Rig::new("download");
+    r.handle.set_transport_protocol(1);
+    r.handle.set_capabilities(cap::ALL);
+    let marked = Arc::new(Mutex::new(Vec::<PathBuf>::new()));
+    let m2 = marked.clone();
+    r.handle
+        .set_received_file_hook(move |p| m2.lock().unwrap().push(p.to_path_buf()));
+    let mut h = r.connect(StaticKey::generate().unwrap());
+    let ack = r.pair_and_hello(&mut h, cap::ALL, 0);
+    assert_ne!(ack.capabilities & cap::FILE_DOWN, 0);
+    r.open_bulk(&mut h, ack.bulk_token);
+
+    // The helper's own engine sends a 5 MiB file.
+    let data: Vec<u8> = (0..5u32 << 20).map(|i| (i * 7) as u8).collect();
+    let mut tx = Engine::default();
+    tx.set_permissions(true, false);
+    tx.set_connected(true);
+    let id = tx
+        .send("report.bin", Box::new(MemSource::new(data.clone(), 1)))
+        .unwrap();
+    let downloads = r.dir.join("Downloads");
+    std::fs::create_dir_all(&downloads).unwrap();
+    for _ in 0..200 {
+        tx.poll(1 << 20);
+        for m in tx.take_messages() {
+            r.send(&mut h, m);
+        }
+        for e in r.events() {
+            if let HelperEvent::Transfer(TransferEvent::Offered { id: o, .. }) = e {
+                assert_eq!(o, id);
+                r.handle.accept_file(o, &downloads).unwrap();
+            }
+        }
+        r.pump(&mut h);
+        for m in std::mem::take(&mut h.got) {
+            tx.handle(&m);
+        }
+        if tx.active() == 0 {
+            break;
+        }
+    }
+    assert_eq!(std::fs::read(downloads.join("report.bin")).unwrap(), data);
+    assert_eq!(marked.lock().unwrap().len(), 1, "MotW hook called");
+    let left: Vec<_> = std::fs::read_dir(&downloads).unwrap().collect();
+    assert_eq!(left.len(), 1, "no part or sidecar left");
+}
+
+#[test]
+fn a_second_helper_instance_is_refused() {
+    let mut r = Rig::new("second");
+    assert!(!r.ctl.allow_second_instance());
+    assert!(
+        r.events()
+            .contains(&HelperEvent::SecondInstanceRefused(Channel::Ctl))
+    );
+    assert_eq!(r.ctl.max_message_size(), HELPER_MAX_MESSAGE);
+}
+
+#[test]
+fn web_url_check() {
+    for ok in ["https://example.org", "HTTP://a/b?c#d", "https://a:8080/x"] {
+        assert!(is_web_url(ok), "{ok}");
+    }
+    for bad in [
+        "file:///C:/x",
+        "javascript:alert(1)",
+        "ms-settings:",
+        "https://",
+        "https:///path",
+        "https://a b",
+        "https://a\nb",
+        "\\\\server\\share",
+        "ftp://x",
+        "",
+    ] {
+        assert!(!is_web_url(bad), "{bad:?}");
+    }
+}

@@ -1672,6 +1672,7 @@ dependencies = [
  "ffwd-render",
  "png",
  "rdp",
+ "remora-link",
  "remora-update",
  "rfd",
  "rpassword",
