@@ -24,7 +24,9 @@ mod frame;
 #[cfg(windows)]
 mod h264_mf;
 mod icon;
+mod icons;
 mod keyhook;
+mod kit;
 mod known_hosts;
 mod mic;
 mod monitors;
@@ -454,6 +456,12 @@ fn snapshot_ui(path: &str, scale: f32) -> Result<(), Box<dyn std::error::Error>>
             write_png(&out, w, h, &px)?;
             eprintln!("saved {w}x{h} snapshot to {out}");
         }
+        // The component kit's reference sheet.
+        let mut px = vec![0u32; w * h];
+        kit::paint_sheet(&mut Canvas::new(&mut px, w, h), &mut te, &fonts, scale);
+        let out = path.replace(".png", &format!("-kit{light}.png"));
+        write_png(&out, w, h, &px)?;
+        eprintln!("saved {w}x{h} snapshot to {out}");
         // The bar over a session spread across monitors.
         let bh = (40.0 * scale).round() as usize;
         let mut px = vec![0u32; w * bh];
