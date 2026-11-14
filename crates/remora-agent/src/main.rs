@@ -1,11 +1,12 @@
 //! `remora-agent`: Remora's helper inside a Windows remote desktop session
 //! (RDP-41, RDP-42, RDP-44).
 //!
-//! It runs as the logged-on user, opens the dynamic virtual channels
-//! `Remora::Ctl` and `Remora::Bulk` whenever a Remora client is attached,
-//! reports session information, and forwards links the user clicks to the
-//! client. The helper protocol itself (handshake, encryption, file transfer)
-//! lives in `remora-link` and plugs in through [`seam::Protocol`].
+//! It runs as the logged-on user, opens the dynamic virtual channel
+//! `Remora::Ctl` whenever a Remora client is attached (and `Remora::Bulk`
+//! once paired), reports session information, forwards links the user
+//! clicks, and moves files both ways. The helper protocol (handshake,
+//! encryption, pairing, file transfer) is `remora-link`, driven by
+//! [`link::LinkProtocol`] through [`seam::Protocol`].
 //!
 //! A GUI-subsystem program: it never shows a console window. Subcommands
 //! that print attach to the console of the shell that started them.
@@ -15,9 +16,12 @@
 #![cfg_attr(not(windows), allow(dead_code))]
 
 mod cli;
+mod files;
 mod framing;
 mod info;
+mod keystore;
 mod lifecycle;
+mod link;
 mod links;
 mod logging;
 mod seam;

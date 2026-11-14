@@ -15,8 +15,8 @@ use windows_sys::Win32::System::Registry::{
 };
 use windows_sys::Win32::System::RemoteDesktop::{
     ProcessIdToSessionId, WTS_CURRENT_SERVER_HANDLE, WTS_CURRENT_SESSION, WTS_PROCESS_INFOW,
-    WTSActive, WTSEnumerateProcessesW, WTSFreeMemory, WTSINFOEXW, WTSIsRemoteSession,
-    WTSQuerySessionInformationW, WTSSessionInfoEx,
+    WTSActive, WTSClientName, WTSEnumerateProcessesW, WTSFreeMemory, WTSINFOEXW,
+    WTSIsRemoteSession, WTSQuerySessionInformationW, WTSSessionInfoEx,
 };
 use windows_sys::Win32::System::SystemInformation::{
     GetTickCount, GlobalMemoryStatusEx, MEMORYSTATUSEX,
@@ -274,6 +274,31 @@ pub fn session_state() -> Option<(bool, Option<bool>)> {
         });
         WTSFreeMemory(buf.cast());
         out
+    }
+}
+
+/// The connected client's computer name (`WTSClientName`), as the client
+/// reported it: untrusted, so only printable characters, at most 32.
+pub fn client_name() -> Option<String> {
+    let mut buf: *mut u16 = std::ptr::null_mut();
+    let mut len = 0u32;
+    // SAFETY: WTS allocates a NUL-terminated string; freed below.
+    unsafe {
+        if WTSQuerySessionInformationW(
+            WTS_CURRENT_SERVER_HANDLE,
+            WTS_CURRENT_SESSION,
+            WTSClientName,
+            &mut buf,
+            &mut len,
+        ) == 0
+            || buf.is_null()
+        {
+            return None;
+        }
+        let s = from_wide_ptr(buf);
+        WTSFreeMemory(buf.cast());
+        let clean: String = s.chars().filter(|c| !c.is_control()).take(32).collect();
+        (!clean.trim().is_empty()).then_some(clean)
     }
 }
 

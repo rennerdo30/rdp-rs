@@ -1,14 +1,18 @@
-//! When to open and close the channels (RDP-42): a pure state machine fed
-//! with session events and open results, so the policy is tested without
-//! Windows.
+//! When to open and close the channels (RDP-42, HELPER-PROTOCOL.md 1): a
+//! pure state machine fed with session events and open results, so the
+//! policy is tested without Windows.
 //!
-//! - A DVC exists only while an RDP client is attached, so the channels are
+//! - A DVC exists only while an RDP client is attached, so `Remora::Ctl` is
 //!   opened when the session is remote-connected (at start and on every
-//!   `WTS_REMOTE_CONNECT`) and closed on `WTS_REMOTE_DISCONNECT` or when the
-//!   session moves to the console.
+//!   `WTS_REMOTE_CONNECT`); both channels close on `WTS_REMOTE_DISCONNECT`
+//!   or when the session moves to the console.
+//! - `Remora::Bulk` opens only on request ([`Lifecycle::request_open`],
+//!   after `HelloAck`): Remora closes a Bulk channel that opens earlier. A
+//!   new connect or [`Lifecycle::close`] cancels the request.
 //! - An open that fails (mstsc or another client without a Remora listener)
-//!   is retried with a slow backoff while the session stays connected:
-//!   30 s, doubling, capped at 10 min. A new connect resets it.
+//!   is retried with a slow backoff while the session stays connected (and,
+//!   for Bulk, while it is wanted): 30 s, doubling, capped at 10 min. A new
+//!   connect resets it.
 //! - Every open attempt carries a generation; results of an older attempt
 //!   (the open can block for a long time) are ignored.
 
@@ -70,6 +74,16 @@ struct Chan {
     state: State,
     backoff: Duration,
     retry_at: Option<Instant>,
+    /// Opened on connect (Ctl) or only while requested (Bulk).
+    on_demand: bool,
+    /// Bulk: requested and not closed since.
+    wanted: bool,
+}
+
+impl Chan {
+    fn should_run(&self, remote: bool) -> bool {
+        remote && (!self.on_demand || self.wanted)
+    }
 }
 
 #[derive(Debug)]
@@ -85,11 +99,15 @@ impl Lifecycle {
             state: State::Closed,
             backoff: BACKOFF_FIRST,
             retry_at: None,
+            on_demand: false,
+            wanted: false,
         };
+        let mut chans = [c; 2];
+        chans[Channel::Bulk.index()].on_demand = true;
         Self {
             remote: false,
             next_gen: 1,
-            chans: [c; 2],
+            chans,
         }
     }
 
@@ -103,23 +121,33 @@ impl Lifecycle {
         }
     }
 
+    fn begin_open(&mut self, ch: Channel) -> LifeAction {
+        let g = self.next_gen;
+        self.next_gen += 1;
+        let c = &mut self.chans[ch.index()];
+        c.retry_at = None;
+        c.state = State::Opening(g);
+        LifeAction::Open(ch, g)
+    }
+
     pub fn on_session(&mut self, ev: SessionChange) -> Vec<LifeAction> {
         let mut out = Vec::new();
         match ev {
             SessionChange::RemoteConnect => {
                 self.remote = true;
                 for ch in Channel::ALL {
+                    let c = &mut self.chans[ch.index()];
                     // A reconnect gives a new client; the old channel is dead.
-                    if matches!(self.chans[ch.index()].state, State::Open(_)) {
+                    if matches!(c.state, State::Open(_)) {
                         out.push(LifeAction::Close(ch));
                     }
-                    let c = &mut self.chans[ch.index()];
+                    c.state = State::Closed;
                     c.backoff = BACKOFF_FIRST;
                     c.retry_at = None;
-                    let g = self.next_gen;
-                    self.next_gen += 1;
-                    self.chans[ch.index()].state = State::Opening(g);
-                    out.push(LifeAction::Open(ch, g));
+                    c.wanted = false;
+                    if !c.on_demand {
+                        out.push(self.begin_open(ch));
+                    }
                 }
             }
             SessionChange::RemoteDisconnect | SessionChange::ConsoleConnect => {
@@ -132,6 +160,7 @@ impl Lifecycle {
                     // A pending open is now stale; its result is dropped.
                     c.state = State::Closed;
                     c.retry_at = None;
+                    c.wanted = false;
                 }
             }
             SessionChange::Logoff => out.push(LifeAction::Shutdown),
@@ -143,9 +172,34 @@ impl Lifecycle {
         out
     }
 
+    /// The protocol asks for an on-demand channel (Bulk after `HelloAck`).
+    pub fn request_open(&mut self, ch: Channel) -> Vec<LifeAction> {
+        let c = &mut self.chans[ch.index()];
+        c.wanted = true;
+        if !self.remote || c.state != State::Closed {
+            return Vec::new();
+        }
+        c.backoff = BACKOFF_FIRST;
+        vec![self.begin_open(ch)]
+    }
+
+    /// The protocol closes a channel (failed authentication, rejected
+    /// pairing, Bulk after Ctl). No retry before the next connect or
+    /// request; a pending open's result is dropped. Returns whether the
+    /// channel was open.
+    pub fn close(&mut self, ch: Channel) -> bool {
+        let c = &mut self.chans[ch.index()];
+        let was_open = matches!(c.state, State::Open(_));
+        c.state = State::Closed;
+        c.retry_at = None;
+        c.wanted = false;
+        was_open
+    }
+
     /// The result of an `Open`. Returns whether the channel should be kept:
     /// `false` for a stale success, which the caller closes again.
     pub fn on_open_result(&mut self, ch: Channel, generation: u64, ok: bool, now: Instant) -> bool {
+        let remote = self.remote;
         let c = &mut self.chans[ch.index()];
         if c.state != State::Opening(generation) {
             return false;
@@ -157,28 +211,30 @@ impl Lifecycle {
             true
         } else {
             c.state = State::Closed;
-            Self::schedule_retry(c, self.remote, now);
+            let run = c.should_run(remote);
+            Self::schedule_retry(c, run, now);
             false
         }
     }
 
     /// The channel closed by itself (client closed it, read error): retried
-    /// with backoff while the session is connected. With `retry` false (the
-    /// protocol closed it, for example after failed authentication) it
-    /// stays closed until the next client connect. Returns whether the event
-    /// was for the current channel.
+    /// with backoff while the session is connected. With `retry` false it
+    /// stays closed until the next client connect. Returns whether the
+    /// event was for the current channel.
     pub fn on_closed(&mut self, ch: Channel, generation: u64, now: Instant, retry: bool) -> bool {
+        let remote = self.remote;
         let c = &mut self.chans[ch.index()];
         if c.state != State::Open(generation) {
             return false;
         }
         c.state = State::Closed;
-        Self::schedule_retry(c, self.remote && retry, now);
+        let run = c.should_run(remote) && retry;
+        Self::schedule_retry(c, run, now);
         true
     }
 
-    fn schedule_retry(c: &mut Chan, remote: bool, now: Instant) {
-        if !remote {
+    fn schedule_retry(c: &mut Chan, run: bool, now: Instant) {
+        if !run {
             c.retry_at = None;
             return;
         }
@@ -190,16 +246,10 @@ impl Lifecycle {
     pub fn poll(&mut self, now: Instant) -> Vec<LifeAction> {
         let mut out = Vec::new();
         for ch in Channel::ALL {
-            let due = self.chans[ch.index()]
-                .retry_at
-                .is_some_and(|t| t <= now && self.remote);
+            let c = &self.chans[ch.index()];
+            let due = c.retry_at.is_some_and(|t| t <= now) && c.should_run(self.remote);
             if due {
-                let g = self.next_gen;
-                self.next_gen += 1;
-                let c = &mut self.chans[ch.index()];
-                c.retry_at = None;
-                c.state = State::Opening(g);
-                out.push(LifeAction::Open(ch, g));
+                out.push(self.begin_open(ch));
             }
         }
         out
@@ -252,27 +302,60 @@ mod tests {
         // Locks and console events open nothing either.
         assert!(l.on_session(SessionChange::Lock).is_empty());
         assert!(l.on_session(SessionChange::ConsoleConnect).is_empty());
+        // Bulk is not opened off a remote connection.
+        assert!(l.request_open(Channel::Bulk).is_empty());
     }
 
     #[test]
-    fn remote_start_opens_both_and_reconnect_reopens() {
+    fn connect_opens_ctl_only_and_reconnect_reopens() {
         let t = Instant::now();
         let mut l = Lifecycle::new();
-        let a = l.start(true);
-        let g = gens(&a);
-        assert_eq!(g.len(), 2);
-        assert!(l.on_open_result(Channel::Ctl, g[0].1, true, t));
-        assert!(l.on_open_result(Channel::Bulk, g[1].1, true, t));
-        assert!(l.is_open(Channel::Ctl));
+        let g = gens(&l.start(true));
+        assert_eq!(g, vec![(Channel::Ctl, 1)], "Bulk waits for HelloAck");
+        assert!(l.on_open_result(Channel::Ctl, 1, true, t));
+        let b = gens(&l.request_open(Channel::Bulk));
+        assert_eq!(b, vec![(Channel::Bulk, 2)]);
+        // Asking again while opening does nothing.
+        assert!(l.request_open(Channel::Bulk).is_empty());
+        assert!(l.on_open_result(Channel::Bulk, 2, true, t));
+        assert!(l.is_open(Channel::Ctl) && l.is_open(Channel::Bulk));
         let a = l.on_session(SessionChange::RemoteConnect);
         assert_eq!(
-            &a[..2],
-            &[
+            a,
+            vec![
                 LifeAction::Close(Channel::Ctl),
-                LifeAction::Open(Channel::Ctl, 3)
+                LifeAction::Open(Channel::Ctl, 3),
+                LifeAction::Close(Channel::Bulk),
             ]
         );
-        assert_eq!(gens(&a).len(), 2);
+        assert!(!l.is_open(Channel::Bulk));
+    }
+
+    #[test]
+    fn bulk_retries_only_while_wanted() {
+        let t = Instant::now();
+        let mut l = Lifecycle::new();
+        let g = gens(&l.start(true));
+        l.on_open_result(Channel::Ctl, g[0].1, true, t);
+        let b = gens(&l.request_open(Channel::Bulk))[0].1;
+        assert!(!l.on_open_result(Channel::Bulk, b, false, t));
+        assert_eq!(l.next_deadline(), Some(t + BACKOFF_FIRST));
+        let b2 = gens(&l.poll(t + BACKOFF_FIRST));
+        assert_eq!(b2.len(), 1);
+        assert!(l.on_open_result(Channel::Bulk, b2[0].1, true, t));
+        // Closed by the client: retried while wanted.
+        assert!(l.on_closed(Channel::Bulk, b2[0].1, t, true));
+        assert!(l.next_deadline().is_some());
+        // The protocol drops it (Ctl went away): no retry, late result dropped.
+        let b3 = gens(&l.poll(t + BACKOFF_CAP));
+        assert!(!l.close(Channel::Bulk));
+        assert_eq!(l.next_deadline(), None);
+        assert!(!l.on_open_result(Channel::Bulk, b3[0].1, true, t));
+        assert!(l.poll(t + BACKOFF_CAP * 10).is_empty());
+        // Closing an open channel reports it.
+        let b4 = gens(&l.request_open(Channel::Bulk))[0].1;
+        l.on_open_result(Channel::Bulk, b4, true, t);
+        assert!(l.close(Channel::Bulk));
     }
 
     #[test]
@@ -285,10 +368,6 @@ mod tests {
             let (ch, gen_) = g[0];
             assert_eq!(ch, Channel::Ctl);
             assert!(!l.on_open_result(ch, gen_, false, t));
-            // Bulk keeps failing too; only follow Ctl's deadline.
-            if let Some(&(Channel::Bulk, bg)) = g.get(1) {
-                l.on_open_result(Channel::Bulk, bg, false, t);
-            }
             let d = l.next_deadline().unwrap();
             waits.push(d - t);
             assert!(l.poll(d - Duration::from_millis(1)).is_empty());
@@ -333,9 +412,10 @@ mod tests {
         // A close from an older channel does not touch the new one.
         assert!(!l.on_closed(Channel::Ctl, first[0].1, t, true));
         assert!(l.is_open(Channel::Ctl));
-        // Disconnect while opening: the late success is stale.
+        // Disconnect while Bulk is opening: the late success is stale.
+        let b = gens(&l.request_open(Channel::Bulk));
         l.on_session(SessionChange::RemoteDisconnect);
-        assert!(!l.on_open_result(Channel::Bulk, second[1].1, true, t));
+        assert!(!l.on_open_result(Channel::Bulk, b[0].1, true, t));
     }
 
     #[test]
@@ -349,8 +429,9 @@ mod tests {
         // A protocol close waits for the next connect.
         let g = gens(&l.poll(t + BACKOFF_FIRST));
         l.on_open_result(Channel::Ctl, g[0].1, true, t);
-        assert!(l.on_closed(Channel::Ctl, g[0].1, t, false));
+        assert!(l.close(Channel::Ctl));
         assert_eq!(l.next_deadline(), None);
+        assert!(l.poll(t + BACKOFF_CAP * 10).is_empty());
         assert_eq!(
             l.on_session(SessionChange::Logoff),
             vec![LifeAction::Shutdown]
