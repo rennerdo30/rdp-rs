@@ -1134,7 +1134,7 @@ impl App {
         let need = m.ui.thumbs_needed();
         if !need.is_empty() {
             make_thumbs(&mut m.ui, &self.sessions, &need);
-            m.ui.paint(
+            m.ui.paint_window(
                 &mut Canvas::new(&mut m.scratch, w, h),
                 &mut self.te,
                 &self.fonts,

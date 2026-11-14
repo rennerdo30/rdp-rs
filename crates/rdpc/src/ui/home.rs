@@ -1436,8 +1436,8 @@ impl Ui {
             &[
                 Hint::Keys("Enter"),
                 Hint::Text("connects"),
-                Hint::Keys("Up"),
-                Hint::Keys("Down"),
+                Hint::Keys("↑"),
+                Hint::Keys("↓"),
                 Hint::Text("other matches"),
                 Hint::Keys("Esc"),
                 Hint::Text("clears"),
@@ -1488,7 +1488,7 @@ impl Ui {
             .chain(0..conns.len())
             .collect();
         for i in rest {
-            if picks.len() >= 5 {
+            if picks.len() >= 4 {
                 break;
             }
             if !picks.iter().any(|x| x.0 == i) {
@@ -1497,7 +1497,7 @@ impl Ui {
         }
         let center = (r.x + p(56.0), r.y + r.h / 2);
         let n = picks.len();
-        let (rx, ry) = ((r.w - p(130.0)) as f32, (r.h / 2 - p(28.0)) as f32);
+        let (rx, ry) = ((r.w - p(140.0)) as f32, (r.h / 2 - p(20.0)) as f32);
         let spots: Vec<(usize, bool, f32, f32)> = picks
             .iter()
             .enumerate()
@@ -1508,7 +1508,7 @@ impl Ui {
                 } else {
                     k as f32 / (n - 1) as f32
                 };
-                let a = (-64.0 + 128.0 * t).to_radians();
+                let a = (-70.0 + 140.0 * t).to_radians();
                 let near = if k % 2 == 1 { 0.78 } else { 1.0 };
                 (
                     i,
@@ -1625,7 +1625,7 @@ impl Ui {
         );
         let y = y + p(30.0);
         let gap = p(16.0);
-        let (cols, cw) = grid_fill(w, p(260.0), p(520.0), gap, cards.len());
+        let (cols, cw) = grid_fill(w, p(260.0), p(400.0), gap, cards.len());
         let thumb_h = (cw - p(12.0)) * 9 / 16;
         self.home.thumb_size = ((cw - p(12.0)).max(1) as usize, thumb_h.max(1) as usize);
         let ch = thumb_h + p(12.0) + p(92.0);
@@ -2796,6 +2796,31 @@ mod tests {
         assert_eq!(m.selected, None, "not saved yet");
         m.key(Key::Esc);
         assert!(m.home_visible(), "Esc leads back Home");
+    }
+
+    #[test]
+    fn tab_walks_the_cards_and_enter_uses_them() {
+        let mut te = TextEngine::new();
+        let Some(fonts) = super::super::load_fonts(&mut te) else {
+            return; // no UI font on this machine (headless CI)
+        };
+        let mut m = super::super::sample_home();
+        let (w, h) = (1320usize, 860usize);
+        let mut px = vec![0u32; w * h];
+        m.paint(&mut Canvas::new(&mut px, w, h), &mut te, &fonts);
+        assert_eq!(m.focus, Some(Field::Quick), "Home starts in quick connect");
+        m.key(Key::Tab);
+        assert_eq!(
+            m.home.kfocus,
+            Some(HomeHit::Open(1)),
+            "the first live session"
+        );
+        assert_eq!(m.focus, None);
+        m.key(Key::BackTab);
+        assert_eq!(m.focus, Some(Field::Quick), "back to the field");
+        m.key(Key::Tab);
+        assert!(m.key(Key::Enter).is_none());
+        assert_eq!(m.active, Some(1), "Enter opens the focused session");
     }
 
     #[test]
