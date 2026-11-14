@@ -96,6 +96,11 @@ fn client_info_with(ci: &ClientInfo, password: &[u8]) -> Vec<u8> {
     const INFO_ENABLEWINDOWSKEY: u32 = 0x0100;
     const INFO_COMPRESSION: u32 = 0x0080;
     const INFO_RAIL: u32 = 0x8000;
+    // The client can redirect audio capture (2.2.1.11.1.1). Without it the
+    // server never creates the AUDIO_INPUT channel (MS-RDPEAI) and the
+    // session has no microphone. It is always set: the channel negotiates
+    // at logon and the Microphone switch only starts or stops capture.
+    const INFO_AUDIOCAPTURE: u32 = 0x0020_0000;
     const COMPRESSION_TYPE_SHIFT: u32 = 9; // CompressionTypeMask 0x00001E00
 
     let mut out = Vec::new();
@@ -115,6 +120,7 @@ fn client_info_with(ci: &ClientInfo, password: &[u8]) -> Vec<u8> {
             }
             | INFO_LOGONNOTIFY
             | INFO_ENABLEWINDOWSKEY
+            | INFO_AUDIOCAPTURE
             | ci.compression.map_or(0, |t| {
                 INFO_COMPRESSION | (u32::from(t & 0x0F) << COMPRESSION_TYPE_SHIFT)
             }),
@@ -869,6 +875,8 @@ mod tests {
         // INFO_COMPRESSION (0x80) with PACKET_COMPR_TYPE_RDP61 in 0x1E00.
         assert_eq!(flags(&info(Some(3))) & 0x1E80, 0x0680);
         assert_eq!(flags(&info(None)) & 0x1E80, 0);
+        // INFO_AUDIOCAPTURE: the server creates AUDIO_INPUT only with it.
+        assert_eq!(flags(&info(None)) & 0x0020_0000, 0x0020_0000);
         // TS_VIRTUALCHANNEL_CAPABILITYSET flags: VCCAPS_COMPR_SC when on.
         let vc_flags = |on| {
             let pdu = confirm_active(1, 2, 640, 480, 0x409, 32, on);

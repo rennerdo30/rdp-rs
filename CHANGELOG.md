@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **The microphone works.** Remora never told the server at logon that it can record audio (INFO_AUDIOCAPTURE), so the server never opened the microphone channel and the remote PC reported no microphone, whether **Microphone** was switched on before or after connecting. It now does, and the switch works live in a running session.
+
 ## 0.1.0-beta.4
 
 - **A sidebar that folds and resizes, and a resizable side panel.** The menu button at the sidebar's top left, **Ctrl+B** or **Collapse sidebar** in the palette folds the sidebar to a narrow rail of icons with each connection's initials, live dot and a tooltip. Drag the sidebar's right edge (200 to 480 px; narrower folds it) and the session side panel's left edge (280 to 560 px); a double-click on an edge resets it. A fitted session is resized once when the drag ends. The fold and both widths are remembered.
