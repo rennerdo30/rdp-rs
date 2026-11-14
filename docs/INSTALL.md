@@ -10,7 +10,7 @@ Download from [Releases](https://github.com/rennerdo30/rdp-rs/releases).
   - The installed copy updates itself.
   - **Coming from rdpc** (Remora's old name, 0.1.0-beta.1): rdpc updates itself to Remora, or run the Remora setup. It removes rdpc's program folder (`%LOCALAPPDATA%\Programs\rdpc`), Start menu shortcut and Installed apps entry; saved connections and settings stay.
 - **Silent install:** `remora-<version>-setup.exe /S`.
-- **Portable:** unpack `remora-<version>-windows-x64.zip` anywhere and run `remora.exe`. A portable copy reports updates but does not install them.
+- **Portable:** unpack `remora-<version>-windows-x64.zip` anywhere and run `remora.exe`. A portable copy does not look for updates; new versions are on the releases page.
 - **Uninstall:** Settings → Apps → Installed apps → Remora, or `"%LOCALAPPDATA%\Programs\Remora\uninstall.exe" /S`. Your saved connections in `%APPDATA%\rdp-rs` stay.
 
 Builds are not signed yet, so SmartScreen warns on the first run (More info → Run anyway).

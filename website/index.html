@@ -1,0 +1,282 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Remora: every remote PC in one window</title>
+  <meta name="description" content="Remora is a free, open-source Remote Desktop client for Windows, written from scratch in Rust. Every connection in one window, live thumbnails, a command palette, live sharing switches and an encrypted password vault.">
+  <meta name="color-scheme" content="dark light">
+  <meta name="theme-color" content="#0a0c10" media="(prefers-color-scheme: dark)">
+  <meta name="theme-color" content="#eceff3" media="(prefers-color-scheme: light)">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self'; style-src 'self'; script-src 'self'; connect-src https://api.github.com; base-uri 'none'; form-action 'none'">
+  <link rel="canonical" href="https://remora.renner.dev/">
+  <link rel="icon" href="/favicon.ico" sizes="any">
+  <link rel="icon" href="assets/logo.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="assets/icon-180.png">
+  <link rel="manifest" href="site.webmanifest">
+  <meta property="og:title" content="Remora">
+  <meta property="og:description" content="Every remote PC in one window. A free Remote Desktop client for Windows, written from scratch in Rust.">
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://remora.renner.dev/">
+  <meta property="og:image" content="https://remora.renner.dev/assets/og.jpg">
+  <meta name="twitter:card" content="summary_large_image">
+  <link rel="stylesheet" href="style.css">
+  <script src="releases.js" defer></script>
+</head>
+<body>
+  <a class="skip" href="#main">Skip to content</a>
+
+  <header class="top">
+    <a class="brand" href="#top" aria-label="Remora home">
+      <img src="assets/logo.svg" width="30" height="30" alt="">
+      <span>Remora</span>
+    </a>
+    <nav aria-label="Sections">
+      <a href="#features">Features</a>
+      <a href="#security">Security</a>
+      <a href="#coverage">Coverage</a>
+      <a href="#download">Download</a>
+      <a class="nav-gh" href="https://github.com/rennerdo30/rdp-rs">GitHub</a>
+    </nav>
+  </header>
+
+  <main id="main">
+    <section class="hero" id="top" aria-labelledby="hero-title">
+      <div class="hero-copy">
+        <p class="kicker"><span class="pill">Beta</span> Free and open source, for Windows</p>
+        <h1 id="hero-title">Every remote PC. <em>One calm window.</em></h1>
+        <p class="lede">Remora is a Remote Desktop client written from scratch in Rust. Your connections sit in one window, each session in its own tab, and whatever you need is one search away.</p>
+        <div class="cta">
+          <a class="btn btn-primary" href="#download" data-release="setup">Download for Windows</a>
+          <a class="btn btn-ghost" href="https://github.com/rennerdo30/rdp-rs">View the source</a>
+        </div>
+        <ul class="facts" aria-label="At a glance">
+          <li>No account</li>
+          <li>No telemetry</li>
+          <li>Installs without admin rights</li>
+          <li>MIT or Apache-2.0</li>
+        </ul>
+      </div>
+      <figure class="shot shot-hero">
+        <picture>
+          <source media="(prefers-color-scheme: light)" srcset="assets/shots/hero-light.webp">
+          <img src="assets/shots/hero.webp" width="1600" height="1000" alt="Remora with a session open: the connections sidebar on the left, the remote desktop in a tab, and the floating session toolbar at the top with full screen, record, Ctrl+Alt+Del, disconnect and the command palette.">
+        </picture>
+      </figure>
+      <p class="caption">A real screenshot of Remora, rendered with sample connections and a stand-in remote desktop.</p>
+    </section>
+
+    <section class="band" id="features" aria-labelledby="home-title">
+      <div class="split">
+        <div class="prose">
+          <p class="eyebrow"><span class="dot dot-teal"></span>Home</p>
+          <h2 id="home-title">See every PC at a glance</h2>
+          <p>Home shows what runs now, with a live thumbnail of each session, then your favourites and the PCs you used last. Open a session with one click, or end it from its card.</p>
+          <p>Quick connect sits on top. Type a saved name, an address or <code>user@host:port</code> and press <kbd>Enter</kbd>. A running session is brought to the front instead of opening twice; a new address opens the editor to ask for the sign-in.</p>
+        </div>
+        <figure class="shot">
+          <img src="assets/shots/home.webp" width="1600" height="1000" loading="lazy" alt="The Home view: a quick connect field, two live sessions with thumbnails and their running time, and the favourites below.">
+        </figure>
+      </div>
+    </section>
+
+    <section class="band" aria-labelledby="palette-title">
+      <div class="split split-rev">
+        <figure class="shot">
+          <img src="assets/shots/palette.webp" width="1600" height="1000" loading="lazy" alt="The command palette over a session, listing this session's commands: disconnect, reconnect, full screen, and the clipboard, sound, microphone, printer and smart card switches with their state.">
+        </figure>
+        <div class="prose">
+          <p class="eyebrow"><span class="dot dot-blue"></span>Command palette</p>
+          <h2 id="palette-title">Press <kbd>Ctrl</kbd>+<kbd>K</kbd> and type</h2>
+          <p>One search field finds sessions, saved connections, RemoteApp programs, groups, settings and commands. A few letters of each word are enough; <kbd>Enter</kbd> runs the highlighted result.</p>
+          <p>Inside a session, <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>K</kbd> opens it over the remote desktop with that session's own commands first: full screen, recording, keyboard mode and every sharing switch with its current state.</p>
+        </div>
+      </div>
+    </section>
+
+    <section class="band" aria-labelledby="steps-title">
+      <div class="band-head">
+        <p class="eyebrow"><span class="dot dot-amber"></span>Connecting</p>
+        <h2 id="steps-title">Know what is happening, and what to do when it fails</h2>
+        <p class="intro">Remora shows each step of the connection as it happens. When one fails, it says why in plain words, where it stopped, and what to try, naming your server, port and user.</p>
+      </div>
+      <div class="pair">
+        <figure class="shot">
+          <img src="assets/shots/connecting.webp" width="1600" height="1000" loading="lazy" alt="Connecting to Office workstation: finding the address, connecting to port 3389 and securing the connection are done; signing in is in progress after four seconds; the licence, session setup and first picture are still to come.">
+          <figcaption>Every step, from finding the address to the first picture.</figcaption>
+        </figure>
+        <figure class="shot">
+          <img src="assets/shots/failed.webp" width="1600" height="1000" loading="lazy" alt="Wrong user name or password: a hint to check CORP\alex and the password, the steps with Sign in marked as where it stopped, and the buttons Retry, Edit connection, Copy details and Open log.">
+          <figcaption>Retry, edit the connection, copy the details or open the log.</figcaption>
+        </figure>
+      </div>
+      <p class="fine">If the network drops in the middle of a session, Remora reconnects on its own, up to five times, with the server's reconnect cookie, so you get the same session back.</p>
+    </section>
+
+    <section class="band" aria-labelledby="screens-title">
+      <div class="band-head">
+        <p class="eyebrow"><span class="dot dot-violet"></span>Monitors and programs</p>
+        <h2 id="screens-title">The desktop where you want it, or just the program</h2>
+      </div>
+      <div class="pair">
+        <article class="card-shot">
+          <figure class="shot">
+            <img src="assets/shots/monitors.webp" width="1600" height="1000" loading="lazy" alt="The connection editor's Display page: desktop size, scale, and a map of three monitors with two of them chosen.">
+          </figure>
+          <h3>Any of your monitors</h3>
+          <p>Pick monitors on a map of your desk: all of them, or only the ones you want. The session opens full screen with one window on each. <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>Break</kbd> brings it back into its tab.</p>
+        </article>
+        <article class="card-shot">
+          <figure class="shot">
+            <img src="assets/shots/remoteapp.webp" width="1600" height="1000" loading="lazy" alt="A RemoteApp session: two open program windows with Focus and Close, and the programs to launch, one running and one starting.">
+          </figure>
+          <h3>RemoteApp, seamless</h3>
+          <p>A connection can open single programs instead of the desktop. Each program window sits on your own desktop and taskbar like a local one; the tab lists the open windows and starts more.</p>
+        </article>
+      </div>
+    </section>
+
+    <section class="band" aria-labelledby="sharing-title">
+      <div class="split">
+        <div class="prose">
+          <p class="eyebrow"><span class="dot dot-green"></span>Sharing</p>
+          <h2 id="sharing-title">Share what you need, switch it live</h2>
+          <p>Everything is off until you turn it on, per connection or for a whole group. The side panel switches each one in a running session, without reconnecting.</p>
+          <ul class="ticks">
+            <li><strong>Clipboard</strong> with text and files, both ways</li>
+            <li><strong>Folders</strong> of this PC as drives in the session</li>
+            <li><strong>Printers</strong> through Easy Print, no drivers on the server</li>
+            <li><strong>Smart cards</strong> from this PC's readers</li>
+            <li><strong>Sound</strong> on the speakers you choose</li>
+            <li><strong>Microphone</strong> from the device you choose</li>
+          </ul>
+        </div>
+        <figure class="shot">
+          <img src="assets/shots/sharing.webp" width="1600" height="1000" loading="lazy" alt="A session with the side panel open on Sharing: switches for clipboard, sound, microphone, printers and smart cards, and a shared folder D:\Share.">
+        </figure>
+      </div>
+    </section>
+
+    <section class="band" aria-labelledby="quality-title">
+      <div class="split split-rev">
+        <figure class="shot">
+          <img src="assets/shots/quality.webp" width="1600" height="1000" loading="lazy" alt="The Quality panel of a session: connection speed presets from Detect automatically to Modem, colour depth, and switches for desktop background, font smoothing and desktop composition.">
+        </figure>
+        <div class="prose">
+          <p class="eyebrow"><span class="dot dot-orange"></span>Picture and keyboard</p>
+          <h2 id="quality-title">Sharp on a LAN, light on a slow link</h2>
+          <p>Pick a speed preset, or let the server measure the link. Classic bitmap updates are the default for the lowest latency; the graphics pipeline with H.264, including AVC444 for crisp text, is there to try and still marked experimental.</p>
+          <p>Every session starts with this PC's keyboard layout. Switch layouts while you work and Remora sends what you type as text, so the characters stay right. Windows keys such as <kbd>Alt</kbd>+<kbd>Tab</kbd> go to the session in full screen, always, or never, as you choose.</p>
+        </div>
+      </div>
+    </section>
+
+    <section class="band" aria-labelledby="editor-title">
+      <div class="band-head">
+        <p class="eyebrow"><span class="dot dot-pink"></span>Connections and groups</p>
+        <h2 id="editor-title">Set it up once, for a whole group</h2>
+        <p class="intro">The editor has five pages: General, Display, Experience, Sharing and Advanced. On a wide window, a summary next to it says in plain words what Connect will do. Groups carry a colour and can hand their sign-in, display settings and sharing down to every connection in them; <em>Connect all</em> opens the lot.</p>
+      </div>
+      <figure class="shot shot-wide">
+        <img src="assets/shots/editor.webp" width="1800" height="1125" loading="lazy" alt="The connection editor on its General page with name, host, group, desktop or apps, and sign-in, and a summary column: opens the whole desktop, spans 2 monitors, LAN quality, shares clipboard and sound, signs in as tester, direct connection.">
+      </figure>
+    </section>
+
+    <section class="band" id="security" aria-labelledby="security-title">
+      <div class="band-head">
+        <p class="eyebrow"><span class="dot dot-slate"></span>Security and privacy</p>
+        <h2 id="security-title">Your passwords stay yours</h2>
+      </div>
+      <div class="pair">
+        <figure class="shot">
+          <img src="assets/shots/vault.webp" width="1600" height="1000" loading="lazy" alt="Settings: the vault with unlock on this PC, master password change, automatic lock after 15 minutes, and encrypted export.">
+        </figure>
+        <figure class="shot">
+          <img src="assets/shots/certificate.webp" width="1600" height="1000" loading="lazy" alt="Verify the server: the first connection to 10.0.0.15 shows the certificate's SHA-256 fingerprint with Cancel and Trust and connect.">
+        </figure>
+      </div>
+      <ul class="grid4">
+        <li>
+          <h3>Network Level Authentication</h3>
+          <p>Sign-in happens before the server shows anything: CredSSP with NTLMv2, implemented in Remora, or Kerberos through Windows with single sign-on.</p>
+        </li>
+        <li>
+          <h3>An encrypted vault</h3>
+          <p>Passwords are saved only after you set a master password: Argon2id and XChaCha20-Poly1305, locked again when idle. Without one, no password is ever written.</p>
+        </li>
+        <li>
+          <h3>Certificates you checked</h3>
+          <p>The first connection to a server shows its fingerprint, and your password is sent only after you trust it. A changed certificate stops with a warning.</p>
+        </li>
+        <li>
+          <h3>Nothing phones home</h3>
+          <p>No account and no telemetry. Besides your RDP connections, an installed copy asks GitHub once a day for a new release. The <a href="privacy.html">privacy page</a> has the details.</p>
+        </li>
+      </ul>
+    </section>
+
+    <section class="band" aria-labelledby="themes-title">
+      <div class="band-head">
+        <p class="eyebrow"><span class="dot dot-teal"></span>Themes</p>
+        <h2 id="themes-title">Dark, light, or whatever Windows uses</h2>
+        <p class="intro">Dark is the default. Light has the same layout; System follows the Windows app theme as it changes.</p>
+      </div>
+      <div class="pair themes">
+        <figure class="shot">
+          <img src="assets/shots/home.webp" width="1600" height="1000" loading="lazy" alt="The Home view in the dark theme.">
+          <figcaption>Dark</figcaption>
+        </figure>
+        <figure class="shot">
+          <img src="assets/shots/home-light.webp" width="1600" height="1000" loading="lazy" alt="The Home view in the light theme.">
+          <figcaption>Light</figcaption>
+        </figure>
+      </div>
+    </section>
+
+    <section class="band" id="coverage" aria-labelledby="coverage-title">
+      <div class="split">
+        <div class="prose">
+          <p class="eyebrow"><span class="dot dot-blue"></span>Under the hood</p>
+          <h2 id="coverage-title">Written from the specifications</h2>
+          <p>Remora's protocol stack is its own, built from Microsoft's published Open Specifications: the connection sequence, NLA, the bitmap codecs, the graphics pipeline, virtual channels, clipboard and drive redirection. Only TLS and a few cryptographic building blocks come from libraries, and Windows decodes H.264.</p>
+          <p>The window is drawn on the CPU with no frame loop, and only changed rectangles reach the screen. That keeps it cheap when Remora itself runs inside a remote session.</p>
+        </div>
+        <div class="coverage">
+          <p class="coverage-num"><strong>78 %</strong> of a full RDP client</p>
+          <div class="meter" role="img" aria-label="29 of 38 features done, 1 partly done"><span class="meter-done"></span><span class="meter-part"></span></div>
+          <p class="coverage-legend"><span class="key key-done"></span>29 of 38 features done <span class="key key-part"></span>1 partly</p>
+          <p>That covers the everyday desktop: logon with NLA, the picture, keyboard and mouse, touch and pen, clipboard, drives, printers, smart cards, sound and microphone, RemoteApp and multiple monitors.</p>
+          <p class="muted">Not yet: UDP transport, RD Gateway over RPC, legacy RDP security without TLS, serial ports, USB devices, cameras, plug and play devices, video redirection and shadowing.</p>
+          <p><a href="https://github.com/rennerdo30/rdp-rs#rdp-coverage-about-78-">The full feature table</a></p>
+        </div>
+      </div>
+    </section>
+
+    <section class="band download" id="download" aria-labelledby="download-title">
+      <div class="band-head">
+        <h2 id="download-title">Get Remora</h2>
+        <p class="intro">Remora is in beta. It connects to Windows with NLA and works for everyday use; the graphics pipeline is experimental, and not every kind of server has been tried yet. Expect rough edges, and please <a href="https://github.com/rennerdo30/rdp-rs/issues">report them</a>. <span data-release="found" hidden>The newest release is <strong data-release="version"></strong>, from <span data-release="date"></span>.</span></p>
+      </div>
+      <div class="dl-grid">
+        <div class="dl">
+          <h3>Setup <span class="tag">recommended</span></h3>
+          <p>Installs for your user only, without admin rights, with a Start menu entry. It changes neither PATH nor file types, and it keeps itself up to date.</p>
+          <p class="cta"><a class="btn btn-primary" href="https://github.com/rennerdo30/rdp-rs/releases" data-release="setup">Download the setup</a></p>
+        </div>
+        <div class="dl">
+          <h3>Portable</h3>
+          <p>A zip to unpack anywhere and run. It changes nothing on your PC and does not check for updates.</p>
+          <p class="cta"><a class="btn" href="https://github.com/rennerdo30/rdp-rs/releases" data-release="zip">Download the zip</a></p>
+        </div>
+      </div>
+      <p class="fine">For 64-bit Windows. The setup is not code-signed yet, so Windows may warn on the first run: choose <em>More info</em>, then <em>Run anyway</em>. Every file is listed with its SHA-256 in <a href="https://github.com/rennerdo30/rdp-rs/releases" data-release="sums">SHA256SUMS.txt</a>; the <a href="https://github.com/rennerdo30/rdp-rs/blob/main/docs/INSTALL.md">install guide</a> shows how to check it. New here? Start with <a href="https://github.com/rennerdo30/rdp-rs/blob/main/docs/GETTING-STARTED.md">Getting started</a>.</p>
+    </section>
+  </main>
+
+  <footer class="foot">
+    <p><img src="assets/logo.svg" width="20" height="20" alt=""> Remora, a project by <a href="https://github.com/rennerdo30">rennerdo30</a>. Licensed under MIT or Apache-2.0.</p>
+    <p><a href="https://github.com/rennerdo30/rdp-rs">GitHub</a> <a href="https://github.com/rennerdo30/rdp-rs/releases">Releases</a> <a href="https://github.com/rennerdo30/rdp-rs/blob/main/docs/USER-GUIDE.md">User guide</a> <a href="https://github.com/rennerdo30/rdp-rs/blob/main/CHANGELOG.md">Changelog</a> <a href="privacy.html">Privacy</a> <a href="https://github.com/rennerdo30/rdp-rs/issues">Report an issue</a></p>
+    <p class="legal">Remora is not affiliated with or endorsed by Microsoft. "Remote Desktop Protocol" is used descriptively; the implementation follows Microsoft's published Open Specifications. Windows is a trademark of the Microsoft group of companies. The screenshots show sample connections and a stand-in remote desktop drawn by Remora for these pages.</p>
+  </footer>
+</body>
+</html>

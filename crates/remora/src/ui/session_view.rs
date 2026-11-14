@@ -1488,11 +1488,14 @@ impl Ui {
     pub fn paint_snapshot(&mut self, cv: &mut Canvas, te: &mut TextEngine, f: &Fonts) {
         self.paint_window(cv, te, f);
         if let Some((_, area)) = self.session_area {
-            paint_sample_picture(cv, area);
+            paint_sample_picture(cv, area, SAMPLE_TINT, Some((te, f)));
         }
         self.paint_overlays(cv, te, f);
     }
 }
+
+/// The wallpaper tint of the sample remote desktop ("Office workstation").
+pub const SAMPLE_TINT: u32 = 0x2ec4b6;
 
 fn inflate(r: Rect, s: f32) -> Rect {
     let b = (PILL_BLUR * s).ceil() as i32 + 1;
@@ -1533,44 +1536,433 @@ fn cancel_rect(te: &mut TextEngine, f: &Fonts, s: f32, card: Rect) -> Rect {
     )
 }
 
-/// A stand-in remote desktop for snapshots: wallpaper, a window, a taskbar.
-pub fn paint_sample_picture(cv: &mut Canvas, r: Rect) {
+/// A stand-in remote desktop for snapshots and the Home view's sample
+/// thumbnails: a wallpaper washed towards `tint`, a report window, a code
+/// window in front and a taskbar. With `text` the windows get their words
+/// and the taskbar its clock; without it, bars stand in for the words.
+pub fn paint_sample_picture(
+    cv: &mut Canvas,
+    r: Rect,
+    tint: u32,
+    text: Option<(&mut TextEngine, &Fonts)>,
+) {
     let old = cv.set_clip(r);
-    for y in 0..r.h {
-        let t = (y * 255 / r.h.max(1)) as u32;
-        cv.fill(
-            Rect::new(r.x, r.y + y, r.w, 1),
-            theme::mix(0x1f4e79, 0x0b7a75, t),
+    let (w, h) = (r.w.max(1), r.h.max(1));
+    // Sized as if the remote desktop were 1280 x 800.
+    let s = (w as f32 / 1280.0).min(h as f32 / 800.0).clamp(0.3, 3.0);
+    let mut pen = SamplePen { cv, text, s };
+    let p = |v: f32| (v * s).round() as i32;
+
+    // Wallpaper: night blue towards the tint, with a soft bloom low right.
+    let night = 0x0a1628;
+    let (bx, by) = (r.x + w * 7 / 10, r.y + h * 4 / 5);
+    let bloom = w.max(h) as f32 * 0.62;
+    for y in 0..h {
+        let t = (y * 150 / h) as u32;
+        let row = Rect::new(r.x, r.y + y, w, 1);
+        pen.cv
+            .fill(row, theme::mix(night, theme::mix(night, tint, 120), t));
+        let dy = (r.y + y - by) as f32;
+        for k in 0..24 {
+            let rr = bloom * (1.0 - k as f32 * 0.038);
+            if dy.abs() < rr {
+                let half = (rr * rr - dy * dy).sqrt() as i32;
+                pen.cv
+                    .fill_alpha(Rect::new(bx - half, r.y + y, 2 * half, 1), tint, 5);
+            }
+        }
+    }
+
+    // Desktop folders with their names.
+    for (i, name) in ["Projects", "Reports", "Shared"].iter().enumerate() {
+        let x = r.x + p(26.0);
+        let y = r.y + p(26.0) + i as i32 * p(86.0);
+        pen.cv.fill_round(
+            Rect::new(x, y - p(5.0), p(20.0), p(12.0)),
+            3.0 * s,
+            0xd9a83f,
+        );
+        pen.cv
+            .fill_round(Rect::new(x, y, p(46.0), p(36.0)), 4.0 * s, 0xf5cf6b);
+        pen.label(false, 11.0, x - p(4.0), y + p(44.0), name, 0xf2f5f8);
+    }
+
+    // The report window.
+    let win = Rect::new(
+        r.x + p(130.0),
+        r.y + p(88.0),
+        (w * 56 / 100).max(p(300.0)),
+        (h * 64 / 100).max(p(220.0)),
+    );
+    sample_shadow(pen.cv, win, s);
+    pen.cv.fill_round(win, 8.0 * s, 0xf7f8fa);
+    pen.cv
+        .fill_round(Rect::new(win.x, win.y, win.w, p(38.0)), 8.0 * s, 0xe9edf2);
+    pen.cv
+        .fill(Rect::new(win.x, win.y + p(30.0), win.w, p(8.0)), 0xe9edf2);
+    pen.cv.fill_round(
+        Rect::new(win.x + p(14.0), win.y + p(12.0), p(14.0), p(14.0)),
+        3.0 * s,
+        0x3d7bd9,
+    );
+    pen.label(
+        true,
+        12.0,
+        win.x + p(36.0),
+        win.y + p(11.0),
+        "Quarterly report",
+        0x2a323d,
+    );
+    sample_caption(pen.cv, win, s, 0x4b5563);
+    // Navigation pane.
+    let nav = Rect::new(win.x, win.y + p(38.0), p(156.0), win.h - p(38.0) - p(8.0));
+    pen.cv.fill(nav, 0xeff2f6);
+    for (i, item) in ["Overview", "Revenue", "Costs", "Regions", "Team"]
+        .iter()
+        .enumerate()
+    {
+        let row = Rect::new(
+            nav.x + p(8.0),
+            nav.y + p(12.0) + i as i32 * p(34.0),
+            nav.w - p(16.0),
+            p(28.0),
+        );
+        if i == 0 {
+            pen.cv.fill_round(row, 5.0 * s, 0xdbe6f3);
+            pen.cv.fill_round(
+                Rect::new(row.x, row.y + p(7.0), p(3.0), p(14.0)),
+                1.5 * s,
+                0x3d7bd9,
+            );
+        }
+        let c = if i == 0 { 0x1d3557 } else { 0x4b5563 };
+        pen.label(i == 0, 12.0, row.x + p(14.0), row.y + p(6.0), item, c);
+    }
+    // Content: a heading, three figures and a chart.
+    let cx = nav.right() + p(24.0);
+    let cw = win.right() - p(24.0) - cx;
+    let mut y = nav.y + p(18.0);
+    pen.label(true, 20.0, cx, y, "Overview", 0x1f2937);
+    pen.label(
+        false,
+        12.0,
+        cx,
+        y + p(30.0),
+        "Third quarter, all regions",
+        0x6b7280,
+    );
+    y += p(62.0);
+    let gap = p(14.0);
+    let fw = (cw - 2 * gap) / 3;
+    let figures = [
+        ("Revenue", "4.2 M", "+8 %", 0x16a34a),
+        ("Orders", "18,410", "+3 %", 0x16a34a),
+        ("Returns", "1.9 %", "-0.4", 0x3d7bd9),
+    ];
+    for (i, (label, value, delta, dc)) in figures.iter().enumerate() {
+        let card = Rect::new(cx + i as i32 * (fw + gap), y, fw, p(74.0));
+        pen.cv.fill_round(card, 6.0 * s, 0xdfe4ea);
+        pen.cv.fill_round(card.inset(1, 1), 5.0 * s, 0xffffff);
+        pen.label(
+            false,
+            11.0,
+            card.x + p(14.0),
+            card.y + p(12.0),
+            label,
+            0x6b7280,
+        );
+        pen.label(
+            true,
+            20.0,
+            card.x + p(14.0),
+            card.y + p(32.0),
+            value,
+            0x111827,
+        );
+        pen.label(
+            true,
+            11.0,
+            card.right() - p(46.0),
+            card.y + p(12.0),
+            delta,
+            *dc,
         );
     }
-    // Desktop icons.
-    for i in 0..4 {
-        let ir = Rect::new(r.x + 24, r.y + 24 + i * 76, 44, 44);
-        cv.fill_round(ir, 8.0, theme::mix(0xffffff, 0x1f4e79, 120));
+    y += p(74.0) + gap;
+    let chart = Rect::new(cx, y, cw, (win.bottom() - p(20.0) - y).max(p(40.0)));
+    pen.cv.fill_round(chart, 6.0 * s, 0xdfe4ea);
+    pen.cv.fill_round(chart.inset(1, 1), 5.0 * s, 0xffffff);
+    pen.label(
+        true,
+        12.0,
+        chart.x + p(14.0),
+        chart.y + p(12.0),
+        "Revenue by month",
+        0x1f2937,
+    );
+    let plot = Rect::new(
+        chart.x + p(16.0),
+        chart.y + p(40.0),
+        chart.w - p(32.0),
+        (chart.h - p(56.0)).max(p(10.0)),
+    );
+    for g in 0..4 {
+        let gy = plot.y + g * plot.h / 3;
+        pen.cv.fill(Rect::new(plot.x, gy, plot.w, 1), 0xeceff3);
     }
-    // A window.
-    let ww = (r.w * 3 / 5).max(200);
-    let wh = (r.h * 3 / 5).max(160);
-    let w = Rect::new(r.x + r.w / 5, r.y + r.h / 6, ww, wh);
-    cv.fill_round(w.inset(-1, -1), 9.0, 0x16324f);
-    cv.fill_round(w, 8.0, 0xf3f3f3);
-    cv.fill(Rect::new(w.x, w.y + 8, w.w, 26), 0xe6e9ee);
-    cv.fill_round(Rect::new(w.x, w.y, w.w, 34), 8.0, 0xe6e9ee);
-    for row in 0..((wh - 60) / 22).max(0) {
-        let lw = ww - 60 - (row * 37 % 160);
-        cv.fill(
-            Rect::new(w.x + 24, w.y + 52 + row * 22, lw.max(40), 8),
-            0xd5dbe3,
+    let bars = [42, 55, 48, 63, 58, 71, 66, 78, 74, 86, 81, 92];
+    let slot = plot.w / bars.len() as i32;
+    let mut line = Vec::new();
+    for (i, v) in bars.iter().enumerate() {
+        let bh = plot.h * v / 100;
+        let bx = plot.x + i as i32 * slot + slot / 5;
+        let bar = Rect::new(bx, plot.bottom() - bh, slot * 3 / 5, bh);
+        let c = if i == bars.len() - 1 {
+            0x3d7bd9
+        } else {
+            0xb9d0ef
+        };
+        pen.cv.fill_round(bar, 2.0 * s, c);
+        line.push((
+            (bx + slot * 3 / 10) as f32,
+            (plot.bottom() - plot.h * (v - 18) / 100) as f32,
+        ));
+    }
+    pen.cv.stroke(&line, 2.0 * s, 0x0f9488);
+
+    // The code window, in front.
+    let code = Rect::new(
+        r.x + w * 46 / 100,
+        r.y + h * 36 / 100,
+        (w * 46 / 100).max(p(260.0)),
+        (h * 43 / 100).max(p(180.0)),
+    );
+    sample_shadow(pen.cv, code, s);
+    pen.cv.fill_round(code, 8.0 * s, 0x1b1d23);
+    pen.cv.fill_round(
+        Rect::new(code.x, code.y, code.w, p(36.0)),
+        8.0 * s,
+        0x25272e,
+    );
+    pen.cv.fill(
+        Rect::new(code.x, code.y + p(28.0), code.w, p(8.0)),
+        0x25272e,
+    );
+    pen.label(
+        false,
+        12.0,
+        code.x + p(16.0),
+        code.y + p(10.0),
+        "session.rs",
+        0xc9ced6,
+    );
+    sample_caption(pen.cv, code, s, 0xaab1bb);
+    let (kw, ty, fun, st, id, cm, pu, num) = (
+        0xc586c0, 0x4ec9b0, 0xdcdcaa, 0xce9178, 0x9cdcfe, 0x6a9955, 0xd4d4d4, 0xb5cea8,
+    );
+    let lines: [(i32, &[(&str, u32)]); 12] = [
+        (0, &[("// Share the clipboard, fit the picture.", cm)]),
+        (
+            0,
+            &[
+                ("pub fn ", kw),
+                ("start", fun),
+                ("(cfg: ", pu),
+                ("Config", ty),
+                (") -> ", pu),
+                ("Result", ty),
+                ("<", pu),
+                ("Session", ty),
+                ("> {", pu),
+            ],
+        ),
+        (
+            1,
+            &[
+                ("let ", kw),
+                ("host", id),
+                (" = cfg.", pu),
+                ("host", fun),
+                ("();", pu),
+            ],
+        ),
+        (
+            1,
+            &[
+                ("let mut ", kw),
+                ("s", id),
+                (" = ", pu),
+                ("Session", ty),
+                ("::", pu),
+                ("connect", fun),
+                ("(host)?;", pu),
+            ],
+        ),
+        (
+            1,
+            &[
+                ("s.", pu),
+                ("share_clipboard", fun),
+                ("(", pu),
+                ("true", kw),
+                (");", pu),
+            ],
+        ),
+        (1, &[("s.", pu), ("fit_to_window", fun), ("();", pu)]),
+        (
+            1,
+            &[
+                ("log", fun),
+                ("(", pu),
+                ("\"connected to {host}\"", st),
+                (");", pu),
+            ],
+        ),
+        (1, &[("Ok", ty), ("(s)", pu)]),
+        (0, &[("}", pu)]),
+        (0, &[]),
+        (0, &[("// Wait this long for the first picture.", cm)]),
+        (
+            0,
+            &[
+                ("const ", kw),
+                ("TIMEOUT_S", id),
+                (": ", pu),
+                ("u64", ty),
+                (" = ", pu),
+                ("30", num),
+                (";", pu),
+            ],
+        ),
+    ];
+    let lh = p(22.0);
+    let gutter = code.x + p(16.0);
+    let tx = code.x + p(48.0);
+    for (i, (indent, tokens)) in lines.iter().enumerate() {
+        let ly = code.y + p(50.0) + i as i32 * lh;
+        if ly + lh > code.bottom() - p(8.0) {
+            break;
+        }
+        if i == 5 {
+            pen.cv
+                .fill(Rect::new(code.x, ly - p(3.0), code.w, lh), 0x262a33);
+        }
+        pen.label(false, 11.0, gutter, ly, &(i + 1).to_string(), 0x5c6370);
+        let mut x = tx + indent * p(28.0);
+        for (t, c) in tokens.iter() {
+            x = pen.label(false, 12.0, x, ly, t, *c);
+        }
+    }
+
+    // Taskbar: the apps in the middle, a clock on the right.
+    let tb = Rect::new(r.x, r.bottom() - p(46.0), w, p(46.0));
+    pen.cv.fill(tb, 0x121821);
+    pen.cv.fill(Rect::new(tb.x, tb.y, tb.w, 1), 0x2a3340);
+    let icons = [tint, 0x4c8dff, 0xf0b230, 0xe9edf2, 0x48c774, 0x8f6cff];
+    let iw = p(30.0);
+    let step = p(44.0);
+    let x0 = tb.x + (tb.w - icons.len() as i32 * step) / 2;
+    for (i, c) in icons.iter().enumerate() {
+        let ir = Rect::new(
+            x0 + i as i32 * step + (step - iw) / 2,
+            tb.y + p(8.0),
+            iw,
+            iw,
         );
+        pen.cv.fill_round(ir, 6.0 * s, *c);
+        if i == 1 || i == 4 {
+            pen.cv.fill_round(
+                Rect::new(ir.x + iw / 2 - p(4.0), tb.bottom() - p(5.0), p(8.0), p(3.0)),
+                1.5 * s,
+                0x9fb3c8,
+            );
+        }
     }
-    // Taskbar.
-    let tb = Rect::new(r.x, r.bottom() - 44, r.w, 44);
-    cv.fill(tb, 0x1b1f27);
-    for i in 0..5 {
-        let ir = Rect::new(r.x + r.w / 2 - 110 + i * 46, tb.y + 8, 28, 28);
-        cv.fill_round(ir, 6.0, if i == 0 { 0x4cc2ff } else { 0x3a4250 });
+    pen.label(
+        false,
+        11.0,
+        tb.right() - p(66.0),
+        tb.y + p(6.0),
+        "14:32",
+        0xe9edf2,
+    );
+    pen.label(
+        false,
+        11.0,
+        tb.right() - p(82.0),
+        tb.y + p(24.0),
+        "2026-11-14",
+        0xaab4c0,
+    );
+    pen.cv.set_clip(old);
+}
+
+/// Draws the sample desktop's words, or bars of about their width.
+struct SamplePen<'a, 'b, 'c> {
+    cv: &'a mut Canvas<'b>,
+    text: Option<(&'c mut TextEngine, &'c Fonts)>,
+    s: f32,
+}
+
+impl SamplePen<'_, '_, '_> {
+    /// `text` (`size` logical) with its top at `y`; returns the end x.
+    fn label(&mut self, semi: bool, size: f32, x: i32, y: i32, text: &str, color: u32) -> i32 {
+        let s = self.s;
+        let font = if semi { Font::Semi } else { Font::Regular };
+        match self.text.as_mut() {
+            Some((te, f)) => {
+                let base = y + (size * 1.05 * s).round() as i32;
+                Kit::new(self.cv, te, f, s).text(font, size, x, base, text, color, i32::MAX / 4)
+            }
+            None => {
+                let tw = (text.chars().count() as f32 * size * 0.52 * s) as i32;
+                let bh = (size * 0.5 * s).max(1.0) as i32;
+                if !text.trim().is_empty() {
+                    let bar = Rect::new(x, y + (size * 0.4 * s) as i32, tw, bh);
+                    self.cv.fill_round(bar, bh as f32 / 2.0, color);
+                }
+                x + tw
+            }
+        }
     }
-    cv.set_clip(old);
+}
+
+/// Minimise, maximise and close glyphs at a sample window's top right.
+fn sample_caption(cv: &mut Canvas, win: Rect, s: f32, color: u32) {
+    let p = |v: f32| (v * s).round() as i32;
+    let cy = win.y + p(19.0);
+    let x = win.right() - p(112.0);
+    cv.fill(Rect::new(x, cy, p(10.0), 1.max(p(1.0))), color);
+    cv.stroke_rect(Rect::new(x + p(40.0), cy - p(5.0), p(10.0), p(10.0)), color);
+    let (ax, ay) = ((x + p(80.0)) as f32, (cy - p(5.0)) as f32);
+    let d = p(10.0) as f32;
+    cv.stroke(&[(ax, ay), (ax + d, ay + d)], 1.2 * s, color);
+    cv.stroke(&[(ax + d, ay), (ax, ay + d)], 1.2 * s, color);
+}
+
+/// A soft shadow under a sample window.
+fn sample_shadow(cv: &mut Canvas, win: Rect, s: f32) {
+    let b = (18.0 * s).max(2.0);
+    let dy = (6.0 * s) as i32;
+    let rad = 8.0 * s;
+    let n = b.ceil() as i32;
+    let clip = cv.clip();
+    for y in (win.y - n + dy).max(clip.y)..(win.bottom() + n + dy).min(clip.bottom()) {
+        for x in (win.x - n).max(clip.x)..(win.right() + n).min(clip.right()) {
+            if win.contains(x, y) {
+                continue;
+            }
+            let (px, py) = (x as f32 + 0.5, (y - dy) as f32 + 0.5);
+            let qx = (px - (win.x as f32 + win.w as f32 / 2.0)).abs() - (win.w as f32 / 2.0 - rad);
+            let qy = (py - (win.y as f32 + win.h as f32 / 2.0)).abs() - (win.h as f32 / 2.0 - rad);
+            let d = (qx.max(0.0).powi(2) + qy.max(0.0).powi(2)).sqrt() - rad;
+            let t = (1.0 - d.max(0.0) / b).clamp(0.0, 1.0);
+            let a = (110.0 * t * t) as u32;
+            if a > 0 {
+                cv.fill_alpha(Rect::new(x, y, 1, 1), 0x000000, a);
+            }
+        }
+    }
 }
 
 // ---- Samples for `--snapshot-ui` ----------------------------------------

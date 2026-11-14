@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Privacy · Remora</title>
+  <meta name="color-scheme" content="dark light">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self'; style-src 'self'; base-uri 'none'; form-action 'none'">
+  <link rel="canonical" href="https://remora.renner.dev/privacy.html">
+  <link rel="icon" href="/favicon.ico" sizes="any">
+  <link rel="icon" href="assets/logo.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="top">
+    <a class="brand" href="./" aria-label="Remora home">
+      <img src="assets/logo.svg" width="30" height="30" alt="">
+      <span>Remora</span>
+    </a>
+    <nav aria-label="Site">
+      <a href="./#download">Download</a>
+      <a class="nav-gh" href="https://github.com/rennerdo30/rdp-rs">GitHub</a>
+    </nav>
+  </header>
+
+  <main class="doc">
+    <h1>Privacy</h1>
+
+    <h2>This website</h2>
+    <p>This site sets no cookies, uses no analytics and loads nothing from other sites except one request: your browser asks the public GitHub API for the newest Remora release, so the download buttons can link its files. GitHub receives that request like any other visit to GitHub. The site is hosted on GitHub Pages, which logs visitor IP addresses in its own server logs; see the <a href="https://docs.github.com/en/site-policy/privacy-policies/github-general-privacy-statement">GitHub privacy statement</a>.</p>
+
+    <h2>Remora</h2>
+    <p>Remora has no account and no telemetry. It talks to the network for two things only:</p>
+    <ul>
+      <li><strong>Your connections.</strong> Remora connects to the servers you choose, directly or through the RD Gateway you set. What you share with a session (clipboard, folders, printers, smart cards, sound, microphone) goes only to that session, and only while its switch is on. When you sign in with Windows (Kerberos), Windows asks your domain controller for the ticket, as it does for any sign-in on your network.</li>
+      <li><strong>Updates.</strong> A copy installed with the setup asks the public GitHub API once a day whether a newer Remora release exists. That request carries no information about you or your connections beyond what any web request does. When you install an update, Remora downloads the setup and its checksum file from GitHub. Portable copies never check, and Settings turns the daily check off.</li>
+    </ul>
+    <p>Everything else stays on your PC: your connections and settings in <code>%APPDATA%\rdp-rs</code>, and licences, the bitmap cache and the diagnostic log in <code>%LOCALAPPDATA%\rdp-rs</code>. The diagnostic log is off unless you turn it on, and it never contains passwords. Nothing is uploaded on its own; a log reaches us only if you attach it to a bug report yourself.</p>
+
+    <h2>Contact</h2>
+    <p>Write to <a href="mailto:support@renner.dev">support@renner.dev</a>, or open an issue on <a href="https://github.com/rennerdo30/rdp-rs/issues">GitHub</a>.</p>
+  </main>
+
+  <footer class="foot">
+    <p><img src="assets/logo.svg" width="20" height="20" alt=""> Remora, a project by <a href="https://github.com/rennerdo30">rennerdo30</a>.</p>
+    <p><a href="./">Home</a> <a href="https://github.com/rennerdo30/rdp-rs">GitHub</a></p>
+  </footer>
+</body>
+</html>

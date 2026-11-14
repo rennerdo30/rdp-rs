@@ -7101,8 +7101,8 @@ pub fn sample_panel(page: u8, fullscreen: bool) -> Ui {
     m
 }
 
-/// A running RemoteApp tab for the sample's "Office apps" connection: Excel
-/// open with a dialog, Word starting.
+/// A running RemoteApp tab for the sample's "Office apps" connection: Ledger
+/// open with a dialog, Planner starting.
 fn sample_apps_session(m: &mut Ui, active: bool) {
     let apps = m.store.connections[3].apps.clone();
     let before = m.active;
@@ -7129,19 +7129,19 @@ fn sample_apps_session(m: &mut Ui, active: bool) {
             windows: vec![
                 AppWindowItem {
                     id: 0x2001,
-                    title: "Budget 2027.xlsx - Excel".into(),
-                    icon: icon(0x1D7044),
+                    title: "Budget 2027 - Ledger".into(),
+                    icon: icon(0x3D7BD9),
                     minimized: false,
                 },
                 AppWindowItem {
                     id: 0x2002,
-                    title: "Q3 forecast.xlsx - Excel".into(),
-                    icon: icon(0x1D7044),
+                    title: "Q3 forecast - Ledger".into(),
+                    icon: icon(0x3D7BD9),
                     minimized: true,
                 },
             ],
-            running: vec!["||Excel".into()],
-            starting: vec!["||Word".into()],
+            running: vec!["||Ledger".into()],
+            starting: vec!["||Planner".into()],
         });
     }
     if !active {
@@ -7319,13 +7319,13 @@ pub fn sample(session_tab: bool) -> Ui {
             opens: Opens::Apps,
             apps: vec![
                 AppEntry {
-                    name: "Excel".into(),
-                    program: "||Excel".into(),
+                    name: "Ledger".into(),
+                    program: "||Ledger".into(),
                     ..Default::default()
                 },
                 AppEntry {
-                    name: "Word".into(),
-                    program: "||Word".into(),
+                    name: "Planner".into(),
+                    program: "||Planner".into(),
                     ..Default::default()
                 },
                 AppEntry {
@@ -7615,13 +7615,13 @@ mod tests {
             return; // no UI font on this machine (headless CI)
         };
         let mut m = sample(false);
-        // No session yet: a RemoteApp connection for Word, saved password.
+        // No session yet: a RemoteApp connection for Planner, saved password.
         let Some(Action::Connect { cfg, apps, fit, .. }) =
             click(&mut m, &mut te, &fonts, Hit::AppRow(3, 1))
         else {
             panic!("expected Connect");
         };
-        assert_eq!(cfg.remote_app.as_ref().unwrap().program, "||Word");
+        assert_eq!(cfg.remote_app.as_ref().unwrap().program, "||Planner");
         assert_eq!(cfg.password, "sample");
         assert_eq!(apps.len(), 3);
         assert!(!fit);
@@ -7655,7 +7655,7 @@ mod tests {
         m.active = Some(3);
         assert!(matches!(
             click(&mut m, &mut te, &fonts, Hit::TabLaunch(3, 1)),
-            Some(Action::ExecApp(3, a)) if a.program == "||Word"
+            Some(Action::ExecApp(3, a)) if a.program == "||Planner"
         ));
         assert!(matches!(
             click(&mut m, &mut te, &fonts, Hit::RailClose(3, 0x2002)),
@@ -7673,7 +7673,7 @@ mod tests {
         let msg = m.message.clone().unwrap().0;
         assert_eq!(
             msg,
-            "Type the password for Office apps, then click Excel again."
+            "Type the password for Office apps, then click Ledger again."
         );
         // Typed into its form: the next click connects with it.
         m.field_mut(Field::Password).set("typed");
