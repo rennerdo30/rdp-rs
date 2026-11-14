@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- **No more repeated reconnects on some servers.** RemoteFX/NSCodec surface commands and drawing orders, new in 0.1.0-beta.2, are off again by default: a Windows server failed its picture encoding with them (0x112F) or dropped the connection after the window's size was applied, which looked like five connection timeouts before compatible mode took over. Remora draws as in 0.1.0-beta.1 again; `--surface-commands` and `--drawing-orders` turn them on for testing.
 - **The microphone works.** Remora never told the server at logon that it can record audio (INFO_AUDIOCAPTURE), so the server never opened the microphone channel and the remote PC reported no microphone, whether **Microphone** was switched on before or after connecting. It now does, and the switch works live in a running session.
 
 ## 0.1.0-beta.4

@@ -3,6 +3,7 @@
 //!   remora                                       connection manager
 //!   remora <host[:port]> -u <[DOMAIN\]user> [-d domain] [--size WxH] [-v]
 //!          [--compression off|rdp4|rdp5|rdp6|rdp61] [--gfx] [--multimon] [--kerberos]
+//!          [--surface-commands] [--drawing-orders]
 //!                                                one session window
 //!   remora <host> -u <user> --screenshot out.png [--wait SECONDS]
 //!                                                headless: save the desktop as PNG
@@ -80,6 +81,10 @@ struct Args {
     microphone: Option<Option<u32>>,
     list_microphones: bool,
     gfx: bool,
+    /// `--surface-commands`, `--drawing-orders`: the experimental picture
+    /// paths (RemoteFX/NSCodec surface bits, MS-RDPEGDI orders), off by default.
+    surface_commands: bool,
+    drawing_orders: bool,
     /// `--multimon`: span the session over all local monitors.
     multimon: bool,
     /// `--kerberos`: NLA through Windows SSPI Negotiate (Kerberos, NTLM fallback).
@@ -93,6 +98,7 @@ fn usage() -> ! {
          \x20           [--gateway gwhost[:port]]   (RD Gateway, same credentials)\n\
          \x20           [--compression off|rdp4|rdp5|rdp6|rdp61]\n\
          \x20           [--gfx]   (graphics pipeline, MS-RDPEGFX)\n\
+         \x20           [--surface-commands] [--drawing-orders]   (experimental picture paths)\n\
          \x20           [--multimon]   (all local monitors, MS-RDPBCGR 2.2.1.3.6)\n\
          \x20           [--kerberos]   (Windows Negotiate: Kerberos, NTLM fallback;\n\
          \x20                           without -u: single sign-on as the logged-on user)\n\
@@ -160,6 +166,8 @@ fn parse_args() -> Args {
             }
             "--list-microphones" => a.list_microphones = true,
             "--gfx" => a.gfx = true,
+            "--surface-commands" => a.surface_commands = true,
+            "--drawing-orders" => a.drawing_orders = true,
             "--multimon" => a.multimon = true,
             "--kerberos" => a.kerberos = true,
             "-h" | "--help" => usage(),
@@ -296,6 +304,8 @@ fn main() {
         cfg.monitors = monitors::list().into_iter().map(|m| m.monitor).collect();
         eprintln!("{} local monitors: {:?}", cfg.monitors.len(), cfg.monitors);
     }
+    cfg.surface_commands = args.surface_commands;
+    cfg.drawing_orders = args.drawing_orders;
     if args.gfx {
         cfg.graphics = rdp::Graphics::Gfx;
         #[cfg(windows)]

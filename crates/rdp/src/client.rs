@@ -115,13 +115,16 @@ pub struct Config {
     pub remote_app: Option<crate::RemoteApp>,
     /// Advertise surface commands with RemoteFX and NSCodec (MS-RDPBCGR
     /// 2.2.9.2, MS-RDPRFX). With [`crate::Graphics::Gfx`] too, the server
-    /// picks; it prefers the graphics pipeline.
+    /// picks; it prefers the graphics pipeline. Off by default: a Windows
+    /// server failed its graphics encoding with it (0x112F) or dropped the
+    /// connection after a reactivation; not yet proven against servers.
     pub surface_commands: bool,
     /// Directory for client licenses and the client hardware id
     /// (MS-RDPELE 3.3.1.8, 3.3.1.9); None keeps nothing on disk.
     pub license_store: Option<std::path::PathBuf>,
     /// Advertise drawing orders, glyph, brush, offscreen and bitmap caches
-    /// (MS-RDPEGDI). Off, the server sends bitmap updates only.
+    /// (MS-RDPEGDI). Off (the default, until proven against servers), the
+    /// server sends bitmap updates only.
     pub drawing_orders: bool,
     /// Directory of the persistent bitmap cache (MS-RDPEGDI 3.2.1.4), one
     /// per server; None keeps no bitmaps between sessions.
@@ -159,9 +162,9 @@ impl Config {
             redirection: None,
             redirects: 0,
             remote_app: None,
-            surface_commands: true,
+            surface_commands: false,
             license_store: None,
-            drawing_orders: true,
+            drawing_orders: false,
             bitmap_cache_dir: None,
             progress: None,
         }
