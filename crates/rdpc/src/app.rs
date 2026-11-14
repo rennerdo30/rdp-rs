@@ -1371,7 +1371,10 @@ impl App {
                             (remembered, ui.store_mut().remembered_key_path())
                             && let Err(e) = std::fs::write(&path, blob)
                         {
-                            ui.set_message(format!("Could not remember the key: {e}"), Tone::Warning);
+                            ui.set_message(
+                                format!("Could not remember the key: {e}"),
+                                Tone::Warning,
+                            );
                         }
                         ui.vault_opened();
                     }

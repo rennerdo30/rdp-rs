@@ -131,7 +131,10 @@ impl App {
             return;
         };
         if let Some(e) = rs.sync(el, id, &state) {
-            self.message(format!("Cannot open a window for the app: {e}"), Tone::Danger);
+            self.message(
+                format!("Cannot open a window for the app: {e}"),
+                Tone::Danger,
+            );
         }
         let Some(rs) = self.rail(id) else { return };
         rs.tracker.update(&state);

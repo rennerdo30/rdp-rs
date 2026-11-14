@@ -166,7 +166,8 @@ impl Pen<'_, '_> {
     fn circle(&mut self, c: (f32, f32), r: f32) {
         let (x, y) = self.pt(c);
         // `ring` takes the outer radius.
-        self.cv.ring(x, y, r * self.k + self.w / 2.0, self.w, self.color);
+        self.cv
+            .ring(x, y, r * self.k + self.w / 2.0, self.w, self.color);
     }
 
     /// Arc points from `a0` to `a1` degrees (0 = right, 90 = down).
@@ -206,7 +207,8 @@ impl Pen<'_, '_> {
                     (py as f32 + 0.5 - self.y) / self.k,
                 );
                 if inside(g) {
-                    self.cv.fill(ffwd_render::Rect::new(px, py, 1, 1), self.color);
+                    self.cv
+                        .fill(ffwd_render::Rect::new(px, py, 1, 1), self.color);
                 }
             }
         }
@@ -259,7 +261,10 @@ pub fn draw(cv: &mut Canvas, icon: Icon, x: f32, y: f32, size: f32, color: u32) 
             for i in 0..8 {
                 let a = (i as f32 * 45.0).to_radians();
                 let (c, s) = (a.cos(), a.sin());
-                p.line(&[(8.0 + 5.2 * c, 8.0 + 5.2 * s), (8.0 + 6.1 * c, 8.0 + 6.1 * s)]);
+                p.line(&[
+                    (8.0 + 5.2 * c, 8.0 + 5.2 * s),
+                    (8.0 + 6.1 * c, 8.0 + 6.1 * s),
+                ]);
             }
         }
         Icon::Play => p.fill_tri((4.5, 2.8), (13.2, 8.0), (4.5, 13.2)),
@@ -478,14 +483,18 @@ pub fn draw(cv: &mut Canvas, icon: Icon, x: f32, y: f32, size: f32, color: u32) 
             for i in 0..8 {
                 let a = (i as f32 * 45.0).to_radians();
                 let (c, s) = (a.cos(), a.sin());
-                p.line(&[(8.0 + 4.8 * c, 8.0 + 4.8 * s), (8.0 + 6.2 * c, 8.0 + 6.2 * s)]);
+                p.line(&[
+                    (8.0 + 4.8 * c, 8.0 + 4.8 * s),
+                    (8.0 + 6.2 * c, 8.0 + 6.2 * s),
+                ]);
             }
         }
         Icon::Moon => {
             // A solid crescent: a disc minus a smaller one at its upper right.
             let (o, ro) = ((8.0f32, 8.4f32), 5.6f32);
             let (i, ri) = ((11.4f32, 5.2f32), 4.2f32);
-            let dist = |a: (f32, f32), b: (f32, f32)| ((a.0 - b.0).powi(2) + (a.1 - b.1).powi(2)).sqrt();
+            let dist =
+                |a: (f32, f32), b: (f32, f32)| ((a.0 - b.0).powi(2) + (a.1 - b.1).powi(2)).sqrt();
             let ring = |c: (f32, f32), r: f32| -> Vec<(f32, f32)> {
                 (0..=180)
                     .map(|k| {
@@ -494,8 +503,14 @@ pub fn draw(cv: &mut Canvas, icon: Icon, x: f32, y: f32, size: f32, color: u32) 
                     })
                     .collect()
             };
-            let outer: Vec<_> = ring(o, ro).into_iter().filter(|&q| dist(q, i) >= ri).collect();
-            let inner: Vec<_> = ring(i, ri).into_iter().filter(|&q| dist(q, o) <= ro).collect();
+            let outer: Vec<_> = ring(o, ro)
+                .into_iter()
+                .filter(|&q| dist(q, i) >= ri)
+                .collect();
+            let inner: Vec<_> = ring(i, ri)
+                .into_iter()
+                .filter(|&q| dist(q, o) <= ro)
+                .collect();
             p.line(&outer);
             p.line(&inner);
             p.fill_where(|q| dist(q, o) < ro && dist(q, i) > ri);

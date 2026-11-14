@@ -417,7 +417,8 @@ fn snapshot_ui(path: &str, scale: f32) -> Result<(), Box<dyn std::error::Error>>
     let fonts = ui::load_fonts(&mut te).ok_or("no usable UI font")?;
     let (w, h) = ((1320.0 * scale) as usize, (860.0 * scale) as usize);
     // Every screen, in the dark theme and again with "-light" in the name.
-    let screens: [(&str, fn() -> ui::Ui); 25] = [
+    type Screen = (&'static str, fn() -> ui::Ui);
+    let screens: [Screen; 25] = [
         ("", || ui::sample(false)),
         ("-session", || ui::sample(true)),
         ("-form-general", || ui::sample_form(0)),
@@ -436,7 +437,9 @@ fn snapshot_ui(path: &str, scale: f32) -> Result<(), Box<dyn std::error::Error>>
         ("-group", ui::sample_group),
         ("-apps-form", ui::sample_apps_form),
         ("-apps-session", ui::sample_apps_tab),
-        ("-unlock", || ui::Ui::new(store::Store::locked_sample(), 1.0)),
+        ("-unlock", || {
+            ui::Ui::new(store::Store::locked_sample(), 1.0)
+        }),
         ("-exit", ui::sample_exit),
         ("-failed", || ui::sample_tab_state(2)),
         ("-connecting", || ui::sample_tab_state(0)),
@@ -465,7 +468,16 @@ fn snapshot_ui(path: &str, scale: f32) -> Result<(), Box<dyn std::error::Error>>
         // The bar over a session spread across monitors.
         let bh = (40.0 * scale).round() as usize;
         let mut px = vec![0u32; w * bh];
-        span::paint_bar(&mut px, w, bh, scale, "Office workstation", None, &mut te, &fonts);
+        span::paint_bar(
+            &mut px,
+            w,
+            bh,
+            scale,
+            "Office workstation",
+            None,
+            &mut te,
+            &fonts,
+        );
         let out = path.replace(".png", &format!("-span-bar{light}.png"));
         write_png(&out, w, bh, &px)?;
         eprintln!("saved {w}x{bh} snapshot to {out}");

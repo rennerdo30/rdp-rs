@@ -50,7 +50,6 @@ pub struct Palette {
     pub accent_text: u32,
     /// Tinted background of accent pills, chosen segments, banners.
     pub accent_subtle: u32,
-    pub accent_border: u32,
     pub focus_ring: u32,
     pub success: u32,
     pub success_subtle: u32,
@@ -58,13 +57,15 @@ pub struct Palette {
     pub warning_subtle: u32,
     pub danger: u32,
     pub danger_subtle: u32,
-    pub danger_border: u32,
     pub info: u32,
     pub info_subtle: u32,
     /// Dims the window behind a dialog: colour and alpha (0..=255).
     pub scrim: (u32, u32),
     /// Dialog shadow: colour and peak alpha.
     pub shadow: (u32, u32),
+    /// Text and glyphs on a saturated fill (danger button, caption close,
+    /// colour swatch, switch knob).
+    pub on_solid: u32,
     /// Windows' own close-button red (caption).
     pub close_hover: u32,
     pub close_pressed: u32,
@@ -121,7 +122,6 @@ pub static DARK: Palette = Palette {
     accent_pressed: 0x22a99c,
     accent_text: 0x03211d,
     accent_subtle: mix(dark::SURFACE, dark::ACCENT, pct(14)),
-    accent_border: mix(dark::SURFACE, dark::ACCENT, pct(45)),
     focus_ring: mix(dark::BG, dark::ACCENT, pct(60)),
     success: dark::SUCCESS,
     success_subtle: mix(dark::SURFACE, dark::SUCCESS, pct(15)),
@@ -129,10 +129,10 @@ pub static DARK: Palette = Palette {
     warning_subtle: mix(dark::SURFACE, dark::WARNING, pct(14)),
     danger: dark::DANGER,
     danger_subtle: mix(dark::SURFACE, dark::DANGER, pct(14)),
-    danger_border: mix(dark::SURFACE, dark::DANGER, pct(42)),
     info: dark::INFO,
     info_subtle: mix(dark::SURFACE, dark::INFO, pct(14)),
     scrim: (0x030406, 165),
+    on_solid: 0xffffff,
     shadow: (0x000000, 110),
     close_hover: 0xc42b1c,
     close_pressed: 0x9e2a1f,
@@ -173,7 +173,6 @@ pub static LIGHT: Palette = Palette {
     accent_pressed: 0x08756b,
     accent_text: 0xffffff,
     accent_subtle: mix(light::SURFACE, light::ACCENT, pct(11)),
-    accent_border: mix(light::SURFACE, light::ACCENT, pct(45)),
     focus_ring: mix(light::BG, light::ACCENT, pct(55)),
     success: light::SUCCESS,
     success_subtle: mix(light::SURFACE, light::SUCCESS, pct(11)),
@@ -181,10 +180,10 @@ pub static LIGHT: Palette = Palette {
     warning_subtle: mix(light::SURFACE, light::WARNING, pct(12)),
     danger: light::DANGER,
     danger_subtle: mix(light::SURFACE, light::DANGER, pct(9)),
-    danger_border: mix(light::SURFACE, light::DANGER, pct(40)),
     info: light::INFO,
     info_subtle: mix(light::SURFACE, light::INFO, pct(10)),
     scrim: (0x0e1116, 95),
+    on_solid: 0xffffff,
     shadow: (0x1a2230, 46),
     close_hover: 0xc42b1c,
     close_pressed: 0x9e2a1f,
@@ -280,7 +279,9 @@ impl Tone {
     }
 }
 
-/// Spacing scale in logical pixels (multiply by the UI scale).
+/// Spacing scale in logical pixels (multiply by the UI scale). The whole
+/// scale is offered; screens pick their steps from it.
+#[allow(dead_code)]
 pub mod space {
     pub const XS: f32 = 4.0;
     pub const S: f32 = 8.0;
@@ -310,6 +311,7 @@ pub mod size {
 }
 
 /// Control heights in logical pixels.
+#[allow(dead_code)]
 pub mod height {
     pub const SMALL: f32 = 28.0;
     pub const CONTROL: f32 = 32.0;
@@ -344,7 +346,11 @@ pub fn color_for_name(name: &str) -> usize {
 /// A group colour as a solid dot or bar in the current theme.
 pub fn group_solid(i: usize) -> u32 {
     let c = GROUP_COLORS[i % GROUP_COLORS.len()].1;
-    if pal().dark { c } else { mix(c, 0x000000, pct(12)) }
+    if pal().dark {
+        c
+    } else {
+        mix(c, 0x000000, pct(12))
+    }
 }
 
 /// An avatar tile in group colour `i`: (fill, monogram colour).

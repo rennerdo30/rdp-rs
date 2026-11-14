@@ -1124,6 +1124,43 @@ mod tests {
     }
 
     #[test]
+    fn group_colours_are_chosen_inherited_or_picked_from_the_name() {
+        let s = store_with(
+            vec![
+                Group {
+                    path: "Work".into(),
+                    color: Some(5),
+                    ..Default::default()
+                },
+                Group {
+                    path: "Work/Lab".into(),
+                    ..Default::default()
+                },
+                Group {
+                    path: "Home".into(),
+                    ..Default::default()
+                },
+            ],
+            vec![Connection {
+                name: "Box".into(),
+                group: "Work/Lab".into(),
+                ..Default::default()
+            }],
+        );
+        assert_eq!(s.group_color("Work"), 5);
+        assert_eq!(
+            s.group_color("Work/Lab"),
+            5,
+            "a sub-group takes its parent's"
+        );
+        assert_eq!(s.connection_color(&s.connections[0]), 5);
+        assert_eq!(s.group_color("Home"), crate::theme::color_for_name("Home"));
+        // Saved only when chosen; old files without it still load.
+        let json = String::from_utf8(s.file_json(false).unwrap()).unwrap();
+        assert_eq!(json.matches("\"color\"").count(), 1);
+    }
+
+    #[test]
     fn plain_file_never_contains_a_group_password() {
         let s = store_with(
             vec![Group {

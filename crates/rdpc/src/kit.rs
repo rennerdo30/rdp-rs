@@ -18,7 +18,7 @@
 use ffwd_render::{Canvas, FontId, Rect, TextEngine};
 
 use crate::icons::{self, Icon};
-use crate::theme::{self, Tone, height, pal, radius, size};
+use crate::theme::{self, Tone, pal, radius, size};
 use crate::ui::Fonts;
 
 /// Interaction state of one control.
@@ -85,10 +85,6 @@ impl<'t> Button<'t> {
     }
     pub fn icon(mut self, icon: Icon) -> Button<'t> {
         self.icon = Some(icon);
-        self
-    }
-    pub fn maybe_icon(mut self, icon: Option<Icon>) -> Button<'t> {
-        self.icon = icon;
         self
     }
     pub fn icon_color(mut self, color: u32) -> Button<'t> {
@@ -335,17 +331,6 @@ impl<'a, 'b> Kit<'a, 'b> {
 
     // ---- Surfaces ------------------------------------------------------
 
-    /// A card: surface fill, 1 px border, card radius.
-    pub fn card(&mut self, r: Rect) {
-        card(self.cv, self.s, r);
-    }
-
-    /// A card with rows of the given heights and dividers between them;
-    /// returns the row rectangles.
-    pub fn card_rows(&mut self, x: i32, y: i32, w: i32, heights: &[i32]) -> Vec<Rect> {
-        card_rows(self.cv, self.s, x, y, w, heights)
-    }
-
     /// A soft drop shadow around `r` (dialogs and popovers only).
     pub fn shadow(&mut self, r: Rect, rad: f32, blur: f32) {
         let (color, peak) = pal().shadow;
@@ -500,7 +485,7 @@ impl<'a, 'b> Kit<'a, 'b> {
                 } else {
                     base
                 };
-                (Some(f), None, 0xffffff)
+                (Some(f), None, p.on_solid)
             }
             (Variant::DangerGhost, _) => (
                 if st.press {
@@ -543,15 +528,7 @@ impl<'a, 'b> Kit<'a, 'b> {
         }
         if tw > 0 {
             let base = self.baseline(font, size::BODY, r);
-            self.text(
-                font,
-                size::BODY,
-                x,
-                base,
-                b.label,
-                color,
-                r.right() - x + 1,
-            );
+            self.text(font, size::BODY, x, base, b.label, color, r.right() - x + 1);
         }
     }
 
@@ -561,11 +538,8 @@ impl<'a, 'b> Kit<'a, 'b> {
         let rad = radius::CONTROL * self.s;
         let color = match variant {
             Variant::Primary => {
-                self.cv.fill_round(
-                    r,
-                    rad,
-                    if st.hover { p.accent_hover } else { p.accent },
-                );
+                self.cv
+                    .fill_round(r, rad, if st.hover { p.accent_hover } else { p.accent });
                 p.accent_text
             }
             Variant::Secondary => {
@@ -657,14 +631,7 @@ impl<'a, 'b> Kit<'a, 'b> {
     /// A rounded avatar tile with a monogram in group colour `color`
     /// (index into the group palette) and an optional status dot whose
     /// ring takes `ring_bg` (the colour around the avatar).
-    pub fn avatar(
-        &mut self,
-        r: Rect,
-        name: &str,
-        color: usize,
-        status: Option<u32>,
-        ring_bg: u32,
-    ) {
+    pub fn avatar(&mut self, r: Rect, name: &str, color: usize, status: Option<u32>, ring_bg: u32) {
         let (fill, fg) = theme::group_tile(color);
         self.cv.fill_round(r, r.w as f32 * 0.28, fill);
         let mono = monogram(name);
@@ -765,8 +732,16 @@ impl<'a, 'b> Kit<'a, 'b> {
             (false, false) => p.border_strong,
         };
         self.cv.fill_round(r, r.h as f32 / 2.0, track);
-        let knob_x = if on { r.right() - r.h / 2 } else { r.x + r.h / 2 };
-        let knob = if on || !p.dark { 0xffffff } else { p.text_secondary };
+        let knob_x = if on {
+            r.right() - r.h / 2
+        } else {
+            r.x + r.h / 2
+        };
+        let knob = if on || !p.dark {
+            p.on_solid
+        } else {
+            p.text_secondary
+        };
         self.cv.fill_circle(
             knob_x as f32,
             (r.y + r.h / 2) as f32,
@@ -788,7 +763,11 @@ impl<'a, 'b> Kit<'a, 'b> {
             let d = self.p(12.0);
             self.icon(Icon::Check, cx - d / 2, cy - d / 2, 12.0, p.accent_text);
         } else {
-            let c = if st.hover { p.text_muted } else { p.border_strong };
+            let c = if st.hover {
+                p.text_muted
+            } else {
+                p.border_strong
+            };
             self.cv.ring(x, y, r, 1.5 * self.s, c);
         }
     }
@@ -835,7 +814,10 @@ impl<'a, 'b> Kit<'a, 'b> {
         let cell_w = inner / n;
         let icons = items.iter().all(|it| {
             it.icon.is_some()
-                && self.p(15.0) + self.p(6.0) + self.measure(Font::Semi, size::SMALL, it.label) + self.p(8.0)
+                && self.p(15.0)
+                    + self.p(6.0)
+                    + self.measure(Font::Semi, size::SMALL, it.label)
+                    + self.p(8.0)
                     <= cell_w
         });
         for (i, it) in items.iter().enumerate() {
@@ -898,7 +880,12 @@ impl<'a, 'b> Kit<'a, 'b> {
         self.caption_text(x + self.p(2.0), base, &caption.to_uppercase(), p.text_muted);
         let (label, hover) = action?;
         let aw = self.measure(Font::Regular, size::SMALL, label);
-        let r = Rect::new(x + w - aw - self.p(2.0), y - self.p(2.0), aw + self.p(4.0), row.h + self.p(4.0));
+        let r = Rect::new(
+            x + w - aw - self.p(2.0),
+            y - self.p(2.0),
+            aw + self.p(4.0),
+            row.h + self.p(4.0),
+        );
         let c = if hover { p.accent_hover } else { p.accent };
         self.text_center(Font::Regular, size::SMALL, r, label, c);
         Some(r)
@@ -916,7 +903,15 @@ impl<'a, 'b> Kit<'a, 'b> {
         self.icon(icon, x, r.y + self.p(14.0), 18.0, tone.color());
         let tx = x + self.p(28.0);
         let tw = r.right() - tx - self.p(14.0);
-        self.text(Font::Semi, size::BODY, tx, r.y + self.p(28.0), title, p.text, tw);
+        self.text(
+            Font::Semi,
+            size::BODY,
+            tx,
+            r.y + self.p(28.0),
+            title,
+            p.text,
+            tw,
+        );
         if !text.is_empty() {
             self.text(
                 Font::Regular,
@@ -955,11 +950,6 @@ impl<'a, 'b> Kit<'a, 'b> {
             true,
         );
         y
-    }
-
-    /// Height of a regular control (32 px at 100 %).
-    pub fn control_h(&self) -> i32 {
-        self.p(height::CONTROL)
     }
 }
 
@@ -1039,8 +1029,14 @@ pub fn monogram(name: &str) -> String {
         [] => "?".into(),
         [one] => {
             let mut c = one.chars();
-            let first: String = c.next().map(|c| c.to_uppercase().collect()).unwrap_or_default();
-            let second: String = c.next().map(|c| c.to_lowercase().collect()).unwrap_or_default();
+            let first: String = c
+                .next()
+                .map(|c| c.to_uppercase().collect())
+                .unwrap_or_default();
+            let second: String = c
+                .next()
+                .map(|c| c.to_lowercase().collect())
+                .unwrap_or_default();
             first + &second
         }
         [a, b, ..] => {
@@ -1069,7 +1065,12 @@ pub fn paint_sheet(cv: &mut Canvas, te: &mut TextEngine, f: &Fonts, s: f32) {
     y += k.p(28.0);
     for (i, icon) in Icon::ALL.iter().enumerate() {
         let (col, row) = (i as i32 % 17, i as i32 / 17);
-        let cell = Rect::new(x0 + col * k.p(40.0), y + row * k.p(40.0), k.p(34.0), k.p(34.0));
+        let cell = Rect::new(
+            x0 + col * k.p(40.0),
+            y + row * k.p(40.0),
+            k.p(34.0),
+            k.p(34.0),
+        );
         k.cv.round_border(cell, 6.0 * s, p.border, p.surface);
         k.icon_in(*icon, cell, 16.0, p.text);
     }
@@ -1116,7 +1117,13 @@ pub fn paint_sheet(cv: &mut Canvas, te: &mut TextEngine, f: &Fonts, s: f32) {
         );
     }
     y += 4 * k.p(44.0) + k.p(12.0);
-    k.section(x0, y, k.p(600.0), "Pills, avatars, keys", Some(("Action", false)));
+    k.section(
+        x0,
+        y,
+        k.p(600.0),
+        "Pills, avatars, keys",
+        Some(("Action", false)),
+    );
     y += k.p(28.0);
     let mut x = x0;
     for (text, tone, lead) in [
@@ -1162,7 +1169,13 @@ pub fn paint_sheet(cv: &mut Canvas, te: &mut TextEngine, f: &Fonts, s: f32) {
     y += k.p(28.0);
     let field = Rect::new(x0, y, k.p(260.0), k.p(32.0));
     let inner = k.field_frame(field, Some(Icon::Search), State::default());
-    k.text_in(Font::Regular, 13.0, inner, "Search connections", p.text_faint);
+    k.text_in(
+        Font::Regular,
+        13.0,
+        inner,
+        "Search connections",
+        p.text_faint,
+    );
     let field = Rect::new(field.right() + k.p(12.0), y, k.p(200.0), k.p(32.0));
     let inner = k.field_frame(
         field,
