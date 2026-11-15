@@ -83,15 +83,15 @@ pub enum Graphics {
 /// 10.0 without RDPGFX_CAPS_FLAG_AVC_DISABLED, which obliges the client to
 /// decode AVC444 and AVC420 (2.2.3.2 - 2.2.3.10), and 8.1 with AVC420 for
 /// servers without 10.x. The server confirms one set (2.2.2.19). 10.1 (16
-/// reserved bytes) and 10.3 (no SMALL_CACHE flag) are not offered. Every
-/// set asks for the 16 MB bitmap cache.
+/// reserved bytes) and 10.3 are not offered. No set asks for the small
+/// (16 MB) bitmap cache: the server may cache 100 MB and 25,600 tiles
+/// (3.3.1.4), as with Microsoft's client. A 4K desktop is about 30 MB, so
+/// with 16 MB the server re-encoded what it had sent before (scrolling,
+/// switching windows), costing its encoder time and the session latency.
 pub fn advertised_caps(avc: bool) -> Vec<CapSet> {
     use pdu::*;
     if avc {
-        let set = |version, flags| CapSet {
-            version,
-            flags: CAPS_FLAG_SMALL_CACHE | flags,
-        };
+        let set = |version, flags| CapSet { version, flags };
         return vec![
             set(CAPVERSION_107, CAPS_FLAG_SCALEDMAP_DISABLE),
             set(CAPVERSION_106, 0),
@@ -105,15 +105,15 @@ pub fn advertised_caps(avc: bool) -> Vec<CapSet> {
     vec![
         CapSet {
             version: CAPVERSION_107,
-            flags: CAPS_FLAG_SMALL_CACHE | CAPS_FLAG_AVC_DISABLED | CAPS_FLAG_SCALEDMAP_DISABLE,
+            flags: CAPS_FLAG_AVC_DISABLED | CAPS_FLAG_SCALEDMAP_DISABLE,
         },
         CapSet {
             version: CAPVERSION_10,
-            flags: CAPS_FLAG_SMALL_CACHE | CAPS_FLAG_AVC_DISABLED,
+            flags: CAPS_FLAG_AVC_DISABLED,
         },
         CapSet {
             version: CAPVERSION_81,
-            flags: CAPS_FLAG_SMALL_CACHE,
+            flags: 0,
         },
     ]
 }

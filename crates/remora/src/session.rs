@@ -80,6 +80,9 @@ pub struct Shared {
     pub damage: Vec<Damage>,
     /// The whole framebuffer must be presented (first frame or resize).
     pub full: bool,
+    /// When the oldest update not yet shown was ready here (decoded), for
+    /// the statistics' update-to-screen time (RDP-56).
+    pub ready: Option<std::time::Instant>,
 }
 
 pub struct Worker {
@@ -150,6 +153,7 @@ pub fn spawn(
         fb: Framebuffer::new(0, 0),
         damage: Vec::new(),
         full: true,
+        ready: None,
     }));
     let notified = Arc::new(AtomicBool::new(false));
     let recorder = Arc::new(Mutex::new(None));
@@ -278,6 +282,7 @@ fn run(
                 }
                 s.damage.extend_from_slice(&out.damage);
             }
+            s.ready.get_or_insert(now);
             drop(s);
             if !notified.swap(true, Ordering::AcqRel) {
                 emit(Event::Frame);

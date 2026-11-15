@@ -53,6 +53,9 @@ pub struct Stats {
     pub input_ms: Option<(f64, f64)>,
     /// Window repaints of this session per second (the UI fills it in).
     pub repaints_per_s: f64,
+    /// From a decoded update to the window showing it: average and worst
+    /// since the last reading, ms (the UI fills it in).
+    pub screen_ms: Option<(f64, f64)>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -152,6 +155,7 @@ impl Meter {
             gfx,
             input_ms,
             repaints_per_s: 0.0,
+            screen_ms: None,
         };
         self.since = now;
         self.prev = cur;
@@ -193,6 +197,12 @@ pub fn rows(
             v.push(("Decoding", format!("{} per frame", fmt_ms(g.decode_ms))));
         }
         None => v.push(("Graphics", "Bitmap".into())),
+    }
+    if let Some((avg, worst)) = st.screen_ms {
+        v.push((
+            "Update → screen",
+            format!("{} avg · {} worst", fmt_ms(avg), fmt_ms(worst)),
+        ));
     }
     v.push((
         "Updates",
@@ -457,6 +467,7 @@ mod tests {
             }),
             input_ms: Some((28.4, 41.0)),
             repaints_per_s: 57.6,
+            screen_ms: Some((2.4, 7.0)),
         };
         let r = rows(&st, Some("RTT 4 ms"), Some((1828, 1232)));
         let get = |k: &str| r.iter().find(|(l, _)| *l == k).map(|(_, v)| v.as_str());
@@ -465,6 +476,7 @@ mod tests {
         assert_eq!(get("Input → picture"), Some("28 ms avg · 41 ms worst"));
         assert_eq!(get("Graphics"), Some("GFX · AVC420 · 60 fps"));
         assert_eq!(get("Decoding"), Some("2.1 ms per frame"));
+        assert_eq!(get("Update → screen"), Some("2.4 ms avg · 7.0 ms worst"));
         assert_eq!(get("Updates"), Some("58/s · repaints 58/s"));
         assert_eq!(get("Received"), Some("12.3 Mbit/s"));
         assert_eq!(get("Sent"), Some("41 kbit/s"));

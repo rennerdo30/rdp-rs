@@ -254,6 +254,8 @@ is on. It shows:
   Remora's decoding. Presses that change nothing on screen are not counted.
 - **Graphics:** GFX with its codec and frames per second, and the decoding
   time per frame; or Bitmap.
+- **Update → screen:** from a decoded update to the window showing it:
+  Remora's own share of the delay, next to the decoding time.
 - **Updates and repaints:** picture updates per second and how often the
   window was repainted.
 - **Received and sent:** the connection's traffic.

@@ -188,6 +188,10 @@ struct MainWin {
     chrome_dirty: bool,
     /// Presents since the last statistics reading, for its repaint rate.
     repaints: (u32, std::time::Instant),
+    /// When the session update being painted was ready (decoded), and the
+    /// update-to-screen times since the last reading: sum, count, worst.
+    painting: Option<std::time::Instant>,
+    to_screen: (std::time::Duration, u32, std::time::Duration),
     /// Until then every chrome render presents the whole window: while the
     /// window resizes or moves, Windows may change screen pixels behind our
     /// back, so presenting only changed tiles could leave stale ones.
@@ -1300,6 +1304,7 @@ impl App {
             blit(&sh.fb, &mut m.scratch, w, area, clip, None);
             sh.damage.clear();
             sh.full = false;
+            m.painting = sh.ready.take();
         }
         // The toolbar and the reconnect card float over the picture; the
         // palette and the quit question go over that (dimming it), and
@@ -1336,6 +1341,12 @@ impl App {
             }
         }
         m.repaints.0 += 1;
+        if let Some(t) = m.painting.take() {
+            let took = t.elapsed();
+            m.to_screen.0 += took;
+            m.to_screen.1 += 1;
+            m.to_screen.2 = m.to_screen.2.max(took);
+        }
         if let Err(e) = buf.present_with_damage(&rects) {
             eprintln!("remora: present failed: {e}");
         }
@@ -1421,6 +1432,7 @@ impl App {
             return self.render_chrome();
         }
         let damage = std::mem::take(&mut sh.damage);
+        m.painting = sh.ready.take();
         let clip = m.ui.session_clip.unwrap_or(area);
         let mut rects = Vec::new();
         for d in &damage {
@@ -1467,6 +1479,12 @@ impl App {
             }
         }
         m.repaints.0 += 1;
+        if let Some(t) = m.painting.take() {
+            let took = t.elapsed();
+            m.to_screen.0 += took;
+            m.to_screen.1 += 1;
+            m.to_screen.2 = m.to_screen.2.max(took);
+        }
         if let Err(e) = buf.present_with_damage(&rects) {
             eprintln!("remora: present failed: {e}");
         }
@@ -2141,6 +2159,8 @@ impl ApplicationHandler<UserEvent> for App {
                         shown_cursor: Shown::Icon(CursorIcon::Default),
                         chrome_dirty: true,
                         repaints: (0, std::time::Instant::now()),
+                        painting: None,
+                        to_screen: Default::default(),
                         settle: None,
                         pressed_in: None,
                     });
@@ -2454,7 +2474,10 @@ impl ApplicationHandler<UserEvent> for App {
                 } else if let Some(worker) = self.sessions.get(&id).and_then(|s| s.worker.as_ref())
                 {
                     // Hidden tab: drop the damage; switching to it blits the whole picture.
-                    worker.shared.lock().unwrap().damage.clear();
+                    let mut sh = worker.shared.lock().unwrap();
+                    sh.damage.clear();
+                    sh.ready = None;
+                    drop(sh);
                     worker.notified.store(false, Ordering::Release);
                 }
             }
@@ -2502,6 +2525,11 @@ impl ApplicationHandler<UserEvent> for App {
                     let (n, since) =
                         std::mem::replace(&mut m.repaints, (0, std::time::Instant::now()));
                     st.repaints_per_s = n as f64 / since.elapsed().as_secs_f64().max(1e-3);
+                    let (sum, count, worst) = std::mem::take(&mut m.to_screen);
+                    st.screen_ms = (count > 0).then(|| {
+                        let ms = |d: std::time::Duration| d.as_secs_f64() * 1000.0;
+                        (ms(sum) / count as f64, ms(worst))
+                    });
                 }
                 if m.ui.set_stats(id, st) {
                     self.render_overlay();
@@ -3003,6 +3031,7 @@ impl App {
         worker.notified.store(false, Ordering::Release);
         let damage = std::mem::take(&mut sh.damage);
         let full = std::mem::take(&mut sh.full);
+        sh.ready = None;
         for sw in self.spans.iter_mut().filter(|s| s.session == id) {
             if full {
                 sw.needs_full = true;

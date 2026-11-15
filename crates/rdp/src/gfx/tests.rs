@@ -164,21 +164,21 @@ fn one(buf: &[u8]) -> ServerPdu<'_> {
 fn caps_advertise_layout() {
     let v = caps_advertise(&advertised_caps(false));
     let mut want = hex("12 00 00 00 2E 00 00 00 03 00");
-    want.extend(hex("01 07 0A 00 04 00 00 00 A2 00 00 00")); // 10.7
-    want.extend(hex("02 00 0A 00 04 00 00 00 22 00 00 00")); // 10.0
-    want.extend(hex("05 01 08 00 04 00 00 00 02 00 00 00")); // 8.1
+    want.extend(hex("01 07 0A 00 04 00 00 00 A0 00 00 00")); // 10.7
+    want.extend(hex("02 00 0A 00 04 00 00 00 20 00 00 00")); // 10.0
+    want.extend(hex("05 01 08 00 04 00 00 00 00 00 00 00")); // 8.1
     assert_eq!(v, want);
     // With a decoder: 10.x without AVC_DISABLED (AVC444 obliged), then 8.1
     // with AVC420.
     let v = caps_advertise(&advertised_caps(true));
     let mut want = hex("12 00 00 00 5E 00 00 00 07 00");
-    want.extend(hex("01 07 0A 00 04 00 00 00 82 00 00 00")); // 10.7
-    want.extend(hex("00 06 0A 00 04 00 00 00 02 00 00 00")); // 10.6
-    want.extend(hex("02 05 0A 00 04 00 00 00 02 00 00 00")); // 10.5
-    want.extend(hex("00 04 0A 00 04 00 00 00 02 00 00 00")); // 10.4
-    want.extend(hex("00 02 0A 00 04 00 00 00 02 00 00 00")); // 10.2
-    want.extend(hex("02 00 0A 00 04 00 00 00 02 00 00 00")); // 10.0
-    want.extend(hex("05 01 08 00 04 00 00 00 12 00 00 00")); // 8.1
+    want.extend(hex("01 07 0A 00 04 00 00 00 80 00 00 00")); // 10.7
+    want.extend(hex("00 06 0A 00 04 00 00 00 00 00 00 00")); // 10.6
+    want.extend(hex("02 05 0A 00 04 00 00 00 00 00 00 00")); // 10.5
+    want.extend(hex("00 04 0A 00 04 00 00 00 00 00 00 00")); // 10.4
+    want.extend(hex("00 02 0A 00 04 00 00 00 00 00 00 00")); // 10.2
+    want.extend(hex("02 00 0A 00 04 00 00 00 00 00 00 00")); // 10.0
+    want.extend(hex("05 01 08 00 04 00 00 00 10 00 00 00")); // 8.1
     assert_eq!(v, want);
 }
 

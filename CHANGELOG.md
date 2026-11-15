@@ -2,11 +2,12 @@
 
 ## Unreleased
 
+- **Less work for the server's encoder with GFX.** Remora now offers the server the normal 100 MB graphics cache, as Microsoft's client does, instead of the small 16 MB one. A 4K desktop is about 30 MB, so with the small cache the server had to encode again what it had already sent, for example when scrolling or switching windows.
 - **GFX is the default.** New connections use the graphics pipeline with H.264. Existing connections saved with the old default, Bitmaps, switch once; choose **Bitmaps** again on the editor's Advanced page or in the side panel if you want them. When a server's graphics fail, the tab reconnects once with plain bitmaps on its own.
 - **A statistics overlay.** **Show statistics** shows a small box over the picture. The switch is on the side panel's Session page, and the toolbar's ⋯ menu and the command palette have it too. It is updated once a second and lists:
   - the round trip, from a ping to the server once a second, and what the server's network detection found;
   - the input-to-picture latency, from a key or click to the next screen change (average and worst);
-  - GFX frames per second with codec and decoding time, or Bitmap;
+  - GFX frames per second with codec and decoding time, or Bitmap, and Remora's own update-to-screen time;
   - updates and repaints per second, and the traffic in and out.
 
   Remora remembers whether it is on (RDP-56).

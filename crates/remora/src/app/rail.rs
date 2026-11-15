@@ -263,6 +263,7 @@ impl App {
         worker.notified.store(false, Ordering::Release);
         let damage = std::mem::take(&mut sh.damage);
         let full = std::mem::take(&mut sh.full);
+        sh.ready = None;
         rs.present(&sh.fb, &damage, full, &mut self.te, &self.fonts);
     }
 
