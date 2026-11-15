@@ -70,6 +70,11 @@ pub enum Input {
     PairingAnswer { ticket: u64, confirmed: bool },
     /// The transfer worker has messages or events for the protocol.
     TransferWake,
+    /// The elevated `tune` finished (RDP-59).
+    TuneDone {
+        request_id: u32,
+        status: remora_link::msg::TuneStatus,
+    },
     /// Exit; `done` is signalled once the loop has finished.
     Shutdown { done: Option<Sender<()>> },
 }
@@ -383,6 +388,11 @@ impl Loop {
                 self.wake_queued.store(false, Ordering::Release);
                 self.feed(AgentEvent::Timer);
             }
+            Input::TuneDone { request_id, status } => {
+                self.feed(AgentEvent::TuneDone { request_id, status });
+                // Read the settings again and send them if they changed.
+                self.tick();
+            }
             Input::Shutdown { done } => {
                 self.shutdown();
                 if let Some(d) = done {
@@ -527,6 +537,24 @@ impl Loop {
                 Action::SendFilesResult { id, outcome } => {
                     if let Some(reply) = self.pending_sends.remove(&id) {
                         let _ = reply.send(outcome);
+                    }
+                }
+                Action::TuneServer { request_id, action } => {
+                    // The administrator prompt waits for the user: off
+                    // this loop.
+                    let tx = self.tx.clone();
+                    let spawned =
+                        std::thread::Builder::new()
+                            .name("tune".into())
+                            .spawn(move || {
+                                let status = super::tune::run_elevated(action);
+                                let _ = tx.send(Input::TuneDone { request_id, status });
+                            });
+                    if spawned.is_err() {
+                        let _ = self.tx.send(Input::TuneDone {
+                            request_id,
+                            status: remora_link::msg::TuneStatus::Failed,
+                        });
                     }
                 }
             }

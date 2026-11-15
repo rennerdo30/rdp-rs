@@ -10,6 +10,7 @@ mod pipe;
 mod shortcut;
 mod sys;
 mod tray;
+mod tune;
 mod ui;
 mod window;
 mod wts;
@@ -131,6 +132,20 @@ pub fn main() -> i32 {
             open_log("send");
             apply::send_files(&files)
         }
+        // Started elevated by the running helper (RDP-59): no console.
+        Command::Tune(action) => {
+            open_log("tune");
+            match tune::write(action) {
+                Ok(()) => {
+                    crate::info!("tune {action:?}: written");
+                    0
+                }
+                Err(e) => {
+                    crate::warn!("tune {action:?}: {e}");
+                    1
+                }
+            }
+        }
         other => {
             attach_parent_console();
             match other {
@@ -171,7 +186,9 @@ pub fn main() -> i32 {
                         None => Ok(crate::clients::strict_status(&setting, policy, Some(p))),
                     })
                 }
-                Command::Run | Command::OpenUrl(_) | Command::Send(_) => unreachable!(),
+                Command::Run | Command::OpenUrl(_) | Command::Send(_) | Command::Tune(_) => {
+                    unreachable!()
+                }
             }
         }
     }

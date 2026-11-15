@@ -379,6 +379,23 @@ until you switch it on; a change applies from the next connection.
 If the server's policy turns off clipboard or drive redirection, file
 transfer is off too, whatever the switches say.
 
+### Server graphics
+
+With a paired helper, the side panel's Session page shows **Server
+graphics**: what Windows on the server allows a remote session's picture.
+
+- **Frame rate:** Windows caps remote sessions at 30 fps unless an
+  administrator raises it.
+- **H.264 (AVC 444):** whether the server prefers H.264 over its other codecs
+  (ClearCodec, RemoteFX) for the whole picture.
+- **H.264 on the GPU:** whether it may encode on the server's graphics card.
+
+**Improve** asks the helper to set 60 fps and H.264 on the GPU. Windows on
+the server shows its administrator prompt in the session; confirm it there,
+or decline and nothing changes. Restart the server for the frame rate;
+reconnect for H.264. **Restore defaults** removes the three settings again.
+Without the GPU, Windows encodes H.264 in software.
+
 ### Transfers
 
 The side panel's Sharing page lists the files on their way, with progress,

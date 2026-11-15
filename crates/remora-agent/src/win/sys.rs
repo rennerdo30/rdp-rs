@@ -417,5 +417,6 @@ pub fn collect(s: &StaticInfo, cpu_prev: &mut Option<CpuTimes>) -> SessionInfo {
         idle_ms: idle_ms(),
         cpu_percent,
         memory: memory(),
+        graphics: super::tune::read(),
     }
 }

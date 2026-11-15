@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **The server helper tunes the server's graphics.** With a paired helper (protocol 1.2), the side panel's Session page shows what limits the picture on the server: the 30 fps cap Windows puts on remote sessions, whether H.264 is preferred over ClearCodec, and whether the GPU encodes. **Improve** sets 60 fps, H.264/AVC 444 and hardware encoding. The change needs one administrator prompt on the server, confirmed there. Restart the server for the frame rate; reconnect for H.264. **Restore defaults** removes the settings again. Helpers before 1.2 show nothing new (RDP-59).
+
 - **Less work for the server's encoder with GFX.** Remora now offers the server the normal 100 MB graphics cache, as Microsoft's client does, instead of the small 16 MB one. A 4K desktop is about 30 MB, so with the small cache the server had to encode again what it had already sent, for example when scrolling or switching windows.
 - **GFX is the default.** New connections use the graphics pipeline with H.264. Existing connections saved with the old default, Bitmaps, switch once; choose **Bitmaps** again on the editor's Advanced page or in the side panel if you want them. When a server's graphics fail, the tab reconnects once with plain bitmaps on its own.
 - **A statistics overlay.** **Show statistics** shows a small box over the picture. The switch is on the side panel's Session page, and the toolbar's ⋯ menu and the command palette have it too. It is updated once a second and lists:

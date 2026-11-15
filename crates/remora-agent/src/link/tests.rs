@@ -103,6 +103,7 @@ fn snapshot(policy: PolicyFlags) -> SessionInfo {
             available_bytes: 3 << 30,
             load_percent: 62,
         }),
+        graphics: remora_link::msg::ServerSettings::default(),
     }
 }
 
@@ -387,6 +388,8 @@ struct Net {
     pending: VecDeque<AgentEvent>,
     url_results: Vec<(u64, UrlOutcome)>,
     send_results: Vec<(u64, SendOutcome)>,
+    /// `TuneServer` actions the agent asked for.
+    tunes: Vec<(u32, remora_link::msg::TuneAction)>,
     /// Channels the agent closed.
     agent_closes: Vec<Channel>,
     opens_requested: Vec<Channel>,
@@ -421,6 +424,7 @@ impl Net {
             pending: VecDeque::new(),
             url_results: Vec::new(),
             send_results: Vec::new(),
+            tunes: Vec::new(),
             agent_closes: Vec::new(),
             opens_requested: Vec::new(),
             bulk_seen: 0,
@@ -469,6 +473,7 @@ impl Net {
                 }
                 Action::OpenUrlResult { id, outcome } => self.url_results.push((id, outcome)),
                 Action::SendFilesResult { id, outcome } => self.send_results.push((id, outcome)),
+                Action::TuneServer { request_id, action } => self.tunes.push((request_id, action)),
             }
         }
     }
@@ -769,7 +774,10 @@ fn policy_turns_file_capabilities_off() {
     }));
     n.answer_locally(true);
     let hello = n.remora.hello.clone().unwrap();
-    assert_eq!(hello.capabilities, cap::SESSION_INFO | cap::OPEN_URL);
+    assert_eq!(
+        hello.capabilities,
+        cap::SESSION_INFO | cap::OPEN_URL | cap::SERVER_TUNING
+    );
     assert_eq!(hello.policy, policy::CLIPBOARD_DISABLED);
     assert!(n.opens_requested.is_empty(), "no Bulk without file caps");
     n.agent_event(AgentEvent::SendFiles {
@@ -1069,6 +1077,123 @@ fn a_new_client_key_gets_no_pending_download_without_the_server_user() {
             .iter()
             .any(|(_, m)| matches!(m, Message::FileOffer(_)))
     );
+}
+
+fn tuned_snapshot(graphics: remora_link::msg::ServerSettings) -> SessionInfo {
+    SessionInfo {
+        graphics,
+        ..snapshot(PolicyFlags::default())
+    }
+}
+
+fn settings_sent(n: &Net) -> Vec<remora_link::msg::ServerSettings> {
+    n.remora
+        .got
+        .iter()
+        .filter_map(|(_, m)| match m {
+            Message::ServerSettings(s) => Some(*s),
+            _ => None,
+        })
+        .collect()
+}
+
+fn tune_results(n: &Net) -> Vec<(u32, remora_link::msg::TuneStatus)> {
+    n.remora
+        .got
+        .iter()
+        .filter_map(|(rid, m)| match m {
+            Message::TuneResult { status } => Some((*rid, *status)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// RDP-59: the settings go to Remora once accepted, and again only when
+/// they change.
+#[test]
+fn server_settings_are_sent_when_accepted_and_changed() {
+    use remora_link::msg::ServerSettings;
+    let mut n = paired_net(Remora::new());
+    n.agent_event(AgentEvent::SessionInfoTick(tuned_snapshot(
+        ServerSettings::default(),
+    )));
+    n.agent_event(AgentEvent::SessionInfoTick(tuned_snapshot(
+        ServerSettings::default(),
+    )));
+    assert_eq!(settings_sent(&n), vec![ServerSettings::default()]);
+    n.agent_event(AgentEvent::SessionInfoTick(tuned_snapshot(
+        ServerSettings::RECOMMENDED,
+    )));
+    assert_eq!(
+        settings_sent(&n),
+        vec![ServerSettings::default(), ServerSettings::RECOMMENDED]
+    );
+    // Not accepted: never sent.
+    let mut r = Remora::new();
+    r.user_caps = cap::SESSION_INFO;
+    let mut n = paired_net(r);
+    n.agent_event(AgentEvent::SessionInfoTick(tuned_snapshot(
+        ServerSettings::RECOMMENDED,
+    )));
+    assert!(settings_sent(&n).is_empty());
+}
+
+/// RDP-59: a trusted client's request becomes one elevated run at a time;
+/// its result goes back under the request's id.
+#[test]
+fn tune_requests_run_once_and_answer_with_their_id() {
+    use remora_link::msg::{TuneAction, TuneStatus};
+    let mut n = paired_net(Remora::new());
+    n.agent_event(AgentEvent::SessionInfoTick(
+        snapshot(PolicyFlags::default()),
+    ));
+    n.answer_locally(true);
+    assert!(n.agent.client_trusted());
+    n.remora.send(
+        7,
+        &Message::TuneServer {
+            action: TuneAction::Apply,
+        },
+    );
+    n.settle();
+    assert_eq!(n.tunes, vec![(7, TuneAction::Apply)]);
+    // A second one while the first runs is refused at once.
+    n.remora.send(
+        8,
+        &Message::TuneServer {
+            action: TuneAction::Restore,
+        },
+    );
+    n.settle();
+    assert_eq!(n.tunes.len(), 1);
+    assert_eq!(tune_results(&n), vec![(8, TuneStatus::Failed)]);
+    // A stale result (another id) is ignored; the real one is answered.
+    n.agent_event(AgentEvent::TuneDone {
+        request_id: 99,
+        status: TuneStatus::Done,
+    });
+    assert_eq!(tune_results(&n).len(), 1);
+    n.agent_event(AgentEvent::TuneDone {
+        request_id: 7,
+        status: TuneStatus::Declined,
+    });
+    assert_eq!(
+        tune_results(&n),
+        vec![(8, TuneStatus::Failed), (7, TuneStatus::Declined)]
+    );
+    // Without tuning accepted: refused, nothing runs.
+    let mut r = Remora::new();
+    r.user_caps = cap::SESSION_INFO;
+    let mut n = paired_net(r);
+    n.remora.send(
+        3,
+        &Message::TuneServer {
+            action: TuneAction::Apply,
+        },
+    );
+    n.settle();
+    assert!(n.tunes.is_empty());
+    assert_eq!(tune_results(&n), vec![(3, TuneStatus::NotAllowed)]);
 }
 
 #[test]

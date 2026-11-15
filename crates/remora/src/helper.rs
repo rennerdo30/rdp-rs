@@ -43,7 +43,8 @@ use std::time::{Duration, Instant};
 
 use rdp::{DvcOut, DynamicChannel, LocalClose};
 use remora_link::msg::{
-    ErrorMsg, Hello, HelloAck, PairingStatus, SessionInfo, TransferId, UrlStatus, err,
+    ErrorMsg, Hello, HelloAck, PairingStatus, ServerSettings, SessionInfo, TransferId, TuneAction,
+    TuneStatus, UrlStatus, err,
 };
 use remora_link::transfer::io::{FsDir, FsSource};
 use remora_link::transfer::worker::{EngineWorker, Posted};
@@ -157,6 +158,10 @@ pub enum HelperEvent {
     Transfer(TransferEvent),
     /// A second helper instance tried to open a channel; it was refused.
     SecondInstanceRefused(Channel),
+    /// The server's graphics settings (1.2, RDP-59).
+    ServerSettings(ServerSettings),
+    /// How [`HelperHandle::tune`] went.
+    TuneResult(TuneStatus),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -237,6 +242,11 @@ struct Core {
     accepted: u32,
     bulk_token: Option<[u8; 32]>,
     session_info: Option<SessionInfo>,
+    /// The server's graphics settings, once the helper sent them.
+    server_settings: Option<ServerSettings>,
+    /// The request id of a `TuneServer` waiting for its result.
+    tune_rid: Option<u32>,
+    next_rid: u32,
     last_seen: Option<Instant>,
     next_heartbeat: Option<Instant>,
     heartbeat_seq: u32,
@@ -923,6 +933,20 @@ impl Core {
                 self.session_info = Some(info.clone());
                 self.push(HelperEvent::SessionInfo(info));
             }
+            Message::ServerSettings(s) => {
+                if self.accepted & cap::SERVER_TUNING == 0 {
+                    return self.send_error(err::NOT_ALLOWED, "server tuning not enabled");
+                }
+                self.server_settings = Some(s);
+                self.push(HelperEvent::ServerSettings(s));
+            }
+            Message::TuneResult { status } => {
+                // Only the answer to the request this side made.
+                if self.tune_rid == Some(request_id) {
+                    self.tune_rid = None;
+                    self.push(HelperEvent::TuneResult(status));
+                }
+            }
             Message::OpenUrl { url } => {
                 let parsed = web_url(&url);
                 if self.accepted & cap::OPEN_URL == 0 {
@@ -1109,6 +1133,9 @@ impl HelperHandle {
                 accepted: 0,
                 bulk_token: None,
                 session_info: None,
+                server_settings: None,
+                tune_rid: None,
+                next_rid: 1,
                 last_seen: None,
                 next_heartbeat: None,
                 heartbeat_seq: 0,
@@ -1318,6 +1345,26 @@ impl HelperHandle {
 
     pub fn session_info(&self) -> Option<SessionInfo> {
         self.lock().session_info.clone()
+    }
+
+    /// The server's graphics settings, once the helper sent them (RDP-59).
+    pub fn server_settings(&self) -> Option<ServerSettings> {
+        self.lock().server_settings
+    }
+
+    /// Asks the helper to change the server's graphics settings; the user
+    /// there confirms the administrator prompt. False when it cannot be
+    /// asked now (not paired, tuning not accepted, or one change waits).
+    pub fn tune(&self, action: TuneAction) -> bool {
+        let mut c = self.lock();
+        if !c.ack_sent || c.accepted & cap::SERVER_TUNING == 0 || c.tune_rid.is_some() {
+            return false;
+        }
+        let rid = c.next_rid.max(1);
+        c.next_rid = rid.wrapping_add(1).max(1);
+        c.tune_rid = Some(rid);
+        c.send(rid, &Message::TuneServer { action });
+        true
     }
 
     /// How many second helper instances were refused on this connection.

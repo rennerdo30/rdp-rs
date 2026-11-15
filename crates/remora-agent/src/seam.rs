@@ -94,6 +94,11 @@ pub enum AgentEvent {
     /// The user answered the pairing dialog on the server (the `ticket`
     /// that [`crate::link::PairingUi::show_sas`] got).
     PairingAnswer { ticket: u64, confirmed: bool },
+    /// The elevated `tune` for [`Action::TuneServer`] finished.
+    TuneDone {
+        request_id: u32,
+        status: remora_link::msg::TuneStatus,
+    },
     /// The deadline from [`Protocol::next_deadline`] passed.
     Timer,
     /// The agent is exiting (logoff, `WM_ENDSESSION`). Last chance to send.
@@ -115,6 +120,13 @@ pub enum Action {
     OpenUrlResult { id: u64, outcome: UrlOutcome },
     /// The answer to [`AgentEvent::SendFiles`].
     SendFilesResult { id: u64, outcome: SendOutcome },
+    /// Remora asked to change the server's graphics settings: start
+    /// `remora-agent tune` elevated, then answer with
+    /// [`AgentEvent::TuneDone`] and the same `request_id`.
+    TuneServer {
+        request_id: u32,
+        action: remora_link::msg::TuneAction,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

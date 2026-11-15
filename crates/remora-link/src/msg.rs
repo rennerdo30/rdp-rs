@@ -11,6 +11,7 @@
 //! | `0x03xx` | open a link on the client                    | Ctl     |
 //! | `0x040x` | file transfer control                        | Ctl     |
 //! | `0x048x` | file transfer data                           | Bulk    |
+//! | `0x05xx` | server graphics settings (1.2)               | Ctl     |
 //!
 //! A type this side does not know decodes as [`Message::Unknown`]; the
 //! receiver answers with [`Message::Unsupported`] and keeps the channel open.
@@ -23,8 +24,10 @@ use crate::wire::{Put, Reader};
 pub const PROTO_MAJOR: u16 = 1;
 /// Minor protocol version. Minors only add optional messages and fields.
 /// 1.1 adds [`Message::PeerPairing`] and [`Message::ClientName`] (the
-/// helper pins Remora's client key).
-pub const PROTO_MINOR: u16 = 1;
+/// helper pins Remora's client key). 1.2 adds the server graphics settings:
+/// [`Message::ServerSettings`], [`Message::TuneServer`] and
+/// [`Message::TuneResult`] under [`cap::SERVER_TUNING`].
+pub const PROTO_MINOR: u16 = 2;
 
 // Session messages (handled inside SecureSession).
 pub const SAS_COMMIT: u16 = 0x0001;
@@ -57,6 +60,13 @@ pub const FILE_COMPLETE: u16 = 0x0405;
 pub const FILE_CHUNK: u16 = 0x0480;
 pub const FILE_BLOCK_HASH: u16 = 0x0481;
 pub const FILE_END: u16 = 0x0482;
+// Server graphics settings (Ctl, 1.2).
+/// Helper → Remora: the server's graphics settings, read without admin.
+pub const SERVER_SETTINGS: u16 = 0x0500;
+/// Remora → helper: change them (the server's user confirms elevation).
+pub const TUNE_SERVER: u16 = 0x0501;
+/// Helper → Remora: how the change went; same `request_id`.
+pub const TUNE_RESULT: u16 = 0x0502;
 
 /// Capability bits (Hello offers, HelloAck accepts a subset).
 pub mod cap {
@@ -68,8 +78,11 @@ pub mod cap {
     pub const FILE_UP: u32 = 1 << 2;
     /// File transfer server → client (download).
     pub const FILE_DOWN: u32 = 1 << 3;
-    /// Every bit version 1.0 defines.
-    pub const ALL: u32 = SESSION_INFO | OPEN_URL | FILE_UP | FILE_DOWN;
+    /// 1.2: the helper reports the server's graphics settings and changes
+    /// them when Remora asks and the server's user confirms elevation.
+    pub const SERVER_TUNING: u32 = 1 << 4;
+    /// Every bit this version defines.
+    pub const ALL: u32 = SESSION_INFO | OPEN_URL | FILE_UP | FILE_DOWN | SERVER_TUNING;
 }
 
 /// Policy flags the helper reads from the server's configuration.
@@ -241,6 +254,115 @@ impl UrlStatus {
     }
 }
 
+/// The server's graphics settings (1.2). `None`: the value is not set
+/// (Windows' default applies).
+///
+/// - `frame_interval`: `DWMFRAMEINTERVAL` under
+///   `HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations`;
+///   Windows caps remote sessions at 30 fps without it, 15 allows 60.
+/// - `avc444`: the policy "Prioritize H.264/AVC 444 graphics mode"
+///   (`AVC444ModePreferred` under
+///   `HKLM\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services`).
+/// - `avc_hw`: the policy "Configure H.264/AVC hardware encoding"
+///   (`AVCHardwareEncodePreferred`, same key).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ServerSettings {
+    pub frame_interval: Option<u32>,
+    pub avc444: Option<u32>,
+    pub avc_hw: Option<u32>,
+}
+
+/// `DWMFRAMEINTERVAL` for 60 fps.
+pub const FRAME_INTERVAL_60FPS: u32 = 15;
+
+impl ServerSettings {
+    /// The values [`TuneAction::Apply`] writes.
+    pub const RECOMMENDED: ServerSettings = ServerSettings {
+        frame_interval: Some(FRAME_INTERVAL_60FPS),
+        avc444: Some(1),
+        avc_hw: Some(1),
+    };
+
+    /// Every value is the recommended one.
+    pub fn tuned(&self) -> bool {
+        *self == Self::RECOMMENDED
+    }
+
+    /// Any value is set (by us or by an administrator).
+    pub fn any_set(&self) -> bool {
+        self.frame_interval.is_some() || self.avc444.is_some() || self.avc_hw.is_some()
+    }
+}
+
+/// What [`Message::TuneServer`] asks for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TuneAction {
+    /// Write [`ServerSettings::RECOMMENDED`].
+    Apply,
+    /// Delete the three values: Windows' defaults again.
+    Restore,
+}
+
+impl TuneAction {
+    pub fn to_u8(self) -> u8 {
+        match self {
+            TuneAction::Apply => 0,
+            TuneAction::Restore => 1,
+        }
+    }
+    pub fn from_u8(v: u8) -> Result<Self> {
+        Ok(match v {
+            0 => TuneAction::Apply,
+            1 => TuneAction::Restore,
+            v => return Err(Error::Malformed(format!("tune action {v}"))),
+        })
+    }
+}
+
+/// How a [`Message::TuneServer`] went.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TuneStatus {
+    /// The settings were written; a fresh [`Message::ServerSettings`] follows.
+    Done,
+    /// The server's user declined the administrator prompt.
+    Declined,
+    /// Writing failed (no administrator on the server, or a policy blocks it).
+    Failed,
+    /// Not paired, not trusted, or tuning not accepted.
+    NotAllowed,
+}
+
+impl TuneStatus {
+    fn to_u8(self) -> u8 {
+        match self {
+            TuneStatus::Done => 0,
+            TuneStatus::Declined => 1,
+            TuneStatus::Failed => 2,
+            TuneStatus::NotAllowed => 3,
+        }
+    }
+    fn from_u8(v: u8) -> Result<Self> {
+        Ok(match v {
+            0 => TuneStatus::Done,
+            1 => TuneStatus::Declined,
+            2 => TuneStatus::Failed,
+            3 => TuneStatus::NotAllowed,
+            v => return Err(Error::Malformed(format!("tune status {v}"))),
+        })
+    }
+}
+
+fn put_opt(p: &mut Vec<u8>, v: Option<u32>) {
+    p.put_bool(v.is_some());
+    p.put_u32(v.unwrap_or(0));
+}
+
+fn opt(r: &mut Reader) -> Result<Option<u32>> {
+    let present = r.bool()?;
+    let v = r.u32()?;
+    Ok(present.then_some(v))
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ErrorMsg {
     pub code: u32,
@@ -335,6 +457,16 @@ pub enum Message {
         epoch: u32,
         root: [u8; 32],
     },
+    /// Helper → Remora (1.2): after `HelloAck` and whenever they change.
+    ServerSettings(ServerSettings),
+    /// Remora → helper (1.2), `request_id` ≠ 0.
+    TuneServer {
+        action: TuneAction,
+    },
+    /// Helper → Remora (1.2), the `TuneServer`'s `request_id`.
+    TuneResult {
+        status: TuneStatus,
+    },
     /// A type this side does not know (newer minor version).
     Unknown {
         ty: u16,
@@ -384,6 +516,9 @@ impl Message {
             Message::FileChunk { .. } => FILE_CHUNK,
             Message::FileBlockHash { .. } => FILE_BLOCK_HASH,
             Message::FileEnd { .. } => FILE_END,
+            Message::ServerSettings(_) => SERVER_SETTINGS,
+            Message::TuneServer { .. } => TUNE_SERVER,
+            Message::TuneResult { .. } => TUNE_RESULT,
             Message::Unknown { ty } => *ty,
         }
     }
@@ -514,6 +649,13 @@ impl Message {
                 p.put_u32(*epoch);
                 p.put_bytes(root);
             }
+            Message::ServerSettings(s) => {
+                put_opt(&mut p, s.frame_interval);
+                put_opt(&mut p, s.avc444);
+                put_opt(&mut p, s.avc_hw);
+            }
+            Message::TuneServer { action } => p.put_u8(action.to_u8()),
+            Message::TuneResult { status } => p.put_u8(status.to_u8()),
             Message::Unknown { .. } => {
                 return Err(Error::State("an unknown message cannot be sent"));
             }
@@ -614,6 +756,17 @@ impl Message {
                 epoch: r.u32()?,
                 root: r.array()?,
             },
+            SERVER_SETTINGS => Message::ServerSettings(ServerSettings {
+                frame_interval: opt(&mut r)?,
+                avc444: opt(&mut r)?,
+                avc_hw: opt(&mut r)?,
+            }),
+            TUNE_SERVER => Message::TuneServer {
+                action: TuneAction::from_u8(r.u8()?)?,
+            },
+            TUNE_RESULT => Message::TuneResult {
+                status: TuneStatus::from_u8(r.u8()?)?,
+            },
             ty => return Ok((f.request_id, Message::Unknown { ty })),
         };
         r.finish()?;
@@ -709,6 +862,18 @@ mod tests {
                 epoch: 2,
                 root: [6; 32],
             },
+            Message::ServerSettings(ServerSettings {
+                frame_interval: Some(15),
+                avc444: None,
+                avc_hw: Some(0),
+            }),
+            Message::ServerSettings(ServerSettings::default()),
+            Message::TuneServer {
+                action: TuneAction::Restore,
+            },
+            Message::TuneResult {
+                status: TuneStatus::Declined,
+            },
         ]
     }
 
@@ -737,6 +902,18 @@ mod tests {
             let long = frame::encode(f.ty, 0, 0, &p).unwrap();
             assert!(Message::decode(&long).is_err(), "{m:?} long");
         }
+    }
+
+    #[test]
+    fn recommended_settings() {
+        let s = ServerSettings::RECOMMENDED;
+        assert!(s.tuned() && s.any_set());
+        assert!(!ServerSettings::default().tuned() && !ServerSettings::default().any_set());
+        let partly = ServerSettings {
+            frame_interval: Some(FRAME_INTERVAL_60FPS),
+            ..Default::default()
+        };
+        assert!(!partly.tuned() && partly.any_set());
     }
 
     #[test]
@@ -775,6 +952,10 @@ mod tests {
         assert!(Message::decode(&f).is_err());
         let f = frame::encode(OPEN_URL_RESULT, 0, 0, &[9]).unwrap();
         assert!(Message::decode(&f).is_err());
+        let f = frame::encode(TUNE_SERVER, 0, 0, &[2]).unwrap();
+        assert!(Message::decode(&f).is_err());
+        let f = frame::encode(TUNE_RESULT, 0, 0, &[4]).unwrap();
+        assert!(Message::decode(&f).is_err());
         let mut si = Message::SessionInfo(SessionInfo {
             locked: false,
             idle_ms: 0,
@@ -808,6 +989,9 @@ mod tests {
             FILE_OFFER,
             FILE_CHUNK,
             FILE_END,
+            SERVER_SETTINGS,
+            TUNE_SERVER,
+            TUNE_RESULT,
         ];
         for round in 0..20_000 {
             let len = (next() % 96) as usize;

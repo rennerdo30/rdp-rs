@@ -19,6 +19,8 @@ pub struct SessionInfo {
     /// Machine-wide CPU load since the previous snapshot, 0..=100.
     pub cpu_percent: Option<f32>,
     pub memory: Option<Memory>,
+    /// The server's graphics settings (RDP-59), read from the registry.
+    pub graphics: remora_link::msg::ServerSettings,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

@@ -19,6 +19,10 @@ Usage:
   remora-agent send <file>...        Send files to the PC Remora connects from
                                      (what \"Send to my PC (Remora)\" runs).
   remora-agent session-info          Print the session information the agent reports.
+  remora-agent tune apply|restore    Set this server's remote graphics for Remora
+                                     (60 fps, H.264/AVC 444, hardware encoding), or
+                                     back to Windows' defaults. Needs administrator
+                                     rights; Remora's Improve button runs it.
   remora-agent fingerprint           Print this helper's key fingerprint, to compare
                                      with Remora's helper card or to set it as the
                                      connection's expected helper in Remora.
@@ -34,7 +38,8 @@ Usage:
                                      or by the PinnedClientsOnly policy).
   remora-agent --version | --help
 
-The agent never needs administrator rights and opens no network ports.
+The agent never needs administrator rights (only `tune` does) and opens no
+network ports.
 Log: %LOCALAPPDATA%\\rdp-rs\\logs\\remora-agent.log
 ";
 
@@ -64,6 +69,8 @@ pub enum Command {
     TrustClient(String),
     /// `strict`: None shows the state.
     Strict(Option<bool>),
+    /// `tune apply|restore` (RDP-59), run elevated.
+    Tune(remora_link::msg::TuneAction),
     Version,
     Help,
 }
@@ -127,6 +134,11 @@ pub fn parse<S: AsRef<str>>(args: &[S]) -> Result<Command, String> {
             ["off"] => Ok(Command::Strict(Some(false))),
             _ => Err("strict takes on or off".into()),
         },
+        "tune" => match rest {
+            ["apply"] => Ok(Command::Tune(remora_link::msg::TuneAction::Apply)),
+            ["restore"] => Ok(Command::Tune(remora_link::msg::TuneAction::Restore)),
+            _ => Err("tune takes apply or restore".into()),
+        },
         "--version" | "-V" | "version" => none(rest, Command::Version),
         "--help" | "-h" | "/?" | "help" => Ok(Command::Help),
         other => Err(format!("unknown command: {other}")),
@@ -156,6 +168,16 @@ mod tests {
             Ok(Command::OpenUrl("https://e.example/".into()))
         );
         assert!(parse(&["open-url"]).is_err());
+        assert_eq!(
+            parse(&["tune", "apply"]),
+            Ok(Command::Tune(remora_link::msg::TuneAction::Apply))
+        );
+        assert_eq!(
+            parse(&["tune", "restore"]),
+            Ok(Command::Tune(remora_link::msg::TuneAction::Restore))
+        );
+        assert!(parse(&["tune"]).is_err());
+        assert!(parse(&["tune", "apply", "x"]).is_err());
         assert!(parse(&["open-url", "a", "b"]).is_err());
         assert_eq!(
             parse(&["send", r"C:\a b.txt", "--dry-run"]),

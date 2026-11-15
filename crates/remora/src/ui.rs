@@ -31,7 +31,7 @@ pub use sidebar::{Divider, sample_rail, sample_resized};
 pub use helper::{
     HelperView, sample_cards as sample_helper_cards, sample_drop as sample_helper_drop,
     sample_helper_blocked, sample_helper_form, sample_helper_panel,
-    sample_pairing as sample_helper_pairing,
+    sample_pairing as sample_helper_pairing, sample_server_graphics,
 };
 pub use home::ThumbDue;
 pub mod session_view;
@@ -352,6 +352,9 @@ pub enum Hit {
     ForgetHelper(u64),
     /// Pairing was blocked after aborted attempts: try again.
     RetryHelperPairing(u64),
+    /// Change the server's graphics settings (RDP-59): improve (true) or
+    /// restore Windows' defaults.
+    TuneServer(u64, bool),
     /// Editor: a helper switch (0 links, 1 receive, 2 send, 3 links
     /// without asking), the download folder, Forget; the forget question.
     FormHelper(u8),
@@ -603,6 +606,9 @@ pub enum Action {
     ForgetHelper(String),
     /// Lift a tab's "pairing blocked" (its helper's next open is answered).
     RetryHelperPairing(u64),
+    /// Change the server's graphics settings (RDP-59): improve (true) or
+    /// restore Windows' defaults.
+    TuneServer(u64, bool),
 }
 
 pub enum Key {
@@ -2027,6 +2033,7 @@ impl Ui {
             | Hit::ShowTransfers(_)
             | Hit::ForgetHelper(_)
             | Hit::RetryHelperPairing(_)
+            | Hit::TuneServer(..)
             | Hit::FormHelper(_)
             | Hit::FormDownloads
             | Hit::FormForgetHelper
@@ -6749,6 +6756,7 @@ impl Ui {
         );
         y += p(58.0) + p(24.0);
         y = self.page_session_helper(cv, te, f, x, y, w, id);
+        y = self.page_server_graphics(cv, te, f, x, y, w, id);
 
         self.caption(cv, te, f, x, y, w, "Windows keys (Win, Alt+Tab)");
         y += p(26.0);

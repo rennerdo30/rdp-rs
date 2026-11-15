@@ -21,7 +21,9 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use ffwd_render::{Canvas, Rect, TextEngine};
-use remora_link::msg::{SessionInfo, TransferId, UrlStatus};
+use remora_link::msg::{
+    ServerSettings, SessionInfo, TransferId, TuneAction, TuneStatus, UrlStatus,
+};
 use remora_link::transfer::{Direction, TransferEvent, reason};
 use remora_link::{Sas, cap, policy};
 
@@ -252,6 +254,19 @@ pub struct HelperView {
     /// A server offer was refused unseen because receiving is off: said
     /// once per tab, quietly.
     pub refused_said: bool,
+    /// The server's graphics settings (RDP-59), once the helper sent them.
+    pub server: Option<ServerSettings>,
+    pub tune: Tune,
+}
+
+/// A change of the server's graphics settings (RDP-59).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Tune {
+    #[default]
+    Idle,
+    /// Asked; the administrator prompt waits on the server.
+    Waiting(TuneAction),
+    Finished(TuneAction, TuneStatus),
 }
 
 impl HelperView {
@@ -381,6 +396,40 @@ impl HelperView {
                 }
             }
             HelperEvent::Transfer(t) => self.transfer(t, now),
+            HelperEvent::ServerSettings(s) => {
+                self.server = Some(s);
+                Vec::new()
+            }
+            HelperEvent::TuneResult(st) => {
+                let action = match self.tune {
+                    Tune::Waiting(a) => a,
+                    _ => TuneAction::Apply,
+                };
+                self.tune = Tune::Finished(action, st);
+                let (text, tone) = match (action, st) {
+                    (TuneAction::Apply, TuneStatus::Done) => (
+                        "Server graphics improved. Restart the server for 60 fps; reconnect for H.264.",
+                        Tone::Success,
+                    ),
+                    (TuneAction::Restore, TuneStatus::Done) => (
+                        "Server graphics back to Windows' defaults. Restart the server to apply them.",
+                        Tone::Muted,
+                    ),
+                    (_, TuneStatus::Declined) => (
+                        "The administrator prompt on the server was declined; nothing changed.",
+                        Tone::Muted,
+                    ),
+                    (_, TuneStatus::Failed) => (
+                        "The server's graphics settings could not be changed (an administrator is needed).",
+                        Tone::Warning,
+                    ),
+                    (_, TuneStatus::NotAllowed) => (
+                        "The server helper does not allow this PC to change settings yet; confirm the pairing on the server.",
+                        Tone::Warning,
+                    ),
+                };
+                vec![Effect::Notice(text.into(), tone)]
+            }
         }
     }
 
@@ -940,6 +989,13 @@ impl Ui {
                 let t = self.tab_mut(id)?;
                 (t.helper.status == Status::Blocked).then_some(Action::RetryHelperPairing(id))
             }
+            Hit::TuneServer(id, apply) => {
+                let t = self.tab_mut(id)?;
+                if matches!(t.helper.tune, Tune::Waiting(_)) {
+                    return None;
+                }
+                Some(Action::TuneServer(id, apply))
+            }
             Hit::FormHelper(i) => {
                 let h = &mut self.opts.helper;
                 match i {
@@ -1341,6 +1397,151 @@ impl Ui {
     }
 
     // ---- The panel -------------------------------------------------------
+
+    /// The server's graphics settings (RDP-59): what limits the picture's
+    /// frame rate and codec, with Improve and Restore defaults. Shown once
+    /// a paired helper sent them.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn page_server_graphics(
+        &mut self,
+        cv: &mut Canvas,
+        te: &mut TextEngine,
+        f: &Fonts,
+        x: i32,
+        mut y: i32,
+        w: i32,
+        id: u64,
+    ) -> i32 {
+        let s = self.scale;
+        let p = |v: f32| (v * s).round() as i32;
+        let c = pal();
+        let Some(t) = self.tabs.iter().find(|t| t.id == id) else {
+            return y;
+        };
+        let v = t.helper.clone();
+        let Some(g) = v.server.filter(|_| v.paired()) else {
+            return y;
+        };
+        self.caption(cv, te, f, x, y, w, "Server graphics");
+        y += p(26.0);
+        let fps = match g.frame_interval {
+            None => "30 fps (default)".to_string(),
+            Some(remora_link::msg::FRAME_INTERVAL_60FPS) => "60 fps".into(),
+            Some(n) => format!("custom ({n})"),
+        };
+        let on_off = |v: Option<u32>, default: &str| match v {
+            None => default.to_string(),
+            Some(0) => "Off".into(),
+            Some(_) => "On".into(),
+        };
+        let rows = [
+            ("Frame rate", fps),
+            (
+                "H.264 (AVC 444)",
+                on_off(g.avc444, "Not preferred (default)"),
+            ),
+            ("H.264 on the GPU", on_off(g.avc_hw, "Off (default)")),
+        ];
+        let note = match v.tune {
+            Tune::Waiting(_) => Some((
+                "Confirm the administrator prompt on the server",
+                Tone::Accent,
+            )),
+            Tune::Finished(TuneAction::Apply, TuneStatus::Done) => Some((
+                "Done: restart the server for 60 fps, reconnect for H.264",
+                Tone::Success,
+            )),
+            Tune::Finished(TuneAction::Restore, TuneStatus::Done) => {
+                Some(("Defaults back: restart the server to apply", Tone::Muted))
+            }
+            Tune::Finished(_, TuneStatus::Declined) => {
+                Some(("The prompt was declined; nothing changed", Tone::Muted))
+            }
+            Tune::Finished(_, TuneStatus::Failed) => {
+                Some(("Not changed: an administrator is needed", Tone::Warning))
+            }
+            Tune::Finished(_, TuneStatus::NotAllowed) => {
+                Some(("Confirm the pairing on the server first", Tone::Warning))
+            }
+            _ if !g.tuned() => Some((
+                "Windows limits this session; Improve asks the server for admin rights",
+                Tone::Muted,
+            )),
+            _ => None,
+        };
+        let mut heights = vec![p(38.0); rows.len()];
+        if note.is_some() {
+            heights.push(p(44.0));
+        }
+        let cells = self.card(cv, x, y, w, &heights);
+        {
+            let mut k = Kit::new(cv, te, f, s);
+            for (r, (label, value)) in cells.iter().zip(rows.iter()) {
+                k.text_in(
+                    Font::Regular,
+                    12.5,
+                    Rect::new(r.x + p(14.0), r.y, p(130.0), r.h),
+                    label,
+                    c.text_muted,
+                );
+                let room = r.w - p(160.0);
+                k.text_right(
+                    Font::Regular,
+                    12.5,
+                    Rect::new(r.right() - p(14.0) - room, r.y, room, r.h),
+                    value,
+                    c.text,
+                );
+            }
+            if let (Some((text, tone)), Some(r)) = (note, cells.get(rows.len())) {
+                let lines = k.wrap(Font::Regular, 12.0, text, r.w - p(28.0));
+                let mut ty = r.y + (r.h - lines.len() as i32 * p(16.0)) / 2 + p(12.0);
+                for l in lines.iter().take(2) {
+                    k.text(
+                        Font::Regular,
+                        12.0,
+                        r.x + p(14.0),
+                        ty,
+                        l,
+                        tone.color(),
+                        r.w - p(28.0),
+                    );
+                    ty += p(16.0);
+                }
+            }
+        }
+        y += heights.iter().sum::<i32>() + p(10.0);
+        let waiting = matches!(v.tune, Tune::Waiting(_));
+        if !waiting && (!g.tuned() || g.any_set()) {
+            let gap = p(8.0);
+            let both = !g.tuned() && g.any_set();
+            let bw = if both { (w - gap) / 2 } else { w };
+            let mut bx = x;
+            if !g.tuned() {
+                self.btn(
+                    cv,
+                    te,
+                    f,
+                    Rect::new(bx, y, bw, p(34.0)),
+                    &Button::primary("Improve").icon(Icon::Bolt),
+                    Hit::TuneServer(id, true),
+                );
+                bx += bw + gap;
+            }
+            if g.any_set() {
+                self.btn(
+                    cv,
+                    te,
+                    f,
+                    Rect::new(bx, y, bw, p(34.0)),
+                    &Button::secondary("Restore defaults"),
+                    Hit::TuneServer(id, false),
+                );
+            }
+            y += p(34.0);
+        }
+        y + p(24.0)
+    }
 
     /// The Session page's helper card (nothing without a helper).
     #[allow(clippy::too_many_arguments)]
@@ -2195,6 +2396,20 @@ pub fn sample_helper_panel(page: u8, paired: bool) -> Ui {
     {
         t.helper.transfers = sample_rows();
     }
+    m
+}
+
+/// The Session page scrolled to the server's graphics settings (RDP-59):
+/// Windows' defaults, or a change waiting for the administrator prompt.
+pub fn sample_server_graphics(waiting: bool) -> Ui {
+    let mut m = sample_helper_panel(3, true);
+    if let Some(t) = m.tab_mut(1) {
+        t.helper.server = Some(ServerSettings::default());
+        if waiting {
+            t.helper.tune = Tune::Waiting(TuneAction::Apply);
+        }
+    }
+    m.drawer_scroll = 420;
     m
 }
 

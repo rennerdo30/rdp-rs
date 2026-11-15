@@ -69,8 +69,8 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use remora_link::msg::{
-    ErrorMsg, Hello, HelloAck, PairingStatus, SessionInfo as WireInfo, SessionKind as WireKind,
-    UrlStatus, err,
+    ErrorMsg, Hello, HelloAck, PairingStatus, ServerSettings, SessionInfo as WireInfo,
+    SessionKind as WireKind, TuneAction, TuneStatus, UrlStatus, err,
 };
 use remora_link::transfer::io::{Source, TargetDir};
 use remora_link::transfer::worker::{EngineWorker, Posted};
@@ -217,6 +217,10 @@ struct Ctl {
     held: Vec<Message>,
     /// Incoming transfers this session started.
     created: Vec<[u8; 16]>,
+    /// The graphics settings last sent (RDP-59).
+    settings_sent: Option<ServerSettings>,
+    /// A `TuneServer` waiting for its elevated process: its request id.
+    tune_pending: Option<u32>,
 }
 
 struct PendingUrl {
@@ -409,6 +413,9 @@ impl LinkProtocol {
             AgentEvent::SendFiles { id, paths } => self.send_files(id, paths, &mut out),
             AgentEvent::PairingAnswer { ticket, confirmed } => {
                 self.on_local_answer(ticket, confirmed, &mut out)
+            }
+            AgentEvent::TuneDone { request_id, status } => {
+                self.tune_done(request_id, status, &mut out)
             }
             AgentEvent::Timer => {}
             AgentEvent::Shutdown => self.close_ui(),
@@ -691,6 +698,8 @@ impl LinkProtocol {
                     refused: false,
                     held: Vec::new(),
                     created: Vec::new(),
+                    settings_sent: None,
+                    tune_pending: None,
                 });
                 out.push(Action::Send(Channel::Ctl, first));
             }
@@ -805,6 +814,7 @@ impl LinkProtocol {
                 }
             }
             Message::OpenUrlResult(status) => self.on_url_result(request_id, status, out),
+            Message::TuneServer { action } => self.tune_server(request_id, action, out),
             Message::Error(e) => {
                 warn!("Remora reported error {}", e.code);
                 if e.code == err::PAIRING_REJECTED || e.code == err::VERSION {
@@ -1008,6 +1018,65 @@ impl LinkProtocol {
             let m = Message::SessionInfo(wire_info(i));
             self.send(0, &m, out);
         }
+        self.send_settings(out);
+    }
+
+    // ------------------------------------------------- server settings
+
+    /// The server's graphics settings, after `HelloAck` and when they
+    /// change (RDP-59).
+    fn send_settings(&mut self, out: &mut Vec<Action>) {
+        if !self.acked().is_some_and(|c| c & cap::SERVER_TUNING != 0) {
+            return;
+        }
+        let Some(cur) = self.info.as_ref().map(|i| i.graphics) else {
+            return;
+        };
+        let Some(ctl) = self.ctl.as_mut() else {
+            return;
+        };
+        if ctl.settings_sent == Some(cur) {
+            return;
+        }
+        ctl.settings_sent = Some(cur);
+        self.send(0, &Message::ServerSettings(cur), out);
+    }
+
+    /// Remora asks to change them: only a client trusted here, with tuning
+    /// accepted, one change at a time. The user here still confirms the
+    /// administrator prompt.
+    fn tune_server(&mut self, request_id: u32, action: TuneAction, out: &mut Vec<Action>) {
+        let allowed = self.acked().is_some_and(|c| c & cap::SERVER_TUNING != 0)
+            && self.client_trusted()
+            && request_id != 0;
+        let busy = self.ctl.as_ref().is_some_and(|c| c.tune_pending.is_some());
+        if !allowed || busy {
+            let status = if allowed {
+                TuneStatus::Failed
+            } else {
+                TuneStatus::NotAllowed
+            };
+            info!("tune {action:?} refused ({status:?})");
+            self.send(request_id, &Message::TuneResult { status }, out);
+            return;
+        }
+        if let Some(ctl) = self.ctl.as_mut() {
+            ctl.tune_pending = Some(request_id);
+        }
+        info!("Remora asks to change the server's graphics settings ({action:?})");
+        out.push(Action::TuneServer { request_id, action });
+    }
+
+    fn tune_done(&mut self, request_id: u32, status: TuneStatus, out: &mut Vec<Action>) {
+        let Some(ctl) = self.ctl.as_mut() else {
+            return;
+        };
+        // A later session's request ids start over: answer only its own.
+        if ctl.tune_pending != Some(request_id) {
+            return;
+        }
+        ctl.tune_pending = None;
+        self.send(request_id, &Message::TuneResult { status }, out);
     }
 
     // ------------------------------------------------------------- Bulk

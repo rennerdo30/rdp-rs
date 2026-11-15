@@ -17,7 +17,9 @@ use crate::store::HelperOptions;
 /// The capability bits a connection's settings allow (`HelloAck` offers no
 /// more). Session info is always allowed once a helper paired.
 pub fn capabilities(o: &HelperOptions) -> u32 {
-    let mut bits = cap::SESSION_INFO;
+    // Server tuning only reports settings; a change needs a click here and
+    // the administrator prompt there (RDP-59).
+    let mut bits = cap::SESSION_INFO | cap::SERVER_TUNING;
     if o.open_links {
         bits |= cap::OPEN_URL;
     }
@@ -318,7 +320,10 @@ mod tests {
 
     #[test]
     fn capabilities_follow_the_switches_and_default_to_session_info() {
-        assert_eq!(capabilities(&HelperOptions::default()), cap::SESSION_INFO);
+        assert_eq!(
+            capabilities(&HelperOptions::default()),
+            cap::SESSION_INFO | cap::SERVER_TUNING
+        );
         let all = HelperOptions {
             open_links: true,
             receive_files: true,
@@ -330,7 +335,10 @@ mod tests {
             receive_files: true,
             ..Default::default()
         };
-        assert_eq!(capabilities(&down), cap::SESSION_INFO | cap::FILE_DOWN);
+        assert_eq!(
+            capabilities(&down),
+            cap::SESSION_INFO | cap::SERVER_TUNING | cap::FILE_DOWN
+        );
     }
 
     #[test]

@@ -7,9 +7,10 @@ implementation is the `remora-link` crate; the client side is
 RDP-41 (research, encryption comments), RDP-42 (core), RDP-43 (file
 transfer), RDP-44 (links).
 
-Version: **1.1** (`PROTO_MAJOR = 1`, `PROTO_MINOR = 1`). 1.1 adds
+Version: **1.2** (`PROTO_MAJOR = 1`, `PROTO_MINOR = 2`). 1.1 adds
 `PeerPairing` and `ClientName`: Remora has a persistent key that the helper
-pins (section 4.3).
+pins (section 4.3). 1.2 adds the server's graphics settings:
+`ServerSettings`, `TuneServer` and `TuneResult` (section 6.1).
 
 ## 1. Channels
 
@@ -356,6 +357,9 @@ All on `Remora::Ctl` unless marked Bulk. Maximum string lengths in bytes.
 | `0x0480` | `FileChunk`      | Bulk, sender→receiver | `[16] id, u32 epoch, u64 offset, blob data (≤256 KiB)` |
 | `0x0481` | `FileBlockHash`  | Bulk, sender→receiver | `[16] id, u32 epoch, u32 index, [32] BLAKE3 of the block` |
 | `0x0482` | `FileEnd`        | Bulk, sender→receiver | `[16] id, u32 epoch, [32] root` |
+| `0x0500` | `ServerSettings` | H→R | `opt frame_interval, opt avc444, opt avc_hw`; each `opt` is `bool present, u32 value`; 1.2 |
+| `0x0501` | `TuneServer`     | R→H | `u8 action` (0 apply, 1 restore); `request_id` ≠ 0; 1.2 |
+| `0x0502` | `TuneResult`     | H→R | `u8 status` (0 done, 1 declined, 2 failed, 3 not allowed); same `request_id`; 1.2 |
 
 - **Unknown types** (a newer minor version) get `Unsupported{type}`; the
   channel stays open. A malformed message of a known type is fatal.
@@ -364,8 +368,9 @@ All on `Remora::Ctl` unless marked Bulk. Maximum string lengths in bytes.
   never change within a major (decoders reject trailing bytes).
 - **Capability bits** (`Hello` offers, `HelloAck` accepts a subset):
   `1` session info, `2` open URL, `4` file transfer up (client → server),
-  `8` file transfer down (server → client). Remora accepts only what the
-  user enabled (default: session info only).
+  `8` file transfer down (server → client), `16` server tuning (1.2).
+  Remora accepts only what the user enabled (default: session info and
+  server tuning).
 - **Policy flags** (`Hello`): `1` clipboard redirection disabled, `2` drive
   redirection disabled. Either one switches both file directions off.
 - **Error codes:** `1` pairing rejected, `2` version, `3` second instance,
@@ -373,6 +378,32 @@ All on `Remora::Ctl` unless marked Bulk. Maximum string lengths in bytes.
 - **Links:** Remora passes only absolute `http`/`https` URLs without spaces
   or control characters to the app, which asks the user (or uses a per-host
   allow list); at most 8 requests wait at a time.
+
+### 6.1 Server graphics settings (1.2)
+
+Under capability `16` the helper reports three values that limit a remote
+session's picture, read from the registry without administrator rights
+(`None` when not set, so Windows' default applies):
+
+| Field | Registry | Recommended |
+|---|---|---|
+| `frame_interval` | `HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations` `DWMFRAMEINTERVAL` | 15 (60 fps; Windows caps remote sessions at 30 without it) |
+| `avc444` | `HKLM\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services` `AVC444ModePreferred` | 1 ("Prioritize H.264/AVC 444 graphics mode") |
+| `avc_hw` | same key, `AVCHardwareEncodePreferred` | 1 ("Configure H.264/AVC hardware encoding"; Windows falls back to software on error) |
+
+- The helper sends `ServerSettings` after `HelloAck` and again whenever the
+  values change (it reads them with every session snapshot).
+- `TuneServer` asks it to write the recommended values (apply) or to delete
+  all three (restore). The helper honours it only from a client trusted
+  on the server (section 4.3), with capability `16` accepted, one at a time;
+  otherwise it answers `TuneResult` not allowed (or failed while one runs).
+- To change them the helper starts itself elevated (`runas`) as
+  `remora-agent tune apply|restore`. Windows shows its administrator prompt
+  in the session; the user there decides. The elevated process takes no
+  other input and writes only these values. Declining gives `TuneResult`
+  declined, a failed write gives failed.
+- The frame-rate cap applies after a restart of the server, the H.264 policies
+  from the next connection.
 
 ## 7. File transfer
 

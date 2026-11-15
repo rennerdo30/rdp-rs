@@ -391,8 +391,63 @@ fn capabilities_follow_user_setting_and_policy() {
     let mut h = r.connect(StaticKey::generate().unwrap());
     // Drive clipboard disabled by policy: no file transfer at all.
     let ack = r.pair_and_hello(&mut h, cap::ALL, policy::CLIPBOARD_DISABLED);
-    assert_eq!(ack.capabilities, cap::SESSION_INFO | cap::OPEN_URL);
+    assert_eq!(
+        ack.capabilities,
+        cap::SESSION_INFO | cap::OPEN_URL | cap::SERVER_TUNING
+    );
     assert_eq!(r.handle.accepted_capabilities(), ack.capabilities);
+}
+
+/// RDP-59: the helper's settings reach the app; one tune request at a
+/// time, answered under its own request id.
+#[test]
+fn server_settings_and_tuning() {
+    let mut r = Rig::new("tune");
+    r.handle.set_transport_protocol(1);
+    r.handle
+        .set_capabilities(cap::SESSION_INFO | cap::SERVER_TUNING);
+    assert!(!r.handle.tune(TuneAction::Apply), "not paired yet");
+    let mut h = r.connect(StaticKey::generate().unwrap());
+    let ack = r.pair_and_hello(&mut h, cap::ALL, 0);
+    assert!(ack.capabilities & cap::SERVER_TUNING != 0);
+    let s = ServerSettings {
+        frame_interval: None,
+        avc444: Some(1),
+        avc_hw: None,
+    };
+    r.send(&mut h, Message::ServerSettings(s));
+    assert!(r.events().contains(&HelperEvent::ServerSettings(s)));
+    assert_eq!(r.handle.server_settings(), Some(s));
+    assert!(r.handle.tune(TuneAction::Apply));
+    assert!(!r.handle.tune(TuneAction::Restore), "one at a time");
+    r.pump(&mut h);
+    assert!(h.got.contains(&Message::TuneServer {
+        action: TuneAction::Apply
+    }));
+    // The fake helper answers with request id 1, the first request's.
+    r.send(
+        &mut h,
+        Message::TuneResult {
+            status: TuneStatus::Done,
+        },
+    );
+    assert!(
+        r.events()
+            .contains(&HelperEvent::TuneResult(TuneStatus::Done))
+    );
+    assert!(r.handle.tune(TuneAction::Restore), "free again");
+    // An answer for another request (id 1 again, now 2 waits) is ignored.
+    r.send(
+        &mut h,
+        Message::TuneResult {
+            status: TuneStatus::Failed,
+        },
+    );
+    assert!(
+        !r.events()
+            .iter()
+            .any(|e| matches!(e, HelperEvent::TuneResult(_)))
+    );
 }
 
 #[test]

@@ -1261,7 +1261,8 @@ impl App {
             | Action::PickSendFiles(_)
             | Action::BrowseDownloads
             | Action::ForgetHelper(_)
-            | Action::RetryHelperPairing(_) => {}
+            | Action::RetryHelperPairing(_)
+            | Action::TuneServer(..) => {}
         }
     }
 

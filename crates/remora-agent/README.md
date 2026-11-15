@@ -8,6 +8,7 @@ Everything on these channels is end-to-end encrypted (Noise, then ChaCha20-Poly1
 
 - Opens `Remora::Ctl` whenever a Remora client attaches to the session, and `Remora::Bulk` once Remora has accepted file transfer. Closes them on disconnect and reopens on reconnect. On the console, or under a client without Remora (mstsc), it stays idle and retries only on the next connect (plus a slow backoff: 30 s, doubling, at most 10 min).
 - Pairs with Remora (below), then reports session information: locked or not, idle time, CPU and memory load, Windows build, desktop or RemoteApp session, and whether clipboard or drive redirection is disabled by policy. If either is disabled, file transfer is off in both directions.
+- Reports the server's graphics settings to Remora (frame-rate cap, H.264/AVC 444 preference, H.264 hardware encoding). When you click **Improve** in Remora, it asks Windows for administrator rights here (the usual UAC prompt in the session, which you confirm or decline), sets 60 fps and H.264, and reports back. **Restore defaults** removes the three values again. A restart of the server applies the frame rate; the next connection the H.264 settings.
 - Receives files you drop onto the Remora window into **`Downloads\From Remora`** (see below).
 - Sends files to your PC with **Send To > Send to my PC (Remora)** in Explorer.
 - Opens links you click in the session in the browser on your own PC (after Remora asks you), once you pick "Remora Agent" as the app for HTTP and HTTPS.
@@ -109,11 +110,11 @@ Removes the scheduled task, the Send To shortcut and the link registration. `--d
 
 ## What it never does
 
-- It never asks for elevation (its manifest says `asInvoker`) and never installs services, drivers or anything machine-wide.
+- It never runs elevated by itself (its manifest says `asInvoker`) and never installs services or drivers. The one exception is **Improve** (or **Restore defaults**) in Remora: then it starts `remora-agent tune` through the Windows administrator prompt, which you confirm here. That process writes (or deletes) only the three graphics values above.
 - It opens no network ports. Its only local endpoint is a named pipe that only your user, in your session, can open; it carries a link from `remora-agent open-url`, or file paths from `remora-agent send`, to the running agent.
 - It never runs programs or commands, except starting your previous browser with a checked `http`/`https` link when Remora is not connected (directly, without a shell). Received files are only written, never opened.
 - It writes received files only into `Downloads\From Remora`, never replaces a file, and sends only files you chose with Send To.
-- It never changes system settings or other users' settings; everything it writes is under your own `HKEY_CURRENT_USER`, your own profile folders and your own scheduled task.
+- Apart from those three graphics values after your confirmation, it never changes system settings or other users' settings. Everything else it writes is under your own `HKEY_CURRENT_USER`, your own profile folders and your own scheduled task.
 - It sends nothing outside the RDP connection you already have.
 
 ## Verify on a real host

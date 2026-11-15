@@ -344,6 +344,25 @@ impl App {
                     },
                 );
             }
+            Action::TuneServer(id, apply) => {
+                let h = self.helper_of(id)?;
+                let action = if apply {
+                    remora_link::msg::TuneAction::Apply
+                } else {
+                    remora_link::msg::TuneAction::Restore
+                };
+                if h.tune(action) {
+                    if let Some(t) = self.win.as_mut().and_then(|w| w.ui.tab_mut(id)) {
+                        t.helper.tune = crate::ui::helper::Tune::Waiting(action);
+                    }
+                } else {
+                    self.message(
+                        "The server helper cannot change settings right now.",
+                        Tone::Warning,
+                    );
+                }
+                self.dirty();
+            }
             Action::RetryHelperPairing(id) => {
                 // Handled: nothing to do for a closed tab.
                 let h = self.helper_of(id)?;

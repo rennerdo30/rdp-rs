@@ -560,6 +560,10 @@ fn snapshot_ui(
         ("-helper-drop", || ui::sample_helper_drop(true)),
         ("-helper-drop-off", || ui::sample_helper_drop(false)),
         ("-helper-panel-session", || ui::sample_helper_panel(3, true)),
+        ("-server-graphics", || ui::sample_server_graphics(false)),
+        ("-server-graphics-waiting", || {
+            ui::sample_server_graphics(true)
+        }),
         ("-helper-panel-failed", || ui::sample_helper_panel(3, false)),
         ("-helper-panel-blocked", || ui::sample_helper_blocked(false)),
         ("-helper-panel-pending", || ui::sample_helper_blocked(true)),
