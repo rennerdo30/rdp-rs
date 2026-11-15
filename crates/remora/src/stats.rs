@@ -3,9 +3,13 @@
 //!
 //! - Traffic: bytes in and out of the connection (TLS records included)
 //!   per second.
-//! - Round trip: Windows' own smoothed TCP round-trip time on the
-//!   connection's socket (`SIO_TCP_INFO`), so it works whatever the server
-//!   supports; a gateway session has none.
+//! - Round trip: a ping (ICMP echo) to the server once a second, on a
+//!   thread of its own ([`Pinger`]). Where the server does not answer pings,
+//!   Windows' smoothed TCP round-trip time on the connection's socket
+//!   (`SIO_TCP_INFO`) instead, marked as such: it runs from sending until
+//!   the server's TCP acknowledges, and a server delays acknowledging small
+//!   packets such as keystrokes, so it reads far above the network's round
+//!   trip (30 ms TCP on a 1 ms LAN). A gateway session has neither.
 //! - Input to picture: from a key or mouse button press to the next change
 //!   of the picture. It includes the round trip, the server's reaction and
 //!   encoding, and Remora's decoding. A press that changes nothing on
@@ -15,6 +19,9 @@
 //!   last codec.
 
 use std::collections::VecDeque;
+use std::net::IpAddr;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 use rdp::input::PTRFLAGS_DOWN;
@@ -33,7 +40,10 @@ pub struct Stats {
     /// Kilobits per second received and sent since the last reading.
     pub in_kbps: f64,
     pub out_kbps: f64,
-    /// Windows' smoothed TCP round-trip time, milliseconds.
+    /// The latest ping to the server, milliseconds.
+    pub ping_ms: Option<f64>,
+    /// Windows' smoothed TCP round-trip time, milliseconds (includes the
+    /// server's delayed acknowledgements).
     pub tcp_rtt_ms: Option<f64>,
     /// Picture updates delivered per second.
     pub updates_per_s: f64,
@@ -104,7 +114,13 @@ impl Meter {
     }
 
     /// The reading since the last one; starts the next interval.
-    pub fn take(&mut self, now: Instant, cur: ClientStats, tcp_rtt: Option<Duration>) -> Stats {
+    pub fn take(
+        &mut self,
+        now: Instant,
+        cur: ClientStats,
+        tcp_rtt: Option<Duration>,
+        ping: Option<Duration>,
+    ) -> Stats {
         let secs = (now - self.since).as_secs_f64().max(1e-3);
         let kbps = |a: u64, b: u64| a.saturating_sub(b) as f64 * 8.0 / 1000.0 / secs;
         let gfx = cur.gfx.map(|g| {
@@ -130,6 +146,7 @@ impl Meter {
         let stats = Stats {
             in_kbps: kbps(cur.bytes_in, self.prev.bytes_in),
             out_kbps: kbps(cur.bytes_out, self.prev.bytes_out),
+            ping_ms: ping.map(|d| d.as_secs_f64() * 1000.0),
             tcp_rtt_ms: tcp_rtt.map(|d| d.as_secs_f64() * 1000.0),
             updates_per_s: self.updates as f64 / secs,
             gfx,
@@ -153,10 +170,11 @@ pub fn rows(
     let mut v = Vec::new();
     v.push((
         "Round trip",
-        st.tcp_rtt_ms.map_or_else(
-            || "not measured".into(),
-            |ms| format!("{} (TCP)", fmt_ms(ms)),
-        ),
+        match (st.ping_ms, st.tcp_rtt_ms) {
+            (Some(ms), _) => format!("{} (ping)", fmt_ms(ms)),
+            (None, Some(ms)) => format!("TCP {} · no ping reply", fmt_ms(ms)),
+            (None, None) => "not measured".into(),
+        },
     ));
     if let Some(s) = server {
         v.push(("Server measured", s.to_string()));
@@ -206,6 +224,103 @@ fn fmt_rate(kbps: f64) -> String {
         format!("{kbps:.0} kbit/s")
     }
 }
+
+/// Pings a server once a second on a thread of its own, while it lives.
+pub struct Pinger {
+    /// The latest round trip in microseconds; `u32::MAX` for none.
+    rtt: Arc<AtomicU32>,
+    stop: Arc<AtomicBool>,
+}
+
+impl Pinger {
+    /// IPv4 servers only; others get no ping.
+    pub fn start(addr: IpAddr) -> Pinger {
+        let rtt = Arc::new(AtomicU32::new(u32::MAX));
+        let stop = Arc::new(AtomicBool::new(false));
+        if let IpAddr::V4(v4) = addr {
+            let (rtt, stop) = (rtt.clone(), stop.clone());
+            let _ = std::thread::Builder::new()
+                .name("rdp-ping".into())
+                .spawn(move || ping_loop(v4, &rtt, &stop));
+        }
+        Pinger { rtt, stop }
+    }
+
+    pub fn rtt(&self) -> Option<Duration> {
+        match self.rtt.load(Ordering::Relaxed) {
+            u32::MAX => None,
+            us => Some(Duration::from_micros(us as u64)),
+        }
+    }
+}
+
+impl Drop for Pinger {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+    }
+}
+
+/// One echo a second (1 s timeout). The last reply stays shown through two
+/// lost pings; a third clears it.
+#[cfg(windows)]
+fn ping_loop(addr: std::net::Ipv4Addr, rtt: &AtomicU32, stop: &AtomicBool) {
+    use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+    use windows_sys::Win32::NetworkManagement::IpHelper::{
+        ICMP_ECHO_REPLY, IcmpCloseHandle, IcmpCreateFile, IcmpSendEcho,
+    };
+    // SAFETY: an ICMP handle this thread owns and closes.
+    let h = unsafe { IcmpCreateFile() };
+    if h == INVALID_HANDLE_VALUE || h.is_null() {
+        return;
+    }
+    let dest = u32::from_ne_bytes(addr.octets());
+    let data = [0x52u8; 32];
+    // Room for one reply with its data, and an ICMP error.
+    let mut reply = vec![0u8; size_of::<ICMP_ECHO_REPLY>() + data.len() + 8 + 64];
+    let mut lost = 0;
+    while !stop.load(Ordering::Relaxed) {
+        let started = Instant::now();
+        // SAFETY: valid handle, request and reply buffers of the sizes given.
+        let n = unsafe {
+            IcmpSendEcho(
+                h,
+                dest,
+                data.as_ptr().cast(),
+                data.len() as u16,
+                std::ptr::null(),
+                reply.as_mut_ptr().cast(),
+                reply.len() as u32,
+                1000,
+            )
+        };
+        let took = started.elapsed();
+        // SAFETY: with n > 0 the buffer starts with an ICMP_ECHO_REPLY;
+        // read unaligned from the byte buffer.
+        let ok = n > 0
+            && unsafe { std::ptr::read_unaligned(reply.as_ptr().cast::<ICMP_ECHO_REPLY>()) }.Status
+                == 0;
+        if ok {
+            lost = 0;
+            let us = took.as_micros().min(u32::MAX as u128 - 1) as u32;
+            rtt.store(us, Ordering::Relaxed);
+        } else {
+            lost += 1;
+            if lost >= 3 {
+                rtt.store(u32::MAX, Ordering::Relaxed);
+            }
+        }
+        // The rest of the second, waking up for the stop flag.
+        let next = started + INTERVAL;
+        while !stop.load(Ordering::Relaxed) && Instant::now() < next {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+    // SAFETY: closing the handle opened above.
+    unsafe { IcmpCloseHandle(h) };
+}
+
+#[cfg(not(windows))]
+fn ping_loop(_addr: std::net::Ipv4Addr, _rtt: &AtomicU32, _stop: &AtomicBool) {}
 
 /// A key or mouse button going down (not a release, move or wheel turn).
 fn is_press(ev: &InputEvent) -> bool {
@@ -296,10 +411,12 @@ mod tests {
                 }),
             },
             Some(Duration::from_micros(3_500)),
+            Some(Duration::from_micros(1_250)),
         );
         assert_eq!(s.in_kbps, 1000.0);
         assert_eq!(s.out_kbps, 8.0);
         assert_eq!(s.tcp_rtt_ms, Some(3.5));
+        assert_eq!(s.ping_ms, Some(1.25));
         assert_eq!(s.updates_per_s, 2.0);
         let g = s.gfx.expect("gfx");
         assert_eq!(g.fps, 60.0);
@@ -308,12 +425,30 @@ mod tests {
         assert_eq!(s.input_ms, None);
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn pinger_measures_loopback() {
+        let p = Pinger::start(IpAddr::from([127, 0, 0, 1]));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while p.rtt().is_none() && Instant::now() < deadline {
+            std::thread::sleep(ms(20));
+        }
+        let rtt = p.rtt().expect("a reply from 127.0.0.1");
+        assert!(rtt < ms(100), "{rtt:?}");
+        assert!(
+            Pinger::start(IpAddr::from([0u16, 0, 0, 0, 0, 0, 0, 1]))
+                .rtt()
+                .is_none()
+        );
+    }
+
     #[test]
     fn rows_name_what_was_measured() {
         let st = Stats {
             in_kbps: 12_345.0,
             out_kbps: 41.2,
-            tcp_rtt_ms: Some(3.12),
+            ping_ms: Some(1.04),
+            tcp_rtt_ms: Some(31.0),
             updates_per_s: 58.0,
             gfx: Some(GfxRate {
                 fps: 60.0,
@@ -325,7 +460,7 @@ mod tests {
         };
         let r = rows(&st, Some("RTT 4 ms"), Some((1828, 1232)));
         let get = |k: &str| r.iter().find(|(l, _)| *l == k).map(|(_, v)| v.as_str());
-        assert_eq!(get("Round trip"), Some("3.1 ms (TCP)"));
+        assert_eq!(get("Round trip"), Some("1.0 ms (ping)"));
         assert_eq!(get("Server measured"), Some("RTT 4 ms"));
         assert_eq!(get("Input → picture"), Some("28 ms avg · 41 ms worst"));
         assert_eq!(get("Graphics"), Some("GFX · AVC420 · 60 fps"));
@@ -337,6 +472,14 @@ mod tests {
         let plain = rows(&Stats::default(), None, None);
         let get = |k: &str| plain.iter().find(|(l, _)| *l == k).map(|(_, v)| v.as_str());
         assert_eq!(get("Round trip"), Some("not measured"));
+        let tcp_only = Stats {
+            tcp_rtt_ms: Some(31.0),
+            ..Stats::default()
+        };
+        assert_eq!(
+            rows(&tcp_only, None, None)[0].1,
+            "TCP 31 ms · no ping reply"
+        );
         assert_eq!(get("Graphics"), Some("Bitmap"));
         assert_eq!(get("Input → picture"), Some("press a key to measure"));
         assert_eq!(get("Server measured"), None);
@@ -368,10 +511,10 @@ mod tests {
         m.input(&[key(true)], t0 + ms(200));
         m.input(&[key(true)], t0 + ms(200) + INPUT_TIMEOUT + ms(1));
         m.picture(t0 + ms(200) + INPUT_TIMEOUT + ms(11));
-        let s = m.take(t0 + ms(3000), ClientStats::default(), None);
+        let s = m.take(t0 + ms(3000), ClientStats::default(), None, None);
         assert_eq!(s.input_ms, Some(((30.0 + 50.0 + 10.0) / 3.0, 50.0)));
         // Samples carry over to the next reading.
-        let s = m.take(t0 + ms(4000), ClientStats::default(), None);
+        let s = m.take(t0 + ms(4000), ClientStats::default(), None, None);
         assert!(s.input_ms.is_some());
         assert_eq!(s.gfx, None);
     }

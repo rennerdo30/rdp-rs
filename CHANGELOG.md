@@ -4,7 +4,7 @@
 
 - **GFX is the default.** New connections use the graphics pipeline with H.264. Existing connections saved with the old default, Bitmaps, switch once; choose **Bitmaps** again on the editor's Advanced page or in the side panel if you want them. When a server's graphics fail, the tab reconnects once with plain bitmaps on its own.
 - **A statistics overlay.** **Show statistics** shows a small box over the picture. The switch is on the side panel's Session page, and the toolbar's ⋯ menu and the command palette have it too. It is updated once a second and lists:
-  - the TCP round trip that Windows measures, and what the server's network detection found;
+  - the round trip, from a ping to the server once a second, and what the server's network detection found;
   - the input-to-picture latency, from a key or click to the next screen change (average and worst);
   - GFX frames per second with codec and decoding time, or Bitmap;
   - updates and repaints per second, and the traffic in and out.

@@ -223,6 +223,12 @@ fn run(
     }
     emit(Event::Connected(client.info().clone()));
     let mut meter = crate::stats::Meter::new(std::time::Instant::now(), client.stats());
+    // The network's own round trip (the TCP figure includes the server's
+    // delayed acknowledgements).
+    let pinger = client
+        .tcp_stream()
+        .and_then(|s| s.peer_addr().ok())
+        .map(|a| crate::stats::Pinger::start(a.ip()));
     if let Some(rail) = client.rail() {
         emit(Event::RailReady(rail));
     }
@@ -292,7 +298,8 @@ fn run(
         }
         if meter.due(now) {
             let rtt = client.tcp_stream().and_then(crate::stats::tcp_rtt);
-            emit(Event::Stats(meter.take(now, client.stats(), rtt)));
+            let ping = pinger.as_ref().and_then(|p| p.rtt());
+            emit(Event::Stats(meter.take(now, client.stats(), rtt, ping)));
         }
         if let Some(reason) = out.closed {
             // A Server Redirection PDU after logon: the next hop needs new

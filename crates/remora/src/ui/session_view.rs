@@ -2318,7 +2318,8 @@ pub fn sample_stats() -> Ui {
         t.stats = Some(crate::stats::Stats {
             in_kbps: 12_345.0,
             out_kbps: 41.0,
-            tcp_rtt_ms: Some(3.1),
+            ping_ms: Some(1.0),
+            tcp_rtt_ms: Some(31.0),
             updates_per_s: 58.0,
             gfx: Some(crate::stats::GfxRate {
                 fps: 60.0,

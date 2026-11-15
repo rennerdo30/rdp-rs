@@ -242,8 +242,10 @@ toolbar's **⋯** menu and the command palette) shows a small statistics box
 at the picture's top left, updated once a second; Remora remembers whether it
 is on. It shows:
 
-- **Round trip:** Windows' own TCP round-trip time to the server. A session
-  through an RD Gateway has none.
+- **Round trip:** a ping to the server, once a second. A server that does not
+  answer pings shows Windows' TCP estimate instead, marked "no ping reply":
+  it includes the server's delayed acknowledgements, so it reads well above
+  the network's real round trip. A session through an RD Gateway has none.
 - **Server measured:** what the server's network detection found, when it
   sends one (connection type Automatic).
 - **Input → picture:** from a key or mouse button press to the next change of
