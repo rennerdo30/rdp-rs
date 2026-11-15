@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- **A hint on servers without the helper.** When a desktop session has run for 15 seconds and no Remora helper showed up, a small card at the picture's top right says what the helper adds (file transfer, links on this PC, faster graphics settings). **How to install** opens the guide, **Later** hides it for this connection, and **Don't show again** hides it for that server (RDP-60).
 - **The server helper tunes the server's graphics.** With a paired helper (protocol 1.2), the side panel's Session page shows what limits the picture on the server: the 30 fps cap Windows puts on remote sessions, whether H.264 is preferred over ClearCodec, and whether the GPU encodes. **Improve** sets 60 fps, H.264/AVC 444 and hardware encoding. The change needs one administrator prompt on the server, confirmed there. Restart the server for the frame rate; reconnect for H.264. **Restore defaults** removes the settings again. Helpers before 1.2 show nothing new (RDP-59).
 
 - **Less work for the server's encoder with GFX.** Remora now offers the server the normal 100 MB graphics cache, as Microsoft's client does, instead of the small 16 MB one. A 4K desktop is about 30 MB, so with the small cache the server had to encode again what it had already sent, for example when scrolling or switching windows.

@@ -30,7 +30,7 @@ pub use sidebar::{Divider, sample_rail, sample_resized};
 
 pub use helper::{
     HelperView, sample_cards as sample_helper_cards, sample_drop as sample_helper_drop,
-    sample_helper_blocked, sample_helper_form, sample_helper_panel,
+    sample_helper_blocked, sample_helper_form, sample_helper_hint, sample_helper_panel,
     sample_pairing as sample_helper_pairing, sample_server_graphics,
 };
 pub use home::ThumbDue;
@@ -355,6 +355,10 @@ pub enum Hit {
     /// Change the server's graphics settings (RDP-59): improve (true) or
     /// restore Windows' defaults.
     TuneServer(u64, bool),
+    /// The no-helper notice (RDP-60).
+    HelperHintInstall,
+    HelperHintLater(u64),
+    HelperHintNever(u64),
     /// Editor: a helper switch (0 links, 1 receive, 2 send, 3 links
     /// without asking), the download folder, Forget; the forget question.
     FormHelper(u8),
@@ -452,6 +456,10 @@ pub struct Tab {
     pub redirected_to: Option<String>,
     /// What network auto-detect measured ("RTT 12 ms · 48.0 Mbit/s").
     pub network: Option<String>,
+    /// The no-helper notice was closed for this connection (RDP-60), and
+    /// whether it is on screen now.
+    pub helper_hint_closed: bool,
+    pub helper_hint_shown: bool,
     /// The statistics overlay's latest reading (RDP-56).
     pub stats: Option<crate::stats::Stats>,
     /// Connection steps, timings, and why it failed or ended.
@@ -609,6 +617,10 @@ pub enum Action {
     /// Change the server's graphics settings (RDP-59): improve (true) or
     /// restore Windows' defaults.
     TuneServer(u64, bool),
+    /// Open the user guide's server helper section (RDP-60).
+    OpenHelperGuide,
+    /// Never show the no-helper notice for this server again.
+    HelperHintNever(String),
 }
 
 pub enum Key {
@@ -769,6 +781,9 @@ pub struct Ui {
     /// The statistics overlay over the session picture; the app sets it
     /// from the settings.
     pub stats_overlay: bool,
+    /// Servers the no-helper notice is switched off for (RDP-60); the app
+    /// sets it from the settings.
+    pub helper_hint_off: Vec<String>,
     /// The floating panel's state and where it was painted.
     panel: panel::PanelState,
     /// The server helper's cards over the session, as laid out.
@@ -872,6 +887,7 @@ impl Ui {
             tip: None,
             panel_pinned: true,
             stats_overlay: false,
+            helper_hint_off: Vec::new(),
             panel: Default::default(),
             helper_ov: Default::default(),
             dropping: 0,
@@ -965,6 +981,8 @@ impl Ui {
             remote_app: None,
             redirected_to: None,
             network: None,
+            helper_hint_closed: false,
+            helper_hint_shown: false,
             stats: None,
             live: Live::default(),
             helper: HelperView::default(),
@@ -2034,6 +2052,9 @@ impl Ui {
             | Hit::ForgetHelper(_)
             | Hit::RetryHelperPairing(_)
             | Hit::TuneServer(..)
+            | Hit::HelperHintInstall
+            | Hit::HelperHintLater(_)
+            | Hit::HelperHintNever(_)
             | Hit::FormHelper(_)
             | Hit::FormDownloads
             | Hit::FormForgetHelper

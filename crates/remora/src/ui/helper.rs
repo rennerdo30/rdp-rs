@@ -655,6 +655,26 @@ fn row_line(r: &Row) -> (String, Tone) {
 enum CardKind {
     Link(usize),
     Offer(usize),
+    /// No helper on this server: what installing it adds (RDP-60).
+    NoHelper,
+}
+
+/// How long a session runs without a helper before the notice shows.
+pub const HINT_AFTER: Duration = Duration::from_secs(15);
+
+fn hint_h(s: f32) -> i32 {
+    (128.0 * s).round() as i32
+}
+
+fn hint_buttons(id: u64) -> [(Button<'static>, Hit); 3] {
+    [
+        (Button::ghost("Don't show again"), Hit::HelperHintNever(id)),
+        (Button::secondary("Later"), Hit::HelperHintLater(id)),
+        (
+            Button::primary("How to install").icon(Icon::Info),
+            Hit::HelperHintInstall,
+        ),
+    ]
 }
 
 /// Where the helper's cards were laid out over the session (physical px).
@@ -849,12 +869,29 @@ impl Ui {
         let w = p(380.0).min(area.w - p(32.0));
         let mut bottom = area.bottom() - p(16.0);
         let right = area.right() - p(16.0);
+        // The no-helper notice sits at the top right (RDP-60).
+        let mut top = area.y + p(72.0);
+        if self.helper_hint_due(id) && area.h > hint_h(s) + p(32.0) {
+            let r = Rect::new(right - w, area.y + p(16.0), w, hint_h(s));
+            let by = r.bottom() - p(16.0) - p(30.0);
+            ov.buttons.extend(button_row(
+                te,
+                f,
+                s,
+                r.right() - p(16.0),
+                by,
+                p(30.0),
+                &hint_buttons(id),
+            ));
+            ov.cards.push((r, CardKind::NoHelper));
+            top = top.max(r.bottom() + p(10.0));
+        }
         for kind in kinds.iter().take(MAX_CARDS) {
             let h = match kind {
                 CardKind::Link(_) => link_h(s),
-                CardKind::Offer(_) => offer_h(s),
+                CardKind::Offer(_) | CardKind::NoHelper => offer_h(s),
             };
-            if bottom - h < area.y + p(72.0) {
+            if bottom - h < top {
                 break;
             }
             let r = Rect::new(right - w, bottom - h, w, h);
@@ -863,13 +900,54 @@ impl Ui {
             let b = match kind {
                 CardKind::Link(_) => button_row(te, f, s, br, by, p(30.0), &link_buttons(id)),
                 CardKind::Offer(i) => button_row(te, f, s, br, by, p(30.0), &offer_buttons(id, *i)),
+                CardKind::NoHelper => Vec::new(),
             };
             ov.buttons.extend(b);
             ov.cards.push((r, *kind));
             bottom = r.y - p(10.0);
         }
-        ov.more = kinds.len() - ov.cards.len();
+        let shown = ov
+            .cards
+            .iter()
+            .filter(|(_, k)| *k != CardKind::NoHelper)
+            .count();
+        ov.more = kinds.len() - shown;
         self.helper_ov = ov;
+    }
+
+    /// The no-helper notice is due for this tab (RDP-60): a desktop
+    /// session (not RemoteApp, not spanned) that has run for
+    /// [`HINT_AFTER`] without any helper showing up, not closed for this
+    /// connection, and not switched off for this server.
+    pub(super) fn helper_hint_due(&self, id: u64) -> bool {
+        let Some(t) = self.tabs.iter().find(|t| t.id == id) else {
+            return false;
+        };
+        let v = &t.helper;
+        let helper_seen = v.present() || v.hello.is_some() || v.fingerprint.is_some();
+        let connected = matches!(t.state, TabState::Connected { .. })
+            && t.live
+                .connected_at
+                .is_some_and(|at| at.elapsed() >= HINT_AFTER);
+        let server = remora_link::server_id(&t.host, t.live.port);
+        connected
+            && !helper_seen
+            && !t.helper_hint_closed
+            && t.remote_app.is_none()
+            && !t.spanned
+            && !self.helper_hint_off.contains(&server)
+    }
+
+    /// Whether the notice changed on screen since the last call; the app
+    /// asks once a second and repaints on a change.
+    pub fn helper_hint_changed(&mut self, id: u64) -> bool {
+        let due = self.active == Some(id) && self.helper_hint_due(id);
+        let Some(t) = self.tab_mut(id) else {
+            return false;
+        };
+        let changed = t.helper_hint_shown != due;
+        t.helper_hint_shown = due;
+        changed
     }
 
     /// The helper's part of the overlay's damage rectangle.
@@ -989,6 +1067,20 @@ impl Ui {
                 let t = self.tab_mut(id)?;
                 (t.helper.status == Status::Blocked).then_some(Action::RetryHelperPairing(id))
             }
+            Hit::HelperHintInstall => Some(Action::OpenHelperGuide),
+            Hit::HelperHintLater(id) => {
+                self.tab_mut(id)?.helper_hint_closed = true;
+                None
+            }
+            Hit::HelperHintNever(id) => {
+                let t = self.tab_mut(id)?;
+                t.helper_hint_closed = true;
+                let server = remora_link::server_id(&t.host, t.live.port);
+                if !self.helper_hint_off.contains(&server) {
+                    self.helper_hint_off.push(server.clone());
+                }
+                Some(Action::HelperHintNever(server))
+            }
             Hit::TuneServer(id, apply) => {
                 let t = self.tab_mut(id)?;
                 if matches!(t.helper.tune, Tune::Waiting(_)) {
@@ -1085,6 +1177,7 @@ impl Ui {
                             self.paint_offer_card(cv, te, f, *r, o, &t_folder(&view));
                         }
                     }
+                    CardKind::NoHelper => self.paint_hint_card(cv, te, f, *r),
                 }
                 // "+N" on the top card.
                 if ov.more > 0 && i + 1 == ov.cards.len() {
@@ -1116,6 +1209,7 @@ impl Ui {
         let all = pairing_buttons(id, changed)
             .into_iter()
             .chain(link_buttons(id))
+            .chain(hint_buttons(id))
             .collect::<Vec<_>>();
         if let Some((b, _)) = all.into_iter().find(|(_, h)| *h == hit) {
             return Some(b);
@@ -1319,6 +1413,37 @@ impl Ui {
             c.text_muted,
             true,
         );
+    }
+
+    /// The no-helper notice (RDP-60).
+    fn paint_hint_card(&mut self, cv: &mut Canvas, te: &mut TextEngine, f: &Fonts, r: Rect) {
+        let s = self.scale;
+        let c = pal();
+        let mut k = Kit::new(cv, te, f, s);
+        let p = |v: f32| (v * s).round() as i32;
+        k.dialog(r);
+        let d = p(32.0);
+        let tile = Rect::new(r.x + p(16.0), r.y + p(16.0), d, d);
+        k.cv.fill_round(tile, 9.0 * s, c.accent_subtle);
+        k.icon_in(Icon::Shield, tile, 16.0, c.accent);
+        let tx = tile.right() + p(12.0);
+        let tw = r.right() - tx - p(16.0);
+        k.text(
+            Font::Semi,
+            14.0,
+            tx,
+            r.y + p(29.0),
+            "No Remora helper on this server",
+            c.text,
+            tw,
+        );
+        let body =
+            "Install it there for file transfer, links on this PC and faster graphics settings.";
+        let mut y = r.y + p(47.0);
+        for line in k.wrap(Font::Regular, 12.0, body, tw).iter().take(2) {
+            k.text(Font::Regular, 12.0, tx, y, line, c.text_muted, tw);
+            y += p(16.0);
+        }
     }
 
     fn paint_link_card(
@@ -2303,6 +2428,18 @@ fn sample_rows() -> Vec<Row> {
 
 /// The sample session with its helper in `status` (paired: with session
 /// info and every switch on).
+/// A session without a helper, connected long enough for the notice
+/// (RDP-60).
+pub fn sample_helper_hint() -> Ui {
+    let mut m = super::sample(true);
+    m.panel_pinned = false;
+    m.session_focus = true;
+    if let Some(t) = m.tab_mut(1) {
+        t.live.connected_at = Instant::now().checked_sub(HINT_AFTER * 2);
+    }
+    m
+}
+
 fn sample_with(status: Status) -> Ui {
     let mut m = super::sample(true);
     if let Some(t) = m.tab_mut(1) {
@@ -2491,6 +2628,55 @@ mod tests {
         m.mouse_move(x, y);
         m.mouse_down(x, y, te, fonts);
         m.mouse_up(x, y)
+    }
+
+    /// RDP-60: the notice shows after a while on a session without any
+    /// helper; Later closes it for this connection, Don't show again for
+    /// the server, and a helper or a RemoteApp session never gets it.
+    #[test]
+    fn no_helper_notice_shows_and_goes() {
+        let mut m = sample_helper_hint();
+        let Some((mut te, fonts)) = painted(&mut m, 1200, 800) else {
+            return; // no UI font (headless CI)
+        };
+        assert!(m.helper_hint_due(1));
+        let card = m
+            .helper_ov
+            .cards
+            .iter()
+            .find(|(_, k)| *k == CardKind::NoHelper)
+            .map(|(r, _)| *r)
+            .expect("notice laid out");
+        let area = m.session_area.unwrap().1;
+        assert!(
+            card.right() > area.right() - 40 && card.y < area.y + 40,
+            "top right"
+        );
+        assert!(matches!(
+            click(&mut m, &mut te, &fonts, Hit::HelperHintInstall),
+            Some(Action::OpenHelperGuide)
+        ));
+        click(&mut m, &mut te, &fonts, Hit::HelperHintLater(1));
+        assert!(!m.helper_hint_due(1), "closed for this connection");
+        // Don't show again: remembered for the server.
+        let mut m = sample_helper_hint();
+        let Some((mut te, fonts)) = painted(&mut m, 1200, 800) else {
+            return;
+        };
+        let a = click(&mut m, &mut te, &fonts, Hit::HelperHintNever(1));
+        assert!(matches!(a, Some(Action::HelperHintNever(_))));
+        assert_eq!(m.helper_hint_off.len(), 1);
+        assert!(!m.helper_hint_due(1));
+        // Too early, a helper, or RemoteApp: none.
+        let mut m = sample_helper_hint();
+        m.tab_mut(1).unwrap().live.connected_at = Some(Instant::now());
+        assert!(!m.helper_hint_due(1));
+        let mut m = sample_helper_hint();
+        m.tab_mut(1).unwrap().helper.status = Status::Handshaking;
+        assert!(!m.helper_hint_due(1));
+        let mut m = sample_helper_hint();
+        m.tab_mut(1).unwrap().spanned = true;
+        assert!(!m.helper_hint_due(1));
     }
 
     fn is_helper_hit(h: &Hit) -> bool {

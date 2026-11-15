@@ -1262,7 +1262,9 @@ impl App {
             | Action::BrowseDownloads
             | Action::ForgetHelper(_)
             | Action::RetryHelperPairing(_)
-            | Action::TuneServer(..) => {}
+            | Action::TuneServer(..)
+            | Action::OpenHelperGuide
+            | Action::HelperHintNever(_) => {}
         }
     }
 
@@ -2142,6 +2144,7 @@ impl ApplicationHandler<UserEvent> for App {
                             );
                             ui.panel_pinned = self.settings.panel_pinned;
                             ui.stats_overlay = self.settings.stats_overlay;
+                            ui.helper_hint_off = self.settings.helper_hint_off.clone();
                             ui.helper_pins = crate::helper_app::pinned_servers();
                             ui.client_fp = crate::link_key::fingerprint();
                             if self.settings.check_updates {
@@ -2532,7 +2535,12 @@ impl ApplicationHandler<UserEvent> for App {
                         (ms(sum) / count as f64, ms(worst))
                     });
                 }
-                if m.ui.set_stats(id, st) {
+                let shown = m.ui.set_stats(id, st);
+                if m.ui.helper_hint_changed(id) {
+                    // The no-helper notice came or went: lay out again.
+                    return self.dirty();
+                }
+                if shown {
                     self.render_overlay();
                 }
             }

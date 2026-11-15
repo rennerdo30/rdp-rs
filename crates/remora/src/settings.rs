@@ -27,6 +27,8 @@ pub struct AppSettings {
     pub panel_pinned: bool,
     /// The statistics overlay over the session picture.
     pub stats_overlay: bool,
+    /// Servers without the helper whose notice was switched off (RDP-60).
+    pub helper_hint_off: Vec<String>,
 }
 
 /// Update channel choices offered in Settings: (setting, label).
@@ -97,6 +99,7 @@ impl Default for AppSettings {
             panel_width: crate::ui::DRAWER_W as u32,
             panel_pinned: false,
             stats_overlay: false,
+            helper_hint_off: Vec::new(),
         }
     }
 }

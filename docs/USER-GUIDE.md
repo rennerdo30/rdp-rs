@@ -379,6 +379,11 @@ until you switch it on; a change applies from the next connection.
 If the server's policy turns off clipboard or drive redirection, file
 transfer is off too, whatever the switches say.
 
+On a server without the helper, a small card at the picture's top right
+says what it adds, 15 seconds after connecting. **How to install** opens this
+section; **Later** hides the card for this connection; **Don't show again**
+hides it for that server.
+
 ### Server graphics
 
 With a paired helper, the side panel's Session page shows **Server

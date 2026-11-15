@@ -21,6 +21,10 @@ use crate::theme::Tone;
 use crate::ui::helper::{Effect, HelloView, PROGRESS_REDRAW};
 use crate::ui::{Action, TabState};
 
+/// The user guide's section on the server helper (RDP-60).
+const HELPER_GUIDE: &str =
+    "https://github.com/rennerdo30/rdp-rs/blob/main/docs/USER-GUIDE.md#server-helper";
+
 /// A tab's server helper and its wake-up flag.
 pub(super) struct TabHelper {
     pub(super) handle: HelperHandle,
@@ -343,6 +347,18 @@ impl App {
                         }
                     },
                 );
+            }
+            Action::OpenHelperGuide => {
+                if let Err(e) = helper_app::open_web_url(HELPER_GUIDE) {
+                    self.message(format!("Could not open the guide: {e}."), Tone::Warning);
+                }
+            }
+            Action::HelperHintNever(server) => {
+                if !self.settings.helper_hint_off.contains(&server) {
+                    self.settings.helper_hint_off.push(server);
+                    let _ = self.settings.save();
+                }
+                self.dirty();
             }
             Action::TuneServer(id, apply) => {
                 let h = self.helper_of(id)?;
