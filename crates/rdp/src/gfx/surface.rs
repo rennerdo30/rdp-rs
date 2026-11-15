@@ -127,6 +127,8 @@ pub struct GfxState {
     dirty: Vec<(u16, Area)>,
     /// Output areas composed and not presented yet.
     pending: Vec<Damage>,
+    /// Decoding statistics, read through [`super::GfxHandle::stats`].
+    pub(crate) stats: super::GfxStats,
 }
 
 impl Default for GfxState {
@@ -147,6 +149,7 @@ impl GfxState {
             resized: false,
             dirty: Vec::new(),
             pending: Vec::new(),
+            stats: super::GfxStats::default(),
         };
         s.set_small_cache(true);
         s

@@ -867,6 +867,28 @@ fn wire_to_surface_uncompressed_and_planar() {
     assert_eq!(fb.pixels[10 * 32 + 10], 0);
 }
 
+#[test]
+fn stats_count_frames_and_name_the_last_codec() {
+    let (mut ch, h) = graphics(None);
+    assert_eq!(h.stats(), GfxStats::default());
+    setup(&mut ch);
+    let raw = hex("01 02 03 00");
+    let planar = hex("20 AA BB 11 22 99 88");
+    run(
+        &mut ch,
+        &[
+            wire(1, CODECID_UNCOMPRESSED, (0, 0, 1, 1), &raw),
+            pdu(CMDID_ENDFRAME, &hex("01 00 00 00")),
+            wire(1, CODECID_PLANAR, (0, 0, 2, 1), &planar),
+            pdu(CMDID_ENDFRAME, &hex("02 00 00 00")),
+        ],
+    );
+    let st = h.stats();
+    assert_eq!(st.frames, 2);
+    assert_eq!(st.codec, Some("Planar"));
+    assert_eq!(codec_name(CODECID_AVC420), "AVC420");
+}
+
 /// A ClearCodec stream (MS-RDPEGFX 2.2.4.1) with residual and bands layers.
 fn clear(residual: &[u8], bands: &[u8]) -> Vec<u8> {
     let mut v = vec![0, 0];

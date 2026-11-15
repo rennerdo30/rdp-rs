@@ -45,6 +45,8 @@ pub enum Event {
     },
     /// New network auto-detect results (MS-RDPBCGR 2.2.14.1.5).
     Network(rdp::NetworkCharacteristics),
+    /// The statistics overlay's reading, once a second (RDP-56).
+    Stats(crate::stats::Stats),
     /// The connection or session failed: the technical text, and its cause
     /// in plain terms with the connection step it happened in.
     Failed {
@@ -220,6 +222,7 @@ fn run(
         s.full = true;
     }
     emit(Event::Connected(client.info().clone()));
+    let mut meter = crate::stats::Meter::new(std::time::Instant::now(), client.stats());
     if let Some(rail) = client.rail() {
         emit(Event::RailReady(rail));
     }
@@ -228,6 +231,7 @@ fn run(
         loop {
             match rx.try_recv() {
                 Ok(Cmd::Input(ev)) => {
+                    meter.input(&ev, std::time::Instant::now());
                     if let Err(e) = client.send_input(&ev) {
                         return emit(failed(&e, None));
                     }
@@ -252,7 +256,9 @@ fn run(
             }
             Err(e) => return emit(failed(&e, None)),
         };
+        let now = std::time::Instant::now();
         if out.resized || !out.damage.is_empty() {
+            meter.picture(now);
             let fb = client.framebuffer();
             let mut s = shared.lock().unwrap();
             if out.resized || s.fb.width != fb.width || s.fb.height != fb.height {
@@ -283,6 +289,10 @@ fn run(
         }
         if let Some(n) = out.network {
             emit(Event::Network(n));
+        }
+        if meter.due(now) {
+            let rtt = client.tcp_stream().and_then(crate::stats::tcp_rtt);
+            emit(Event::Stats(meter.take(now, client.stats(), rtt)));
         }
         if let Some(reason) = out.closed {
             // A Server Redirection PDU after logon: the next hop needs new

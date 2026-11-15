@@ -25,6 +25,8 @@ pub struct AppSettings {
     /// a strip of its pages stays at the picture's edge and the panel
     /// floats over the picture.
     pub panel_pinned: bool,
+    /// The statistics overlay over the session picture (Ctrl+Alt+I).
+    pub stats_overlay: bool,
 }
 
 /// Update channel choices offered in Settings: (setting, label).
@@ -94,6 +96,7 @@ impl Default for AppSettings {
             sidebar_width: crate::ui::SIDEBAR_W as u32,
             panel_width: crate::ui::DRAWER_W as u32,
             panel_pinned: false,
+            stats_overlay: false,
         }
     }
 }

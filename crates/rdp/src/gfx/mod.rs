@@ -49,6 +49,7 @@ mod progressive_tests;
 mod tests;
 
 use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::{Duration, Instant};
 
 use crate::codec::planar;
 use crate::dvc::{DvcOut, DynamicChannel};
@@ -117,6 +118,34 @@ pub fn advertised_caps(avc: bool) -> Vec<CapSet> {
     ]
 }
 
+/// What the graphics channel decoded since it opened, for a statistics
+/// display. Rates come from comparing two readings.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct GfxStats {
+    /// Frames ended (RDPGFX_END_FRAME_PDU) and acknowledged.
+    pub frames: u64,
+    /// Time spent decoding WireToSurface commands (all codecs).
+    pub decode: Duration,
+    /// The codec of the last WireToSurface command.
+    pub codec: Option<&'static str>,
+}
+
+/// A codec's short name (2.2.3.1).
+pub fn codec_name(codec: u16) -> &'static str {
+    match codec {
+        pdu::CODECID_UNCOMPRESSED => "Uncompressed",
+        pdu::CODECID_CAVIDEO => "RemoteFX",
+        pdu::CODECID_CAPROGRESSIVE => "Progressive",
+        pdu::CODECID_CLEARCODEC => "ClearCodec",
+        pdu::CODECID_PLANAR => "Planar",
+        pdu::CODECID_AVC420 => "AVC420",
+        pdu::CODECID_ALPHA => "Alpha",
+        pdu::CODECID_AVC444 => "AVC444",
+        pdu::CODECID_AVC444V2 => "AVC444v2",
+        _ => "Unknown",
+    }
+}
+
 /// The session side of the graphics channel: composed output to present.
 #[derive(Clone)]
 pub struct GfxHandle(Arc<Mutex<GfxState>>);
@@ -130,6 +159,11 @@ impl GfxHandle {
     /// to `damage`. Returns true if `fb` was resized (RDPGFX_RESET_GRAPHICS).
     pub fn present(&self, fb: &mut Framebuffer, damage: &mut Vec<Damage>) -> bool {
         self.lock().present(fb, damage)
+    }
+
+    /// Decoding statistics since the channel opened.
+    pub fn stats(&self) -> GfxStats {
+        self.lock().stats
     }
 }
 
@@ -270,6 +304,7 @@ impl GraphicsChannel {
                 // Zero there reads as QUEUE_DEPTH_UNAVAILABLE (2.2.2.13).
                 let depth = (unprocessed as u32).min(pdu::SUSPEND_FRAME_ACKNOWLEDGEMENT - 1);
                 out.send(pdu::frame_acknowledge(depth, frame_id, self.frames));
+                self.state().stats.frames += 1;
                 if self.frames <= 3 || self.frames.is_multiple_of(200) {
                     trace!(
                         "gfx: frame {frame_id} acknowledged ({} decoded)",
@@ -341,10 +376,12 @@ impl GraphicsChannel {
                 dest,
                 data,
             } => {
+                let started = Instant::now();
                 if let Err(e) = self.wire_to_surface(surface_id, codec_id, pixel_format, dest, data)
                 {
                     trace!("gfx: wire to surface {surface_id} codec {codec_id:#x}: {e}");
                 }
+                self.count_decode(codec_id, started);
             }
             ServerPdu::WireToSurface2 {
                 surface_id,
@@ -353,9 +390,11 @@ impl GraphicsChannel {
                 data,
                 ..
             } => {
+                let started = Instant::now();
                 if let Err(e) = self.wire_to_surface2(surface_id, codec_id, context_id, data) {
                     trace!("gfx: wire to surface 2 {surface_id} context {context_id}: {e}");
                 }
+                self.count_decode(codec_id, started);
             }
             ServerPdu::DeleteEncodingContext {
                 surface_id,
@@ -365,6 +404,14 @@ impl GraphicsChannel {
                 trace!("gfx: command {cmd:#x} not supported, ignored");
             }
         }
+    }
+
+    /// Adds one WireToSurface command's decoding time to the statistics.
+    fn count_decode(&mut self, codec: u16, started: Instant) {
+        let took = started.elapsed();
+        let mut st = self.state();
+        st.stats.decode += took;
+        st.stats.codec = Some(codec_name(codec));
     }
 
     /// RDPGFX_WIRE_TO_SURFACE_PDU_1 (3.3.5.1): decode and copy to a surface.

@@ -215,6 +215,16 @@ pub struct PollOutcome {
     pub network: Option<NetworkCharacteristics>,
 }
 
+/// What [`Client::stats`] reports.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct ClientStats {
+    /// Bytes received and sent on the connection (TLS records included).
+    pub bytes_in: u64,
+    pub bytes_out: u64,
+    /// The graphics pipeline's statistics, in [`crate::Graphics::Gfx`] mode.
+    pub gfx: Option<crate::gfx::GfxStats>,
+}
+
 /// Why a session ended, and whether an auto-reconnect (MS-RDPBCGR 5.5) fits.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CloseReason {
@@ -1003,6 +1013,23 @@ impl Client {
 
     pub fn info(&self) -> &ConnectionInfo {
         &self.info
+    }
+
+    /// Traffic so far and the graphics pipeline's decoding statistics, for
+    /// a statistics display; rates come from comparing two readings.
+    pub fn stats(&self) -> ClientStats {
+        let (bytes_in, bytes_out) = self.f.traffic();
+        ClientStats {
+            bytes_in,
+            bytes_out,
+            gfx: self.gfx.as_ref().map(|g| g.stats()),
+        }
+    }
+
+    /// The TCP connection of a direct session (None through a gateway),
+    /// for socket-level measurements such as the round-trip time.
+    pub fn tcp_stream(&self) -> Option<&std::net::TcpStream> {
+        self.f.tcp()
     }
 
     pub fn framebuffer(&self) -> &Framebuffer {

@@ -118,6 +118,8 @@ pub enum Command {
     Panel,
     /// Dock the panel beside the picture, or float it over the picture.
     PinPanel,
+    /// The statistics overlay.
+    Stats,
     Theme(ThemeChoice),
     OpenSettings,
     /// Fold or unfold the sidebar ("Toggle sidebar", Ctrl+B).
@@ -169,6 +171,7 @@ impl Command {
             Command::Record(id) => Hit::Record(id),
             Command::Panel => Hit::Drawer,
             Command::PinPanel => Hit::PanelPin,
+            Command::Stats => Hit::StatsOverlay,
             Command::Theme(t) => Hit::Theme(
                 ThemeChoice::ALL
                     .iter()
@@ -789,6 +792,21 @@ impl Ui {
                 Lead::Icon(Icon::Pin, Tone::Neutral),
                 Chip::None,
                 verb,
+            );
+            let on = self.stats_overlay;
+            push(
+                Command::Stats,
+                s,
+                if on {
+                    "Hide statistics".into()
+                } else {
+                    "Show statistics".into()
+                },
+                "Latency, frame rate and traffic over the picture".into(),
+                "statistics stats debug info overlay latency ping rtt fps frame rate bandwidth",
+                Lead::Icon(Icon::Clock, Tone::Neutral),
+                Chip::Keys("Ctrl+Alt+I"),
+                if on { "Hide" } else { "Show" },
             );
             push(
                 Command::CloseTab(id),

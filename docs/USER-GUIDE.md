@@ -236,6 +236,24 @@ a double-click on the edge puts the default width back, and Remora remembers
 the width. A desktop set to **Fit window** follows the docked panel: it is
 resized to the new picture area once you let go of the edge.
 
+**Ctrl+Alt+I** (also from inside the session) or **Show statistics** in the
+command palette shows a small statistics box at the picture's top left,
+updated once a second; Remora remembers whether it is on. It shows:
+
+- **Round trip:** Windows' own TCP round-trip time to the server. A session
+  through an RD Gateway has none.
+- **Server measured:** what the server's network detection found, when it
+  sends one (connection type Automatic).
+- **Input → picture:** from a key or mouse button press to the next change of
+  the picture, as an average and the worst of the last 20 presses. This is the
+  delay you feel: the round trip, the server's reaction and encoding, and
+  Remora's decoding. Presses that change nothing on screen are not counted.
+- **Graphics:** GFX with its codec and frames per second, and the decoding
+  time per frame; or Bitmap.
+- **Updates and repaints:** picture updates per second and how often the
+  window was repainted.
+- **Received and sent:** the connection's traffic.
+
 When the network drops, Remora reconnects on its own, up to five times. When a
 session fails or ends, the tab says why; see
 [Troubleshooting](TROUBLESHOOTING.md). Quitting Remora with sessions open

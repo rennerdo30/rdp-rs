@@ -268,6 +268,8 @@ pub enum Hit {
     Tab(u64),
     CloseTab(u64),
     Drawer,
+    /// Show or hide the statistics overlay (Ctrl+Alt+I).
+    StatsOverlay,
     Reconnect(u64),
     Disconnect(u64),
     Clipboard(u64),
@@ -447,6 +449,8 @@ pub struct Tab {
     pub redirected_to: Option<String>,
     /// What network auto-detect measured ("RTT 12 ms · 48.0 Mbit/s").
     pub network: Option<String>,
+    /// The statistics overlay's latest reading (RDP-56).
+    pub stats: Option<crate::stats::Stats>,
     /// Connection steps, timings, and why it failed or ended.
     pub live: Live,
     /// The server helper, its questions and transfers.
@@ -756,6 +760,9 @@ pub struct Ui {
     /// right edge and the panel floats over the picture (`panel`). The app
     /// sets it from the settings (default unpinned); samples start pinned.
     pub panel_pinned: bool,
+    /// The statistics overlay over the session picture (Ctrl+Alt+I); the
+    /// app sets it from the settings.
+    pub stats_overlay: bool,
     /// The floating panel's state and where it was painted.
     panel: panel::PanelState,
     /// The server helper's cards over the session, as laid out.
@@ -858,6 +865,7 @@ impl Ui {
             dividers: Default::default(),
             tip: None,
             panel_pinned: true,
+            stats_overlay: false,
             panel: Default::default(),
             helper_ov: Default::default(),
             dropping: 0,
@@ -951,6 +959,7 @@ impl Ui {
             remote_app: None,
             redirected_to: None,
             network: None,
+            stats: None,
             live: Live::default(),
             helper: HelperView::default(),
         });
@@ -2129,6 +2138,7 @@ impl Ui {
             Hit::Tab(id) => self.active = Some(id),
             Hit::CloseTab(id) => return Some(Action::CloseTab(id)),
             Hit::Drawer => self.toggle_panel(),
+            Hit::StatsOverlay => return self.toggle_stats(),
             Hit::PanelPage(i) => self.panel_page(i),
             Hit::PanelPin => return self.pin_panel(),
             Hit::PanelClose => self.close_panel(),

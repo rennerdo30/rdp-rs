@@ -47,6 +47,7 @@ mod smartcard;
 mod span;
 #[cfg(windows)]
 mod sspi;
+mod stats;
 mod store;
 mod text_field;
 mod theme;
@@ -541,6 +542,7 @@ fn snapshot_ui(
             sv::sample_ended(failure::EndReason::OtherConnection)
         }),
         ("-toolbar-shown", || sv::sample_toolbar(true, false, false)),
+        ("-stats", sv::sample_stats),
         ("-toolbar-hidden", || {
             sv::sample_toolbar(false, false, false)
         }),

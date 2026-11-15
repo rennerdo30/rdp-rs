@@ -71,7 +71,8 @@ pub use audin::{AudioInput, AudioInputHandle, CaptureBackend, audin};
 pub use autodetect::NetworkCharacteristics;
 pub use channel::{ChannelOut, StaticChannel};
 pub use client::{
-    CertificateCheck, Client, CloseReason, Config, ConnectionInfo, PollOutcome, ServerCertificate,
+    CertificateCheck, Client, ClientStats, CloseReason, Config, ConnectionInfo, PollOutcome,
+    ServerCertificate,
 };
 pub use cliprdr::{ClipboardBackend, ClipboardHandle, Cliprdr, cliprdr};
 pub use compress::Compression;
@@ -82,8 +83,8 @@ pub use error::{Error, Result};
 pub use experience::{ConnectionType, Experience};
 pub use framebuffer::{Damage, Framebuffer};
 pub use gateway::GatewayConfig;
-pub use gfx::Graphics;
 pub use gfx::h264::{H264Decoder, H264Factory, Yuv420Frame};
+pub use gfx::{GfxStats, Graphics};
 pub use input::{InputEvent, KeyboardInfo};
 pub use log::set_verbose;
 pub use monitor::{Monitor, Orientation, VirtualDesktop};

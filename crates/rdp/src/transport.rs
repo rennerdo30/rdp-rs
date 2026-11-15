@@ -63,6 +63,8 @@ struct Reader {
     /// Received bytes not yet consumed (by TLS, which takes them in pieces).
     pending: Vec<u8>,
     closed: bool,
+    /// Bytes received from the socket so far.
+    received: u64,
 }
 
 impl Reader {
@@ -91,6 +93,7 @@ impl Reader {
             rx,
             pending: Vec::new(),
             closed: false,
+            received: 0,
         }
     }
 
@@ -114,6 +117,7 @@ impl Reader {
                 while let Ok(Incoming::Data(more)) = self.rx.try_recv() {
                     self.pending.extend_from_slice(&more);
                 }
+                self.received += self.pending.len() as u64;
                 Ok(true)
             }
             Incoming::Closed => {
@@ -149,6 +153,11 @@ pub struct Framer {
     /// How long one read waits for data (`set_read_timeout`).
     wait: Duration,
     buf: Vec<u8>,
+    /// Bytes written to the socket so far (TLS records included).
+    sent: u64,
+    /// The TCP connection, when the stream is a direct one (not through a
+    /// gateway): for socket-level statistics such as the round-trip time.
+    tcp: Option<TcpStream>,
 }
 
 impl Drop for Framer {
@@ -163,7 +172,20 @@ impl Framer {
         let read = sock
             .try_clone()
             .expect("clone socket for the reader thread");
-        Self::over(Box::new(sock), Box::new(read))
+        let tcp = sock.try_clone().ok();
+        let mut f = Self::over(Box::new(sock), Box::new(read));
+        f.tcp = tcp;
+        f
+    }
+
+    /// Bytes received and sent on the connection so far.
+    pub fn traffic(&self) -> (u64, u64) {
+        (self.reader.received, self.sent)
+    }
+
+    /// The TCP connection under a direct (not gateway) session.
+    pub fn tcp(&self) -> Option<&TcpStream> {
+        self.tcp.as_ref()
     }
 
     /// A framer over any byte stream: `read` is read on a thread of its own
@@ -175,6 +197,8 @@ impl Framer {
             tls: None,
             wait: Duration::from_millis(100),
             buf: Vec::new(),
+            sent: 0,
+            tcp: None,
         }
     }
 
@@ -187,7 +211,7 @@ impl Framer {
     fn flush_tls(&mut self) -> Result<()> {
         if let Some(conn) = &mut self.tls {
             while conn.wants_write() {
-                conn.write_tls(&mut self.sock)?;
+                self.sent += conn.write_tls(&mut self.sock)? as u64;
             }
         }
         Ok(())
@@ -195,7 +219,10 @@ impl Framer {
 
     pub fn write(&mut self, data: &[u8]) -> Result<()> {
         match &mut self.tls {
-            None => self.sock.write_all(data)?,
+            None => {
+                self.sock.write_all(data)?;
+                self.sent += data.len() as u64;
+            }
             Some(conn) => {
                 conn.writer().write_all(data)?;
                 self.flush_tls()?;
@@ -232,7 +259,7 @@ impl Framer {
             }
             self.reader.feed(conn)?;
             while conn.wants_write() {
-                conn.write_tls(&mut self.sock)?;
+                self.sent += conn.write_tls(&mut self.sock)? as u64;
             }
         }
     }

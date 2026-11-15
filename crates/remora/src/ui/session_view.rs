@@ -34,6 +34,13 @@ const PILL_BLUR: f32 = 14.0;
 /// Height of the band above a session without a picture (RemoteApp,
 /// spanned) that holds the pill.
 const BAND_H: f32 = 60.0;
+/// The statistics overlay (logical px): width, padding, title row, row
+/// height and the label column.
+const STATS_W: f32 = 300.0;
+const STATS_PAD: f32 = 12.0;
+const STATS_HEAD: f32 = 24.0;
+const STATS_ROW: f32 = 18.0;
+const STATS_LABEL_W: f32 = 112.0;
 
 /// What a session tab knows about its connection beyond its state: the
 /// steps reached, timings, and why it failed or ended.
@@ -512,6 +519,7 @@ impl Ui {
             self.tip_bounds(),
             self.panel_shadow_rect(),
             self.helper_overlay_rect(),
+            self.stats_rect(),
         ]
         .into_iter()
         .flatten()
@@ -1077,10 +1085,111 @@ impl Ui {
             self.paint_reconnect_card(cv, te, f, area, id, &attempt, &step);
         }
         self.paint_panel_shadow(cv, te, f);
+        self.paint_stats(cv, te, f);
         self.paint_tip(cv, te, f);
         self.paint_toolbar(cv, te, f);
         // The helper's cards and questions over everything of the session.
         self.paint_helper_overlay(cv, te, f);
+    }
+
+    /// Shows or hides the statistics overlay (Ctrl+Alt+I); the choice is
+    /// saved with the layout.
+    pub fn toggle_stats(&mut self) -> Option<Action> {
+        let was = self.overlay_rect();
+        self.stats_overlay = !self.stats_overlay;
+        self.mark_overlay(was);
+        Some(Action::SaveLayout)
+    }
+
+    /// A session's statistics reading (once a second). True when the
+    /// overlay on screen changed and needs repainting.
+    pub fn set_stats(&mut self, id: u64, st: crate::stats::Stats) -> bool {
+        let was = self.overlay_rect();
+        let Some(t) = self.tab_mut(id) else {
+            return false;
+        };
+        t.stats = Some(st);
+        let shown = self.stats_overlay && self.session_area.is_some_and(|(s, _)| s == id);
+        if shown {
+            self.mark_overlay(was);
+        }
+        shown
+    }
+
+    /// Where the statistics overlay goes (top left of the visible picture)
+    /// and its rows; None while it is off, or the session has no reading
+    /// or no live picture.
+    fn stats_view(&self) -> Option<(Rect, Vec<(&'static str, String)>)> {
+        if !self.stats_overlay || self.toolbar.dim.is_some() {
+            return None;
+        }
+        let (id, area) = self.session_area?;
+        let t = self.tabs.iter().find(|t| t.id == id)?;
+        let st = t.stats.as_ref()?;
+        let desktop = match t.state {
+            TabState::Connected { width, height, .. } => Some((width, height)),
+            _ => return None,
+        };
+        let rows = crate::stats::rows(st, t.network.as_deref(), desktop);
+        let p = |v: f32| (v * self.scale).round() as i32;
+        let clip = self.session_clip.unwrap_or(area).intersect(area);
+        let h = p(STATS_PAD * 2.0 + STATS_HEAD) + rows.len() as i32 * p(STATS_ROW);
+        let w = p(STATS_W).min(clip.w - p(24.0));
+        let r = Rect::new(clip.x + p(12.0), clip.y + p(12.0), w, h).intersect(clip);
+        (w >= p(160.0) && !r.is_empty()).then_some((r, rows))
+    }
+
+    fn stats_rect(&self) -> Option<Rect> {
+        self.stats_view().map(|(r, _)| r)
+    }
+
+    fn paint_stats(&mut self, cv: &mut Canvas, te: &mut TextEngine, f: &Fonts) {
+        let Some((r, rows)) = self.stats_view() else {
+            return;
+        };
+        let c = pal();
+        let old = cv.set_clip(cv.clip().intersect(r));
+        let mut k = Kit::new(cv, te, f, self.scale);
+        let border = if c.dark { c.border_strong } else { c.border };
+        k.cv.round_border(r, radius::CARD * self.scale, border, c.surface_raised);
+        let pad = k.p(STATS_PAD);
+        let (x, w) = (r.x + pad, r.w - 2 * pad);
+        let head = Rect::new(x, r.y + pad, w, k.p(STATS_HEAD) - k.p(6.0));
+        let b = k.baseline(Font::Semi, size::BODY, head);
+        k.text(Font::Semi, size::BODY, x, b, "Statistics", c.text, w);
+        k.text_right(
+            Font::Regular,
+            size::CAPTION,
+            head,
+            "Ctrl+Alt+I",
+            c.text_faint,
+        );
+        let label_w = k.p(STATS_LABEL_W);
+        let mut y = r.y + pad + k.p(STATS_HEAD);
+        for (label, value) in &rows {
+            let row = Rect::new(x, y, w, k.p(STATS_ROW));
+            let b = k.baseline(Font::Regular, size::SMALL, row);
+            k.text(
+                Font::Regular,
+                size::SMALL,
+                x,
+                b,
+                label,
+                c.text_muted,
+                label_w - k.p(6.0),
+            );
+            k.text(
+                Font::Regular,
+                size::SMALL,
+                x + label_w,
+                b,
+                value,
+                c.text,
+                w - label_w,
+            );
+            y += k.p(STATS_ROW);
+        }
+        cv.set_clip(old);
     }
 
     fn paint_toolbar(&mut self, cv: &mut Canvas, te: &mut TextEngine, f: &Fonts) {
@@ -2197,6 +2306,29 @@ pub fn sample_ended(reason: EndReason) -> Ui {
 
 /// A running session: the toolbar shown (as on arrival, before a click
 /// into the picture) or hidden to its handle; `menu` opens its menu.
+/// A connected session with the statistics overlay on (RDP-56).
+pub fn sample_stats() -> Ui {
+    let mut m = sample_toolbar(false, false, false);
+    m.stats_overlay = true;
+    if let Some(t) = m.tab_mut(1) {
+        t.network = Some("RTT 4 ms · 48.0 Mbit/s".into());
+        t.stats = Some(crate::stats::Stats {
+            in_kbps: 12_345.0,
+            out_kbps: 41.0,
+            tcp_rtt_ms: Some(3.1),
+            updates_per_s: 58.0,
+            gfx: Some(crate::stats::GfxRate {
+                fps: 60.0,
+                decode_ms: 2.1,
+                codec: Some("AVC420"),
+            }),
+            input_ms: Some((28.4, 41.0)),
+            repaints_per_s: 58.0,
+        });
+    }
+    m
+}
+
 pub fn sample_toolbar(shown: bool, menu: bool, fullscreen: bool) -> Ui {
     let mut m = sample(true);
     // The panel unpinned (the default): its strip at the picture's edge.
@@ -2253,6 +2385,40 @@ mod tests {
         assert!(m.take_overlay_damage().is_some());
         let (painted_area, after) = (area, m.session_area.unwrap().1);
         assert_eq!(painted_area, after, "the remote size does not change");
+    }
+
+    /// The statistics overlay sits at the picture's top left, repaints only
+    /// its rectangle on a new reading, and leaves the pointer to the session.
+    #[test]
+    fn stats_overlay_shows_repaints_and_hides() {
+        let mut m = sample_stats();
+        let Some(_) = painted(&mut m, 1200, 800) else {
+            return; // no UI font (headless CI)
+        };
+        let _ = m.take_overlay_damage();
+        let (id, area) = m.session_area.unwrap();
+        let r = m.stats_rect().expect("shown");
+        let clip = m.session_clip.unwrap_or(area);
+        assert!(clip.contains(r.x, r.y) && r.x < clip.x + 20 && r.y < clip.y + 20);
+        assert!(
+            !m.over_overlay(r.x + 4, r.y + 4),
+            "clicks go to the session"
+        );
+        assert!(m.overlay_rect().is_some_and(|o| o.contains(r.x, r.y)));
+        // A new reading repaints the box only.
+        let st = m.tabs[0].stats.clone().unwrap();
+        assert!(m.set_stats(id, st.clone()));
+        let d = m.take_overlay_damage().expect("box to repaint");
+        assert!(d.contains(r.x, r.y) && d.contains(r.right() - 1, r.bottom() - 1));
+        // Another tab's reading changes nothing on screen.
+        assert!(!m.set_stats(id + 99, st));
+        // Off: gone, and its place is repainted.
+        assert!(matches!(m.toggle_stats(), Some(Action::SaveLayout)));
+        assert!(m.stats_rect().is_none());
+        assert!(
+            m.take_overlay_damage()
+                .is_some_and(|d| d.contains(r.x, r.y))
+        );
     }
 
     #[test]

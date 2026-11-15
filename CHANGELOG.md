@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- **A statistics overlay.** **Ctrl+Alt+I** (also from inside a session) or **Show statistics** in the command palette shows a small box over the picture. It is updated once a second and lists:
+  - the TCP round trip that Windows measures, and what the server's network detection found;
+  - the input-to-picture latency, from a key or click to the next screen change (average and worst);
+  - GFX frames per second with codec and decoding time, or Bitmap;
+  - updates and repaints per second, and the traffic in and out.
+
+  Remora remembers whether it is on (RDP-56).
+
 ## 0.1.0-beta.8
 
 - **Reconnect no longer freezes Remora.** Reconnecting a tab that was still connected (for example after switching its Graphics option to GFX) hung the window for good, "not responding", while the new connection ran on behind it. The old connection's "disconnected" was taken for the new connection's end, and the window then waited for the new connection to finish. Each connection's events are now told apart, and the window never waits for a connection to end (RDP-55).

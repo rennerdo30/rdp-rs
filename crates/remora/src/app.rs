@@ -186,6 +186,8 @@ struct MainWin {
     cursor: (i32, i32),
     shown_cursor: Shown,
     chrome_dirty: bool,
+    /// Presents since the last statistics reading, for its repaint rate.
+    repaints: (u32, std::time::Instant),
     /// Until then every chrome render presents the whole window: while the
     /// window resizes or moves, Windows may change screen pixels behind our
     /// back, so presenting only changed tiles could leave stale ones.
@@ -724,6 +726,7 @@ impl App {
         if let Some(t) = self.win.as_mut().and_then(|w| w.ui.tab_mut(id)) {
             t.state = TabState::Connecting;
             t.network = None; // measured again by the new connection
+            t.stats = None;
             t.live.restart();
         }
         // The new session gets the settings the tab had.
@@ -1028,6 +1031,7 @@ impl App {
                     self.settings.sidebar_width = sidebar;
                     self.settings.panel_width = panel;
                     self.settings.panel_pinned = m.ui.panel_pinned;
+                    self.settings.stats_overlay = m.ui.stats_overlay;
                     let _ = self.settings.save();
                 }
                 self.dirty();
@@ -1322,6 +1326,7 @@ impl App {
                 }
             }
         }
+        m.repaints.0 += 1;
         if let Err(e) = buf.present_with_damage(&rects) {
             eprintln!("remora: present failed: {e}");
         }
@@ -1452,6 +1457,7 @@ impl App {
                 }
             }
         }
+        m.repaints.0 += 1;
         if let Err(e) = buf.present_with_damage(&rects) {
             eprintln!("remora: present failed: {e}");
         }
@@ -1566,6 +1572,17 @@ impl App {
                 self.send(id, session::release_modifiers());
             }
             return self.dirty();
+        }
+        // Ctrl+Alt+I: the statistics overlay, also from inside a session.
+        if stats_chord(&ev, self.mods) && m.ui.session_area.is_some() {
+            let action = m.ui.toggle_stats();
+            if let Some(id) = session {
+                self.send(id, session::release_modifiers());
+            }
+            if let Some(a) = action {
+                self.handle_action(a);
+            }
+            return self.render_overlay();
         }
         if let Some(id) = session {
             // Alt (the host key) shows the toolbar while it is held; the
@@ -2107,6 +2124,7 @@ impl ApplicationHandler<UserEvent> for App {
                                 self.settings.panel_width,
                             );
                             ui.panel_pinned = self.settings.panel_pinned;
+                            ui.stats_overlay = self.settings.stats_overlay;
                             ui.helper_pins = crate::helper_app::pinned_servers();
                             ui.client_fp = crate::link_key::fingerprint();
                             if self.settings.check_updates {
@@ -2124,6 +2142,7 @@ impl ApplicationHandler<UserEvent> for App {
                         cursor: (-1, -1),
                         shown_cursor: Shown::Icon(CursorIcon::Default),
                         chrome_dirty: true,
+                        repaints: (0, std::time::Instant::now()),
                         settle: None,
                         pressed_in: None,
                     });
@@ -2479,6 +2498,17 @@ impl ApplicationHandler<UserEvent> for App {
             session::Event::Failed { why, failure } => self.failed(id, why, failure),
             session::Event::Dropped { why, cookie } => self.dropped(id, why, cookie),
             session::Event::Redirected { cfg, to } => self.redirected(id, *cfg, to),
+            session::Event::Stats(mut st) => {
+                let Some(m) = &mut self.win else { return };
+                if active {
+                    let (n, since) =
+                        std::mem::replace(&mut m.repaints, (0, std::time::Instant::now()));
+                    st.repaints_per_s = n as f64 / since.elapsed().as_secs_f64().max(1e-3);
+                }
+                if m.ui.set_stats(id, st) {
+                    self.render_overlay();
+                }
+            }
             session::Event::Network(n) => {
                 if let Some(t) = self.win.as_mut().and_then(|w| w.ui.tab_mut(id)) {
                     t.network = n.summary();
@@ -2756,6 +2786,22 @@ fn panel_chord(ev: &winit::event::KeyEvent, mods: ModifiersState) -> bool {
         && ev.physical_key == PhysicalKey::Code(KeyCode::KeyP)
         && match &ev.logical_key {
             WKey::Character(c) => c.eq_ignore_ascii_case("p"),
+            _ => true,
+        }
+}
+
+/// Ctrl+Alt+I, the statistics overlay's chord (also while a session has the
+/// keyboard). As with [`palette_chord`], an AltGr+I that types a character
+/// stays the session's.
+fn stats_chord(ev: &winit::event::KeyEvent, mods: ModifiersState) -> bool {
+    use winit::keyboard::{KeyCode, PhysicalKey};
+    ev.state.is_pressed()
+        && mods.control_key()
+        && mods.alt_key()
+        && !mods.shift_key()
+        && ev.physical_key == PhysicalKey::Code(KeyCode::KeyI)
+        && match &ev.logical_key {
+            WKey::Character(c) => c.eq_ignore_ascii_case("i"),
             _ => true,
         }
 }
