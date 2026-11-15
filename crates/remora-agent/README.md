@@ -55,6 +55,12 @@ Right-click (or click) it for:
 - **Only paired PCs may connect** (`strict on|off`); shown checked and greyed when a policy or a PC trusted by fingerprint keeps it on.
 - **Open log folder** and **Quit helper.** Quitting lasts until your next logon or reconnect.
 
+## Updating
+
+From version 0.1.0-beta.9, Remora updates a paired helper itself: when the helper is older than Remora, the side panel's Session page offers **Update helper to …**. Remora downloads the helper of its own version from the release and checks it against the release's checksums. It sends it over the encrypted helper connection, and the helper swaps its exe and restarts (the scheduled task keeps working). It takes updates only from a Remora PC confirmed on this server.
+
+An older helper is replaced by hand once: **Quit helper** in the tray, replace `remora-agent.exe` with the new one (same path), then start it again or reconnect.
+
 A note appears when a pairing waits for you and when a file from Remora arrived. Without a shell (Server Core) there is no icon; the helper works the same.
 
 ## Files

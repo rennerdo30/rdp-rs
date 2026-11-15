@@ -70,7 +70,7 @@ use std::time::{Duration, Instant};
 
 use remora_link::msg::{
     ErrorMsg, Hello, HelloAck, PairingStatus, ServerSettings, SessionInfo as WireInfo,
-    SessionKind as WireKind, TuneAction, TuneStatus, UrlStatus, err,
+    SessionKind as WireKind, TuneAction, TuneStatus, UpdateStatus, UrlStatus, err,
 };
 use remora_link::transfer::io::{Source, TargetDir};
 use remora_link::transfer::worker::{EngineWorker, Posted};
@@ -221,6 +221,10 @@ struct Ctl {
     settings_sent: Option<ServerSettings>,
     /// A `TuneServer` waiting for its elevated process: its request id.
     tune_pending: Option<u32>,
+    /// A helper update being received, by its request id (RDP-61).
+    update: Option<(u32, remora_link::update::Receiver)>,
+    /// An update handed to the agent to install, by its request id.
+    installing: Option<u32>,
 }
 
 struct PendingUrl {
@@ -417,6 +421,10 @@ impl LinkProtocol {
             AgentEvent::TuneDone { request_id, status } => {
                 self.tune_done(request_id, status, &mut out)
             }
+            AgentEvent::UpdateInstalled {
+                request_id,
+                installed,
+            } => self.update_installed(request_id, installed, &mut out),
             AgentEvent::Timer => {}
             AgentEvent::Shutdown => self.close_ui(),
         }
@@ -700,6 +708,8 @@ impl LinkProtocol {
                     created: Vec::new(),
                     settings_sent: None,
                     tune_pending: None,
+                    update: None,
+                    installing: None,
                 });
                 out.push(Action::Send(Channel::Ctl, first));
             }
@@ -815,6 +825,15 @@ impl LinkProtocol {
             }
             Message::OpenUrlResult(status) => self.on_url_result(request_id, status, out),
             Message::TuneServer { action } => self.tune_server(request_id, action, out),
+            Message::UpdateBegin {
+                version,
+                size,
+                hash,
+            } => self.update_begin(request_id, &version, size, hash, out),
+            Message::UpdateData { offset, data } => {
+                self.update_data(request_id, offset, &data, out)
+            }
+            Message::UpdateEnd => self.update_end(request_id, out),
             Message::Error(e) => {
                 warn!("Remora reported error {}", e.code);
                 if e.code == err::PAIRING_REJECTED || e.code == err::VERSION {
@@ -1065,6 +1084,109 @@ impl LinkProtocol {
         }
         info!("Remora asks to change the server's graphics settings ({action:?})");
         out.push(Action::TuneServer { request_id, action });
+    }
+
+    // --------------------------------------------------- helper update
+
+    fn update_result(&mut self, request_id: u32, status: UpdateStatus, out: &mut Vec<Action>) {
+        self.send(request_id, &Message::UpdateResult { status }, out);
+    }
+
+    /// Only a client trusted here, with updates accepted, one at a time.
+    fn update_begin(
+        &mut self,
+        request_id: u32,
+        version: &str,
+        size: u64,
+        hash: [u8; 32],
+        out: &mut Vec<Action>,
+    ) {
+        let allowed = self.acked().is_some_and(|c| c & cap::HELPER_UPDATE != 0)
+            && self.client_trusted()
+            && request_id != 0;
+        let busy = self
+            .ctl
+            .as_ref()
+            .is_some_and(|c| c.update.is_some() || c.installing.is_some());
+        if !allowed || busy {
+            info!("helper update refused (allowed {allowed}, busy {busy})");
+            return self.update_result(request_id, UpdateStatus::Refused, out);
+        }
+        let running = env!("CARGO_PKG_VERSION");
+        match remora_link::update::Receiver::begin(version, size, hash, running) {
+            Ok(r) => {
+                info!("Remora sends helper {version} ({size} bytes)");
+                if let Some(ctl) = self.ctl.as_mut() {
+                    ctl.update = Some((request_id, r));
+                }
+            }
+            Err(why) => {
+                info!("helper update {version} refused: {why}");
+                self.update_result(request_id, UpdateStatus::Refused, out);
+            }
+        }
+    }
+
+    fn update_data(&mut self, request_id: u32, offset: u64, data: &[u8], out: &mut Vec<Action>) {
+        let Some(ctl) = self.ctl.as_mut() else {
+            return;
+        };
+        let Some((rid, r)) = ctl.update.as_mut().filter(|(rid, _)| *rid == request_id) else {
+            return; // refused or another request: dropped
+        };
+        if let Err(why) = r.data(offset, data) {
+            let rid = *rid;
+            warn!("helper update failed: {why}");
+            ctl.update = None;
+            self.update_result(rid, UpdateStatus::Failed, out);
+        }
+    }
+
+    fn update_end(&mut self, request_id: u32, out: &mut Vec<Action>) {
+        let Some(ctl) = self.ctl.as_mut() else {
+            return;
+        };
+        if ctl
+            .update
+            .as_ref()
+            .is_none_or(|(rid, _)| *rid != request_id)
+        {
+            return;
+        }
+        let Some((rid, r)) = ctl.update.take() else {
+            return;
+        };
+        match r.finish() {
+            Ok((version, exe)) => {
+                ctl.installing = Some(rid);
+                info!("helper {version} received and checked; installing");
+                out.push(Action::InstallUpdate {
+                    request_id: rid,
+                    version,
+                    exe,
+                });
+            }
+            Err(why) => {
+                warn!("helper update failed: {why}");
+                self.update_result(rid, UpdateStatus::Failed, out);
+            }
+        }
+    }
+
+    fn update_installed(&mut self, request_id: u32, installed: bool, out: &mut Vec<Action>) {
+        let Some(ctl) = self.ctl.as_mut() else {
+            return;
+        };
+        if ctl.installing != Some(request_id) {
+            return;
+        }
+        ctl.installing = None;
+        let status = if installed {
+            UpdateStatus::Installed
+        } else {
+            UpdateStatus::Failed
+        };
+        self.update_result(request_id, status, out);
     }
 
     fn tune_done(&mut self, request_id: u32, status: TuneStatus, out: &mut Vec<Action>) {

@@ -94,6 +94,9 @@ pub enum AgentEvent {
     /// The user answered the pairing dialog on the server (the `ticket`
     /// that [`crate::link::PairingUi::show_sas`] got).
     PairingAnswer { ticket: u64, confirmed: bool },
+    /// [`Action::InstallUpdate`] finished: `installed` and the new helper
+    /// started (this one exits next), or nothing changed.
+    UpdateInstalled { request_id: u32, installed: bool },
     /// The elevated `tune` for [`Action::TuneServer`] finished.
     TuneDone {
         request_id: u32,
@@ -126,6 +129,13 @@ pub enum Action {
     TuneServer {
         request_id: u32,
         action: remora_link::msg::TuneAction,
+    },
+    /// A checked helper update from a trusted Remora (RDP-61): install it
+    /// and start it, then answer with [`AgentEvent::UpdateInstalled`].
+    InstallUpdate {
+        request_id: u32,
+        version: String,
+        exe: Vec<u8>,
     },
 }
 

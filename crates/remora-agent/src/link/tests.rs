@@ -390,6 +390,8 @@ struct Net {
     send_results: Vec<(u64, SendOutcome)>,
     /// `TuneServer` actions the agent asked for.
     tunes: Vec<(u32, remora_link::msg::TuneAction)>,
+    /// `InstallUpdate` actions.
+    installs: Vec<(u32, String, Vec<u8>)>,
     /// Channels the agent closed.
     agent_closes: Vec<Channel>,
     opens_requested: Vec<Channel>,
@@ -425,6 +427,7 @@ impl Net {
             url_results: Vec::new(),
             send_results: Vec::new(),
             tunes: Vec::new(),
+            installs: Vec::new(),
             agent_closes: Vec::new(),
             opens_requested: Vec::new(),
             bulk_seen: 0,
@@ -474,6 +477,11 @@ impl Net {
                 Action::OpenUrlResult { id, outcome } => self.url_results.push((id, outcome)),
                 Action::SendFilesResult { id, outcome } => self.send_results.push((id, outcome)),
                 Action::TuneServer { request_id, action } => self.tunes.push((request_id, action)),
+                Action::InstallUpdate {
+                    request_id,
+                    version,
+                    exe,
+                } => self.installs.push((request_id, version, exe)),
             }
         }
     }
@@ -776,7 +784,7 @@ fn policy_turns_file_capabilities_off() {
     let hello = n.remora.hello.clone().unwrap();
     assert_eq!(
         hello.capabilities,
-        cap::SESSION_INFO | cap::OPEN_URL | cap::SERVER_TUNING
+        cap::SESSION_INFO | cap::OPEN_URL | cap::SERVER_TUNING | cap::HELPER_UPDATE
     );
     assert_eq!(hello.policy, policy::CLIPBOARD_DISABLED);
     assert!(n.opens_requested.is_empty(), "no Bulk without file caps");
@@ -1194,6 +1202,60 @@ fn tune_requests_run_once_and_answer_with_their_id() {
     n.settle();
     assert!(n.tunes.is_empty());
     assert_eq!(tune_results(&n), vec![(3, TuneStatus::NotAllowed)]);
+}
+
+fn update_results(n: &Net) -> Vec<(u32, remora_link::msg::UpdateStatus)> {
+    n.remora
+        .got
+        .iter()
+        .filter_map(|(rid, m)| match m {
+            Message::UpdateResult { status } => Some((*rid, *status)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// RDP-61: a trusted client's update is checked, installed once, and
+/// answered under its request id; a mismatch or an untrusted client never
+/// reaches the installer.
+#[test]
+fn helper_updates_are_checked_and_installed_once() {
+    use remora_link::msg::UpdateStatus;
+    let exe: Vec<u8> = (0..150_000u32).map(|i| (i % 251) as u8).collect();
+    let mut n = paired_net(Remora::new());
+    n.answer_locally(true);
+    for m in remora_link::update::messages("9.9.10", &exe) {
+        n.remora.send(5, &m);
+    }
+    n.settle();
+    assert_eq!(n.installs, vec![(5, "9.9.10".to_string(), exe.clone())]);
+    assert!(update_results(&n).is_empty(), "answered after installing");
+    n.agent_event(AgentEvent::UpdateInstalled {
+        request_id: 5,
+        installed: true,
+    });
+    assert_eq!(update_results(&n), vec![(5, UpdateStatus::Installed)]);
+    // A changed chunk: failed, nothing to install.
+    let mut n = paired_net(Remora::new());
+    n.answer_locally(true);
+    let mut msgs = remora_link::update::messages("9.9.10", &exe);
+    if let Message::UpdateData { data, .. } = &mut msgs[1] {
+        data[9] ^= 0x40;
+    }
+    for m in &msgs {
+        n.remora.send(6, m);
+    }
+    n.settle();
+    assert!(n.installs.is_empty());
+    assert_eq!(update_results(&n), vec![(6, UpdateStatus::Failed)]);
+    // Not confirmed on the server: refused.
+    let mut n = paired_net(Remora::new());
+    for m in remora_link::update::messages("9.9.10", &exe) {
+        n.remora.send(7, &m);
+    }
+    n.settle();
+    assert!(n.installs.is_empty());
+    assert_eq!(update_results(&n), vec![(7, UpdateStatus::Refused)]);
 }
 
 #[test]

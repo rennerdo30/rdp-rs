@@ -19,7 +19,8 @@ use crate::store::HelperOptions;
 pub fn capabilities(o: &HelperOptions) -> u32 {
     // Server tuning only reports settings; a change needs a click here and
     // the administrator prompt there (RDP-59).
-    let mut bits = cap::SESSION_INFO | cap::SERVER_TUNING;
+    // Updates likewise need a click on Update helper (RDP-61).
+    let mut bits = cap::SESSION_INFO | cap::SERVER_TUNING | cap::HELPER_UPDATE;
     if o.open_links {
         bits |= cap::OPEN_URL;
     }
@@ -322,7 +323,7 @@ mod tests {
     fn capabilities_follow_the_switches_and_default_to_session_info() {
         assert_eq!(
             capabilities(&HelperOptions::default()),
-            cap::SESSION_INFO | cap::SERVER_TUNING
+            cap::SESSION_INFO | cap::SERVER_TUNING | cap::HELPER_UPDATE
         );
         let all = HelperOptions {
             open_links: true,
@@ -337,7 +338,7 @@ mod tests {
         };
         assert_eq!(
             capabilities(&down),
-            cap::SESSION_INFO | cap::SERVER_TUNING | cap::FILE_DOWN
+            cap::SESSION_INFO | cap::SERVER_TUNING | cap::HELPER_UPDATE | cap::FILE_DOWN
         );
     }
 

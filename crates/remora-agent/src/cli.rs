@@ -46,6 +46,9 @@ Log: %LOCALAPPDATA%\\rdp-rs\\logs\\remora-agent.log
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
     Run,
+    /// `run --replace <pid>`: started by an update (RDP-61); waits for the
+    /// helper it replaces to exit first.
+    RunReplacing(u32),
     Install {
         dry_run: bool,
     },
@@ -96,7 +99,14 @@ pub fn parse<S: AsRef<str>>(args: &[S]) -> Result<Command, String> {
         return Ok(Command::Run);
     };
     match first {
-        "run" => none(rest, Command::Run),
+        "run" => match rest {
+            [] => Ok(Command::Run),
+            ["--replace", pid] => pid
+                .parse()
+                .map(Command::RunReplacing)
+                .map_err(|_| "run --replace takes a process id".to_string()),
+            other => Err(format!("unexpected arguments: {}", other.join(" "))),
+        },
         "install" => Ok(Command::Install {
             dry_run: flag_only(rest)?,
         }),
@@ -177,6 +187,12 @@ mod tests {
             Ok(Command::Tune(remora_link::msg::TuneAction::Restore))
         );
         assert!(parse(&["tune"]).is_err());
+        assert_eq!(
+            parse(&["run", "--replace", "1234"]),
+            Ok(Command::RunReplacing(1234))
+        );
+        assert!(parse(&["run", "--replace", "x"]).is_err());
+        assert!(parse(&["run", "x"]).is_err());
         assert!(parse(&["tune", "apply", "x"]).is_err());
         assert!(parse(&["open-url", "a", "b"]).is_err());
         assert_eq!(

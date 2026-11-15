@@ -211,6 +211,32 @@ pub fn setup_name(v: &Version) -> String {
     format!("remora-{v}-setup.exe")
 }
 
+/// The server helper's asset name in release `v`.
+pub fn agent_name(v: &Version) -> String {
+    format!("remora-agent-{v}-windows-x64.exe")
+}
+
+/// The largest server helper downloaded.
+pub const MAX_AGENT: usize = 32 * 1024 * 1024;
+
+/// Downloads the server helper of release `v` (Remora's own version) and
+/// returns it only when it matches that release's `SHA256SUMS.txt` (RDP-61:
+/// Remora then sends it to a paired helper).
+pub fn download_agent(v: &Version) -> Result<Vec<u8>, Error> {
+    let base = format!("{DOWNLOAD_PREFIX}v{v}/");
+    let sums = fetch(&format!("{base}{SUMS}"), 1024 * 1024)?;
+    let sums = String::from_utf8(sums).map_err(|_| err(format!("{SUMS} is not text")))?;
+    let name = agent_name(v);
+    let expected = expected_hash(&sums, &name)?;
+    let exe = fetch(&format!("{base}{name}"), MAX_AGENT)?;
+    if sha256_hex(&exe) != expected {
+        return Err(err(
+            "the downloaded helper does not match its published checksum",
+        ));
+    }
+    Ok(exe)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Candidate {
     pub version: Version,
@@ -830,6 +856,15 @@ mod tests {
             sha256_hex(b"abc"),
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
         );
+    }
+
+    /// Talks to GitHub: the published beta.8 helper, checked (RDP-61).
+    #[test]
+    #[ignore]
+    fn live_agent_download() {
+        let exe = download_agent(&v("0.1.0-beta.8")).expect("helper downloaded and checked");
+        assert!(exe.len() > 100_000 && exe.starts_with(b"MZ"));
+        assert!(download_agent(&v("0.0.1")).is_err(), "no such release");
     }
 
     /// Talks to GitHub; run by hand with `cargo test -p remora-update -- --ignored`.

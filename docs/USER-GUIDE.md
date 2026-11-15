@@ -379,6 +379,12 @@ until you switch it on; a change applies from the next connection.
 If the server's policy turns off clipboard or drive redirection, file
 transfer is off too, whatever the switches say.
 
+When the paired helper is older than Remora, the Session page offers
+**Update helper to …**. Remora downloads the helper of its own version from
+its GitHub release, checks it against the release's checksums and sends it;
+the helper replaces itself and reconnects. Helpers older than 0.1.0-beta.9
+cannot update this way; replace `remora-agent.exe` by hand once.
+
 On a server without the helper, a small card at the picture's top right
 says what it adds, 15 seconds after connecting. **How to install** opens this
 section; **Later** hides the card for this connection; **Don't show again**

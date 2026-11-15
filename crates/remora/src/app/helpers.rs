@@ -59,6 +59,33 @@ impl App {
         TabHelper { handle, pending }
     }
 
+    /// The helper update arrived from the release (or did not): send it.
+    pub(super) fn helper_downloaded(&mut self, id: u64, r: Result<(String, Vec<u8>), String>) {
+        use crate::ui::helper::HelperUpdate;
+        let state = match (r, self.helper_of(id)) {
+            (Ok((version, exe)), Some(h)) => {
+                if h.send_update(&version, &exe) {
+                    HelperUpdate::Sending
+                } else {
+                    HelperUpdate::NotDownloaded("The helper is not ready for an update".into())
+                }
+            }
+            (Err(e), _) => {
+                rdp::trace!("ui: helper update download failed: {e}");
+                self.message(
+                    format!("Could not get the helper update: {e}."),
+                    Tone::Warning,
+                );
+                HelperUpdate::NotDownloaded(format!("Could not get it: {e}"))
+            }
+            (Ok(_), None) => return,
+        };
+        if let Some(t) = self.win.as_mut().and_then(|w| w.ui.tab_mut(id)) {
+            t.helper.update = state;
+        }
+        self.dirty();
+    }
+
     fn helper_of(&self, id: u64) -> Option<HelperHandle> {
         self.sessions.get(&id).map(|s| s.helper.handle.clone())
     }
@@ -347,6 +374,23 @@ impl App {
                         }
                     },
                 );
+            }
+            Action::UpdateHelper(id) => {
+                if let Some(t) = self.win.as_mut().and_then(|w| w.ui.tab_mut(id)) {
+                    t.helper.update = crate::ui::helper::HelperUpdate::Downloading;
+                }
+                let proxy = Mutex::new(self.proxy.clone());
+                std::thread::spawn(move || {
+                    let r = remora_update::current_version()
+                        .and_then(|v| {
+                            remora_update::download_agent(&v).map(|exe| (v.to_string(), exe))
+                        })
+                        .map_err(|e| e.to_string());
+                    if let Ok(p) = proxy.lock() {
+                        let _ = p.send_event(UserEvent::HelperDownload(id, r));
+                    }
+                });
+                self.dirty();
             }
             Action::OpenHelperGuide => {
                 if let Err(e) = helper_app::open_web_url(HELPER_GUIDE) {

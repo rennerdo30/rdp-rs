@@ -22,7 +22,7 @@ use std::time::{Duration, Instant};
 
 use ffwd_render::{Canvas, Rect, TextEngine};
 use remora_link::msg::{
-    ServerSettings, SessionInfo, TransferId, TuneAction, TuneStatus, UrlStatus,
+    ServerSettings, SessionInfo, TransferId, TuneAction, TuneStatus, UpdateStatus, UrlStatus,
 };
 use remora_link::transfer::{Direction, TransferEvent, reason};
 use remora_link::{Sas, cap, policy};
@@ -257,6 +257,36 @@ pub struct HelperView {
     /// The server's graphics settings (RDP-59), once the helper sent them.
     pub server: Option<ServerSettings>,
     pub tune: Tune,
+    pub update: HelperUpdate,
+}
+
+/// Updating the helper from here (RDP-61).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum HelperUpdate {
+    #[default]
+    Idle,
+    /// Fetching it from Remora's release.
+    Downloading,
+    /// Sent; the helper checks and installs it.
+    Sending,
+    Finished(UpdateStatus),
+    /// The download or its check failed.
+    NotDownloaded(String),
+}
+
+impl HelperView {
+    /// Remora's version when the paired helper is older (RDP-61).
+    pub fn outdated(&self) -> Option<String> {
+        let h = self.hello.as_ref()?;
+        let theirs = remora_update::Version::parse(&h.version).ok()?;
+        let ours = remora_update::current_version().ok()?;
+        (theirs < ours).then(|| ours.to_string())
+    }
+
+    /// The paired helper can take an update from here.
+    pub fn updatable(&self) -> bool {
+        self.paired() && self.accepted & cap::HELPER_UPDATE != 0
+    }
 }
 
 /// A change of the server's graphics settings (RDP-59).
@@ -399,6 +429,24 @@ impl HelperView {
             HelperEvent::ServerSettings(s) => {
                 self.server = Some(s);
                 Vec::new()
+            }
+            HelperEvent::UpdateResult(st) => {
+                self.update = HelperUpdate::Finished(st);
+                let (text, tone) = match st {
+                    UpdateStatus::Installed => (
+                        "The server helper updated; it reconnects in a moment.",
+                        Tone::Success,
+                    ),
+                    UpdateStatus::Refused => (
+                        "The server helper did not take the update (confirm this PC on the server first).",
+                        Tone::Warning,
+                    ),
+                    UpdateStatus::Failed => (
+                        "The server helper could not install the update; it keeps running as it was.",
+                        Tone::Warning,
+                    ),
+                };
+                vec![Effect::Notice(text.into(), tone)]
             }
             HelperEvent::TuneResult(st) => {
                 let action = match self.tune {
@@ -1068,6 +1116,17 @@ impl Ui {
                 (t.helper.status == Status::Blocked).then_some(Action::RetryHelperPairing(id))
             }
             Hit::HelperHintInstall => Some(Action::OpenHelperGuide),
+            Hit::UpdateHelper(id) => {
+                let t = self.tab_mut(id)?;
+                if matches!(
+                    t.helper.update,
+                    HelperUpdate::Downloading | HelperUpdate::Sending
+                ) || !t.helper.updatable()
+                {
+                    return None;
+                }
+                Some(Action::UpdateHelper(id))
+            }
             Hit::HelperHintLater(id) => {
                 self.tab_mut(id)?.helper_hint_closed = true;
                 None
@@ -1522,6 +1581,104 @@ impl Ui {
     }
 
     // ---- The panel -------------------------------------------------------
+
+    /// A paired helper older than Remora (RDP-61): **Update helper** when
+    /// it can take updates (1.2), otherwise a note to replace it by hand.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn page_helper_update(
+        &mut self,
+        cv: &mut Canvas,
+        te: &mut TextEngine,
+        f: &Fonts,
+        x: i32,
+        mut y: i32,
+        w: i32,
+        id: u64,
+    ) -> i32 {
+        let s = self.scale;
+        let p = |v: f32| (v * s).round() as i32;
+        let c = pal();
+        let Some(t) = self.tabs.iter().find(|t| t.id == id) else {
+            return y;
+        };
+        let v = t.helper.clone();
+        let finished = matches!(v.update, HelperUpdate::Finished(_));
+        let Some(newer) = v.outdated().filter(|_| v.paired()) else {
+            return y;
+        };
+        let version = v
+            .hello
+            .as_ref()
+            .map(|h| h.version.clone())
+            .unwrap_or_default();
+        let (text, tone) = match &v.update {
+            HelperUpdate::Downloading => (format!("Getting helper {newer}…"), Tone::Accent),
+            HelperUpdate::Sending => (
+                format!("Sending helper {newer}; it restarts when installed"),
+                Tone::Accent,
+            ),
+            HelperUpdate::Finished(UpdateStatus::Installed) => {
+                ("Updated; the helper reconnects".into(), Tone::Success)
+            }
+            HelperUpdate::Finished(UpdateStatus::Refused) => (
+                "Refused: confirm this PC on the server first".into(),
+                Tone::Warning,
+            ),
+            HelperUpdate::Finished(UpdateStatus::Failed) => {
+                ("The helper could not install it".into(), Tone::Warning)
+            }
+            HelperUpdate::NotDownloaded(why) => (why.clone(), Tone::Warning),
+            HelperUpdate::Idle if v.updatable() => (
+                format!("Helper {version} is older than Remora {newer}"),
+                Tone::Muted,
+            ),
+            HelperUpdate::Idle => (
+                format!(
+                    "Helper {version} is older than Remora {newer}: replace remora-agent.exe on the server once; newer helpers update from here"
+                ),
+                Tone::Muted,
+            ),
+        };
+        let lines = Kit::new(cv, te, f, s).wrap(Font::Regular, 12.0, &text, w - p(28.0));
+        let rows = lines.len().clamp(1, 3) as i32;
+        let h = p(20.0) + rows * p(16.0);
+        let cells = self.card(cv, x, y, w, &[h]);
+        {
+            let mut k = Kit::new(cv, te, f, s);
+            let r = cells[0];
+            let mut ty = r.y + p(10.0) + p(12.0);
+            for l in lines.iter().take(3) {
+                k.text(
+                    Font::Regular,
+                    12.0,
+                    r.x + p(14.0),
+                    ty,
+                    l,
+                    tone.color(),
+                    r.w - p(28.0),
+                );
+                ty += p(16.0);
+            }
+        }
+        y += h + p(10.0);
+        let busy = matches!(v.update, HelperUpdate::Downloading | HelperUpdate::Sending);
+        if v.updatable()
+            && !busy
+            && !(finished && v.update == HelperUpdate::Finished(UpdateStatus::Installed))
+        {
+            self.btn(
+                cv,
+                te,
+                f,
+                Rect::new(x, y, w, p(34.0)),
+                &Button::secondary(&format!("Update helper to {newer}")).icon(Icon::Download),
+                Hit::UpdateHelper(id),
+            );
+            y += p(34.0);
+        }
+        let _ = c;
+        y + p(24.0)
+    }
 
     /// The server's graphics settings (RDP-59): what limits the picture's
     /// frame rate and codec, with Improve and Restore defaults. Shown once
@@ -2536,6 +2693,17 @@ pub fn sample_helper_panel(page: u8, paired: bool) -> Ui {
     m
 }
 
+/// A paired helper older than Remora (RDP-61).
+pub fn sample_helper_update() -> Ui {
+    let mut m = sample_server_graphics(false);
+    if let Some(t) = m.tab_mut(1)
+        && let Some(h) = t.helper.hello.as_mut()
+    {
+        h.version = "0.1.0-beta.5".into();
+    }
+    m
+}
+
 /// The Session page scrolled to the server's graphics settings (RDP-59):
 /// Windows' defaults, or a change waiting for the administrator prompt.
 pub fn sample_server_graphics(waiting: bool) -> Ui {
@@ -2628,6 +2796,31 @@ mod tests {
         m.mouse_move(x, y);
         m.mouse_down(x, y, te, fonts);
         m.mouse_up(x, y)
+    }
+
+    /// RDP-61: Update helper shows for a paired helper older than Remora.
+    #[test]
+    fn an_older_helper_is_outdated() {
+        let mut v = HelperView {
+            status: Status::Paired,
+            hello: Some(HelloView {
+                version: "0.0.1".into(),
+                os_build: 26100,
+                offered: cap::ALL,
+                policy: 0,
+            }),
+            accepted: cap::HELPER_UPDATE,
+            ..HelperView::default()
+        };
+        let ours = remora_update::current_version().unwrap().to_string();
+        assert_eq!(v.outdated(), Some(ours.clone()));
+        assert!(v.updatable());
+        v.hello.as_mut().unwrap().version = ours;
+        assert_eq!(v.outdated(), None, "the same version");
+        v.hello.as_mut().unwrap().version = "not a version".into();
+        assert_eq!(v.outdated(), None);
+        v.accepted = cap::SESSION_INFO;
+        assert!(!v.updatable(), "a 1.1 helper takes no update");
     }
 
     /// RDP-60: the notice shows after a while on a session without any

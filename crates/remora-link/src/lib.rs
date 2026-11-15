@@ -62,6 +62,7 @@ pub mod pins;
 pub mod session;
 pub mod store;
 pub mod transfer;
+pub mod update;
 pub mod wire;
 
 pub use error::{Error, Result};

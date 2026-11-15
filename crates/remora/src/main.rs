@@ -562,6 +562,7 @@ fn snapshot_ui(
         ("-helper-panel-session", || ui::sample_helper_panel(3, true)),
         ("-server-graphics", || ui::sample_server_graphics(false)),
         ("-helper-hint", ui::sample_helper_hint),
+        ("-helper-update", ui::sample_helper_update),
         ("-server-graphics-waiting", || {
             ui::sample_server_graphics(true)
         }),

@@ -48,6 +48,8 @@ pub enum UserEvent {
     HookKey(u8, bool, bool),
     /// A recording was finished (its file, or why it failed).
     Recorded(Result<crate::recorder::RecordingInfo, String>),
+    /// The helper update for a tab was downloaded and checked (RDP-61).
+    HelperDownload(u64, Result<(String, Vec<u8>), String>),
     /// Export: the chosen file; Import: the chosen backup (asks its password).
     ExportTo(std::path::PathBuf),
     ImportFrom(std::path::PathBuf),
@@ -1264,7 +1266,8 @@ impl App {
             | Action::RetryHelperPairing(_)
             | Action::TuneServer(..)
             | Action::OpenHelperGuide
-            | Action::HelperHintNever(_) => {}
+            | Action::HelperHintNever(_)
+            | Action::UpdateHelper(_) => {}
         }
     }
 
@@ -2200,6 +2203,7 @@ impl ApplicationHandler<UserEvent> for App {
                 (id, ev)
             }
             UserEvent::Helper(id) => return self.helper_events(id),
+            UserEvent::HelperDownload(id, r) => return self.helper_downloaded(id, r),
             UserEvent::PickedFiles(id, files) => return self.send_files(id, files),
             UserEvent::PickedDownloads(dir) => {
                 // Received files need the Mark-of-the-Web: say at once when

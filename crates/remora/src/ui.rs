@@ -31,7 +31,7 @@ pub use sidebar::{Divider, sample_rail, sample_resized};
 pub use helper::{
     HelperView, sample_cards as sample_helper_cards, sample_drop as sample_helper_drop,
     sample_helper_blocked, sample_helper_form, sample_helper_hint, sample_helper_panel,
-    sample_pairing as sample_helper_pairing, sample_server_graphics,
+    sample_helper_update, sample_pairing as sample_helper_pairing, sample_server_graphics,
 };
 pub use home::ThumbDue;
 pub mod session_view;
@@ -359,6 +359,8 @@ pub enum Hit {
     HelperHintInstall,
     HelperHintLater(u64),
     HelperHintNever(u64),
+    /// Send the paired helper Remora's version of it (RDP-61).
+    UpdateHelper(u64),
     /// Editor: a helper switch (0 links, 1 receive, 2 send, 3 links
     /// without asking), the download folder, Forget; the forget question.
     FormHelper(u8),
@@ -621,6 +623,8 @@ pub enum Action {
     OpenHelperGuide,
     /// Never show the no-helper notice for this server again.
     HelperHintNever(String),
+    /// Download and send the helper update (RDP-61).
+    UpdateHelper(u64),
 }
 
 pub enum Key {
@@ -2055,6 +2059,7 @@ impl Ui {
             | Hit::HelperHintInstall
             | Hit::HelperHintLater(_)
             | Hit::HelperHintNever(_)
+            | Hit::UpdateHelper(_)
             | Hit::FormHelper(_)
             | Hit::FormDownloads
             | Hit::FormForgetHelper
@@ -6777,6 +6782,7 @@ impl Ui {
         );
         y += p(58.0) + p(24.0);
         y = self.page_session_helper(cv, te, f, x, y, w, id);
+        y = self.page_helper_update(cv, te, f, x, y, w, id);
         y = self.page_server_graphics(cv, te, f, x, y, w, id);
 
         self.caption(cv, te, f, x, y, w, "Windows keys (Win, Alt+Tab)");

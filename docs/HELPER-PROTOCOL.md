@@ -9,8 +9,10 @@ transfer), RDP-44 (links).
 
 Version: **1.2** (`PROTO_MAJOR = 1`, `PROTO_MINOR = 2`). 1.1 adds
 `PeerPairing` and `ClientName`: Remora has a persistent key that the helper
-pins (section 4.3). 1.2 adds the server's graphics settings:
-`ServerSettings`, `TuneServer` and `TuneResult` (section 6.1).
+pins (section 4.3). 1.2 adds the server's graphics settings
+(`ServerSettings`, `TuneServer`, `TuneResult`; section 6.1) and helper
+updates (`UpdateBegin`, `UpdateData`, `UpdateEnd`, `UpdateResult`;
+section 6.2).
 
 ## 1. Channels
 
@@ -360,6 +362,10 @@ All on `Remora::Ctl` unless marked Bulk. Maximum string lengths in bytes.
 | `0x0500` | `ServerSettings` | H→R | `opt frame_interval, opt avc444, opt avc_hw`; each `opt` is `bool present, u32 value`; 1.2 |
 | `0x0501` | `TuneServer`     | R→H | `u8 action` (0 apply, 1 restore); `request_id` ≠ 0; 1.2 |
 | `0x0502` | `TuneResult`     | H→R | `u8 status` (0 done, 1 declined, 2 failed, 3 not allowed); same `request_id`; 1.2 |
+| `0x0600` | `UpdateBegin`    | R→H | `str version (≤64), u64 size (≤32 MiB), [32] BLAKE3`; `request_id` ≠ 0, the same on the whole update; 1.2 |
+| `0x0601` | `UpdateData`     | R→H | `u64 offset, blob data (64 KiB chunks, in order)`; 1.2 |
+| `0x0602` | `UpdateEnd`      | R→H | empty; 1.2 |
+| `0x0603` | `UpdateResult`   | H→R | `u8 status` (0 installed, 1 refused, 2 failed); same `request_id`; 1.2 |
 
 - **Unknown types** (a newer minor version) get `Unsupported{type}`; the
   channel stays open. A malformed message of a known type is fatal.
@@ -368,9 +374,10 @@ All on `Remora::Ctl` unless marked Bulk. Maximum string lengths in bytes.
   never change within a major (decoders reject trailing bytes).
 - **Capability bits** (`Hello` offers, `HelloAck` accepts a subset):
   `1` session info, `2` open URL, `4` file transfer up (client → server),
-  `8` file transfer down (server → client), `16` server tuning (1.2).
-  Remora accepts only what the user enabled (default: session info and
-  server tuning).
+  `8` file transfer down (server → client), `16` server tuning (1.2),
+  `32` helper update (1.2). Remora accepts only what the user enabled
+  (default: session info, server tuning and helper update; the last two act
+  only on a click).
 - **Policy flags** (`Hello`): `1` clipboard redirection disabled, `2` drive
   redirection disabled. Either one switches both file directions off.
 - **Error codes:** `1` pairing rejected, `2` version, `3` second instance,
@@ -404,6 +411,26 @@ session's picture, read from the registry without administrator rights
   declined, a failed write gives failed.
 - The frame-rate cap applies after a restart of the server, the H.264 policies
   from the next connection.
+
+### 6.2 Helper update (1.2)
+
+Under capability `32` Remora can send the helper a newer `remora-agent.exe`
+(owner decision 2026-11-15: pairing and checksum, no release signing key).
+
+- Remora downloads `remora-agent-<its version>-windows-x64.exe` from its own
+  GitHub release and checks it against that release's `SHA256SUMS.txt`, as
+  its own updater does, before sending anything.
+- It sends `UpdateBegin`, the file in `UpdateData` chunks and `UpdateEnd`,
+  all under one `request_id`. The helper takes it only from a client trusted
+  on the server (section 4.3), with capability `32` accepted, one at a time,
+  and never the version it runs. It checks order, size and the BLAKE3 hash.
+- To install, it renames its running exe to `remora-agent.exe.old`, puts
+  the new one in its place, starts it as `run --replace <pid>` (the new one
+  waits for this process to exit), answers `UpdateResult` installed and
+  exits. The new helper deletes the `.old` file and reconnects; the scheduled
+  task keeps the same path. On any failure the old exe stays and the answer
+  is failed (or refused, before receiving).
+- Helpers before 1.2 cannot take an update; they are replaced by hand once.
 
 ## 7. File transfer
 

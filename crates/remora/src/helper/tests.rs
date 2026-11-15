@@ -393,9 +393,49 @@ fn capabilities_follow_user_setting_and_policy() {
     let ack = r.pair_and_hello(&mut h, cap::ALL, policy::CLIPBOARD_DISABLED);
     assert_eq!(
         ack.capabilities,
-        cap::SESSION_INFO | cap::OPEN_URL | cap::SERVER_TUNING
+        cap::SESSION_INFO | cap::OPEN_URL | cap::SERVER_TUNING | cap::HELPER_UPDATE
     );
     assert_eq!(r.handle.accepted_capabilities(), ack.capabilities);
+}
+
+/// RDP-61: an update goes out as Begin, Data and End under one request id;
+/// only that request's result reaches the app; one at a time.
+#[test]
+fn helper_update_is_sent_and_answered() {
+    let mut r = Rig::new("update");
+    r.handle.set_transport_protocol(1);
+    r.handle
+        .set_capabilities(cap::SESSION_INFO | cap::HELPER_UPDATE);
+    let exe = vec![7u8; 100_000];
+    assert!(!r.handle.send_update("9.9.9", &exe), "not paired yet");
+    let mut h = r.connect(StaticKey::generate().unwrap());
+    r.pair_and_hello(&mut h, cap::ALL, 0);
+    assert!(r.handle.send_update("9.9.9", &exe));
+    assert!(!r.handle.send_update("9.9.9", &exe), "one at a time");
+    r.pump(&mut h);
+    let mut got = Vec::new();
+    for m in &h.got {
+        match m {
+            Message::UpdateBegin { version, size, .. } => {
+                assert_eq!((version.as_str(), *size), ("9.9.9", 100_000))
+            }
+            Message::UpdateData { data, .. } => got.extend_from_slice(data),
+            Message::UpdateEnd => assert_eq!(got, exe),
+            _ => {}
+        }
+    }
+    assert!(h.got.contains(&Message::UpdateEnd));
+    // The fake helper answers with request id 1, this update's.
+    r.send(
+        &mut h,
+        Message::UpdateResult {
+            status: UpdateStatus::Installed,
+        },
+    );
+    assert!(
+        r.events()
+            .contains(&HelperEvent::UpdateResult(UpdateStatus::Installed))
+    );
 }
 
 /// RDP-59: the helper's settings reach the app; one tune request at a

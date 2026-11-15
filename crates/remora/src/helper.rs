@@ -44,7 +44,7 @@ use std::time::{Duration, Instant};
 use rdp::{DvcOut, DynamicChannel, LocalClose};
 use remora_link::msg::{
     ErrorMsg, Hello, HelloAck, PairingStatus, ServerSettings, SessionInfo, TransferId, TuneAction,
-    TuneStatus, UrlStatus, err,
+    TuneStatus, UpdateStatus, UrlStatus, err,
 };
 use remora_link::transfer::io::{FsDir, FsSource};
 use remora_link::transfer::worker::{EngineWorker, Posted};
@@ -162,6 +162,8 @@ pub enum HelperEvent {
     ServerSettings(ServerSettings),
     /// How [`HelperHandle::tune`] went.
     TuneResult(TuneStatus),
+    /// How [`HelperHandle::send_update`] went (RDP-61).
+    UpdateResult(UpdateStatus),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -246,6 +248,8 @@ struct Core {
     server_settings: Option<ServerSettings>,
     /// The request id of a `TuneServer` waiting for its result.
     tune_rid: Option<u32>,
+    /// The request id of a helper update waiting for its result.
+    update_rid: Option<u32>,
     next_rid: u32,
     last_seen: Option<Instant>,
     next_heartbeat: Option<Instant>,
@@ -940,6 +944,12 @@ impl Core {
                 self.server_settings = Some(s);
                 self.push(HelperEvent::ServerSettings(s));
             }
+            Message::UpdateResult { status } => {
+                if self.update_rid == Some(request_id) {
+                    self.update_rid = None;
+                    self.push(HelperEvent::UpdateResult(status));
+                }
+            }
             Message::TuneResult { status } => {
                 // Only the answer to the request this side made.
                 if self.tune_rid == Some(request_id) {
@@ -1135,6 +1145,7 @@ impl HelperHandle {
                 session_info: None,
                 server_settings: None,
                 tune_rid: None,
+                update_rid: None,
                 next_rid: 1,
                 last_seen: None,
                 next_heartbeat: None,
@@ -1350,6 +1361,23 @@ impl HelperHandle {
     /// The server's graphics settings, once the helper sent them (RDP-59).
     pub fn server_settings(&self) -> Option<ServerSettings> {
         self.lock().server_settings
+    }
+
+    /// Sends the helper a new version of itself (RDP-61): `exe` came from
+    /// Remora's release and matched its checksums. False when it cannot be
+    /// sent now (not paired, updates not accepted, or one is under way).
+    pub fn send_update(&self, version: &str, exe: &[u8]) -> bool {
+        let mut c = self.lock();
+        if !c.ack_sent || c.accepted & cap::HELPER_UPDATE == 0 || c.update_rid.is_some() {
+            return false;
+        }
+        let rid = c.next_rid.max(1);
+        c.next_rid = rid.wrapping_add(1).max(1);
+        c.update_rid = Some(rid);
+        for m in remora_link::update::messages(version, exe) {
+            c.send(rid, &m);
+        }
+        true
     }
 
     /// Asks the helper to change the server's graphics settings; the user

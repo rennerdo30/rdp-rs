@@ -70,6 +70,8 @@ pub enum Input {
     PairingAnswer { ticket: u64, confirmed: bool },
     /// The transfer worker has messages or events for the protocol.
     TransferWake,
+    /// An update was installed (or not) (RDP-61).
+    UpdateInstalled { request_id: u32, installed: bool },
     /// The elevated `tune` finished (RDP-59).
     TuneDone {
         request_id: u32,
@@ -388,6 +390,20 @@ impl Loop {
                 self.wake_queued.store(false, Ordering::Release);
                 self.feed(AgentEvent::Timer);
             }
+            Input::UpdateInstalled {
+                request_id,
+                installed,
+            } => {
+                self.feed(AgentEvent::UpdateInstalled {
+                    request_id,
+                    installed,
+                });
+                if installed {
+                    // The result goes out with the channels' flush; the new
+                    // helper waits for this process to end.
+                    self.shutdown();
+                }
+            }
             Input::TuneDone { request_id, status } => {
                 self.feed(AgentEvent::TuneDone { request_id, status });
                 // Read the settings again and send them if they changed.
@@ -538,6 +554,26 @@ impl Loop {
                     if let Some(reply) = self.pending_sends.remove(&id) {
                         let _ = reply.send(outcome);
                     }
+                }
+                Action::InstallUpdate {
+                    request_id,
+                    version,
+                    exe,
+                } => {
+                    let installed = match super::update::replace_and_restart(&exe) {
+                        Ok(()) => {
+                            info!("helper {version} installed");
+                            true
+                        }
+                        Err(e) => {
+                            warn!("helper {version} not installed: {e}");
+                            false
+                        }
+                    };
+                    let _ = self.tx.send(Input::UpdateInstalled {
+                        request_id,
+                        installed,
+                    });
                 }
                 Action::TuneServer { request_id, action } => {
                     // The administrator prompt waits for the user: off

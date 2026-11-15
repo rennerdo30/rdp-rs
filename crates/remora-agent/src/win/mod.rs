@@ -12,6 +12,7 @@ mod sys;
 mod tray;
 mod tune;
 mod ui;
+mod update;
 mod window;
 mod wts;
 
@@ -120,6 +121,14 @@ pub fn main() -> i32 {
     match cmd {
         Command::Run => {
             open_log("run");
+            update::clean_up();
+            agent::run()
+        }
+        Command::RunReplacing(pid) => {
+            open_log("run");
+            crate::info!("started by an update; waiting for process {pid} to exit");
+            update::wait_for(pid);
+            update::clean_up();
             agent::run()
         }
         Command::OpenUrl(url) => {
@@ -186,7 +195,11 @@ pub fn main() -> i32 {
                         None => Ok(crate::clients::strict_status(&setting, policy, Some(p))),
                     })
                 }
-                Command::Run | Command::OpenUrl(_) | Command::Send(_) | Command::Tune(_) => {
+                Command::Run
+                | Command::RunReplacing(_)
+                | Command::OpenUrl(_)
+                | Command::Send(_)
+                | Command::Tune(_) => {
                     unreachable!()
                 }
             }

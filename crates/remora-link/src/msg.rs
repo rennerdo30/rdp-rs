@@ -12,6 +12,7 @@
 //! | `0x040x` | file transfer control                        | Ctl     |
 //! | `0x048x` | file transfer data                           | Bulk    |
 //! | `0x05xx` | server graphics settings (1.2)               | Ctl     |
+//! | `0x06xx` | helper update (1.2)                          | Ctl     |
 //!
 //! A type this side does not know decodes as [`Message::Unknown`]; the
 //! receiver answers with [`Message::Unsupported`] and keeps the channel open.
@@ -26,7 +27,8 @@ pub const PROTO_MAJOR: u16 = 1;
 /// 1.1 adds [`Message::PeerPairing`] and [`Message::ClientName`] (the
 /// helper pins Remora's client key). 1.2 adds the server graphics settings:
 /// [`Message::ServerSettings`], [`Message::TuneServer`] and
-/// [`Message::TuneResult`] under [`cap::SERVER_TUNING`].
+/// [`Message::TuneResult`] under [`cap::SERVER_TUNING`], and helper updates
+/// ([`Message::UpdateBegin`] and the rest) under [`cap::HELPER_UPDATE`].
 pub const PROTO_MINOR: u16 = 2;
 
 // Session messages (handled inside SecureSession).
@@ -67,6 +69,11 @@ pub const SERVER_SETTINGS: u16 = 0x0500;
 pub const TUNE_SERVER: u16 = 0x0501;
 /// Helper → Remora: how the change went; same `request_id`.
 pub const TUNE_RESULT: u16 = 0x0502;
+// Helper update (Ctl, 1.2): see `crate::update`.
+pub const UPDATE_BEGIN: u16 = 0x0600;
+pub const UPDATE_DATA: u16 = 0x0601;
+pub const UPDATE_END: u16 = 0x0602;
+pub const UPDATE_RESULT: u16 = 0x0603;
 
 /// Capability bits (Hello offers, HelloAck accepts a subset).
 pub mod cap {
@@ -81,8 +88,11 @@ pub mod cap {
     /// 1.2: the helper reports the server's graphics settings and changes
     /// them when Remora asks and the server's user confirms elevation.
     pub const SERVER_TUNING: u32 = 1 << 4;
+    /// 1.2: Remora may send the helper a newer version of itself.
+    pub const HELPER_UPDATE: u32 = 1 << 5;
     /// Every bit this version defines.
-    pub const ALL: u32 = SESSION_INFO | OPEN_URL | FILE_UP | FILE_DOWN | SERVER_TUNING;
+    pub const ALL: u32 =
+        SESSION_INFO | OPEN_URL | FILE_UP | FILE_DOWN | SERVER_TUNING | HELPER_UPDATE;
 }
 
 /// Policy flags the helper reads from the server's configuration.
@@ -352,6 +362,36 @@ impl TuneStatus {
     }
 }
 
+/// How a helper update went ([`Message::UpdateResult`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UpdateStatus {
+    /// Installed; the helper restarts as the new version now.
+    Installed,
+    /// Not taken: not trusted here, not accepted, the same version, or
+    /// out of bounds.
+    Refused,
+    /// Taken but not installed (a check or writing it failed).
+    Failed,
+}
+
+impl UpdateStatus {
+    fn to_u8(self) -> u8 {
+        match self {
+            UpdateStatus::Installed => 0,
+            UpdateStatus::Refused => 1,
+            UpdateStatus::Failed => 2,
+        }
+    }
+    fn from_u8(v: u8) -> Result<Self> {
+        Ok(match v {
+            0 => UpdateStatus::Installed,
+            1 => UpdateStatus::Refused,
+            2 => UpdateStatus::Failed,
+            v => return Err(Error::Malformed(format!("update status {v}"))),
+        })
+    }
+}
+
 fn put_opt(p: &mut Vec<u8>, v: Option<u32>) {
     p.put_bool(v.is_some());
     p.put_u32(v.unwrap_or(0));
@@ -467,6 +507,22 @@ pub enum Message {
     TuneResult {
         status: TuneStatus,
     },
+    /// Remora → helper (1.2): a new helper follows; `request_id` ≠ 0, the
+    /// same on every message of this update.
+    UpdateBegin {
+        version: String,
+        size: u64,
+        hash: [u8; 32],
+    },
+    UpdateData {
+        offset: u64,
+        data: Vec<u8>,
+    },
+    UpdateEnd,
+    /// Helper → Remora (1.2), same `request_id`.
+    UpdateResult {
+        status: UpdateStatus,
+    },
     /// A type this side does not know (newer minor version).
     Unknown {
         ty: u16,
@@ -519,6 +575,10 @@ impl Message {
             Message::ServerSettings(_) => SERVER_SETTINGS,
             Message::TuneServer { .. } => TUNE_SERVER,
             Message::TuneResult { .. } => TUNE_RESULT,
+            Message::UpdateBegin { .. } => UPDATE_BEGIN,
+            Message::UpdateData { .. } => UPDATE_DATA,
+            Message::UpdateEnd => UPDATE_END,
+            Message::UpdateResult { .. } => UPDATE_RESULT,
             Message::Unknown { ty } => *ty,
         }
     }
@@ -656,6 +716,24 @@ impl Message {
             }
             Message::TuneServer { action } => p.put_u8(action.to_u8()),
             Message::TuneResult { status } => p.put_u8(status.to_u8()),
+            Message::UpdateBegin {
+                version,
+                size,
+                hash,
+            } => {
+                if version.len() > MAX_VERSION_TEXT {
+                    return Err(Error::TooLarge(version.len()));
+                }
+                p.put_str(version, MAX_VERSION_TEXT);
+                p.put_u64(*size);
+                p.put_bytes(hash);
+            }
+            Message::UpdateData { offset, data } => {
+                p.put_u64(*offset);
+                p.put_blob(data);
+            }
+            Message::UpdateEnd => {}
+            Message::UpdateResult { status } => p.put_u8(status.to_u8()),
             Message::Unknown { .. } => {
                 return Err(Error::State("an unknown message cannot be sent"));
             }
@@ -767,6 +845,19 @@ impl Message {
             TUNE_RESULT => Message::TuneResult {
                 status: TuneStatus::from_u8(r.u8()?)?,
             },
+            UPDATE_BEGIN => Message::UpdateBegin {
+                version: r.str(MAX_VERSION_TEXT)?,
+                size: r.u64()?,
+                hash: r.array()?,
+            },
+            UPDATE_DATA => Message::UpdateData {
+                offset: r.u64()?,
+                data: r.blob(MAX_PAYLOAD)?.to_vec(),
+            },
+            UPDATE_END => Message::UpdateEnd,
+            UPDATE_RESULT => Message::UpdateResult {
+                status: UpdateStatus::from_u8(r.u8()?)?,
+            },
             ty => return Ok((f.request_id, Message::Unknown { ty })),
         };
         r.finish()?;
@@ -874,6 +965,19 @@ mod tests {
             Message::TuneResult {
                 status: TuneStatus::Declined,
             },
+            Message::UpdateBegin {
+                version: "0.1.0-beta.9".into(),
+                size: 1 << 20,
+                hash: [8; 32],
+            },
+            Message::UpdateData {
+                offset: 65536,
+                data: vec![3; 100],
+            },
+            Message::UpdateEnd,
+            Message::UpdateResult {
+                status: UpdateStatus::Failed,
+            },
         ]
     }
 
@@ -956,6 +1060,8 @@ mod tests {
         assert!(Message::decode(&f).is_err());
         let f = frame::encode(TUNE_RESULT, 0, 0, &[4]).unwrap();
         assert!(Message::decode(&f).is_err());
+        let f = frame::encode(UPDATE_RESULT, 0, 0, &[3]).unwrap();
+        assert!(Message::decode(&f).is_err());
         let mut si = Message::SessionInfo(SessionInfo {
             locked: false,
             idle_ms: 0,
@@ -992,6 +1098,9 @@ mod tests {
             SERVER_SETTINGS,
             TUNE_SERVER,
             TUNE_RESULT,
+            UPDATE_BEGIN,
+            UPDATE_DATA,
+            UPDATE_RESULT,
         ];
         for round in 0..20_000 {
             let len = (next() % 96) as usize;
