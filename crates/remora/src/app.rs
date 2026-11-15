@@ -36,7 +36,8 @@ mod rail;
 mod touch;
 
 pub enum UserEvent {
-    Session(u64, session::Event),
+    /// A session event: tab id, the serial of the worker that sent it.
+    Session(u64, u64, session::Event),
     /// The frame hook saw the maximise button or window state change.
     Frame,
     /// Key derivation for the vault finished (unlock or create).
@@ -443,8 +444,8 @@ impl App {
         controls
             .helper()
             .set_client(crate::link_key::key(), &cfg.client_name);
-        let worker = session::spawn(cfg, channels, move |ev| {
-            let _ = proxy.send_event(UserEvent::Session(id, ev));
+        let worker = session::spawn(cfg, channels, move |serial, ev| {
+            let _ = proxy.send_event(UserEvent::Session(id, serial, ev));
         });
         (worker, controls)
     }
@@ -1810,11 +1811,17 @@ impl App {
         if let Some(t) = self.win.as_mut().and_then(|w| w.ui.tab_mut(id)) {
             t.recording = false;
         }
+        // Never wait on the window thread: a worker still running is told
+        // to close and finishes on its own (RDP-55).
         if let Some(s) = self.sessions.get_mut(&id)
             && let Some(mut w) = s.worker.take()
-            && let Some(t) = w.thread.take()
         {
-            let _ = t.join();
+            w.close();
+            if let Some(t) = w.thread.take()
+                && t.is_finished()
+            {
+                let _ = t.join();
+            }
         }
         if let Some(m) = &mut self.win
             && state != TabState::Connecting
@@ -2136,7 +2143,21 @@ impl ApplicationHandler<UserEvent> for App {
 
     fn user_event(&mut self, el: &ActiveEventLoop, event: UserEvent) {
         let (id, ev) = match event {
-            UserEvent::Session(id, ev) => (id, ev),
+            // A worker that a reconnect replaced still reports its end
+            // ("disconnected"); taken for the tab's current worker, that
+            // ended the new connection and hung the window (RDP-55).
+            UserEvent::Session(id, serial, ev) => {
+                let current = self
+                    .sessions
+                    .get(&id)
+                    .and_then(|s| s.worker.as_ref())
+                    .is_some_and(|w| w.sent(serial));
+                if !current {
+                    rdp::trace!("ui: session {id}: event from a replaced connection ignored");
+                    return;
+                }
+                (id, ev)
+            }
             UserEvent::Helper(id) => return self.helper_events(id),
             UserEvent::PickedFiles(id, files) => return self.send_files(id, files),
             UserEvent::PickedDownloads(dir) => {

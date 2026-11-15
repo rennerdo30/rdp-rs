@@ -81,6 +81,10 @@ pub struct Shared {
 }
 
 pub struct Worker {
+    /// Unique per worker: a reconnect replaces a tab's worker, and events
+    /// the old one still sends (its "disconnected" above all) must not be
+    /// taken for the new one's (RDP-55).
+    pub serial: u64,
     pub tx: Sender<Cmd>,
     pub shared: Arc<Mutex<Shared>>,
     /// True while a Frame event is in flight, so the worker sends at most one.
@@ -119,6 +123,11 @@ impl Worker {
         let _ = self.tx.send(Cmd::Close);
     }
 
+    /// Whether an event carrying this serial came from this worker.
+    pub fn sent(&self, serial: u64) -> bool {
+        self.serial == serial
+    }
+
     pub fn send(&self, events: Vec<InputEvent>) {
         if !events.is_empty() {
             let _ = self.tx.send(Cmd::Input(events));
@@ -129,8 +138,11 @@ impl Worker {
 pub fn spawn(
     cfg: Config,
     channels: Vec<Box<dyn StaticChannel>>,
-    emit: impl Fn(Event) + Send + 'static,
+    emit: impl Fn(u64, Event) + Send + 'static,
 ) -> Worker {
+    static SERIAL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    let serial = SERIAL.fetch_add(1, Ordering::Relaxed);
+    let emit = move |ev| emit(serial, ev);
     let (tx, rx) = mpsc::channel();
     let shared = Arc::new(Mutex::new(Shared {
         fb: Framebuffer::new(0, 0),
@@ -148,6 +160,7 @@ pub fn spawn(
         .spawn(move || run(cfg, channels, rx, s, n, r, emit))
         .expect("spawn session thread");
     Worker {
+        serial,
         tx,
         shared,
         notified,
@@ -388,4 +401,48 @@ pub fn wheel(delta: winit::event::MouseScrollDelta, pos: (u16, u16)) -> Option<I
     }
     let units = (notches * 120.0).round().clamp(-255.0, 255.0) as i16;
     Some(InputEvent::wheel(units, pos.0, pos.1))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    /// Each worker tags its events with its own serial, so the UI can drop
+    /// what a replaced worker still sends (RDP-55).
+    #[test]
+    fn events_carry_the_serial_of_the_worker_that_sent_them() {
+        let (tx, rx) = mpsc::channel();
+        let spawn_one = |tx: mpsc::Sender<(u64, bool)>| {
+            // Nothing listens on port 1: the connection fails at once.
+            let mut cfg = Config::new("127.0.0.1", "u", "p");
+            cfg.port = 1;
+            cfg.timeout = Duration::from_secs(2);
+            spawn(cfg, Vec::new(), move |serial, ev| {
+                let _ = tx.send((serial, matches!(ev, Event::Failed { .. })));
+            })
+        };
+        let mut a = spawn_one(tx.clone());
+        let mut b = spawn_one(tx);
+        assert_ne!(a.serial, b.serial);
+        let mut ended = Vec::new();
+        while ended.len() < 2 {
+            let (serial, failed) = rx
+                .recv_timeout(Duration::from_secs(20))
+                .expect("both workers report");
+            assert!(a.sent(serial) || b.sent(serial), "unknown serial {serial}");
+            if failed {
+                ended.push(serial);
+            }
+        }
+        ended.sort_unstable();
+        let mut want = vec![a.serial, b.serial];
+        want.sort_unstable();
+        assert_eq!(ended, want);
+        for w in [&mut a, &mut b] {
+            w.close();
+            w.thread.take().map(|t| t.join());
+        }
+    }
 }
