@@ -805,7 +805,7 @@ impl Ui {
                 "Latency, frame rate and traffic over the picture".into(),
                 "statistics stats debug info overlay latency ping rtt fps frame rate bandwidth",
                 Lead::Icon(Icon::Clock, Tone::Neutral),
-                Chip::Keys("Ctrl+Alt+I"),
+                Chip::None,
                 if on { "Hide" } else { "Show" },
             );
             push(

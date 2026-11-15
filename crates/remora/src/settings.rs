@@ -25,7 +25,7 @@ pub struct AppSettings {
     /// a strip of its pages stays at the picture's edge and the panel
     /// floats over the picture.
     pub panel_pinned: bool,
-    /// The statistics overlay over the session picture (Ctrl+Alt+I).
+    /// The statistics overlay over the session picture.
     pub stats_overlay: bool,
 }
 

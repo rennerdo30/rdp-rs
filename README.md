@@ -17,7 +17,7 @@ each session in its own tab. Website: [remora.renner.dev](https://remora.renner.
 
 > **Status: beta ([0.1.0-beta.1](https://github.com/rennerdo30/rdp-rs/releases)).**
 > It connects to Windows with NLA and is usable day to day through the bitmap
-> path; the graphics pipeline (GFX, H.264) is experimental. Expect rough edges
+> path and the graphics pipeline (GFX, H.264, the default). Expect rough edges
 > and please report them.
 
 ## What Remora does
@@ -64,7 +64,7 @@ Of the 38 features a full RDP client offers (below), 29 are done and 1 partly (7
 |  | Bulk compression (MPPC, NCRUSH, XCRUSH) | ✅ | MS-RDPBCGR 3.1.8, MS-RDPEGDI |
 |  | Drawing orders and glyph cache | ✅ | MS-RDPEGDI: primary, secondary and offscreen orders; glyph, brush and bitmap caches |
 |  | Persistent bitmap cache | ✅ | MS-RDPBCGR 2.2.1.17: kept per server in `%LOCALAPPDATA%\rdp-rs\bitmap-cache`, 100 MB cap |
-|  | Graphics pipeline: ZGFX, surfaces, ClearCodec, Progressive | ✅ | MS-RDPEGFX (experimental) |
+|  | Graphics pipeline: ZGFX, surfaces, ClearCodec, Progressive | ✅ | MS-RDPEGFX |
 |  | H.264 AVC420 | ✅ | MS-RDPEGFX 2.2.4.4 |
 |  | H.264 AVC444 | ✅ | MS-RDPEGFX 2.2.4.5, 2.2.4.6 (AVC444v2) |
 |  | RemoteFX surface bits (RDP 7) | ✅ | MS-RDPRFX, MS-RDPNSC: Set/Stream Surface Bits with RemoteFX and NSCodec, frame acknowledgement |

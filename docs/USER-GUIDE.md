@@ -140,11 +140,12 @@ explained in [Server helper](#server-helper).
 
 ![The Advanced page: graphics, Windows keys, compression](images/editor-advanced.webp)
 
-- **Graphics**: **Bitmaps**, classic bitmap updates with the lowest latency
-  (the default), or **GFX (H.264)**, the graphics pipeline with H.264
-  (experimental).
-- **Windows keys (Win, Alt+Tab, …)**: **On this PC**, **On the remote**, or
-  **Remote in full screen** (the default).
+- **Graphics**: **GFX (H.264)**, the graphics pipeline with H.264 (the
+  default: smoother video and less traffic), or **Bitmaps**, classic bitmap
+  updates, for a server or setup where GFX misbehaves. When a server's
+  graphics fail, Remora reconnects the tab once with bitmaps on its own.
+- **Windows keys (Win, Alt+Tab, …)**: **On this PC**, **On the remote** (the
+  default), or **Remote in full screen**.
 - **Compression**: **Off** is fastest on a LAN; RDP 6.1, 6.0 or 5.0 send less
   data on slow links for a little more CPU.
 
@@ -236,9 +237,10 @@ a double-click on the edge puts the default width back, and Remora remembers
 the width. A desktop set to **Fit window** follows the docked panel: it is
 resized to the new picture area once you let go of the edge.
 
-**Ctrl+Alt+I** (also from inside the session) or **Show statistics** in the
-command palette shows a small statistics box at the picture's top left,
-updated once a second; Remora remembers whether it is on. It shows:
+**Show statistics** (a switch on the side panel's Session page, also in the
+toolbar's **⋯** menu and the command palette) shows a small statistics box
+at the picture's top left, updated once a second; Remora remembers whether it
+is on. It shows:
 
 - **Round trip:** Windows' own TCP round-trip time to the server. A session
   through an RD Gateway has none.

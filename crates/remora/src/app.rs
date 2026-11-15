@@ -659,24 +659,33 @@ impl App {
 
     /// The server's graphics encoder failed (ERRINFO_GRAPHICSSUBSYSTEMFAILED
     /// and its neighbours): connects again once with the plain bitmap path,
-    /// without surface commands (RemoteFX, NSCodec) or drawing orders, and
+    /// without the graphics pipeline, surface commands (RemoteFX, NSCodec)
+    /// or drawing orders, and
     /// keeps that for the tab's later reconnects. False when the tab already
     /// uses the plain path; the failure screen shows then.
     fn graphics_fallback(&mut self, id: u64) -> bool {
         let Some(s) = self.sessions.get_mut(&id) else {
             return false;
         };
-        if !s.cfg.surface_commands && !s.cfg.drawing_orders {
+        let gfx = s.cfg.graphics == rdp::Graphics::Gfx;
+        if !s.cfg.surface_commands && !s.cfg.drawing_orders && !gfx {
             return false;
         }
         s.cfg.surface_commands = false;
         s.cfg.drawing_orders = false;
+        // GFX is the default since 0.1.0-beta.9: the plain path below it.
+        s.cfg.graphics = rdp::Graphics::Bitmap;
+        s.cfg.h264 = None;
         let cfg = s.cfg.clone();
         rdp::trace!(
-            "ui: session {id}: the server's graphics failed; connecting again without surface commands and drawing orders"
+            "ui: session {id}: the server's graphics failed; connecting again with plain bitmaps (no GFX, surface commands or drawing orders)"
         );
         self.ended(id, TabState::Connecting);
         self.reconnect_with(id, cfg);
+        if gfx && let Some(t) = self.win.as_mut().and_then(|w| w.ui.tab_mut(id)) {
+            // The session panel shows what the tab now uses.
+            t.quality.gfx = false;
+        }
         self.message(
             "The server's graphics failed; connecting again in compatible mode…",
             Tone::Muted,
@@ -1572,17 +1581,6 @@ impl App {
                 self.send(id, session::release_modifiers());
             }
             return self.dirty();
-        }
-        // Ctrl+Alt+I: the statistics overlay, also from inside a session.
-        if stats_chord(&ev, self.mods) && m.ui.session_area.is_some() {
-            let action = m.ui.toggle_stats();
-            if let Some(id) = session {
-                self.send(id, session::release_modifiers());
-            }
-            if let Some(a) = action {
-                self.handle_action(a);
-            }
-            return self.render_overlay();
         }
         if let Some(id) = session {
             // Alt (the host key) shows the toolbar while it is held; the
@@ -2786,22 +2784,6 @@ fn panel_chord(ev: &winit::event::KeyEvent, mods: ModifiersState) -> bool {
         && ev.physical_key == PhysicalKey::Code(KeyCode::KeyP)
         && match &ev.logical_key {
             WKey::Character(c) => c.eq_ignore_ascii_case("p"),
-            _ => true,
-        }
-}
-
-/// Ctrl+Alt+I, the statistics overlay's chord (also while a session has the
-/// keyboard). As with [`palette_chord`], an AltGr+I that types a character
-/// stays the session's.
-fn stats_chord(ev: &winit::event::KeyEvent, mods: ModifiersState) -> bool {
-    use winit::keyboard::{KeyCode, PhysicalKey};
-    ev.state.is_pressed()
-        && mods.control_key()
-        && mods.alt_key()
-        && !mods.shift_key()
-        && ev.physical_key == PhysicalKey::Code(KeyCode::KeyI)
-        && match &ev.logical_key {
-            WKey::Character(c) => c.eq_ignore_ascii_case("i"),
             _ => true,
         }
 }

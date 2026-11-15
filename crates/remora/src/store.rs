@@ -207,7 +207,7 @@ enum AnyFile {
 }
 
 /// The file format written now.
-const FILE_VERSION: u32 = 3;
+const FILE_VERSION: u32 = 4;
 
 fn parse(bytes: &[u8]) -> Result<(Vec<Group>, Vec<Connection>), String> {
     let (version, mut groups, mut connections) =
@@ -225,6 +225,15 @@ fn parse(bytes: &[u8]) -> Result<(Vec<Group>, Vec<Connection>), String> {
                 o.win_keys = WinKeys::Remote;
             }
         };
+        groups.iter_mut().for_each(|g| migrate(&mut g.options));
+        connections.iter_mut().for_each(|c| migrate(&mut c.options));
+    }
+    if version < 4 {
+        // Bitmaps was the default before version 4 and the graphics
+        // pipeline was experimental, so "bitmaps" says nothing about a
+        // choice: move to today's default, GFX, once. From version 4 on
+        // bitmaps is the user's choice and stays.
+        let migrate = |o: &mut SessionOptions| o.quality.gfx = true;
         groups.iter_mut().for_each(|g| migrate(&mut g.options));
         connections.iter_mut().for_each(|c| migrate(&mut c.options));
     }
@@ -462,7 +471,7 @@ impl Quality {
             animations: e.animations,
             visual_styles: e.visual_styles,
             compression: Comp::Off,
-            gfx: false,
+            gfx: true,
             touch: true,
         }
     }
@@ -1239,6 +1248,21 @@ mod tests {
         let (_, back) = parse(&s.file_json(false).unwrap()).unwrap();
         assert_eq!(back[0].options.win_keys, WinKeys::FullScreen);
         assert_eq!(WinKeys::default(), WinKeys::Remote);
+    }
+
+    #[test]
+    fn older_files_move_to_gfx_once() {
+        let v3 = br#"{"version":3,"groups":[{"path":"Work","options":{"quality":{"gfx":false}}}],
+            "connections":[
+              {"name":"a","host":"h","port":3389,"user":"u","width":0,"height":0,"options":{"quality":{"gfx":false}}}]}"#;
+        let (g, c) = parse(v3).unwrap();
+        assert!(g[0].options.quality.gfx && c[0].options.quality.gfx);
+        // Bitmaps chosen again and saved in today's format stays.
+        let mut s = store_with(vec![], c);
+        s.connections[0].options.quality.gfx = false;
+        let (_, back) = parse(&s.file_json(false).unwrap()).unwrap();
+        assert!(!back[0].options.quality.gfx);
+        assert!(Quality::default().gfx, "new connections use GFX");
     }
 
     #[test]

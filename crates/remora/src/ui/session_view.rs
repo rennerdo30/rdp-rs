@@ -1048,6 +1048,15 @@ impl Ui {
                 hit: Hit::PinBar,
             },
             MenuItem {
+                icon: Icon::Clock,
+                label: if self.stats_overlay {
+                    "Hide statistics"
+                } else {
+                    "Show statistics"
+                },
+                hit: Hit::StatsOverlay,
+            },
+            MenuItem {
                 icon: Icon::Refresh,
                 label: "Reconnect",
                 hit: Hit::Reconnect(id),
@@ -1092,8 +1101,9 @@ impl Ui {
         self.paint_helper_overlay(cv, te, f);
     }
 
-    /// Shows or hides the statistics overlay (Ctrl+Alt+I); the choice is
-    /// saved with the layout.
+    /// Shows or hides the statistics overlay (the session panel's switch,
+    /// the toolbar menu or the palette); the choice is saved with the
+    /// layout.
     pub fn toggle_stats(&mut self) -> Option<Action> {
         let was = self.overlay_rect();
         self.stats_overlay = !self.stats_overlay;
@@ -1157,13 +1167,6 @@ impl Ui {
         let head = Rect::new(x, r.y + pad, w, k.p(STATS_HEAD) - k.p(6.0));
         let b = k.baseline(Font::Semi, size::BODY, head);
         k.text(Font::Semi, size::BODY, x, b, "Statistics", c.text, w);
-        k.text_right(
-            Font::Regular,
-            size::CAPTION,
-            head,
-            "Ctrl+Alt+I",
-            c.text_faint,
-        );
         let label_w = k.p(STATS_LABEL_W);
         let mut y = r.y + pad + k.p(STATS_HEAD);
         for (label, value) in &rows {

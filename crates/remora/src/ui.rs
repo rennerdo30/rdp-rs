@@ -268,7 +268,7 @@ pub enum Hit {
     Tab(u64),
     CloseTab(u64),
     Drawer,
-    /// Show or hide the statistics overlay (Ctrl+Alt+I).
+    /// Show or hide the statistics overlay.
     StatsOverlay,
     Reconnect(u64),
     Disconnect(u64),
@@ -760,8 +760,8 @@ pub struct Ui {
     /// right edge and the panel floats over the picture (`panel`). The app
     /// sets it from the settings (default unpinned); samples start pinned.
     pub panel_pinned: bool,
-    /// The statistics overlay over the session picture (Ctrl+Alt+I); the
-    /// app sets it from the settings.
+    /// The statistics overlay over the session picture; the app sets it
+    /// from the settings.
     pub stats_overlay: bool,
     /// The floating panel's state and where it was painted.
     panel: panel::PanelState,
@@ -2096,9 +2096,10 @@ impl Ui {
             Hit::FormGraphics(i) => self.opts.quality.gfx = i == 1,
             Hit::FormPreset(i) => {
                 let depth = self.opts.quality.color_depth;
-                let touch = self.opts.quality.touch;
+                let (touch, gfx) = (self.opts.quality.touch, self.opts.quality.gfx);
                 self.opts.quality = Quality::preset(PRESETS[i].0, depth);
                 self.opts.quality.touch = touch;
+                self.opts.quality.gfx = gfx;
             }
             Hit::FormDepth(i) => self.opts.quality.color_depth = DEPTHS[i],
             Hit::FormExperience(i) => {
@@ -5643,8 +5644,8 @@ impl Ui {
         self.caption(cv, te, f, x, y, w, "GRAPHICS");
         y += p(24.0);
         let subs = [
-            "Classic bitmap updates. Lowest latency; the default.",
-            "Graphics pipeline with H.264. Experimental.",
+            "Classic bitmap updates, for servers or setups where GFX misbehaves.",
+            "Graphics pipeline with H.264. Smoother video and less traffic; the default.",
         ];
         let cells = self.card(cv, x, y, w, &[p(50.0); 2]);
         for (i, (r, (name, sub))) in cells
@@ -6730,6 +6731,23 @@ impl Ui {
             }
         }
         y += count as i32 * p(40.0) + p(24.0);
+
+        // RDP-56: a switch here, not a key chord the session would want.
+        self.caption(cv, te, f, x, y, w, "Statistics");
+        y += p(26.0);
+        let cells = self.card(cv, x, y, w, &[p(58.0)]);
+        self.card_switch_i(
+            cv,
+            te,
+            f,
+            cells[0],
+            Some(Icon::Clock),
+            "Show statistics",
+            "Latency, frame rate and traffic",
+            self.stats_overlay,
+            Hit::StatsOverlay,
+        );
+        y += p(58.0) + p(24.0);
         y = self.page_session_helper(cv, te, f, x, y, w, id);
 
         self.caption(cv, te, f, x, y, w, "Windows keys (Win, Alt+Tab)");
