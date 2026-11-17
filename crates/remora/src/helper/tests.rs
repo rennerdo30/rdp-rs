@@ -1214,6 +1214,7 @@ fn a_full_queue_keeps_links_offers_and_states() {
         name: "a".into(),
         size: 1,
         mtime: 1,
+        files: 1,
     }));
     c.push(HelperEvent::State(HelperState::Paired));
     let failed = |i: u32, direction| {
@@ -1253,6 +1254,7 @@ fn a_full_queue_keeps_links_offers_and_states() {
             name: "o".into(),
             size: 1,
             mtime: 1,
+            files: 1,
         }));
     }
     c.open_urls.push(9);

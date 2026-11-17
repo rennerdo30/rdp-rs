@@ -41,7 +41,10 @@
 //!   acts on by merely showing a folder (`.lnk`, `.url`, `.scf`, ...) are
 //!   stored with `.download` appended ([`path::stored_name`]). Only files a
 //!   transfer created itself are ever deleted by it.
+//! - **Folders** (protocol 1.2): see [`folder`]; the app sees one transfer
+//!   per folder.
 
+pub mod folder;
 pub mod io;
 pub mod path;
 pub mod worker;
@@ -50,7 +53,7 @@ use std::collections::{BTreeMap, VecDeque};
 
 use serde::{Deserialize, Serialize};
 
-use crate::msg::{FileOffer, Message, TransferId};
+use crate::msg::{FileOffer, FolderRef, Message, TransferId};
 use crate::wire::{hex, unhex};
 use io::{PartFile, Source, TargetDir};
 
@@ -95,13 +98,15 @@ pub enum Direction {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TransferEvent {
-    /// The peer offers a file; call [`Engine::accept`] or [`Engine::reject`].
+    /// The peer offers a file, or a folder of `files` files (`size` is
+    /// then their total); call [`Engine::accept`] or [`Engine::reject`].
     /// `name` passed [`path::check_name`].
     Offered {
         id: TransferId,
         name: String,
         size: u64,
         mtime: u64,
+        files: u32,
     },
     Progress {
         id: TransferId,
@@ -358,6 +363,7 @@ pub struct Engine {
     out: Vec<Message>,
     pub(crate) events: VecDeque<TransferEvent>,
     buf: Vec<u8>,
+    folders: folder::Folders,
 }
 
 impl Default for Engine {
@@ -383,6 +389,7 @@ impl Engine {
             out: Vec::new(),
             events: VecDeque::new(),
             buf: Vec::new(),
+            folders: folder::Folders::default(),
         }
     }
 
@@ -391,6 +398,18 @@ impl Engine {
     pub fn set_permissions(&mut self, send: bool, receive: bool) {
         self.allow_send = send;
         self.allow_receive = receive;
+        if !send {
+            let ids: Vec<_> = self.folders.out.keys().copied().collect();
+            for id in ids {
+                self.fail_folder_out(id, reason::DISABLED, false, "file transfer switched off");
+            }
+        }
+        if !receive {
+            let ids: Vec<_> = self.folders.inc.keys().copied().collect();
+            for id in ids {
+                self.fail_folder_in(id, reason::DISABLED, false, "file transfer switched off");
+            }
+        }
         if !send {
             let ids: Vec<_> = self.sending.keys().copied().collect();
             for id in ids {
@@ -479,7 +498,18 @@ impl Engine {
         &mut self,
         id: TransferId,
         name: &str,
+        source: Box<dyn Source>,
+    ) -> crate::Result<TransferId> {
+        self.offer_file(id, name, source, None)
+    }
+
+    /// Offers one file, on its own or as part of a folder.
+    fn offer_file(
+        &mut self,
+        id: TransferId,
+        name: &str,
         mut source: Box<dyn Source>,
+        folder: Option<FolderRef>,
     ) -> crate::Result<TransferId> {
         if !self.allow_send {
             return Err(crate::Error::State("sending files is switched off"));
@@ -498,6 +528,7 @@ impl Engine {
             size,
             mtime,
             block_size: BLOCK_SIZE,
+            folder,
         };
         let id = offer.id;
         if self.connected {
@@ -522,8 +553,15 @@ impl Engine {
     }
 
     /// Accepts an offered file into `dir`. Resumes from a sidecar there when
-    /// one matches the offer.
+    /// one matches the offer. A folder ([`folder`]) is created in `dir`.
     pub fn accept(&mut self, id: TransferId, dir: Box<dyn TargetDir>) -> crate::Result<()> {
+        if self.is_folder(&id).1 {
+            return self.accept_folder(id, dir);
+        }
+        self.accept_file(id, dir)
+    }
+
+    fn accept_file(&mut self, id: TransferId, dir: Box<dyn TargetDir>) -> crate::Result<()> {
         let Some(r) = self.receiving.get_mut(&id) else {
             return Err(crate::Error::State("no such offer"));
         };
@@ -531,10 +569,13 @@ impl Engine {
             return Err(crate::Error::State("already accepted"));
         }
         r.dir = Some(dir);
+        // Names in use by transfers into the same folder.
+        let place = |o: &FileOffer| o.folder.as_ref().map(|f| (f.id, f.path.clone()));
+        let here = place(&r.offer);
         let taken: Vec<String> = self
             .receiving
             .values()
-            .filter(|o| o.state != RecvState::Offered)
+            .filter(|o| o.state != RecvState::Offered && place(&o.offer) == here)
             .map(|o| o.name.clone())
             .collect();
         let r = self.receiving.get_mut(&id).expect("checked above");
@@ -565,6 +606,10 @@ impl Engine {
 
     /// Rejects (or cancels) an incoming transfer with a [`reason`] code.
     pub fn reject_with(&mut self, id: TransferId, code: u8) {
+        if self.is_folder(&id).1 {
+            self.fail_folder_in(id, code, false, "rejected");
+            return;
+        }
         if self.receiving.contains_key(&id) {
             self.fail_receive(id, code, "rejected", true);
         }
@@ -572,6 +617,13 @@ impl Engine {
 
     /// Cancels a transfer in either direction; a received part is deleted.
     pub fn cancel(&mut self, id: TransferId) {
+        let (out, inc) = self.is_folder(&id);
+        if out {
+            self.fail_folder_out(id, reason::USER, false, "cancelled");
+        }
+        if inc {
+            self.fail_folder_in(id, reason::USER, false, "cancelled");
+        }
         if self.sending.contains_key(&id) {
             self.fail_send(id, reason::USER, "cancelled", true);
         }
@@ -586,12 +638,19 @@ impl Engine {
     }
 
     pub fn next_event(&mut self) -> Option<TransferEvent> {
-        self.events.pop_front()
+        loop {
+            if let Some(e) = self.folders.ready.pop_front() {
+                return Some(e);
+            }
+            let e = self.events.pop_front()?;
+            self.translate(e);
+        }
     }
 
     /// Ids of transfers in progress (either direction).
     pub fn active(&self) -> usize {
-        self.sending.len() + self.receiving.len()
+        let queued: usize = self.folders.out.values().map(|f| f.queued()).sum();
+        self.sending.len() + self.receiving.len() + queued
     }
 
     /// An outgoing transfer is sending data (the worker keeps pumping).
@@ -773,7 +832,14 @@ impl Engine {
             });
             return;
         }
-        if let Err(e) = path::check_name(&o.name) {
+        let bad = path::check_name(&o.name)
+            .map_err(|e| e.to_string())
+            .and_then(|()| {
+                o.folder
+                    .as_ref()
+                    .map_or(Ok(()), |f| folder::check_folder(f).map(|_| ()))
+            });
+        if let Err(e) = bad {
             self.out.push(Message::FileReject {
                 id: o.id,
                 reason: reason::BAD_NAME,
@@ -804,11 +870,17 @@ impl Engine {
                 owns_files: false,
             },
         );
+        if let Some(f) = &o.folder {
+            // Part of a folder: the app hears of the folder, once.
+            self.folder_file_offered(o.id, f.clone());
+            return;
+        }
         self.events.push_back(TransferEvent::Offered {
             id: o.id,
             name: o.name.clone(),
             size: o.size,
             mtime: o.mtime,
+            files: 1,
         });
     }
 

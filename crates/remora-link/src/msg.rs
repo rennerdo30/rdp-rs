@@ -90,9 +90,12 @@ pub mod cap {
     pub const SERVER_TUNING: u32 = 1 << 4;
     /// 1.2: Remora may send the helper a newer version of itself.
     pub const HELPER_UPDATE: u32 = 1 << 5;
+    /// 1.2: file offers may belong to a folder ([`super::FolderRef`]); a
+    /// peer without it is never sent one.
+    pub const FOLDERS: u32 = 1 << 6;
     /// Every bit this version defines.
     pub const ALL: u32 =
-        SESSION_INFO | OPEN_URL | FILE_UP | FILE_DOWN | SERVER_TUNING | HELPER_UPDATE;
+        SESSION_INFO | OPEN_URL | FILE_UP | FILE_DOWN | SERVER_TUNING | HELPER_UPDATE | FOLDERS;
 }
 
 /// Policy flags the helper reads from the server's configuration.
@@ -130,6 +133,8 @@ pub const MAX_URL: usize = 8192;
 /// Longest file name in bytes (UTF-8); the receiver also limits it to 255
 /// UTF-16 units.
 pub const MAX_NAME: usize = 1024;
+/// Longest subfolder path of a folder transfer's file (UTF-8 bytes).
+pub const MAX_FOLDER_PATH: usize = 4096;
 
 /// A 128-bit random transfer id (UUID version 4 layout).
 pub type TransferId = [u8; 16];
@@ -419,6 +424,23 @@ pub struct FileOffer {
     pub mtime: u64,
     /// Hash block size; 4 MiB in version 1.0.
     pub block_size: u32,
+    /// 1.2 ([`cap::FOLDERS`]): the file is part of a folder transfer.
+    pub folder: Option<FolderRef>,
+}
+
+/// Where a file of a folder transfer goes (protocol 1.2).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FolderRef {
+    /// The folder transfer's own id (not any file's).
+    pub id: TransferId,
+    /// The folder's name, a plain name like a file name.
+    pub top: String,
+    /// Subfolders below `top`, `\`-separated; empty for files directly in
+    /// it. Every part is checked like a file name.
+    pub path: String,
+    /// Files and bytes in the whole folder.
+    pub files: u32,
+    pub bytes: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -660,6 +682,18 @@ impl Message {
                 p.put_u64(o.size);
                 p.put_u64(o.mtime);
                 p.put_u32(o.block_size);
+                // 1.2: only present for a folder's file (peers before 1.2
+                // are never sent one: they refuse trailing bytes).
+                if let Some(f) = &o.folder {
+                    if f.top.len() > MAX_NAME || f.path.len() > MAX_FOLDER_PATH {
+                        return Err(Error::TooLarge(f.top.len().max(f.path.len())));
+                    }
+                    p.put_bytes(&f.id);
+                    p.put_str(&f.top, MAX_NAME);
+                    p.put_str(&f.path, MAX_FOLDER_PATH);
+                    p.put_u32(f.files);
+                    p.put_u64(f.bytes);
+                }
             }
             Message::FileAccept {
                 id,
@@ -796,6 +830,17 @@ impl Message {
                 size: r.u64()?,
                 mtime: r.u64()?,
                 block_size: r.u32()?,
+                folder: if r.remaining() > 0 {
+                    Some(FolderRef {
+                        id: r.array()?,
+                        top: r.str(MAX_NAME)?,
+                        path: r.str(MAX_FOLDER_PATH)?,
+                        files: r.u32()?,
+                        bytes: r.u64()?,
+                    })
+                } else {
+                    None
+                },
             }),
             FILE_ACCEPT => Message::FileAccept {
                 id: r.array()?,
@@ -921,6 +966,7 @@ mod tests {
                 size: 10 << 20,
                 mtime: 1_700_000_000_000,
                 block_size: 4 << 20,
+                folder: None,
             }),
             Message::FileAccept {
                 id,

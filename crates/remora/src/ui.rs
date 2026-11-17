@@ -30,8 +30,9 @@ pub use sidebar::{Divider, sample_rail, sample_resized};
 
 pub use helper::{
     HelperView, sample_cards as sample_helper_cards, sample_drop as sample_helper_drop,
-    sample_helper_blocked, sample_helper_form, sample_helper_hint, sample_helper_panel,
-    sample_helper_update, sample_pairing as sample_helper_pairing, sample_server_graphics,
+    sample_folder_offer as sample_helper_folder, sample_helper_blocked, sample_helper_form,
+    sample_helper_hint, sample_helper_panel, sample_helper_update,
+    sample_pairing as sample_helper_pairing, sample_server_graphics,
 };
 pub use home::ThumbDue;
 pub mod session_view;
@@ -5426,7 +5427,7 @@ impl Ui {
                 0u8,
                 Icon::Clipboard,
                 "Clipboard",
-                "Text and files, both ways",
+                "Text, images and files, both ways",
                 o.clipboard,
             ),
             (
@@ -6298,7 +6299,7 @@ impl Ui {
             (
                 Icon::Clipboard,
                 "Clipboard",
-                "Text and files, both ways",
+                "Text, images and files, both ways",
                 t.clipboard,
                 Hit::Clipboard(id),
             ),

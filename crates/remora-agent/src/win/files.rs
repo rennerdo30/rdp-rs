@@ -9,6 +9,7 @@ use std::os::windows::io::AsRawHandle;
 use std::path::{Path, PathBuf};
 
 use remora_link::transfer::NO_MARK;
+use remora_link::transfer::folder::FolderFile;
 use remora_link::transfer::io::{FsDir, Source, TargetDir};
 use windows_sys::Win32::Storage::FileSystem::{
     FILE_FLAG_OPEN_REPARSE_POINT, FILE_TYPE_DISK, GetDiskFreeSpaceExW, GetFileType,
@@ -180,6 +181,20 @@ impl Files for WinFiles {
                         .inspect_err(|e| warn!("received file not marked as downloaded: {e}"))
                 }),
         ))
+    }
+
+    fn open_folder(&mut self, path: &Path) -> io::Result<(String, Vec<FolderFile>)> {
+        let m = std::fs::symlink_metadata(path)?;
+        if m.is_symlink() || !m.is_dir() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "not a plain folder",
+            ));
+        }
+        remora_link::transfer::folder::walk(path, |p| {
+            let f = open_regular(p)?;
+            Ok(Box::new(FileSource(f)) as Box<dyn Source>)
+        })
     }
 
     fn open_source(&mut self, path: &Path) -> io::Result<(String, Box<dyn Source>)> {

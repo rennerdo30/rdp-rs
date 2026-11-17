@@ -457,8 +457,9 @@ fn send_check(arg: &str) -> Result<String, String> {
     }
     let s = p.to_str().ok_or("the name cannot be sent")?.to_string();
     match std::fs::symlink_metadata(&p) {
-        Ok(m) if m.is_dir() => return Err("folders cannot be sent yet".into()),
         Ok(m) if m.is_symlink() => return Err("links are not sent".into()),
+        // A folder goes whole (RDP-64); the agent walks it.
+        Ok(m) if m.is_dir() => return Ok(s),
         Ok(_) => {}
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Err("not found".into()),
         Err(e) => return Err(e.to_string()),

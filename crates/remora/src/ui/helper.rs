@@ -79,6 +79,8 @@ pub struct Offer {
     pub id: TransferId,
     pub name: String,
     pub size: u64,
+    /// More than 1: a folder of that many files.
+    pub files: u32,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -489,9 +491,20 @@ impl HelperView {
 
     fn transfer(&mut self, ev: TransferEvent, now: Instant) -> Vec<Effect> {
         match ev {
-            TransferEvent::Offered { id, name, size, .. } => {
+            TransferEvent::Offered {
+                id,
+                name,
+                size,
+                files,
+                ..
+            } => {
                 if !self.offers.iter().any(|o| o.id == id) {
-                    self.offers.push(Offer { id, name, size });
+                    self.offers.push(Offer {
+                        id,
+                        name,
+                        size,
+                        files,
+                    });
                 }
                 Vec::new()
             }
@@ -1574,7 +1587,15 @@ impl Ui {
             12.0,
             tx,
             r.y + p(47.0),
-            &format!("{} from the server · to {folder}", fmt_bytes(o.size)),
+            &if o.files > 1 {
+                format!(
+                    "Folder · {} files · {} from the server · to {folder}",
+                    o.files,
+                    fmt_bytes(o.size)
+                )
+            } else {
+                format!("{} from the server · to {folder}", fmt_bytes(o.size))
+            },
             c.text_muted,
             tw,
         );
@@ -2638,6 +2659,21 @@ pub fn sample_pairing(changed: bool) -> Ui {
     m
 }
 
+/// A folder the server offers (RDP-64).
+pub fn sample_folder_offer() -> Ui {
+    let mut m = sample_cards();
+    if let Some(t) = m.tab_mut(1) {
+        t.helper.links.clear();
+        t.helper.offers[0] = Offer {
+            id: [9; 16],
+            name: "Project photos".into(),
+            size: 2_140_000_000,
+            files: 248,
+        };
+    }
+    m
+}
+
 /// A link and a file offer waiting over the running session.
 pub fn sample_cards() -> Ui {
     let mut m = sample_with(Status::Paired);
@@ -2651,6 +2687,7 @@ pub fn sample_cards() -> Ui {
             id: [9; 16],
             name: "Q3 report.pdf".into(),
             size: 3_350_000,
+            files: 1,
         });
     }
     m
@@ -3068,6 +3105,7 @@ mod tests {
                 name: "a.bin".into(),
                 size: 4000,
                 mtime: 0,
+                files: 1,
             }),
             t0,
         );
@@ -3138,6 +3176,7 @@ mod tests {
                 name: "c".into(),
                 size: 1,
                 mtime: 0,
+                files: 1,
             }),
             t0,
         );

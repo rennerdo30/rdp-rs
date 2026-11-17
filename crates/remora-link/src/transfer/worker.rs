@@ -23,6 +23,7 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
+use super::folder::FolderFile;
 use super::io::{Source, TargetDir};
 use super::{Engine, Limits, MAX_ACTIVE, TransferEvent, WINDOW, new_id, path};
 use crate::msg::{Message, TransferId};
@@ -48,6 +49,7 @@ enum Cmd {
     Connected(bool),
     Permissions(bool, bool),
     Send(TransferId, String, Box<dyn Source>),
+    SendFolder(TransferId, String, Vec<FolderFile>),
     Accept(TransferId, Box<dyn TargetDir>),
     Reject(TransferId, u8),
     Cancel(TransferId),
@@ -216,6 +218,18 @@ impl EngineWorker {
         Ok(id)
     }
 
+    /// Sends a folder ([`super::folder`]); the peer must have
+    /// `cap::FOLDERS`. The name is checked here, the files on the worker.
+    pub fn send_folder(&self, top: &str, files: Vec<FolderFile>) -> crate::Result<TransferId> {
+        if !self.permissions().0 {
+            return Err(crate::Error::State("sending files is switched off"));
+        }
+        path::check_name(top).map_err(|e| crate::Error::Malformed(e.to_string()))?;
+        let id = new_id()?;
+        self.cmd(Cmd::SendFolder(id, top.to_string(), files));
+        Ok(id)
+    }
+
     /// Accepts an offered file into `dir` (a resume re-reads the part file
     /// on the worker, never on the caller's thread).
     pub fn accept(&self, id: TransferId, dir: Box<dyn TargetDir>) {
@@ -292,6 +306,17 @@ fn run(mut engine: Engine, rx: Receiver<Cmd>, shared: Arc<Shared>) {
                 Cmd::Permissions(s, r) => engine.set_permissions(s, r),
                 Cmd::Send(id, name, source) => {
                     if let Err(e) = engine.send_with_id(id, &name, source) {
+                        engine.events.push_back(TransferEvent::Failed {
+                            id,
+                            direction: super::Direction::Send,
+                            reason: super::reason::IO,
+                            by_peer: false,
+                            detail: e.to_string(),
+                        });
+                    }
+                }
+                Cmd::SendFolder(id, top, files) => {
+                    if let Err(e) = engine.send_folder_with_id(id, &top, files) {
                         engine.events.push_back(TransferEvent::Failed {
                             id,
                             direction: super::Direction::Send,
@@ -446,6 +471,7 @@ mod tests {
             size: 1 << 40,
             mtime: 1,
             block_size: super::super::BLOCK_SIZE,
+            folder: None,
         }));
         assert!(rx.sync(T));
         // The accept blocks the worker in the folder listing.
@@ -522,6 +548,7 @@ mod tests {
             size: 1 << 30,
             mtime: 1,
             block_size: super::super::BLOCK_SIZE,
+            folder: None,
         }));
         assert!(rx.sync(T));
         let open = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
@@ -556,6 +583,7 @@ mod tests {
                     size: 1,
                     mtime: 1,
                     block_size: super::super::BLOCK_SIZE,
+                    folder: None,
                 })
             };
             match rx.post(&m) {

@@ -557,6 +557,7 @@ fn snapshot_ui(
             ui::sample_helper_pairing(true)
         }),
         ("-helper-cards", ui::sample_helper_cards),
+        ("-helper-folder", ui::sample_helper_folder),
         ("-helper-drop", || ui::sample_helper_drop(true)),
         ("-helper-drop-off", || ui::sample_helper_drop(false)),
         ("-helper-panel-session", || ui::sample_helper_panel(3, true)),

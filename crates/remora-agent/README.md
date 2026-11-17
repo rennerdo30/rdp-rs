@@ -65,7 +65,7 @@ A note appears when a pairing waits for you and when a file from Remora arrived.
 
 ## Files
 
-**From your PC to the server:** drop files onto the Remora window (when Remora allows files to this server). They land in `Downloads\From Remora` (the folder is created when the first file arrives; a moved Downloads folder is followed).
+**From your PC to the server:** drop files or folders onto the Remora window (when Remora allows files to this server). They land in `Downloads\From Remora` (the folder is created when the first file arrives; a moved Downloads folder is followed).
 
 - An existing file is never replaced: the new one is saved as `name (2).ext`, and so on.
 - Files are written as `name.remora-part` with a `name.remora-part.meta` record and renamed when complete and verified (BLAKE3 per 4 MiB block). A dropped connection resumes from the last verified block after you reconnect, also after a restart of the agent.
@@ -73,7 +73,7 @@ A note appears when a pairing waits for you and when a file from Remora arrived.
 - Free space is checked first. One Remora PC can have at most 16 files coming in (running or paused) at a time.
 - Received files get the Mark-of-the-Web (`Zone.Identifier`, Internet zone), like a download: Windows warns before running them and Office opens them in Protected View. `Downloads` must be on an NTFS (or ReFS) drive: on a FAT or exFAT drive, which cannot hold the mark, files are refused rather than saved unmarked.
 
-**From the server to your PC:** select files in Explorer, then **Send To > Send to my PC (Remora)**, or run `remora-agent send <file>...`. Remora asks you where to save them. Only regular files are sent in this version: no folders, links or devices. If Remora is not connected, has not allowed files to your PC, or is not a paired PC (confirm the code on the server first), a short message says so.
+**From the server to your PC:** select files in Explorer, then **Send To > Send to my PC (Remora)**, or run `remora-agent send <file>...`. Remora asks you where to save them. Folders are sent whole, with their subfolders, and arrive as one folder (Remora asks once for the folder); links, junctions and devices are not sent. Folders need Remora 0.1.0-beta.9 or later on the PC. If Remora is not connected, has not allowed files to your PC, or is not a paired PC (confirm the code on the server first), a short message says so.
 
 ## Install
 

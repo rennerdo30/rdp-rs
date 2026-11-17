@@ -350,7 +350,7 @@ All on `Remora::Ctl` unless marked Bulk. Maximum string lengths in bytes.
 | `0x0200` | `SessionInfo`    | H→R | `bool locked, u32 idle_ms, u8 cpu_percent (0..100), u64 mem_used, u64 mem_total` |
 | `0x0300` | `OpenUrl`        | H→R | `str url (≤8192)`; `request_id` ≠ 0 |
 | `0x0301` | `OpenUrlResult`  | R→H | `u8 status` (0 opened, 1 declined, 2 invalid, 3 disabled); same `request_id` |
-| `0x0400` | `FileOffer`      | sender→receiver | `[16] id, str name (≤1024), u64 size, u64 mtime (ms since 1970), u32 block_size (4 MiB)` |
+| `0x0400` | `FileOffer`      | sender→receiver | `[16] id, str name (≤1024), u64 size, u64 mtime (ms since 1970), u32 block_size (4 MiB)`; 1.2, only for a folder's file: `[16] folder id, str top (≤1024), str path (≤4096), u32 files, u64 bytes` (section 7.2) |
 | `0x0401` | `FileAccept`     | receiver→sender | `[16] id, u32 epoch, u64 offset, u64 limit` |
 | `0x0402` | `FileReject`     | receiver→sender | `[16] id, u8 reason` |
 | `0x0403` | `FileCredit`     | receiver→sender | `[16] id, u32 epoch, u64 limit` |
@@ -375,7 +375,8 @@ All on `Remora::Ctl` unless marked Bulk. Maximum string lengths in bytes.
 - **Capability bits** (`Hello` offers, `HelloAck` accepts a subset):
   `1` session info, `2` open URL, `4` file transfer up (client → server),
   `8` file transfer down (server → client), `16` server tuning (1.2),
-  `32` helper update (1.2). Remora accepts only what the user enabled
+  `32` helper update (1.2), `64` folders (1.2: a `FileOffer` may carry a
+  folder, section 7.2). Remora accepts only what the user enabled
   (default: session info, server tuning and helper update; the last two act
   only on a click).
 - **Policy flags** (`Hello`): `1` clipboard redirection disabled, `2` drive
@@ -503,7 +504,7 @@ sender                                     receiver
 
 ### 7.1 Names (receiving side)
 
-Only plain file names; no folders in 1.x. Refused with reason 3 before the
+Only plain file names (folders: section 7.2). Refused with reason 3 before the
 user sees the offer: empty names, `.`/`..`/dots only, `/` `\` `:` (paths,
 drives, alternate data streams), `< > " | ? *`, control characters, bidi
 and invisible format characters (U+200B–200F, U+202A–202E, U+2066–2069,
@@ -539,6 +540,29 @@ them (the NTLM-leak class). `Completed` reports the stored name.
 Programs and scripts (`.exe`, `.cpl`, `.js`, `.hta`, ...) act only when
 opened: they keep their names, and the Mark-of-the-Web makes Windows warn
 before they run.
+
+
+### 7.2 Folders (1.2)
+
+With capability `64` on both sides, a folder travels as its files: every
+`FileOffer` of it carries the folder's id (not any file's), its name
+(`top`), the file's subfolders below it (`path`, `\`-separated, empty for
+files directly in it) and the folder's totals. A peer without `64` is never
+sent such an offer (its decoder refuses the trailing bytes).
+
+- **Sender:** offers 4 files of a folder at a time, the next when one
+  completes; a failed file cancels the others (`FileCancel`). The app sees
+  one transfer under the folder's id: summed progress, done with the last
+  file. Links, junctions and other reparse points are never followed; names
+  the receiver would refuse are left out. Empty subfolders are not sent.
+- **Receiver:** checks `top` and every part of `path` like a file name
+  (section 7.1), at most 32 parts deep, and refuses the file with reason 3
+  otherwise. The first file of a folder raises one question to the user
+  (name, file count, total size). Accepting creates the folder in the chosen
+  directory, as `top (2)` and so on when the name is taken (never into an
+  existing folder), and takes every file of it into its subfolder from then
+  on; rejecting refuses them all. Each file keeps its own resume, block
+  hashes and Mark-of-the-Web.
 
 ## 8. Resume
 

@@ -72,6 +72,7 @@ use remora_link::msg::{
     ErrorMsg, Hello, HelloAck, PairingStatus, ServerSettings, SessionInfo as WireInfo,
     SessionKind as WireKind, TuneAction, TuneStatus, UpdateStatus, UrlStatus, err,
 };
+use remora_link::transfer::folder::FolderFile;
 use remora_link::transfer::io::{Source, TargetDir};
 use remora_link::transfer::worker::{EngineWorker, Posted};
 use remora_link::transfer::{Direction, TransferEvent};
@@ -177,6 +178,14 @@ pub trait Files {
     /// Opens a file to send: its plain name and a reader. Refuses anything
     /// that is not a regular file (folders, links, devices).
     fn open_source(&mut self, path: &Path) -> io::Result<(String, Box<dyn Source>)>;
+    /// Lists a folder to send (protocol 1.2): its name and its files, each
+    /// opened like [`Files::open_source`] when its turn comes.
+    fn open_folder(&mut self, _path: &Path) -> io::Result<(String, Vec<FolderFile>)> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "folders cannot be sent",
+        ))
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -292,7 +301,7 @@ pub fn hello(info: &SessionInfo) -> Hello {
     }
     let mut caps = cap::ALL;
     if info.policy.file_transfer_disabled() {
-        caps &= !(cap::FILE_UP | cap::FILE_DOWN);
+        caps &= !(cap::FILE_UP | cap::FILE_DOWN | cap::FOLDERS);
     }
     let version =
         remora_link::wire::truncate(info.agent_version, remora_link::msg::MAX_VERSION_TEXT);
@@ -1017,7 +1026,7 @@ impl LinkProtocol {
             && *caps & (cap::FILE_UP | cap::FILE_DOWN) != 0
         {
             info!("file transfer switched off by policy");
-            *caps &= !(cap::FILE_UP | cap::FILE_DOWN);
+            *caps &= !(cap::FILE_UP | cap::FILE_DOWN | cap::FOLDERS);
             if self.bulk.is_some() || self.bulk_wanted {
                 self.bulk = None;
                 self.bulk_wanted = false;
@@ -1324,7 +1333,34 @@ impl LinkProtocol {
             return;
         }
         let (mut offered, mut failed) = (0u16, 0u16);
+        let folders_ok = self.acked().is_some_and(|c| c & cap::FOLDERS != 0);
         for p in paths {
+            if std::fs::symlink_metadata(&p).is_ok_and(|m| m.is_dir()) {
+                let r = if folders_ok {
+                    self.files.open_folder(&p).and_then(|(top, files)| {
+                        debug!("offering folder {top} ({} files)", files.len());
+                        self.engine
+                            .send_folder(&top, files)
+                            .map_err(|e| io::Error::other(e.to_string()))
+                    })
+                } else {
+                    Err(io::Error::other(
+                        "this Remora cannot receive folders; update Remora",
+                    ))
+                };
+                match r {
+                    Ok(t) => {
+                        offered = offered.saturating_add(1);
+                        info!("folder transfer {} offered to Remora", tid(&t));
+                    }
+                    Err(e) => {
+                        failed = failed.saturating_add(1);
+                        warn!("a folder could not be offered: {e}");
+                        debug!("not offered: {}", p.display());
+                    }
+                }
+                continue;
+            }
             let r = self.files.open_source(&p).and_then(|(name, src)| {
                 if crate::files::reserved_name(&name) {
                     return Err(io::Error::new(

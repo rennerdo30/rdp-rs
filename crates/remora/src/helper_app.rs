@@ -20,6 +20,7 @@ pub fn capabilities(o: &HelperOptions) -> u32 {
     // Server tuning only reports settings; a change needs a click here and
     // the administrator prompt there (RDP-59).
     // Updates likewise need a click on Update helper (RDP-61).
+    // Folders only matter with a file direction on (RDP-64).
     let mut bits = cap::SESSION_INFO | cap::SERVER_TUNING | cap::HELPER_UPDATE;
     if o.open_links {
         bits |= cap::OPEN_URL;
@@ -29,6 +30,9 @@ pub fn capabilities(o: &HelperOptions) -> u32 {
     }
     if o.receive_files {
         bits |= cap::FILE_DOWN;
+    }
+    if o.send_files || o.receive_files {
+        bits |= cap::FOLDERS;
     }
     bits
 }
@@ -338,7 +342,11 @@ mod tests {
         };
         assert_eq!(
             capabilities(&down),
-            cap::SESSION_INFO | cap::SERVER_TUNING | cap::HELPER_UPDATE | cap::FILE_DOWN
+            cap::SESSION_INFO
+                | cap::SERVER_TUNING
+                | cap::HELPER_UPDATE
+                | cap::FILE_DOWN
+                | cap::FOLDERS
         );
     }
 

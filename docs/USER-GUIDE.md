@@ -375,9 +375,11 @@ until you switch it on; a change applies from the next connection.
   Explorer would act on (`.lnk`, `.url`, `.scf`, `.theme`, `desktop.ini`
   ...) are saved with `.download` appended. With this switch off, an
   offered file is refused and Remora says so once.
-- **Send files to the server**: drop files onto the session (the drop target
-  says where they go, or why it cannot take them), or **Send files to…** on
-  the side panel's Sharing page or in the palette.
+- **Send files to the server**: drop files or folders onto the session (the
+  drop target says where they go, or why it cannot take them), or **Send
+  files to…** on the side panel's Sharing page or in the palette. A folder
+  goes whole, with its subfolders, and arrives as one folder; on the server,
+  **Send To > Send to my PC (Remora)** works on folders too.
 
 If the server's policy turns off clipboard or drive redirection, file
 transfer is off too, whatever the switches say.

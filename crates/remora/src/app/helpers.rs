@@ -209,19 +209,22 @@ impl App {
             return;
         };
         for path in paths {
-            if path.is_dir() {
-                self.message(
-                    "Folders cannot be sent yet; send the files in them.",
-                    Tone::Warning,
-                );
-                continue;
-            }
-            let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
             let name = path
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default();
-            match h.send_file(&path) {
+            let folder = path.is_dir();
+            let size = if folder {
+                folder_size(&path)
+            } else {
+                std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0)
+            };
+            let sent = if folder {
+                h.send_folder(&path)
+            } else {
+                h.send_file(&path)
+            };
+            match sent {
                 Ok(tid) => {
                     if let Some(t) = self.win.as_mut().and_then(|w| w.ui.tab_mut(id)) {
                         t.helper.sending(tid, name, size);
@@ -233,7 +236,7 @@ impl App {
         self.dirty();
     }
 
-    /// Files dropped on the window: sent when the active session's helper
+    /// Files dropped on the window (folders too): sent when the active session's helper
     /// takes them, otherwise nothing (the drop target said why).
     pub(super) fn dropped_file(&mut self, path: PathBuf) {
         let target = self.win.as_mut().and_then(|m| {
@@ -450,4 +453,24 @@ impl App {
         }
         None
     }
+}
+
+/// Bytes of the regular files below `dir` (links not followed), for the
+/// progress row of a folder being sent.
+fn folder_size(dir: &std::path::Path) -> u64 {
+    let mut total = 0u64;
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&d) else {
+            continue;
+        };
+        for e in rd.flatten() {
+            match std::fs::symlink_metadata(e.path()) {
+                Ok(m) if m.is_dir() && !m.is_symlink() => stack.push(e.path()),
+                Ok(m) if m.is_file() => total += m.len(),
+                _ => {}
+            }
+        }
+    }
+    total
 }

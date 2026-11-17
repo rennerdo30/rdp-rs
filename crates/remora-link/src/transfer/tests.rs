@@ -31,6 +31,9 @@ struct Pair {
     delivered: u64,
     /// Receiver events seen while running (offers are accepted).
     rx_events: Vec<TransferEvent>,
+    /// Sender events, when `drain_tx` (folders advance as events are read).
+    tx_events: Vec<TransferEvent>,
+    drain_tx: bool,
 }
 
 impl Pair {
@@ -47,6 +50,8 @@ impl Pair {
             dir: MemDir::new(),
             delivered: 0,
             rx_events: Vec::new(),
+            tx_events: Vec::new(),
+            drain_tx: false,
         }
     }
 
@@ -81,6 +86,11 @@ impl Pair {
             let b = self.rx.take_messages();
             for m in b.iter() {
                 self.tx.handle(&wire(m));
+            }
+            if self.drain_tx {
+                while let Some(e) = self.tx.next_event() {
+                    self.tx_events.push(e);
+                }
             }
             if a.is_empty() && b.is_empty() && self.tx.active() + self.rx.active() == 0 {
                 return;
@@ -218,6 +228,7 @@ fn disabled_direction_rejects_and_send_refuses() {
         size: 1,
         mtime: 0,
         block_size: BLOCK_SIZE,
+        folder: None,
     };
     rx.handle(&Message::FileOffer(offer));
     assert_eq!(
@@ -259,6 +270,7 @@ fn unsafe_names_are_rejected_before_the_user_sees_them() {
             size: 10,
             mtime: 0,
             block_size: BLOCK_SIZE,
+            folder: None,
         }));
         assert_eq!(
             rx.take_messages(),
@@ -396,6 +408,7 @@ fn receiver_fails_a_chunk_beyond_credit() {
         size: 8 * MIB as u64,
         mtime: 0,
         block_size: BLOCK_SIZE,
+        folder: None,
     }));
     events(&mut rx);
     let dir = MemDir::new();
@@ -660,6 +673,7 @@ fn offer(id: u8, name: &str, size: u64) -> FileOffer {
         size,
         mtime: 1,
         block_size: BLOCK_SIZE,
+        folder: None,
     }
 }
 
@@ -931,4 +945,342 @@ fn received_files_are_never_stored_unmarked() {
         dir.names()
     );
     assert!(dir.marked_names().is_empty());
+}
+
+// ------------------------------------------------------------- folders
+
+fn mem_file(path: &str, name: &str, bytes: Vec<u8>) -> folder::FolderFile {
+    folder::FolderFile {
+        path: path.to_string(),
+        name: name.to_string(),
+        size: bytes.len() as u64,
+        open: Box::new(move || Ok(Box::new(MemSource::new(bytes, 5)) as Box<dyn io::Source>)),
+    }
+}
+
+/// Ten files in three levels; more than FOLDER_PARALLEL.
+fn tree() -> Vec<(String, String, Vec<u8>)> {
+    let mut v = vec![
+        (String::new(), "a.txt".to_string(), b"top".to_vec()),
+        ("sub".into(), "b.bin".into(), data(6 * MIB + 5, 2)),
+        ("sub\\deep".into(), "c.txt".into(), b"deep".to_vec()),
+        ("x".into(), "readme.txt".into(), b"x".to_vec()),
+        ("y".into(), "readme.txt".into(), b"y".to_vec()),
+        ("sub".into(), "empty.txt".into(), Vec::new()),
+    ];
+    for i in 0..4 {
+        v.push((
+            "many".into(),
+            format!("f{i}.dat"),
+            data(1000 + i, i as u64 + 9),
+        ));
+    }
+    v
+}
+
+fn send_tree(p: &mut Pair, top: &str) -> TransferId {
+    let files = tree()
+        .into_iter()
+        .map(|(path, name, b)| mem_file(&path, &name, b))
+        .collect();
+    p.drain_tx = true;
+    p.tx.send_folder(top, files).unwrap()
+}
+
+/// The folder `parts` below `d`.
+fn sub(d: &MemDir, parts: &[&str]) -> MemDir {
+    let mut d = d.clone();
+    for p in parts {
+        d = d.dir(p).unwrap_or_else(|| panic!("no folder {p}"));
+    }
+    d
+}
+
+fn folder_event_id(e: &TransferEvent) -> TransferId {
+    match e {
+        TransferEvent::Offered { id, .. }
+        | TransferEvent::Progress { id, .. }
+        | TransferEvent::Paused { id, .. }
+        | TransferEvent::Completed { id, .. }
+        | TransferEvent::Failed { id, .. } => *id,
+    }
+}
+
+#[test]
+fn a_folder_arrives_as_one_transfer_in_its_own_folder() {
+    let mut p = Pair::new();
+    let id = send_tree(&mut p, "Photos");
+    p.run_all();
+    let rx = rx_events(&mut p);
+    let offers: Vec<_> = rx
+        .iter()
+        .filter_map(|e| match e {
+            TransferEvent::Offered {
+                id,
+                name,
+                size,
+                files,
+                ..
+            } => Some((*id, name.clone(), *size, *files)),
+            _ => None,
+        })
+        .collect();
+    let total: u64 = tree().iter().map(|t| t.2.len() as u64).sum();
+    assert_eq!(offers, [(id, "Photos".to_string(), total, 10)], "one offer");
+    assert!(
+        rx.iter()
+            .chain(p.tx_events.iter())
+            .all(|e| folder_event_id(e) == id),
+        "the app only sees the folder"
+    );
+    assert_eq!(completed(&rx).as_deref(), Some("Photos"));
+    assert_eq!(completed(&p.tx_events).as_deref(), Some("Photos"));
+    let top = sub(&p.dir, &["Photos"]);
+    for (path, name, bytes) in tree() {
+        let parts: Vec<&str> = path.split('\\').filter(|s| !s.is_empty()).collect();
+        assert_eq!(sub(&top, &parts).get(&name), Some(bytes), "{path}\\{name}");
+    }
+    assert_eq!(
+        sub(&top, &["x"]).names(),
+        ["readme.txt"],
+        "same names in other folders do not collide"
+    );
+    assert!(p.dir.names().is_empty(), "nothing outside the folder");
+    let last = p.tx_events.iter().rev().find_map(|e| match e {
+        TransferEvent::Progress { total, .. } => Some(*total),
+        _ => None,
+    });
+    assert_eq!(last, Some(total));
+}
+
+#[test]
+fn an_existing_folder_is_never_merged_into() {
+    let mut p = Pair::new();
+    p.dir.put("Photos", b"a file of that name".to_vec());
+    let mut d = p.dir.clone();
+    io::TargetDir::create_dir_new(&mut d, "Photos (2)").unwrap();
+    send_tree(&mut p, "Photos");
+    p.run_all();
+    assert_eq!(completed(&rx_events(&mut p)).as_deref(), Some("Photos (3)"));
+    assert!(sub(&p.dir, &["Photos (2)"]).names().is_empty());
+    assert_eq!(
+        sub(&p.dir, &["Photos (3)", "sub", "deep"])
+            .get("c.txt")
+            .as_deref(),
+        Some(&b"deep"[..])
+    );
+}
+
+#[test]
+fn a_rejected_folder_refuses_every_file() {
+    let mut p = Pair::new();
+    let id = send_tree(&mut p, "Photos");
+    for _ in 0..50 {
+        p.tx.poll(1 << 20);
+        for m in p.tx.take_messages() {
+            p.rx.handle(&wire(&m));
+        }
+        while let Some(e) = p.rx.next_event() {
+            if let TransferEvent::Offered { id, .. } = e {
+                p.rx.reject(id);
+            }
+            p.rx_events.push(e);
+        }
+        for m in p.rx.take_messages() {
+            p.tx.handle(&wire(&m));
+        }
+        while let Some(e) = p.tx.next_event() {
+            p.tx_events.push(e);
+        }
+    }
+    assert!(failed(&p.tx_events).is_some());
+    assert!(p.tx_events.iter().all(|e| folder_event_id(e) == id));
+    assert_eq!(p.tx.active() + p.rx.active(), 0, "nothing left over");
+    assert!(p.dir.dir_names().is_empty() && p.dir.names().is_empty());
+}
+
+#[test]
+fn a_file_that_cannot_be_read_fails_the_folder() {
+    let mut p = Pair::new();
+    let mut files: Vec<_> = tree()
+        .into_iter()
+        .map(|(path, name, b)| mem_file(&path, &name, b))
+        .collect();
+    files[6].open = Box::new(|| Err(std::io::Error::other("locked")));
+    p.drain_tx = true;
+    let id = p.tx.send_folder("Photos", files).unwrap();
+    p.run_all();
+    let rx = rx_events(&mut p);
+    match p
+        .tx_events
+        .iter()
+        .find(|e| matches!(e, TransferEvent::Failed { .. }))
+    {
+        Some(TransferEvent::Failed { id: f, detail, .. }) => {
+            assert_eq!(*f, id);
+            assert!(detail.contains("locked"), "{detail}");
+        }
+        other => panic!("no failure: {other:?}"),
+    }
+    assert!(failed(&rx).is_some(), "the receiver hears of it");
+    assert_eq!(p.tx.active() + p.rx.active(), 0);
+}
+
+#[test]
+fn the_sender_can_cancel_a_folder() {
+    let mut p = Pair::new();
+    let id = send_tree(&mut p, "Photos");
+    let mut n = 0;
+    p.run(
+        &mut |_| {
+            n += 1;
+            n > 3
+        },
+        &mut Some,
+    );
+    p.tx.cancel(id);
+    p.run_all();
+    assert!(matches!(
+        p.tx_events.last(),
+        Some(TransferEvent::Failed {
+            reason: reason::USER,
+            ..
+        })
+    ));
+    assert!(failed(&rx_events(&mut p)).is_some());
+    assert_eq!(p.tx.active() + p.rx.active(), 0);
+}
+
+#[test]
+fn a_folder_resumes_after_a_disconnect() {
+    let mut p = Pair::new();
+    send_tree(&mut p, "Photos");
+    let mut n = 0;
+    p.run(
+        &mut |p| {
+            n += 1;
+            p.delivered > 2 * MIB as u64 && n > 2
+        },
+        &mut Some,
+    );
+    p.tx.set_connected(false);
+    p.rx.set_connected(false);
+    p.tx.set_connected(true);
+    p.rx.set_connected(true);
+    p.run_all();
+    assert_eq!(completed(&rx_events(&mut p)).as_deref(), Some("Photos"));
+    assert_eq!(
+        sub(&p.dir, &["Photos", "sub"])
+            .get("b.bin")
+            .map(|b| b.len()),
+        Some(6 * MIB + 5)
+    );
+}
+
+#[test]
+fn folder_paths_that_leave_the_folder_are_refused() {
+    for (top, path) in [
+        ("Photos", "..\\evil"),
+        ("Photos", "a\\..\\b"),
+        ("Photos", "C:"),
+        ("Photos", "a\\\\b"),
+        ("..", ""),
+        ("Photos", "con"),
+        ("Photos", "x/y"),
+    ] {
+        let mut rx = Engine::default();
+        rx.set_permissions(false, true);
+        rx.set_connected(true);
+        rx.handle(&wire(&Message::FileOffer(FileOffer {
+            id: [9; 16],
+            name: "f.txt".into(),
+            size: 1,
+            mtime: 0,
+            block_size: BLOCK_SIZE,
+            folder: Some(FolderRef {
+                id: [8; 16],
+                top: top.into(),
+                path: path.into(),
+                files: 1,
+                bytes: 1,
+            }),
+        })));
+        let ev = events(&mut rx);
+        assert!(
+            matches!(
+                ev.as_slice(),
+                [TransferEvent::Failed {
+                    reason: reason::BAD_NAME,
+                    ..
+                }]
+            ),
+            "{top} / {path}: {ev:?}"
+        );
+        assert!(matches!(
+            rx.take_messages().as_slice(),
+            [Message::FileReject {
+                reason: reason::BAD_NAME,
+                ..
+            }]
+        ));
+    }
+}
+
+#[test]
+fn folder_offers_round_trip_and_plain_offers_are_unchanged() {
+    let o = FileOffer {
+        id: [1; 16],
+        name: "f.txt".into(),
+        size: 5 << 32,
+        mtime: 7,
+        block_size: BLOCK_SIZE,
+        folder: Some(FolderRef {
+            id: [2; 16],
+            top: "Fotos ü".into(),
+            path: "a\\b".into(),
+            files: 3,
+            bytes: 6 << 32,
+        }),
+    };
+    let m = Message::FileOffer(o.clone());
+    assert_eq!(wire(&m), m);
+    let plain = Message::FileOffer(FileOffer { folder: None, ..o });
+    assert_eq!(wire(&plain), plain);
+    // id 16 + name 2+5 + size 8 + mtime 8 + block 4: the 1.1 layout.
+    let bytes = plain.encode(0).unwrap();
+    let (_, body) = bytes.split_at(crate::frame::HEADER_LEN);
+    assert_eq!(body.len(), 16 + 2 + 5 + 8 + 8 + 4);
+}
+
+#[test]
+fn walk_lists_a_folder_in_name_order_and_skips_what_it_cannot_send() {
+    let root = std::env::temp_dir().join(format!("remora-walk-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let top = root.join("Tree");
+    std::fs::create_dir_all(top.join("b").join("c")).unwrap();
+    std::fs::create_dir_all(top.join("empty")).unwrap();
+    std::fs::write(top.join("z.txt"), b"z").unwrap();
+    std::fs::write(top.join("b").join("y.txt"), b"yy").unwrap();
+    std::fs::write(top.join("b").join("c").join("x.txt"), b"xxx").unwrap();
+    std::fs::write(top.join("b").join("x.txt.remora-part"), b"part").unwrap();
+    let (name, files) = folder::walk(&top, |p| {
+        let d = std::fs::read(p)?;
+        Ok(Box::new(MemSource::new(d, 1)) as Box<dyn io::Source>)
+    })
+    .unwrap();
+    assert_eq!(name, "Tree");
+    let got: Vec<(String, String, u64)> = files
+        .iter()
+        .map(|f| (f.path.clone(), f.name.clone(), f.size))
+        .collect();
+    assert_eq!(
+        got,
+        [
+            (String::new(), "z.txt".to_string(), 1),
+            ("b".to_string(), "y.txt".to_string(), 2),
+            ("b\\c".to_string(), "x.txt".to_string(), 3),
+        ],
+        "a folder's files, then its subfolders, in name order; no empty folders"
+    );
+    let _ = std::fs::remove_dir_all(&root);
 }

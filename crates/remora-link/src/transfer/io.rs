@@ -68,6 +68,17 @@ pub trait TargetDir: Send {
     /// Mark-of-the-Web here too (the fallback where [`TargetDir::mark`]
     /// could not carry over).
     fn finished(&mut self, _name: &str) {}
+    /// Folder transfers (1.2): creates the folder `name` here; fails with
+    /// `AlreadyExists` when anything has that name.
+    fn create_dir_new(&mut self, _name: &str) -> io::Result<()> {
+        Err(io::ErrorKind::Unsupported.into())
+    }
+    /// Folder transfers (1.2): the folder `parts` below this one (each a
+    /// checked plain name), created when missing, with the same checks and
+    /// hooks as this one.
+    fn subdir(&self, _parts: &[String]) -> io::Result<Box<dyn TargetDir>> {
+        Err(io::ErrorKind::Unsupported.into())
+    }
 }
 
 // ---------------------------------------------------------------- memory
@@ -83,6 +94,8 @@ pub struct MemDir {
     fail_writes_after: Option<u64>,
     /// Marking fails (a volume without named streams); shared by clones.
     no_marks: Arc<std::sync::atomic::AtomicBool>,
+    /// Subfolders by name (folder transfers).
+    dirs: Arc<Mutex<BTreeMap<String, MemDir>>>,
 }
 
 impl MemDir {
@@ -137,6 +150,37 @@ impl MemDir {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .clone()
+    }
+
+    /// The subfolder `name`, if there is one.
+    pub fn dir(&self, name: &str) -> Option<MemDir> {
+        self.dirs
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(name)
+            .cloned()
+    }
+
+    /// Subfolder names.
+    pub fn dir_names(&self) -> Vec<String> {
+        self.dirs
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .keys()
+            .cloned()
+            .collect()
+    }
+
+    /// A new empty folder with this one's settings (free space, marks).
+    fn child(&self) -> MemDir {
+        MemDir {
+            free: self.free,
+            fail_writes_after: self.fail_writes_after,
+            no_marks: self.no_marks.clone(),
+            finished: self.finished.clone(),
+            marked: self.marked.clone(),
+            ..MemDir::default()
+        }
     }
 
     /// Flips one byte of a stored file (simulated disk corruption).
@@ -198,7 +242,32 @@ impl PartFile for MemPart {
 
 impl TargetDir for MemDir {
     fn exists(&self, name: &str) -> bool {
-        self.lock().contains_key(name)
+        self.lock().contains_key(name) || self.dir(name).is_some()
+    }
+    fn create_dir_new(&mut self, name: &str) -> io::Result<()> {
+        if self.exists(name) {
+            return Err(io::ErrorKind::AlreadyExists.into());
+        }
+        let child = self.child();
+        self.dirs
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(name.to_string(), child);
+        Ok(())
+    }
+    fn subdir(&self, parts: &[String]) -> io::Result<Box<dyn TargetDir>> {
+        let mut d = self.clone();
+        for p in parts {
+            if d.lock().contains_key(p) {
+                return Err(io::ErrorKind::AlreadyExists.into());
+            }
+            let next = {
+                let mut dirs = d.dirs.lock().unwrap_or_else(|p| p.into_inner());
+                dirs.entry(p.clone()).or_insert_with(|| d.child()).clone()
+            };
+            d = next;
+        }
+        Ok(Box::new(d))
     }
     fn create_new(&mut self, name: &str) -> io::Result<Box<dyn PartFile>> {
         let mut files = self.lock();
@@ -312,12 +381,12 @@ impl Source for MemSource {
 
 // ---------------------------------------------------------------- std::fs
 
-/// Free-space query for [`FsDir`].
-pub type FreeSpaceFn = Box<dyn Fn(&Path) -> Option<u64> + Send>;
+/// Free-space query for [`FsDir`] (shared with its subfolders).
+pub type FreeSpaceFn = Arc<dyn Fn(&Path) -> Option<u64> + Send + Sync>;
 /// Called with each stored file's path (Mark-of-the-Web hook).
-pub type FinishedFn = Box<dyn FnMut(&Path) -> io::Result<()> + Send>;
+pub type FinishedFn = Arc<Mutex<dyn FnMut(&Path) -> io::Result<()> + Send>>;
 /// Whether a folder's volume keeps the Mark-of-the-Web (named streams).
-pub type MarkCheckFn = Box<dyn Fn(&Path) -> io::Result<()> + Send>;
+pub type MarkCheckFn = Arc<dyn Fn(&Path) -> io::Result<()> + Send + Sync>;
 
 /// A real folder through `std::fs` (no platform APIs). The app supplies the
 /// free-space query and the Mark-of-the-Web hook.
@@ -338,8 +407,11 @@ impl FsDir {
         }
     }
 
-    pub fn with_free_space(mut self, f: impl Fn(&Path) -> Option<u64> + Send + 'static) -> FsDir {
-        self.free_space = Some(Box::new(f));
+    pub fn with_free_space(
+        mut self,
+        f: impl Fn(&Path) -> Option<u64> + Send + Sync + 'static,
+    ) -> FsDir {
+        self.free_space = Some(Arc::new(f));
         self
     }
 
@@ -348,7 +420,7 @@ impl FsDir {
     /// and of the stored file after it (best effort: the part's mark
     /// carried over).
     pub fn on_finished(mut self, f: impl FnMut(&Path) -> io::Result<()> + Send + 'static) -> FsDir {
-        self.on_finished = Some(Box::new(f));
+        self.on_finished = Some(Arc::new(Mutex::new(f)));
         self
     }
 
@@ -356,9 +428,9 @@ impl FsDir {
     /// [`TargetDir::can_mark`]).
     pub fn with_mark_check(
         mut self,
-        f: impl Fn(&Path) -> io::Result<()> + Send + 'static,
+        f: impl Fn(&Path) -> io::Result<()> + Send + Sync + 'static,
     ) -> FsDir {
-        self.mark_check = Some(Box::new(f));
+        self.mark_check = Some(Arc::new(f));
         self
     }
 
@@ -498,18 +570,46 @@ impl TargetDir for FsDir {
     }
     fn mark(&mut self, name: &str) -> io::Result<()> {
         let p = self.path(name)?.canonicalize()?;
-        let Some(f) = self.on_finished.as_mut() else {
+        let Some(f) = self.on_finished.as_ref() else {
             return Ok(());
         };
+        let mut f = f.lock().unwrap_or_else(|p| p.into_inner());
         f(&p).map_err(|e| io::Error::new(e.kind(), format!("{} ({e})", super::NO_MARK)))
     }
     fn finished(&mut self, name: &str) {
         if let (Some(f), Ok(p)) = (
-            self.on_finished.as_mut(),
+            self.on_finished.as_ref(),
             self.root.join(name).canonicalize(),
         ) {
-            let _ = f(&p);
+            let _ = (f.lock().unwrap_or_else(|p| p.into_inner()))(&p);
         }
+    }
+    fn create_dir_new(&mut self, name: &str) -> io::Result<()> {
+        std::fs::create_dir(self.path(name)?)
+    }
+    fn subdir(&self, parts: &[String]) -> io::Result<Box<dyn TargetDir>> {
+        let mut root = self.root.clone();
+        for p in parts {
+            root = FsDir::new(root).path(p)?;
+            match std::fs::symlink_metadata(&root) {
+                // Never into a link or junction someone placed there.
+                Ok(m) if m.file_type().is_symlink() || !m.is_dir() => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::AlreadyExists,
+                        "not a plain folder",
+                    ));
+                }
+                Ok(_) => {}
+                Err(e) if e.kind() == io::ErrorKind::NotFound => std::fs::create_dir(&root)?,
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(Box::new(FsDir {
+            root,
+            free_space: self.free_space.clone(),
+            on_finished: self.on_finished.clone(),
+            mark_check: self.mark_check.clone(),
+        }))
     }
 }
 

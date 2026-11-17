@@ -1008,6 +1008,7 @@ mod tests {
             size: 0,
             mtime: 0,
             block_size: 0,
+            folder: None,
         };
     }
 

@@ -854,7 +854,7 @@ impl Core {
         }
         let mut caps = h.capabilities & self.user_caps & cap::ALL;
         if h.policy & policy::BLOCKS_FILE_TRANSFER != 0 {
-            caps &= !(cap::FILE_UP | cap::FILE_DOWN);
+            caps &= !(cap::FILE_UP | cap::FILE_DOWN | cap::FOLDERS);
         }
         // Received files get the Mark-of-the-Web, or none are received.
         if self.on_received.is_none() {
@@ -1496,6 +1496,34 @@ impl HelperHandle {
         let id = c
             .engine
             .send(&name, Box::new(source))
+            .map_err(|e| e.to_string())?;
+        c.flush_engine();
+        Ok(id)
+    }
+
+    /// Sends a folder with everything in it (protocol 1.2, RDP-64): one
+    /// transfer for the app, its files offered a few at a time.
+    pub fn send_folder(&self, path: &Path) -> Result<TransferId, String> {
+        let meta = std::fs::symlink_metadata(path).map_err(|e| e.to_string())?;
+        if meta.is_symlink() || !meta.is_dir() {
+            return Err("not a plain folder".into());
+        }
+        if self.lock().accepted & cap::FOLDERS == 0 {
+            return Err(
+                "the helper on this server is too old to receive folders; update it first".into(),
+            );
+        }
+        let (top, files) = remora_link::transfer::folder::walk(path, |p| {
+            FsSource::open(p).map(|s| Box::new(s) as Box<dyn remora_link::transfer::io::Source>)
+        })
+        .map_err(|e| e.to_string())?;
+        if files.is_empty() {
+            return Err("the folder has no files".into());
+        }
+        let mut c = self.lock();
+        let id = c
+            .engine
+            .send_folder(&top, files)
             .map_err(|e| e.to_string())?;
         c.flush_engine();
         Ok(id)

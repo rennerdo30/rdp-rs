@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **Send folders through the server helper.** Drop a folder onto the session, or use **Send To > Send to my PC (Remora)** on a folder on the server: it goes whole, with its subfolders, and arrives as one folder (`name (2)` when that name is taken). Remora asks once per folder and shows one progress row; every file keeps resume and integrity checks. Needs the helper of this version on the server (RDP-64).
+
 - **Copy images, and big files and folders, through the clipboard.** Images now copy both ways (they were announced as text before, so nothing arrived). Files and folders copied on the server are on this PC's clipboard at once and are fetched only when you paste: Explorer copies them straight from the server with its own progress window, like Microsoft's client, with no 4 GB limit and no download before the paste. Several sessions can pass text and images from one server to another (RDP-62, RDP-63).
 
 - **Remora updates the server helper.** When a paired helper is older than Remora, the side panel's Session page offers **Update helper to …**. Remora downloads the helper of its own version from the GitHub release, checks it against the release's checksums, and sends it over the encrypted helper connection. The helper accepts it only from a PC confirmed on the server, checks it again, replaces itself and reconnects. Helpers older than this version are replaced by hand once (RDP-61).
