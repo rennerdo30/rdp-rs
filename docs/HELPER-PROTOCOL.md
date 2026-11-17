@@ -370,6 +370,11 @@ All on `Remora::Ctl` unless marked Bulk. Maximum string lengths in bytes.
 | `0x0700` | `LatencyMark`    | R→H | `u32 rgb` (0xRRGGBB): paint the marker in this colour; `request_id` ≠ 0; 1.2, capability `256` |
 | `0x0701` | `LatencyShown`   | H→R | `u32 x, u32 y, u32 size`: painted, at these picture pixels; same `request_id`; 1.2 |
 | `0x0702` | `LatencyEnd`     | R→H | empty: remove the marker; 1.2 |
+| `0x0710` | `StreamStart`    | R→H | `u8 codec` (1 H.264), `u8 max_fps`, `u32 kbps`; `request_id` ≠ 0; 1.2, capability `512` |
+| `0x0711` | `StreamState`    | H→R | `u8 state` (0 started, 1 stopped, 2 failed), `u32 width, u32 height, str text (≤1024)`; the start's `request_id` when answering it; 1.2 |
+| `0x0712` | `StreamStop`     | R→H | empty; 1.2 |
+| `0x0713` | `StreamAck`      | R→H | `u32 seq`: that picture was decoded; 1.2 |
+| `0x0790` | `StreamData`     | Bulk, H→R | `u32 seq, u8 flags (1 keyframe), u32 offset, u32 total (≤16 MB), u16 count, count × (u16 x, y, w, h), blob data (≤256 KiB)`; rectangles on the first piece only; 1.2 |
 
 - **Unknown types** (a newer minor version) get `Unsupported{type}`; the
   channel stays open. A malformed message of a known type is fatal.
@@ -382,7 +387,7 @@ All on `Remora::Ctl` unless marked Bulk. Maximum string lengths in bytes.
   `32` helper update (1.2), `64` folders (1.2: a `FileOffer` may carry a
   folder, section 7.2), `128` keyboard layout (1.2: `KeyboardLayout`, so
   Remora types with the session's keys), `256` latency meter (1.2,
-  section 6.3). Remora accepts only what the user enabled
+  section 6.3), `512` picture stream (1.2, section 6.4, experimental). Remora accepts only what the user enabled
   (default: session info, server tuning and helper update; the last two act
   only on a click).
 - **Policy flags** (`Hello`): `1` clipboard redirection disabled, `2` drive
@@ -453,6 +458,28 @@ network and Remora's decoder, on one clock. The `LatencyShown` answer times
 the channel alone. Remora cycles through colours (each differs from the one
 before in every channel), 20 marks with random pauses, then `LatencyEnd`;
 the helper also removes the marker when the session ends.
+
+### 6.4 Picture stream (1.2, experimental)
+
+Under capability `512` the helper can send the session's picture itself,
+for a client that wants it faster than RDP's own picture. Remora sends
+`StreamStart`; the helper (only for a trusted client, with Bulk open)
+captures the session's desktop (DXGI Desktop Duplication), converts it to
+NV12 on the GPU and encodes it as H.264 (the GPU's encoder sharing the
+textures, else a copy to memory, else Windows' software encoder; low
+latency, constant bitrate, no B-frames) and answers `StreamState` started
+with the picture's size, or failed with the reason.
+
+Each encoded picture travels on Bulk as `StreamData` pieces of at most
+256 KiB, in order; the first piece names the rectangles that changed since
+the previous picture (dirty and moved regions), so Remora converts only
+those. Remora acknowledges each decoded picture with `StreamAck`; the
+helper captures only while fewer than two pictures wait, so a slow
+network or client gets fewer, fresher pictures rather than a queue. The
+first picture is a keyframe with its sequence header and covers the whole
+picture. `StreamStop`, the session ending, a lost desktop that cannot be
+captured again, or a refused piece ends the stream; Remora then shows
+RDP's picture again. RDP's own picture keeps flowing meanwhile.
 
 ## 7. File transfer
 

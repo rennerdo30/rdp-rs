@@ -17,7 +17,8 @@
 //! Environment: `E2E_HOST`, `E2E_PORT`, `E2E_USER`, `E2E_PASSWORD_FILE`,
 //! `E2E_DIR`. Optional: `E2E_SIZE` (`WxH`), `E2E_GFX=1` (graphics pipeline
 //! with the H.264 decoder, as the app connects), `E2E_LATENCY_ONLY=1` (end
-//! after the latency meter).
+//! after the latency meter), `E2E_STREAM=1` (then switch to the helper's
+//! picture stream, save `stream.png` and measure again: `latency-stream`).
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -113,6 +114,70 @@ fn measure_latency(
         assert!(t.elapsed() < Duration::from_secs(120), "latency meter hung");
         std::thread::sleep(Duration::from_millis(2));
     }
+}
+
+/// RDP-67: the helper's picture stream in place of RDP's, as the app's
+/// switch does; a screenshot of the picture, then the latency meter.
+#[cfg(windows)]
+fn stream_and_measure(
+    h: &HelperHandle,
+    worker: &crate::session::Worker,
+    dir: &Path,
+) -> Result<String, String> {
+    let (fw, fh) = {
+        let s = worker.shared.lock().unwrap();
+        (s.fb.width, s.fb.height)
+    };
+    let kbps = ((fw * fh) as f64 * 60.0 * 0.05 / 1000.0) as u32;
+    let (tx, rx) = std::sync::mpsc::channel();
+    h.stream_start(60, kbps.clamp(2_000, 50_000), tx)
+        .ok_or("the helper does not offer the stream")?;
+    let player = crate::stream_player::Player::start(
+        rx,
+        worker.shared.clone(),
+        worker.notified.clone(),
+        h.clone(),
+        || {},
+    );
+    let t = Instant::now();
+    let (state, w, hh, text) = loop {
+        if let Some(HelperEvent::StreamState {
+            state,
+            width,
+            height,
+            text,
+            ..
+        }) = h.next_event()
+        {
+            break (state, width, height, text);
+        }
+        if t.elapsed() > Duration::from_secs(60) {
+            return Err("no answer to StreamStart".into());
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    if state != 0 {
+        return Err(text);
+    }
+    // Let pictures arrive, then keep what Remora shows.
+    std::thread::sleep(Duration::from_secs(3));
+    let owns = {
+        let s = worker.shared.lock().unwrap();
+        let _ = crate::write_png(
+            &dir.join("stream.png").to_string_lossy(),
+            s.fb.width,
+            s.fb.height,
+            &s.fb.pixels,
+        );
+        s.stream_owns
+    };
+    if !owns {
+        return Err(format!("started at {w}x{hh}, but no picture was shown"));
+    }
+    let r = measure_latency(h, &worker.shared, dir)?;
+    h.stream_stop();
+    drop(player);
+    Ok(format!("{} (helper stream {w}x{hh})", r.summary()))
 }
 
 #[test]
@@ -222,6 +287,14 @@ fn live_helper_folders_and_update() {
             Err(e) => format!("failed: {e}"),
         },
     );
+    #[cfg(windows)]
+    if std::env::var("E2E_STREAM").is_ok_and(|v| v == "1") {
+        let text = match stream_and_measure(&h, &worker, &dir) {
+            Ok(r) => r,
+            Err(e) => format!("failed: {e}"),
+        };
+        note(&dir, "latency-stream", &text);
+    }
     if std::env::var("E2E_LATENCY_ONLY").is_ok_and(|v| v == "1") {
         worker.close();
         return;

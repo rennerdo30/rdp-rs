@@ -422,6 +422,14 @@ for comparison. It takes a few seconds; keep the corner uncovered. Use it to
 compare settings, servers or networks: the time includes the server's
 encoder, the network and Remora's decoder.
 
+**Use the helper picture** (below the latency meter, experimental) lets
+the server helper send the session's picture itself, encoded on the
+server's graphics card when it has one, instead of Windows' remote desktop
+picture. **Back to the RDP picture** returns to the normal one, and so does
+Remora by itself when the stream stops (for example on the lock screen).
+Use **Measure latency** with and without it to see which is faster on your
+server.
+
 ### Transfers
 
 The side panel's Sharing page lists the files on their way, with progress,

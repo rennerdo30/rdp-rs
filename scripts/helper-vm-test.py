@@ -117,6 +117,8 @@ def main() -> int:
     ap.add_argument("--gfx", action="store_true", help="graphics pipeline with H.264, as the app")
     ap.add_argument("--decode-delay-ms", type=int, default=0,
                     help="slow each H.264 decode (debug build), to see it in the latency")
+    ap.add_argument("--stream", action="store_true",
+                    help="with --latency-only: also measure the helper's picture stream (RDP-67)")
     ap.add_argument("--delays", default="",
                     help="with --latency-only: one latency run per value, each a new connection "
                          "with that --decode-delay-ms (e.g. 0,20,0,20)")
@@ -188,6 +190,8 @@ fsutil file createnew "$s\big.bin" {a.big_mib * 1048576} | Out-Null
             tenv["E2E_GFX"] = "1"
         if a.latency_only:
             tenv["E2E_LATENCY_ONLY"] = "1"
+        if a.stream:
+            tenv["E2E_STREAM"] = "1"
         delays = [int(d) for d in a.delays.split(",") if d] or [a.decode_delay_ms]
         tenv["REMORA_DEBUG_DECODE_DELAY_MS"] = str(delays[0])
         proc = subprocess.Popen(["cargo", "test", "-p", "remora", "live_helper", "--",
@@ -218,6 +222,11 @@ fsutil file createnew "$s\big.bin" {a.big_mib * 1048576} | Out-Null
         latency = wait(work, "latency", 180, proc)
         check(f"latency meter measures the picture (RDP-67), decode delay {delays[0]} ms",
               not latency.startswith("failed"), latency)
+        if a.stream:
+            streamed = wait(work, "latency-stream", 240, proc)
+            check("helper picture stream measured (RDP-67)", not streamed.startswith("failed"),
+                  streamed)
+            log(f"stream screenshot: {work / 'stream.png'}")
         if a.latency_only:
             proc.wait(timeout=60)
             # More connections, each with a new key: the live test
