@@ -110,6 +110,22 @@ pub enum AgentEvent {
         y: u32,
         size: u32,
     },
+    /// The picture stream of [`Action::StartStream`] started (`state` 0,
+    /// with the size), stopped (1) or failed (2, `text`).
+    StreamState {
+        request_id: u32,
+        state: u8,
+        width: u32,
+        height: u32,
+        text: String,
+    },
+    /// One encoded picture of the stream.
+    StreamPicture {
+        seq: u32,
+        key: bool,
+        rects: Vec<[u16; 4]>,
+        data: Vec<u8>,
+    },
     /// The deadline from [`Protocol::next_deadline`] passed.
     Timer,
     /// The agent is exiting (logoff, `WM_ENDSESSION`). Last chance to send.
@@ -143,6 +159,17 @@ pub enum Action {
     ShowMarker { request_id: u32, rgb: u32 },
     /// Remove the marker.
     HideMarker,
+    /// Remora asked for the picture stream (RDP-67): start it, answer with
+    /// [`AgentEvent::StreamState`].
+    StartStream {
+        request_id: u32,
+        max_fps: u8,
+        kbps: u32,
+    },
+    /// Stop the picture stream.
+    StopStream,
+    /// Remora decoded stream picture `seq`.
+    StreamAck(u32),
     /// A checked helper update from a trusted Remora (RDP-61): install it
     /// and start it, then answer with [`AgentEvent::UpdateInstalled`].
     InstallUpdate {

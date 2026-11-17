@@ -133,6 +133,8 @@ struct Remora {
     out: VecDeque<(Channel, Vec<u8>)>,
     /// Application messages received on Ctl.
     got: Vec<(u32, Message)>,
+    /// Picture stream pieces received on Bulk (RDP-67).
+    stream_got: Vec<Message>,
     /// Channels Remora closed.
     closes: Vec<Channel>,
 }
@@ -158,6 +160,7 @@ impl Remora {
             dir: MemDir::new(),
             out: VecDeque::new(),
             got: Vec::new(),
+            stream_got: Vec::new(),
             closes: Vec::new(),
         }
     }
@@ -276,7 +279,11 @@ impl Remora {
                 Event::Message { request_id, msg } => match ch {
                     Channel::Ctl => self.on_ctl(request_id, msg),
                     Channel::Bulk => {
-                        assert!(self.engine.handle(&msg));
+                        if matches!(msg, Message::StreamData { .. }) {
+                            self.stream_got.push(msg);
+                        } else {
+                            assert!(self.engine.handle(&msg));
+                        }
                     }
                 },
             }
@@ -393,6 +400,8 @@ struct Net {
     tunes: Vec<(u32, remora_link::msg::TuneAction)>,
     /// `ShowMarker` (request id, colour) and `HideMarker` (None).
     markers: Vec<Option<(u32, u32)>>,
+    /// Stream actions, as text: "start <id>", "stop", "ack <seq>".
+    streams: Vec<String>,
     /// `InstallUpdate` actions.
     installs: Vec<(u32, String, Vec<u8>)>,
     /// Channels the agent closed.
@@ -431,6 +440,7 @@ impl Net {
             send_results: Vec::new(),
             tunes: Vec::new(),
             markers: Vec::new(),
+            streams: Vec::new(),
             installs: Vec::new(),
             agent_closes: Vec::new(),
             opens_requested: Vec::new(),
@@ -485,6 +495,11 @@ impl Net {
                     self.markers.push(Some((request_id, rgb)))
                 }
                 Action::HideMarker => self.markers.push(None),
+                Action::StartStream { request_id, .. } => {
+                    self.streams.push(format!("start {request_id}"))
+                }
+                Action::StopStream => self.streams.push("stop".into()),
+                Action::StreamAck(seq) => self.streams.push(format!("ack {seq}")),
                 Action::InstallUpdate {
                     request_id,
                     version,
@@ -783,7 +798,10 @@ fn rejection_on_either_side_closes() {
 
 #[test]
 fn policy_turns_file_capabilities_off() {
-    let mut n = Net::new(Remora::new(), BTreeMap::new());
+    // Without the picture stream, which opens Bulk on its own (RDP-67).
+    let mut r = Remora::new();
+    r.user_caps = cap::ALL & !cap::STREAM;
+    let mut n = Net::new(r, BTreeMap::new());
     n.connect(snapshot(PolicyFlags {
         clipboard_disabled: true,
         drives_disabled: false,
@@ -798,6 +816,7 @@ fn policy_turns_file_capabilities_off() {
             | cap::HELPER_UPDATE
             | cap::KEYBOARD
             | cap::LATENCY
+            | cap::STREAM
     );
     assert_eq!(hello.policy, policy::CLIPBOARD_DISABLED);
     assert!(n.opens_requested.is_empty(), "no Bulk without file caps");
@@ -808,7 +827,9 @@ fn policy_turns_file_capabilities_off() {
     assert_eq!(n.send_results, vec![(1, SendOutcome::NoClient)]);
 
     // Policy switched on mid-session: Bulk closes, rights go.
-    let mut n = paired_net(Remora::new());
+    let mut r = Remora::new();
+    r.user_caps = cap::ALL & !cap::STREAM;
+    let mut n = paired_net(r);
     n.answer_locally(true);
     assert!(n.agent.bulk_ready());
     n.agent_event(AgentEvent::SessionInfoTick(snapshot(PolicyFlags {
@@ -816,6 +837,16 @@ fn policy_turns_file_capabilities_off() {
         drives_disabled: true,
     })));
     assert!(n.agent_closes.contains(&Channel::Bulk));
+    assert_eq!(n.agent.file_rights(), (false, false));
+
+    // With the picture stream accepted, Bulk stays for it; files still go.
+    let mut n = paired_net(Remora::new());
+    n.answer_locally(true);
+    n.agent_event(AgentEvent::SessionInfoTick(snapshot(PolicyFlags {
+        clipboard_disabled: false,
+        drives_disabled: true,
+    })));
+    assert!(!n.agent_closes.contains(&Channel::Bulk));
     assert_eq!(n.agent.file_rights(), (false, false));
 }
 
@@ -1277,6 +1308,131 @@ fn latency_marks_are_painted_for_a_trusted_client() {
     n.remora.send(6, &Message::LatencyMark { rgb: 0 });
     n.settle();
     assert!(n.markers.is_empty());
+}
+
+fn stream_states(n: &Net) -> Vec<(u32, u8, String)> {
+    n.remora
+        .got
+        .iter()
+        .filter_map(|(rid, m)| match m {
+            Message::StreamState { state, text, .. } => Some((*rid, *state, text.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+/// RDP-67: a trusted client's stream request starts the stream; pictures
+/// travel in pieces on Bulk; acknowledgements reach the stream; stopping,
+/// or the session closing, ends it.
+#[test]
+fn the_picture_stream_runs_for_a_trusted_client() {
+    use remora_link::msg::{MAX_STREAM_PIECE, STREAM_H264, STREAM_KEYFRAME};
+    let mut n = paired_net(Remora::new());
+    n.answer_locally(true);
+    n.settle();
+    let start = Message::StreamStart {
+        codec: STREAM_H264,
+        max_fps: 60,
+        kbps: 20_000,
+    };
+    n.remora.send(9, &start);
+    n.settle();
+    assert_eq!(n.streams, vec!["start 9"]);
+    n.agent_event(AgentEvent::StreamState {
+        request_id: 9,
+        state: 0,
+        width: 1280,
+        height: 800,
+        text: String::new(),
+    });
+    assert_eq!(stream_states(&n), vec![(9, 0, String::new())]);
+    // A picture larger than one piece arrives in order, rectangles first.
+    let picture = data(MAX_STREAM_PIECE * 2 + 100, 3);
+    n.agent_event(AgentEvent::StreamPicture {
+        seq: 1,
+        key: true,
+        rects: vec![[0, 0, 1280, 800]],
+        data: picture.clone(),
+    });
+    n.settle();
+    let pieces: Vec<_> = n
+        .remora
+        .stream_got
+        .iter()
+        .map(|m| match m {
+            Message::StreamData {
+                seq,
+                flags,
+                offset,
+                total,
+                rects,
+                data,
+            } => (*seq, *flags, *offset, *total, rects.len(), data.len()),
+            _ => unreachable!(),
+        })
+        .collect();
+    let (p, t) = (MAX_STREAM_PIECE as u32, picture.len() as u32);
+    assert_eq!(
+        pieces,
+        vec![
+            (1, STREAM_KEYFRAME, 0, t, 1, MAX_STREAM_PIECE),
+            (1, STREAM_KEYFRAME, p, t, 0, MAX_STREAM_PIECE),
+            (1, STREAM_KEYFRAME, 2 * p, t, 0, 100),
+        ]
+    );
+    let mut joined = Vec::new();
+    for m in &n.remora.stream_got {
+        if let Message::StreamData { data, .. } = m {
+            joined.extend_from_slice(data);
+        }
+    }
+    assert_eq!(joined, picture);
+    n.remora.send(0, &Message::StreamAck { seq: 1 });
+    n.settle();
+    assert_eq!(n.streams, vec!["start 9", "ack 1"]);
+    n.remora.send(0, &Message::StreamStop);
+    n.settle();
+    assert_eq!(n.streams.last().map(String::as_str), Some("stop"));
+    assert_eq!(stream_states(&n).last().map(|s| s.1), Some(1));
+    // A picture after the stop is dropped.
+    let before = n.remora.stream_got.len();
+    n.agent_event(AgentEvent::StreamPicture {
+        seq: 2,
+        key: false,
+        rects: Vec::new(),
+        data: vec![1; 10],
+    });
+    n.settle();
+    assert_eq!(n.remora.stream_got.len(), before);
+    // Running again, the session closes: the stream stops.
+    n.remora.send(10, &start);
+    n.settle();
+    n.agent_event(AgentEvent::ChannelClosed(Channel::Ctl));
+    assert_eq!(n.streams.last().map(String::as_str), Some("stop"));
+}
+
+/// RDP-67: without the capability, the request is answered as failed and
+/// nothing starts.
+#[test]
+fn the_picture_stream_needs_the_capability() {
+    let mut r = Remora::new();
+    r.user_caps = cap::SESSION_INFO;
+    let mut n = paired_net(r);
+    n.answer_locally(true);
+    n.remora.send(
+        4,
+        &Message::StreamStart {
+            codec: remora_link::msg::STREAM_H264,
+            max_fps: 30,
+            kbps: 5000,
+        },
+    );
+    n.settle();
+    assert!(n.streams.is_empty());
+    assert_eq!(
+        stream_states(&n),
+        vec![(4, 2, "the picture stream is not enabled".into())]
+    );
 }
 
 fn update_results(n: &Net) -> Vec<(u32, remora_link::msg::UpdateStatus)> {

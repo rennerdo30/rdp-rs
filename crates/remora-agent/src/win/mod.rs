@@ -10,6 +10,7 @@ mod marker;
 mod pipe;
 mod probe;
 mod shortcut;
+mod stream;
 mod sys;
 mod tray;
 mod tune;

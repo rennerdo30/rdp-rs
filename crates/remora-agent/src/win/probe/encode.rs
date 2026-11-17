@@ -57,7 +57,9 @@ use windows::Win32::Media::MediaFoundation::{
     MFT_OUTPUT_STREAM_PROVIDES_SAMPLES, MFT_REGISTER_TYPE_INFO, MFTEnumEx, MFVideoFormat_AV1,
     MFVideoFormat_H264, MFVideoFormat_HEVC, MFVideoFormat_NV12, MFVideoInterlace_Progressive,
 };
-use windows::Win32::Media::MediaFoundation::{MFCreateAttributes, MFTEnum2};
+use windows::Win32::Media::MediaFoundation::{
+    MF_MT_MPEG_SEQUENCE_HEADER, MFCreateAttributes, MFTEnum2,
+};
 use windows::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx, CoTaskMemFree};
 use windows::Win32::System::Variant::{VARIANT, VT_BOOL, VT_UI4};
 use windows::core::{GUID, Interface};
@@ -219,6 +221,9 @@ struct Bench {
     /// Read-back texture of the copy path.
     nv12_staging: Option<ID3D11Texture2D>,
     bitrate: u32,
+    /// Live encoding ([`Live`]): `source` holds the captured frame, nothing
+    /// scrolls.
+    live: bool,
     /// The adapter the captured picture is on.
     luid: Option<u64>,
 }
@@ -292,6 +297,7 @@ impl Bench {
                 manager,
                 nv12_staging: None,
                 bitrate,
+                live: false,
                 luid,
             })
         }
@@ -401,6 +407,9 @@ impl Bench {
 
     /// Copies the snapshot into `source`, scrolled by `i * SCROLL` rows.
     fn scroll(&self, i: u64) {
+        if self.live {
+            return;
+        }
         let (w, h) = self.size;
         let s = ((i * SCROLL as u64) % h as u64) as u32;
         // SAFETY: copies between two textures of the same size and format.
@@ -665,6 +674,220 @@ impl Bench {
     }
 }
 
+/// The helper's live picture stream (RDP-67): the benchmark's converter and
+/// encoder choice, fed with captured frames. H.264 hardware first (GPU
+/// textures, then the copy path), else the software encoder.
+pub(crate) struct Live {
+    bench: Bench,
+    enc: Encoder,
+    input: Input,
+    /// Asynchronous encoders: inputs they asked for.
+    need: u32,
+    i: u64,
+    stats: Stats,
+    sent: HashMap<i64, Instant>,
+    /// Sequence and picture parameter sets, prepended to a keyframe that
+    /// lacks them.
+    header: Vec<u8>,
+    /// Which encoder and how frames reach it, for the log.
+    pub name: String,
+}
+
+impl Live {
+    /// Sets up an encoder for frames like `first` (a captured frame on
+    /// `device`). Media Foundation must be started on this thread.
+    pub(crate) fn start(
+        device: &ID3D11Device,
+        context: &ID3D11DeviceContext,
+        first: &ID3D11Texture2D,
+        kbps: u32,
+    ) -> Result<Live, String> {
+        let mut bench = Bench::new(device, context, first)?;
+        bench.live = true;
+        bench.bitrate = kbps.saturating_mul(1000).clamp(1_000_000, 80_000_000);
+        let mut hw = match bench.luid {
+            Some(l) => list(MFVideoFormat_H264, true, true, Some(l)),
+            None => Vec::new(),
+        };
+        hw.extend(list(MFVideoFormat_H264, true, true, None));
+        let mut why = Vec::new();
+        for input in [Input::Gpu, Input::Copy] {
+            for f in &hw {
+                // SAFETY: MF is started on this thread (the caller's contract).
+                match unsafe {
+                    Encoder::new(
+                        &f.activate,
+                        "H.264",
+                        MFVideoFormat_H264,
+                        &bench,
+                        input == Input::Gpu,
+                    )
+                } {
+                    Ok(enc) => return Ok(Live::with(bench, enc, input, &f.name)),
+                    Err(e) => why.push(format!("{} ({}): {e}", f.name, input.name())),
+                }
+            }
+        }
+        if let Some(f) = list(MFVideoFormat_H264, false, true, None)
+            .into_iter()
+            .next()
+        {
+            let input = if bench.gpu.is_ok() {
+                Input::Copy
+            } else {
+                Input::Cpu
+            };
+            // SAFETY: as above.
+            match unsafe { Encoder::new(&f.activate, "H.264", MFVideoFormat_H264, &bench, false) } {
+                Ok(enc) => return Ok(Live::with(bench, enc, input, &f.name)),
+                Err(e) => why.push(format!("{}: {e}", f.name)),
+            }
+        }
+        Err(if why.is_empty() {
+            "no H.264 encoder".into()
+        } else {
+            why.join("; ")
+        })
+    }
+
+    fn with(bench: Bench, enc: Encoder, input: Input, name: &str) -> Live {
+        let input = match (input, enc.d3d) {
+            (Input::Gpu, false) if bench.gpu.is_ok() => Input::Copy,
+            (Input::Gpu, false) => Input::Cpu,
+            (i, _) => i,
+        };
+        let name = format!("{name}, {}", input.name());
+        Live {
+            bench,
+            enc,
+            input,
+            need: 0,
+            i: 0,
+            stats: Stats {
+                sink: Some(Vec::new()),
+                ..Stats::default()
+            },
+            sent: HashMap::new(),
+            header: Vec::new(),
+            name,
+        }
+    }
+
+    /// The encoded picture size (even width and height).
+    pub(crate) fn encoded_size(&self) -> (u32, u32) {
+        self.bench.even
+    }
+
+    /// Asks an asynchronous encoder for its news.
+    fn pump(&mut self) -> Result<(), String> {
+        let Some(ev) = self.enc.events.clone() else {
+            return Ok(());
+        };
+        // SAFETY: event queue of our asynchronous transform.
+        unsafe {
+            loop {
+                match ev.GetEvent(MF_EVENT_FLAG_NO_WAIT) {
+                    Ok(e) => {
+                        let ty = e.GetType().unwrap_or(0);
+                        if ty == METransformNeedInput.0 as u32 {
+                            self.need += 1;
+                        } else if ty == METransformHaveOutput.0 as u32 {
+                            self.enc.output(&mut self.sent, &mut self.stats)?;
+                        }
+                    }
+                    Err(e) if e.code() == MF_E_NO_EVENTS_AVAILABLE => return Ok(()),
+                    Err(e) => return Err(err("encoder event", e)),
+                }
+            }
+        }
+    }
+
+    /// Encodes a captured frame (same size and format as the first).
+    /// Returns its sample time, or `None` when the encoder is still busy
+    /// (the frame is skipped; the next one carries its changes).
+    pub(crate) fn push(&mut self, frame: &ID3D11Texture2D) -> Result<Option<i64>, String> {
+        self.pump()?;
+        if self.enc.events.is_some() && self.need == 0 {
+            return Ok(None);
+        }
+        // SAFETY: a GPU copy between textures of the same description.
+        unsafe { self.bench.context.CopyResource(&self.bench.source, frame) };
+        let sample = self.bench.frame(self.i, self.input)?;
+        let t = self.i as i64 * FRAME_TICKS;
+        self.sent.insert(t, Instant::now());
+        // SAFETY: input for our transform.
+        unsafe { self.enc.t.ProcessInput(0, &sample, 0) }.map_err(|e| err("ProcessInput", e))?;
+        self.need = self.need.saturating_sub(1);
+        self.i += 1;
+        if self.enc.events.is_none() {
+            self.enc.output(&mut self.sent, &mut self.stats)?;
+        }
+        Ok(Some(t))
+    }
+
+    /// The pictures finished since the last call, in order.
+    pub(crate) fn take(&mut self) -> Result<Vec<Encoded>, String> {
+        self.pump()?;
+        let mut out = self
+            .stats
+            .sink
+            .as_mut()
+            .map(std::mem::take)
+            .unwrap_or_default();
+        for e in out.iter_mut().filter(|e| e.key) {
+            if !has_sps(&e.data) {
+                if self.header.is_empty() {
+                    self.header = self.sequence_header();
+                }
+                let mut d = self.header.clone();
+                d.extend_from_slice(&e.data);
+                e.data = d;
+            }
+        }
+        Ok(out)
+    }
+
+    /// The encoder's SPS and PPS (MF_MT_MPEG_SEQUENCE_HEADER), Annex B.
+    fn sequence_header(&self) -> Vec<u8> {
+        // SAFETY: plain getters on the current output type.
+        unsafe {
+            let Ok(t) = self.enc.t.GetOutputCurrentType(0) else {
+                return Vec::new();
+            };
+            let Ok(n) = t.GetBlobSize(&MF_MT_MPEG_SEQUENCE_HEADER) else {
+                return Vec::new();
+            };
+            let mut v = vec![0u8; n as usize];
+            let mut got = 0u32;
+            if t.GetBlob(&MF_MT_MPEG_SEQUENCE_HEADER, &mut v, Some(&mut got))
+                .is_err()
+            {
+                return Vec::new();
+            }
+            v.truncate(got as usize);
+            v
+        }
+    }
+}
+
+impl Drop for Live {
+    fn drop(&mut self) {
+        // SAFETY: ends streaming on our transform.
+        unsafe {
+            let _ = self
+                .enc
+                .t
+                .ProcessMessage(MFT_MESSAGE_NOTIFY_END_STREAMING, 0);
+        }
+    }
+}
+
+/// Whether an Annex B stream has a sequence parameter set (NAL type 7).
+fn has_sps(d: &[u8]) -> bool {
+    d.windows(4)
+        .any(|w| w[0] == 0 && w[1] == 0 && w[2] == 1 && w[3] & 0x1f == 7)
+}
+
 /// How frames reach the encoder.
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Input {
@@ -918,6 +1141,16 @@ struct Stats {
     latencies: Vec<f64>,
     sizes: Vec<u32>,
     keyframes: Vec<u32>,
+    /// Live encoding: the encoded pictures themselves.
+    sink: Option<Vec<Encoded>>,
+}
+
+/// One encoded picture of the live stream (H.264 Annex B).
+pub(crate) struct Encoded {
+    /// The sample time [`Live::push`] returned for its frame.
+    pub time: i64,
+    pub key: bool,
+    pub data: Vec<u8>,
 }
 
 impl Stats {
@@ -931,8 +1164,24 @@ impl Stats {
                 self.latencies.push(t0.elapsed().as_secs_f64() * 1000.0);
             }
             self.sizes.push(bytes);
-            if s.GetUINT32(&MFSampleExtension_CleanPoint).unwrap_or(0) != 0 {
+            let key = s.GetUINT32(&MFSampleExtension_CleanPoint).unwrap_or(0) != 0;
+            if key {
                 self.keyframes.push(bytes);
+            }
+            if let Some(sink) = self.sink.as_mut()
+                && let Ok(buf) = s.ConvertToContiguousBuffer()
+            {
+                let mut p: *mut u8 = std::ptr::null_mut();
+                let mut len = 0u32;
+                if buf.Lock(&mut p, None, Some(&mut len)).is_ok() {
+                    let data = std::slice::from_raw_parts(p, len as usize).to_vec();
+                    let _ = buf.Unlock();
+                    sink.push(Encoded {
+                        time: s.GetSampleTime().unwrap_or(0),
+                        key,
+                        data,
+                    });
+                }
             }
         }
     }
@@ -1364,5 +1613,113 @@ mod tests {
             }
         }
         assert!(measured > 0, "no adapter encoded");
+    }
+
+    /// The stream's live encoder on this PC's default GPU (RDP-67), fed
+    /// generated frames: the first output is a keyframe with its sequence
+    /// header, every frame comes out, and changing frames make pictures.
+    /// `cargo test -p remora-agent live_encoder_on_this_gpu -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "uses this PC's GPU encoder"]
+    fn live_encoder_on_this_gpu() {
+        use windows::Win32::Foundation::HMODULE;
+        use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_HARDWARE;
+        use windows::Win32::Graphics::Direct3D11::{
+            D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+            D3D11_CREATE_DEVICE_VIDEO_SUPPORT, D3D11_SDK_VERSION, D3D11_SUBRESOURCE_DATA,
+            D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT, D3D11CreateDevice,
+        };
+        use windows::Win32::Graphics::Dxgi::Common::{
+            DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC,
+        };
+        use windows::Win32::Media::MediaFoundation::{
+            MF_VERSION, MFSTARTUP_NOSOCKET, MFShutdown, MFStartup,
+        };
+        let (w, h) = (1280u32, 800u32);
+        // SAFETY: device, textures and MF on this thread; the data outlives
+        // each call that reads it.
+        unsafe {
+            MFStartup(MF_VERSION, MFSTARTUP_NOSOCKET).unwrap();
+            let mut device = None;
+            let mut context = None;
+            D3D11CreateDevice(
+                None,
+                D3D_DRIVER_TYPE_HARDWARE,
+                HMODULE::default(),
+                D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_VIDEO_SUPPORT,
+                None,
+                D3D11_SDK_VERSION,
+                Some(&mut device),
+                None,
+                Some(&mut context),
+            )
+            .expect("hardware device");
+            let (device, context) = (device.unwrap(), context.unwrap());
+            let frame = |shade: u8| {
+                let mut px = vec![0u8; (w * h * 4) as usize];
+                for (i, p) in px.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+                    let x = (i as u32 % w) as u8;
+                    p.copy_from_slice(&[x.wrapping_add(shade), shade, 255 - x, 255]);
+                }
+                let desc = D3D11_TEXTURE2D_DESC {
+                    Width: w,
+                    Height: h,
+                    MipLevels: 1,
+                    ArraySize: 1,
+                    Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                    SampleDesc: DXGI_SAMPLE_DESC {
+                        Count: 1,
+                        Quality: 0,
+                    },
+                    Usage: D3D11_USAGE_DEFAULT,
+                    BindFlags: (D3D11_BIND_RENDER_TARGET.0 | D3D11_BIND_SHADER_RESOURCE.0) as u32,
+                    CPUAccessFlags: 0,
+                    MiscFlags: 0,
+                };
+                let init = D3D11_SUBRESOURCE_DATA {
+                    pSysMem: px.as_ptr() as *const _,
+                    SysMemPitch: w * 4,
+                    SysMemSlicePitch: 0,
+                };
+                let mut t = None;
+                device
+                    .CreateTexture2D(&desc, Some(&init), Some(&mut t))
+                    .unwrap();
+                t.unwrap()
+            };
+            let first = frame(0);
+            let mut live = super::Live::start(&device, &context, &first, 8000).expect("encoder");
+            println!("live encoder: {}", live.name);
+            assert_eq!(live.encoded_size(), (w, h));
+            let mut pushed = Vec::new();
+            let mut got = Vec::new();
+            let t0 = std::time::Instant::now();
+            let mut k = 0u8;
+            while got.len() < 30 && t0.elapsed() < std::time::Duration::from_secs(10) {
+                if pushed.len() < 30
+                    && let Some(t) = live.push(&frame(k.wrapping_mul(8))).unwrap()
+                {
+                    pushed.push(t);
+                    k = k.wrapping_add(1);
+                }
+                got.extend(live.take().unwrap());
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+            println!(
+                "{} pushed, {} out, first {} bytes, sizes {:?}",
+                pushed.len(),
+                got.len(),
+                got.first().map_or(0, |e| e.data.len()),
+                got.iter().take(5).map(|e| e.data.len()).collect::<Vec<_>>()
+            );
+            assert!(!got.is_empty(), "no pictures");
+            assert!(got[0].key, "the first picture is a keyframe");
+            assert!(super::has_sps(&got[0].data), "with its sequence header");
+            assert_eq!(got.len(), pushed.len(), "every frame came out");
+            // In order, by the times push returned.
+            assert_eq!(got.iter().map(|e| e.time).collect::<Vec<_>>(), pushed);
+            drop(live);
+            let _ = MFShutdown();
+        }
     }
 }

@@ -17,7 +17,7 @@
 //! Only reads and measures: nothing is sent anywhere; the square is the one
 //! visible effect, and it closes when the probe ends.
 
-mod encode;
+pub(super) mod encode;
 
 use std::time::{Duration, Instant};
 
@@ -73,7 +73,7 @@ pub fn run(seconds: u64) -> String {
     r
 }
 
-fn adapters(r: &mut String) -> Vec<IDXGIAdapter1> {
+pub(super) fn adapters(r: &mut String) -> Vec<IDXGIAdapter1> {
     let mut out = Vec::new();
     // SAFETY: DXGI enumeration; descriptors are plain data.
     unsafe {
@@ -122,15 +122,15 @@ fn adapters(r: &mut String) -> Vec<IDXGIAdapter1> {
     out
 }
 
-struct Dup {
-    context: ID3D11DeviceContext,
-    device: ID3D11Device,
-    output: IDXGIOutput1,
-    dupl: IDXGIOutputDuplication,
+pub(super) struct Dup {
+    pub context: ID3D11DeviceContext,
+    pub device: ID3D11Device,
+    pub output: IDXGIOutput1,
+    pub dupl: IDXGIOutputDuplication,
 }
 
 /// The first adapter output that can be duplicated.
-fn duplicate(adapters: &[IDXGIAdapter1], r: &mut String) -> Option<Dup> {
+pub(super) fn duplicate(adapters: &[IDXGIAdapter1], r: &mut String) -> Option<Dup> {
     for (i, a) in adapters.iter().enumerate() {
         // SAFETY: COM calls on valid interfaces; out pointers to locals.
         unsafe {
@@ -296,7 +296,7 @@ fn capture(
 }
 
 /// Copies a captured frame into `snapshot` (created on first use).
-fn keep_frame(d: &Dup, tex: &ID3D11Texture2D, snapshot: &mut Option<ID3D11Texture2D>) {
+pub(super) fn keep_frame(d: &Dup, tex: &ID3D11Texture2D, snapshot: &mut Option<ID3D11Texture2D>) {
     // SAFETY: a GPU copy between textures of the same description.
     unsafe {
         if snapshot.is_none() {

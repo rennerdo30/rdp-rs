@@ -234,6 +234,8 @@ struct Ctl {
     tune_pending: Option<u32>,
     /// The latency meter's marker is up (RDP-67).
     marker: bool,
+    /// The picture stream runs (RDP-67).
+    streaming: bool,
     /// A helper update being received, by its request id (RDP-61).
     update: Option<(u32, remora_link::update::Receiver)>,
     /// An update handed to the agent to install, by its request id.
@@ -440,6 +442,19 @@ impl LinkProtocol {
                 y,
                 size,
             } => self.marker_shown(request_id, x, y, size, &mut out),
+            AgentEvent::StreamState {
+                request_id,
+                state,
+                width,
+                height,
+                text,
+            } => self.stream_state(request_id, state, width, height, text, &mut out),
+            AgentEvent::StreamPicture {
+                seq,
+                key,
+                rects,
+                data,
+            } => self.stream_picture(seq, key, rects, &data, &mut out),
             AgentEvent::UpdateInstalled {
                 request_id,
                 installed,
@@ -516,7 +531,8 @@ impl LinkProtocol {
         }
         // Bulk may open before the answer (it is bound to this session and
         // carries nothing until then).
-        let usable = send || caps & cap::FILE_UP != 0;
+        // The picture stream travels on Bulk too (RDP-67).
+        let usable = send || caps & (cap::FILE_UP | cap::STREAM) != 0;
         if usable && !self.bulk_wanted && self.ctl.is_some() {
             self.bulk_wanted = true;
             out.push(Action::OpenChannel(Channel::Bulk));
@@ -574,6 +590,9 @@ impl LinkProtocol {
         if let Some(c) = self.ctl.take() {
             if c.marker {
                 out.push(Action::HideMarker);
+            }
+            if c.streaming {
+                out.push(Action::StopStream);
             }
             let trusted = c.client_known || c.local_confirmed;
             if !trusted {
@@ -732,6 +751,7 @@ impl LinkProtocol {
                     keyboard_sent: None,
                     tune_pending: None,
                     marker: false,
+                    streaming: false,
                     update: None,
                     installing: None,
                 });
@@ -851,6 +871,17 @@ impl LinkProtocol {
             Message::TuneServer { action } => self.tune_server(request_id, action, out),
             Message::LatencyMark { rgb } => self.latency_mark(request_id, rgb, out),
             Message::LatencyEnd => self.latency_end(out),
+            Message::StreamStart {
+                codec,
+                max_fps,
+                kbps,
+            } => self.stream_start(request_id, codec, max_fps, kbps, out),
+            Message::StreamStop => self.stream_stop(out),
+            Message::StreamAck { seq } => {
+                if self.ctl.as_ref().is_some_and(|c| c.streaming) {
+                    out.push(Action::StreamAck(seq));
+                }
+            }
             Message::UpdateBegin {
                 version,
                 size,
@@ -1055,7 +1086,9 @@ impl LinkProtocol {
         {
             info!("file transfer switched off by policy");
             *caps &= !(cap::FILE_UP | cap::FILE_DOWN | cap::FOLDERS);
-            if self.bulk.is_some() || self.bulk_wanted {
+            // The picture stream keeps Bulk (RDP-67).
+            let stream = *caps & cap::STREAM != 0;
+            if !stream && (self.bulk.is_some() || self.bulk_wanted) {
                 self.bulk = None;
                 self.bulk_wanted = false;
                 out.push(Action::Close(Channel::Bulk));
@@ -1176,6 +1209,145 @@ impl LinkProtocol {
     fn marker_shown(&mut self, request_id: u32, x: u32, y: u32, size: u32, out: &mut Vec<Action>) {
         if self.ctl.as_ref().is_some_and(|c| c.marker) {
             self.send(request_id, &Message::LatencyShown { x, y, size }, out);
+        }
+    }
+
+    // --------------------------------------------------- picture stream
+
+    /// Remora asks for the picture stream (RDP-67): a trusted client that
+    /// accepted it, H.264, with Bulk up. Anything else is answered as failed.
+    fn stream_start(
+        &mut self,
+        request_id: u32,
+        codec: u8,
+        max_fps: u8,
+        kbps: u32,
+        out: &mut Vec<Action>,
+    ) {
+        let why = if !self.acked().is_some_and(|c| c & cap::STREAM != 0) || request_id == 0 {
+            Some("the picture stream is not enabled")
+        } else if !self.client_trusted() {
+            Some("confirm this PC on the server first")
+        } else if codec != remora_link::msg::STREAM_H264 {
+            Some("unknown codec")
+        } else if !self.bulk_ready() {
+            Some("the data channel is not open yet")
+        } else {
+            None
+        };
+        if let Some(why) = why {
+            info!("picture stream refused: {why}");
+            let m = Message::StreamState {
+                state: 2,
+                width: 0,
+                height: 0,
+                text: why.into(),
+            };
+            self.send(request_id, &m, out);
+            return;
+        }
+        if let Some(ctl) = self.ctl.as_mut() {
+            if ctl.streaming {
+                out.push(Action::StopStream);
+            }
+            ctl.streaming = true;
+        }
+        info!("Remora asks for the picture stream ({max_fps} fps, {kbps} kbit/s)");
+        out.push(Action::StartStream {
+            request_id,
+            max_fps,
+            kbps,
+        });
+    }
+
+    fn stream_stop(&mut self, out: &mut Vec<Action>) {
+        if let Some(ctl) = self.ctl.as_mut()
+            && std::mem::take(&mut ctl.streaming)
+        {
+            info!("picture stream stopped by Remora");
+            out.push(Action::StopStream);
+            let m = Message::StreamState {
+                state: 1,
+                width: 0,
+                height: 0,
+                text: String::new(),
+            };
+            self.send(0, &m, out);
+        }
+    }
+
+    fn stream_state(
+        &mut self,
+        request_id: u32,
+        state: u8,
+        width: u32,
+        height: u32,
+        text: String,
+        out: &mut Vec<Action>,
+    ) {
+        let Some(ctl) = self.ctl.as_mut().filter(|c| c.streaming) else {
+            return;
+        };
+        if state != 0 {
+            ctl.streaming = false;
+        }
+        let m = Message::StreamState {
+            state,
+            width,
+            height,
+            text,
+        };
+        self.send(request_id, &m, out);
+    }
+
+    /// One encoded picture, in pieces on Bulk.
+    fn stream_picture(
+        &mut self,
+        seq: u32,
+        key: bool,
+        rects: Vec<[u16; 4]>,
+        data: &[u8],
+        out: &mut Vec<Action>,
+    ) {
+        if !self.ctl.as_ref().is_some_and(|c| c.streaming) {
+            return;
+        }
+        let total = data.len() as u32;
+        let flags = if key {
+            remora_link::msg::STREAM_KEYFRAME
+        } else {
+            0
+        };
+        let mut rects = Some(rects);
+        for (i, piece) in data.chunks(remora_link::msg::MAX_STREAM_PIECE).enumerate() {
+            let m = Message::StreamData {
+                seq,
+                flags,
+                offset: (i * remora_link::msg::MAX_STREAM_PIECE) as u32,
+                total,
+                rects: rects.take().unwrap_or_default(),
+                data: piece.to_vec(),
+            };
+            if !self.send(0, &m, out) {
+                warn!("picture stream: Bulk refused a piece; stopping");
+                self.stream_failed("the data channel closed", out);
+                return;
+            }
+        }
+    }
+
+    fn stream_failed(&mut self, why: &str, out: &mut Vec<Action>) {
+        if let Some(ctl) = self.ctl.as_mut()
+            && std::mem::take(&mut ctl.streaming)
+        {
+            out.push(Action::StopStream);
+            let m = Message::StreamState {
+                state: 2,
+                width: 0,
+                height: 0,
+                text: why.into(),
+            };
+            self.send(0, &m, out);
         }
     }
 

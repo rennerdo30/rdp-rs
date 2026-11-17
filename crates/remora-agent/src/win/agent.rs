@@ -77,6 +77,21 @@ pub enum Input {
         request_id: u32,
         status: remora_link::msg::TuneStatus,
     },
+    /// The picture stream started, stopped or failed (RDP-67).
+    StreamState {
+        request_id: u32,
+        state: u8,
+        width: u32,
+        height: u32,
+        text: String,
+    },
+    /// One encoded stream picture.
+    StreamPicture {
+        seq: u32,
+        key: bool,
+        rects: Vec<[u16; 4]>,
+        data: Vec<u8>,
+    },
     /// The latency marker is painted (RDP-67).
     MarkerShown {
         request_id: u32,
@@ -179,6 +194,8 @@ struct Loop {
     pending_sends: BTreeMap<u64, Sender<SendOutcome>>,
     /// The latency meter's marker window, while Remora measures.
     marker: Option<super::marker::Marker>,
+    /// The picture stream, while Remora shows it (RDP-67).
+    stream: Option<super::stream::Stream>,
     static_info: Option<sys::StaticInfo>,
     cpu_prev: Option<CpuTimes>,
     shutting_down: bool,
@@ -245,6 +262,7 @@ fn event_loop(key: StaticKey) -> i32 {
         pending_urls: BTreeMap::new(),
         pending_sends: BTreeMap::new(),
         marker: None,
+        stream: None,
         static_info: None,
         cpu_prev: None,
         shutting_down: false,
@@ -414,6 +432,35 @@ impl Loop {
                     self.shutdown();
                 }
             }
+            Input::StreamState {
+                request_id,
+                state,
+                width,
+                height,
+                text,
+            } => {
+                if state != 0 {
+                    self.stream = None;
+                }
+                self.feed(AgentEvent::StreamState {
+                    request_id,
+                    state,
+                    width,
+                    height,
+                    text,
+                })
+            }
+            Input::StreamPicture {
+                seq,
+                key,
+                rects,
+                data,
+            } => self.feed(AgentEvent::StreamPicture {
+                seq,
+                key,
+                rects,
+                data,
+            }),
             Input::MarkerShown {
                 request_id,
                 x,
@@ -603,6 +650,25 @@ impl Loop {
                         .show(request_id, rgb);
                 }
                 Action::HideMarker => self.marker = None,
+                Action::StartStream {
+                    request_id,
+                    max_fps,
+                    kbps,
+                } => {
+                    self.stream = None;
+                    self.stream = Some(super::stream::Stream::start(
+                        request_id,
+                        max_fps,
+                        kbps,
+                        self.tx.clone(),
+                    ));
+                }
+                Action::StopStream => self.stream = None,
+                Action::StreamAck(seq) => {
+                    if let Some(s) = &self.stream {
+                        s.ack(seq);
+                    }
+                }
                 Action::TuneServer { request_id, action } => {
                     // The administrator prompt waits for the user: off
                     // this loop.
