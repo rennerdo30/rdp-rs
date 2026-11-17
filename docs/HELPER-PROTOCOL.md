@@ -266,7 +266,7 @@ Right after the SAS, before `Hello`, the helper sends `PeerPairing`
 | Status | Name        | Meaning for Remora |
 |-------:|-------------|--------------------|
 | 0      | `Known`     | the helper has this client key pinned |
-| 1      | `Confirm`   | it does not: the helper shows its code and asks its user now, whatever `Pairing` says; Remora shows its code too (also for a pinned helper) |
+| 1      | `Confirm`   | it does not: Remora shows its code and asks its user. The helper shows its code and asks its user too, unless it has this client key pinned: then it answers `Confirmed` at once (the handshake proved the pinned key; a dialog there would only hold transfers and close the link unanswered) |
 | 2      | `Confirmed` | the helper's user confirmed |
 | 3      | `Rejected`  | the helper's user rejected; the helper sends `Error{PAIRING_REJECTED}` and closes |
 
@@ -348,6 +348,7 @@ All on `Remora::Ctl` unless marked Bulk. Maximum string lengths in bytes.
 | `0x0106` | `PeerPairing`    | H→R | `u8 status` (section 4.3); 1.1 |
 | `0x0107` | `ClientName`     | R→H | `str name (≤64)`: a label for the helper's client list, never trusted; 1.1 |
 | `0x0200` | `SessionInfo`    | H→R | `bool locked, u32 idle_ms, u8 cpu_percent (0..100), u64 mem_used, u64 mem_total` |
+| `0x0201` | `KeyboardLayout` | H→R | `u32 klid`: the foreground window's keyboard layout, after `HelloAck` and when it changes (with the session info); 1.2, capability `128` |
 | `0x0300` | `OpenUrl`        | H→R | `str url (≤8192)`; `request_id` ≠ 0 |
 | `0x0301` | `OpenUrlResult`  | R→H | `u8 status` (0 opened, 1 declined, 2 invalid, 3 disabled); same `request_id` |
 | `0x0400` | `FileOffer`      | sender→receiver | `[16] id, str name (≤1024), u64 size, u64 mtime (ms since 1970), u32 block_size (4 MiB)`; 1.2, only for a folder's file: `[16] folder id, str top (≤1024), str path (≤4096), u32 files, u64 bytes` (section 7.2) |
@@ -376,7 +377,8 @@ All on `Remora::Ctl` unless marked Bulk. Maximum string lengths in bytes.
   `1` session info, `2` open URL, `4` file transfer up (client → server),
   `8` file transfer down (server → client), `16` server tuning (1.2),
   `32` helper update (1.2), `64` folders (1.2: a `FileOffer` may carry a
-  folder, section 7.2). Remora accepts only what the user enabled
+  folder, section 7.2), `128` keyboard layout (1.2: `KeyboardLayout`, so
+  Remora types with the session's keys). Remora accepts only what the user enabled
   (default: session info, server tuning and helper update; the last two act
   only on a click).
 - **Policy flags** (`Hello`): `1` clipboard redirection disabled, `2` drive

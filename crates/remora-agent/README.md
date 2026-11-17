@@ -112,6 +112,10 @@ remora-agent uninstall
 
 Removes the scheduled task, the Send To shortcut and the link registration. `--dry-run` shows what it would do. If Remora Agent was your browser, Windows asks which app to use for the next link. The key file and `Downloads\From Remora` stay; delete them by hand if you like.
 
+## Capture probe
+
+`remora-agent capture-probe [seconds]` measures whether this session's picture can be captured by the helper itself (a first step towards streaming it with the server's own GPU encoder, RDP-67): the display adapters and outputs the session sees, Desktop Duplication frames per second while a small square blinks at the top left, the delay from a screen update to its capture, the cost of copying a frame to the CPU, and the H.264, HEVC and AV1 encoders (hardware or software). It only reads and measures; nothing is sent anywhere. Run it inside a Remote Desktop session (default 10 s).
+
 ## Log
 
 `%LOCALAPPDATA%\rdp-rs\logs\remora-agent.log`, at most 1 MiB plus one older file (`remora-agent.log.1`). It records starts, channel and pairing events, session events, transfer ids and sizes, and errors: never message contents, keys or links. File names appear only with `REMORA_AGENT_DEBUG=1` in the agent's environment.

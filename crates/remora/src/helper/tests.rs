@@ -393,7 +393,7 @@ fn capabilities_follow_user_setting_and_policy() {
     let ack = r.pair_and_hello(&mut h, cap::ALL, policy::CLIPBOARD_DISABLED);
     assert_eq!(
         ack.capabilities,
-        cap::SESSION_INFO | cap::OPEN_URL | cap::SERVER_TUNING | cap::HELPER_UPDATE
+        cap::SESSION_INFO | cap::OPEN_URL | cap::SERVER_TUNING | cap::HELPER_UPDATE | cap::KEYBOARD
     );
     assert_eq!(r.handle.accepted_capabilities(), ack.capabilities);
 }

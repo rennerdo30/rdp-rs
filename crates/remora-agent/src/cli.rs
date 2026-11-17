@@ -19,6 +19,9 @@ Usage:
   remora-agent send <file>...        Send files to the PC Remora connects from
                                      (what \"Send to my PC (Remora)\" runs).
   remora-agent session-info          Print the session information the agent reports.
+  remora-agent capture-probe [secs]  Measure whether and how fast this session's picture
+                                     can be captured, and list video encoders (shows a
+                                     small blinking square while it runs; default 10 s).
   remora-agent tune apply|restore    Set this server's remote graphics for Remora
                                      (60 fps, H.264/AVC 444, hardware encoding), or
                                      back to Windows' defaults. Needs administrator
@@ -66,6 +69,8 @@ pub enum Command {
     OpenUrl(String),
     Send(Vec<String>),
     SessionInfo,
+    /// `capture-probe [seconds]` (RDP-67): can this session be captured.
+    CaptureProbe(u64),
     Fingerprint,
     Clients,
     ForgetClient(String),
@@ -133,6 +138,16 @@ pub fn parse<S: AsRef<str>>(args: &[S]) -> Result<Command, String> {
         },
         "session-info" => none(rest, Command::SessionInfo),
         "fingerprint" => none(rest, Command::Fingerprint),
+        "capture-probe" => match rest {
+            [] => Ok(Command::CaptureProbe(10)),
+            [s] => s
+                .parse()
+                .ok()
+                .filter(|s| (1..=120).contains(s))
+                .map(Command::CaptureProbe)
+                .ok_or_else(|| "capture-probe takes 1 to 120 seconds".to_string()),
+            _ => Err("capture-probe takes at most one number".into()),
+        },
         "clients" => none(rest, Command::Clients),
         // A fingerprint is pasted as one argument or as its ten groups.
         "forget-client" if !rest.is_empty() => Ok(Command::ForgetClient(rest.join(" "))),

@@ -525,6 +525,7 @@ fn snapshot_ui(
         ("-form-general", || ui::sample_form(0)),
         ("-form-display", || ui::sample_form(1)),
         ("-form-experience", || ui::sample_form(2)),
+        ("-form-keyboard", ui::sample_form_keyboard),
         ("-form-sharing", || ui::sample_form(3)),
         ("-form-advanced", || ui::sample_form(4)),
         ("-settings", || ui::sample_settings(false)),

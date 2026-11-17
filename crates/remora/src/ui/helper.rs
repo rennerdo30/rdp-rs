@@ -432,6 +432,7 @@ impl HelperView {
                 self.server = Some(s);
                 Vec::new()
             }
+            HelperEvent::KeyboardLayout(_) => Vec::new(),
             HelperEvent::UpdateResult(st) => {
                 self.update = HelperUpdate::Finished(st);
                 let (text, tone) = match st {

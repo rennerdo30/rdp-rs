@@ -267,6 +267,11 @@ pub struct SessionOptions {
     pub win_keys: WinKeys,
     /// How typing reaches the session (part of Display for inheritance).
     pub keyboard: KeyboardMode,
+    /// The session's keyboard layout (KLID), when the user names it: typed
+    /// text then goes as that layout's keys (RDP-68). A server helper's
+    /// report wins over it. None: unknown (text as Unicode).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_layout: Option<u32>,
     /// Local monitors the session spans, by device name; empty: the window.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub monitors: Vec<String>,
@@ -959,6 +964,7 @@ impl Store {
             out.options.quality = g.options.quality;
             out.options.win_keys = g.options.win_keys;
             out.options.keyboard = g.options.keyboard;
+            out.options.server_layout = g.options.server_layout;
             out.options.monitors = g.options.monitors.clone();
         }
         if let Some(g) = self.source_of(&c.group, &c.inherit, |i| i.sharing) {
@@ -968,6 +974,7 @@ impl Store {
             out.options.quality = own.quality;
             out.options.win_keys = own.win_keys;
             out.options.keyboard = own.keyboard;
+            out.options.server_layout = own.server_layout;
             out.options.monitors = own.monitors;
             // "Always for this host" stays the connection's own.
             out.options.helper.links_unasked |= own.helper.links_unasked;

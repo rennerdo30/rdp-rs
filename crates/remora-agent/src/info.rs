@@ -21,6 +21,8 @@ pub struct SessionInfo {
     pub memory: Option<Memory>,
     /// The server's graphics settings (RDP-59), read from the registry.
     pub graphics: remora_link::msg::ServerSettings,
+    /// The keyboard layout (KLID) of the foreground window (RDP-68).
+    pub keyboard: Option<u32>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -201,6 +203,20 @@ pub fn fix_product_name(name: &str, build: u32, installation_type: &str) -> Stri
         return format!("Windows 11{rest}");
     }
     name.to_string()
+}
+
+/// A keyboard layout handle as its layout id (KLID): the language for a
+/// standard layout, the layout id from the handle's device part otherwise
+/// (as Remora computes it for this PC).
+pub fn klid_from_hkl(hkl: usize) -> u32 {
+    let lang = (hkl & 0xFFFF) as u32;
+    let device = ((hkl >> 16) & 0xFFFF) as u32;
+    match device & 0xF000 {
+        0xE000 => (device << 16) | lang,
+        0xF000 => lang,
+        _ if device == 0 => lang,
+        _ => device,
+    }
 }
 
 #[cfg(test)]

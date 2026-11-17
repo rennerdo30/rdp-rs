@@ -7,6 +7,7 @@ mod apply;
 mod dpapi;
 mod files;
 mod pipe;
+mod probe;
 mod shortcut;
 mod sys;
 mod tray;
@@ -174,6 +175,14 @@ pub fn main() -> i32 {
                 Command::UnregisterLinks { dry_run } => apply::unregister_links(dry_run),
                 Command::SessionInfo => apply::print_session_info(),
                 Command::Fingerprint => print_fingerprint(),
+                Command::CaptureProbe(secs) => {
+                    let report = probe::run(secs);
+                    for line in report.lines() {
+                        crate::info!("capture probe: {line}");
+                    }
+                    print!("{report}");
+                    0
+                }
                 Command::Clients => clients_command(crate::clients::list),
                 Command::ForgetClient(fp) => {
                     clients_command(|p| crate::clients::forget(p, &fp).map(|s| s + "\n"))

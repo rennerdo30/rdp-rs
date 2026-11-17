@@ -228,6 +228,8 @@ struct Ctl {
     created: Vec<[u8; 16]>,
     /// The graphics settings last sent (RDP-59).
     settings_sent: Option<ServerSettings>,
+    /// The keyboard layout last reported (RDP-68).
+    keyboard_sent: Option<u32>,
     /// A `TuneServer` waiting for its elevated process: its request id.
     tune_pending: Option<u32>,
     /// A helper update being received, by its request id (RDP-61).
@@ -716,6 +718,7 @@ impl LinkProtocol {
                     held: Vec::new(),
                     created: Vec::new(),
                     settings_sent: None,
+                    keyboard_sent: None,
                     tune_pending: None,
                     update: None,
                     installing: None,
@@ -942,6 +945,17 @@ impl LinkProtocol {
                     return self.send_error(err::PROTOCOL, "unexpected Pairing", out);
                 }
                 ctl.pairing = Pairing::Confirming;
+                if ctl.client_known {
+                    // This PC is pinned here already: only Remora's user
+                    // checks this helper. A dialog here would add nothing,
+                    // hold every transfer while open, and end the link
+                    // when nobody answers it (found live, RDP-64).
+                    info!("pairing: Remora compares codes; this client is pinned here");
+                    ctl.local_confirmed = true;
+                    self.send(0, &Message::PeerPairing(PairingStatus::Confirmed), out);
+                    self.apply_rights(out);
+                    return;
+                }
                 info!("pairing: Remora asks the user to compare codes");
                 self.show_dialog();
             }
@@ -1047,6 +1061,26 @@ impl LinkProtocol {
             self.send(0, &m, out);
         }
         self.send_settings(out);
+        self.send_keyboard(out);
+    }
+
+    /// The session's keyboard layout, after `HelloAck` and when it changes
+    /// (RDP-68): Remora types with the keys of that layout.
+    fn send_keyboard(&mut self, out: &mut Vec<Action>) {
+        if !self.acked().is_some_and(|c| c & cap::KEYBOARD != 0) {
+            return;
+        }
+        let Some(klid) = self.info.as_ref().and_then(|i| i.keyboard) else {
+            return;
+        };
+        let Some(ctl) = self.ctl.as_mut() else {
+            return;
+        };
+        if ctl.keyboard_sent == Some(klid) {
+            return;
+        }
+        ctl.keyboard_sent = Some(klid);
+        self.send(0, &Message::KeyboardLayout { klid }, out);
     }
 
     // ------------------------------------------------- server settings

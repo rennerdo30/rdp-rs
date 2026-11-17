@@ -21,7 +21,8 @@ pub fn capabilities(o: &HelperOptions) -> u32 {
     // the administrator prompt there (RDP-59).
     // Updates likewise need a click on Update helper (RDP-61).
     // Folders only matter with a file direction on (RDP-64).
-    let mut bits = cap::SESSION_INFO | cap::SERVER_TUNING | cap::HELPER_UPDATE;
+    // The keyboard layout is only reported (RDP-68).
+    let mut bits = cap::SESSION_INFO | cap::SERVER_TUNING | cap::HELPER_UPDATE | cap::KEYBOARD;
     if o.open_links {
         bits |= cap::OPEN_URL;
     }
@@ -327,7 +328,7 @@ mod tests {
     fn capabilities_follow_the_switches_and_default_to_session_info() {
         assert_eq!(
             capabilities(&HelperOptions::default()),
-            cap::SESSION_INFO | cap::SERVER_TUNING | cap::HELPER_UPDATE
+            cap::SESSION_INFO | cap::SERVER_TUNING | cap::HELPER_UPDATE | cap::KEYBOARD
         );
         let all = HelperOptions {
             open_links: true,
@@ -345,6 +346,7 @@ mod tests {
             cap::SESSION_INFO
                 | cap::SERVER_TUNING
                 | cap::HELPER_UPDATE
+                | cap::KEYBOARD
                 | cap::FILE_DOWN
                 | cap::FOLDERS
         );

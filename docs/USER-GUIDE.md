@@ -488,6 +488,14 @@ the side panel's Session page) decides how keys go:
 - **Translate**: text always as typed here; shortcuts and special keys stay
   keys.
 
+Some programs read keys rather than text and ignore typed text: games, VM
+consoles, programs built on winit (Remora itself, ffwd). When Remora knows
+the session's layout, it types each character with that layout's own key
+(and Shift or AltGr), which every program reads; only characters that
+layout cannot type go as text. The server helper reports the layout by
+itself; without it, name it under **Server keyboard layout** on the
+editor's Experience page (for example German).
+
 The touch keyboard and the emoji panel work too: their characters are sent as
 text.
 

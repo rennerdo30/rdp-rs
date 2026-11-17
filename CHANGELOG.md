@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- **Typing reaches every program.** With translated typing (Automatic), Remora sent text as Unicode, which programs that read keys ignore: games, VM consoles, winit apps such as Remora itself and ffwd. When the session's layout is known, Remora now types each character with that layout's key and Shift or AltGr; only characters it cannot type still go as text. The server helper reports the layout (protocol 1.2, `KeyboardLayout`); without it, name it under **Server keyboard layout** on the editor's Experience page (RDP-68).
+- **A PC the helper already trusts is not asked about again on the server.** When Remora asked to compare codes (for example after its pins were reset) the helper showed its dialog too, held every transfer while it waited, and closed the connection after 5 minutes unanswered. Found by the new live helper test (RDP-64).
+- **`remora-agent capture-probe`** measures whether the helper can capture the session's picture itself, how fast, and which video encoders the server has (RDP-67, first step).
+
 - **Zip folders and e-mail attachments paste on the server.** Files that exist on this PC only as data (inside a zip folder, an Outlook attachment) can be copied here and pasted in the session; files copied on one server can be pasted on another (RDP-63).
 - **The command line checks server certificates.** `remora <host> --screenshot` and `--record` accept a known certificate, ask about a new or changed one on a console (and remember it), and refuse it without a console; scripts pass `--expect-fingerprint` (RDP-54).
 

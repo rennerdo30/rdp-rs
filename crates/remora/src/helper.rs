@@ -164,6 +164,8 @@ pub enum HelperEvent {
     TuneResult(TuneStatus),
     /// How [`HelperHandle::send_update`] went (RDP-61).
     UpdateResult(UpdateStatus),
+    /// The session's keyboard layout (KLID) changed (1.2, RDP-68).
+    KeyboardLayout(u32),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -937,6 +939,11 @@ impl Core {
                 self.session_info = Some(info.clone());
                 self.push(HelperEvent::SessionInfo(info));
             }
+            Message::KeyboardLayout { klid } => {
+                if self.accepted & cap::KEYBOARD != 0 {
+                    self.push(HelperEvent::KeyboardLayout(klid));
+                }
+            }
             Message::ServerSettings(s) => {
                 if self.accepted & cap::SERVER_TUNING == 0 {
                     return self.send_error(err::NOT_ALLOWED, "server tuning not enabled");
@@ -1674,3 +1681,6 @@ impl DynamicChannel for HelperChannel {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(all(test, windows))]
+mod live_tests;

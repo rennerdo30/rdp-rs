@@ -48,6 +48,8 @@ pub const PEER_PAIRING: u16 = 0x0106;
 pub const CLIENT_NAME: u16 = 0x0107;
 // Session information.
 pub const SESSION_INFO: u16 = 0x0200;
+/// 1.2: the session's active keyboard layout (RDP-68).
+pub const KEYBOARD_LAYOUT: u16 = 0x0201;
 // Links.
 pub const OPEN_URL: u16 = 0x0300;
 pub const OPEN_URL_RESULT: u16 = 0x0301;
@@ -93,9 +95,18 @@ pub mod cap {
     /// 1.2: file offers may belong to a folder ([`super::FolderRef`]); a
     /// peer without it is never sent one.
     pub const FOLDERS: u32 = 1 << 6;
+    /// 1.2: the helper reports the session's keyboard layout
+    /// ([`super::Message::KeyboardLayout`]), so Remora can type with keys.
+    pub const KEYBOARD: u32 = 1 << 7;
     /// Every bit this version defines.
-    pub const ALL: u32 =
-        SESSION_INFO | OPEN_URL | FILE_UP | FILE_DOWN | SERVER_TUNING | HELPER_UPDATE | FOLDERS;
+    pub const ALL: u32 = SESSION_INFO
+        | OPEN_URL
+        | FILE_UP
+        | FILE_DOWN
+        | SERVER_TUNING
+        | HELPER_UPDATE
+        | FOLDERS
+        | KEYBOARD;
 }
 
 /// Policy flags the helper reads from the server's configuration.
@@ -521,6 +532,11 @@ pub enum Message {
     },
     /// Helper → Remora (1.2): after `HelloAck` and whenever they change.
     ServerSettings(ServerSettings),
+    /// Helper → Remora (1.2, [`cap::KEYBOARD`]): the keyboard layout (KLID)
+    /// of the session's foreground window, after `HelloAck` and on change.
+    KeyboardLayout {
+        klid: u32,
+    },
     /// Remora → helper (1.2), `request_id` ≠ 0.
     TuneServer {
         action: TuneAction,
@@ -595,6 +611,7 @@ impl Message {
             Message::FileBlockHash { .. } => FILE_BLOCK_HASH,
             Message::FileEnd { .. } => FILE_END,
             Message::ServerSettings(_) => SERVER_SETTINGS,
+            Message::KeyboardLayout { .. } => KEYBOARD_LAYOUT,
             Message::TuneServer { .. } => TUNE_SERVER,
             Message::TuneResult { .. } => TUNE_RESULT,
             Message::UpdateBegin { .. } => UPDATE_BEGIN,
@@ -743,6 +760,7 @@ impl Message {
                 p.put_u32(*epoch);
                 p.put_bytes(root);
             }
+            Message::KeyboardLayout { klid } => p.put_u32(*klid),
             Message::ServerSettings(s) => {
                 put_opt(&mut p, s.frame_interval);
                 put_opt(&mut p, s.avc444);
@@ -879,6 +897,7 @@ impl Message {
                 epoch: r.u32()?,
                 root: r.array()?,
             },
+            KEYBOARD_LAYOUT => Message::KeyboardLayout { klid: r.u32()? },
             SERVER_SETTINGS => Message::ServerSettings(ServerSettings {
                 frame_interval: opt(&mut r)?,
                 avc444: opt(&mut r)?,
@@ -1005,6 +1024,7 @@ mod tests {
                 avc_hw: Some(0),
             }),
             Message::ServerSettings(ServerSettings::default()),
+            Message::KeyboardLayout { klid: 0x0000_0407 },
             Message::TuneServer {
                 action: TuneAction::Restore,
             },
@@ -1137,6 +1157,7 @@ mod tests {
             HELLO_ACK,
             ERROR,
             SESSION_INFO,
+            KEYBOARD_LAYOUT,
             OPEN_URL,
             FILE_OFFER,
             FILE_CHUNK,

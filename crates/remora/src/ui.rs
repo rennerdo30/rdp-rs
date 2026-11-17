@@ -255,6 +255,8 @@ pub enum Hit {
     FormWinKeys(usize),
     TabKeyboard(u64, usize),
     FormKeyboard(usize),
+    /// The editor's server keyboard layout (RDP-68), by [`SERVER_LAYOUTS`] index + 1.
+    FormServerLayout(usize),
     /// Quality: speed preset (index into PRESETS), colour depth, experience toggle.
     FormPreset(usize),
     FormDepth(usize),
@@ -443,6 +445,8 @@ pub struct Tab {
     pub win_keys: WinKeys,
     /// How typing reaches the session (changeable live).
     pub keyboard: KeyboardMode,
+    /// The session's layout as the connection names it (RDP-68).
+    pub server_layout: Option<u32>,
     /// The keyboard layout (KLID) the session logged on with; None until
     /// it is connected.
     pub keyboard_layout: Option<u32>,
@@ -987,6 +991,7 @@ impl Ui {
             cert: None,
             win_keys: WinKeys::default(),
             keyboard: KeyboardMode::default(),
+            server_layout: None,
             keyboard_layout: None,
             speaker: None,
             microphone: false,
@@ -2089,6 +2094,9 @@ impl Ui {
                 t.keyboard = KeyboardMode::ALL[i];
             }
             Hit::FormKeyboard(i) => self.opts.keyboard = KeyboardMode::ALL[i],
+            Hit::FormServerLayout(i) => {
+                self.opts.server_layout = i.checked_sub(1).map(|i| SERVER_LAYOUTS[i].0);
+            }
             Hit::BrowseForm => return Some(Action::Browse(None)),
             Hit::BrowseDrive(id) => return Some(Action::Browse(Some(id))),
             Hit::TabSpeaker(id, i) => {
@@ -5370,7 +5378,7 @@ impl Ui {
             Hit::FormExperience(6),
         );
         y += p(60.0) + p(24.0);
-        self.keyboard_choice(
+        let y = self.keyboard_choice(
             cv,
             te,
             f,
@@ -5378,7 +5386,41 @@ impl Ui {
             self.opts.keyboard,
             true,
             Hit::FormKeyboard,
-        )
+        );
+        if self.opts.keyboard == KeyboardMode::Remote {
+            return y;
+        }
+        // RDP-68: with the session's layout known, typing goes as its keys,
+        // which every program reads (some ignore typed text).
+        let names: Vec<String> = SERVER_LAYOUTS.iter().map(|l| l.1.to_string()).collect();
+        let chosen = self
+            .opts
+            .server_layout
+            .and_then(|k| SERVER_LAYOUTS.iter().find(|l| l.0 == k))
+            .map(|l| l.1);
+        let y = self.device_card(
+            cv,
+            te,
+            f,
+            x,
+            y + p(8.0),
+            w,
+            "Server keyboard layout",
+            "Unknown: send text as typed",
+            &names,
+            chosen,
+            Hit::FormServerLayout,
+        );
+        self.hint(
+            cv,
+            te,
+            f,
+            x,
+            y - p(4.0),
+            w,
+            "Name it so every program takes your typing (some ignore typed text). The server helper reports it by itself.",
+        );
+        y + p(28.0)
     }
 
     /// The Keyboard choice (RDP-32): segments and one line on the chosen
@@ -7416,6 +7458,15 @@ pub fn sample_settings(vault: bool) -> Ui {
 }
 
 /// The connection editor on `page` for a top-level connection.
+/// The Experience page scrolled to the keyboard, with a server layout
+/// named (RDP-68).
+pub fn sample_form_keyboard() -> Ui {
+    let mut m = sample_form(2);
+    m.opts.server_layout = Some(0x0407);
+    m.home_scroll = 1100;
+    m
+}
+
 pub fn sample_form(page: u8) -> Ui {
     let mut m = sample(false);
     m.store.connections[2].password = Some("sample".into());
@@ -7783,6 +7834,20 @@ pub fn sample(session_tab: bool) -> Ui {
     m
 }
 
+/// Layouts the editor offers for the session (RDP-68): KLID and name.
+pub const SERVER_LAYOUTS: [(u32, &str); 10] = [
+    (0x0000_0407, "German"),
+    (0x0000_0807, "German (Switzerland)"),
+    (0x0000_0409, "English (US)"),
+    (0x0000_0809, "English (UK)"),
+    (0x0000_040C, "French"),
+    (0x0000_0410, "Italian"),
+    (0x0000_040A, "Spanish"),
+    (0x0000_0816, "Portuguese"),
+    (0x0000_0413, "Dutch"),
+    (0x0000_0411, "Japanese"),
+];
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -7848,7 +7913,9 @@ mod tests {
         );
         assert!(inside(&m));
         assert!(
-            m.hits.iter().any(|(_, h)| *h == Hit::FormExperience(6)),
+            m.hits
+                .iter()
+                .any(|(_, h)| *h == Hit::FormServerLayout(SERVER_LAYOUTS.len())),
             "the last row is reachable"
         );
         assert!(m.scroll_home(cx, cy, 100.0));

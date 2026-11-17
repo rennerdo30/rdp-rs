@@ -104,6 +104,7 @@ fn snapshot(policy: PolicyFlags) -> SessionInfo {
             load_percent: 62,
         }),
         graphics: remora_link::msg::ServerSettings::default(),
+        keyboard: Some(0x0000_0407),
     }
 }
 
@@ -784,7 +785,7 @@ fn policy_turns_file_capabilities_off() {
     let hello = n.remora.hello.clone().unwrap();
     assert_eq!(
         hello.capabilities,
-        cap::SESSION_INFO | cap::OPEN_URL | cap::SERVER_TUNING | cap::HELPER_UPDATE
+        cap::SESSION_INFO | cap::OPEN_URL | cap::SERVER_TUNING | cap::HELPER_UPDATE | cap::KEYBOARD
     );
     assert_eq!(hello.policy, policy::CLIPBOARD_DISABLED);
     assert!(n.opens_requested.is_empty(), "no Bulk without file caps");
@@ -1033,11 +1034,14 @@ fn download_survives_a_drop_and_resumes() {
     );
     assert!(n.remora.dir.get("big.iso.remora-part").is_some());
     n.drop_link();
-    // A new Ctl session must be confirmed on the server again before the
-    // download continues (Known is not enough for server-to-client data).
+    // Remora lost its pin of the helper: only Remora compares codes; the
+    // helper has this client pinned, so no dialog holds the download.
     n.remora.pinned = None;
     n.connect(snapshot(PolicyFlags::default()));
-    n.answer_locally(true);
+    assert!(
+        n.agent.ctl.as_ref().is_some_and(|c| c.ticket.is_none()),
+        "no dialog for a pinned client"
+    );
     n.tick();
     for _ in 0..10 {
         n.advance(POLL_INTERVAL);

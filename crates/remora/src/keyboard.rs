@@ -9,6 +9,14 @@
 //! this PC's layout produced, including dead-key compositions and AltGr
 //! characters. Shortcuts, navigation and function keys and the modifiers
 //! themselves stay scancodes.
+//!
+//! When the session's layout is known (the server helper reports it, or the
+//! connection names it), translated text goes as the *keys* that type it on
+//! that layout, with Shift or AltGr pressed around them as needed (RDP-68):
+//! programs that read keys rather than characters (winit apps such as
+//! Remora itself, games, VM consoles) ignore Unicode keyboard events. Only
+//! characters that layout cannot type (or only with a dead key) still go
+//! as Unicode.
 
 use rdp::{InputEvent, KeyboardInfo};
 
@@ -82,6 +90,24 @@ pub enum Decision {
     Unicode { wrap: bool },
     /// Nothing now (a dead key; its composition follows as text).
     Swallow,
+}
+
+/// How a character is typed on a layout: its key and the modifiers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Typed {
+    pub key: (u8, bool),
+    pub shift: bool,
+    pub altgr: bool,
+}
+
+/// The characters a layout types, and how.
+pub type LayoutTable = std::collections::HashMap<char, Typed>;
+
+/// The one character of a key's text, if it is exactly one.
+fn single_char(text: Option<&str>) -> Option<char> {
+    let mut it = text?.chars();
+    let c = it.next()?;
+    it.next().is_none().then_some(c)
 }
 
 /// Modifiers the remote holds, as this client sent them.
@@ -185,6 +211,10 @@ pub struct Keys {
     /// Keys whose last press went as text or was swallowed: their release
     /// is not sent.
     translated: Vec<(u8, bool)>,
+    /// The session's layout, when known (RDP-68).
+    layout: Option<std::sync::Arc<LayoutTable>>,
+    /// Local key -> the session's key it was typed with (released with it).
+    mapped: Vec<((u8, bool), (u8, bool))>,
 }
 
 impl Keys {
@@ -197,7 +227,45 @@ impl Keys {
             held: Vec::new(),
             altgr: false,
             translated: Vec::new(),
+            layout: None,
+            mapped: Vec::new(),
         }
+    }
+
+    /// The session's layout as a table (from the helper or the
+    /// connection), or None when unknown: text then goes as Unicode.
+    pub fn set_layout(&mut self, table: Option<std::sync::Arc<LayoutTable>>) {
+        self.layout = table;
+    }
+
+    /// The keys that type `t` on the session's layout, with Shift and AltGr
+    /// set as it needs and put back after (RDP-68).
+    fn typed(&self, t: Typed) -> Vec<InputEvent> {
+        let m = self.mods();
+        let have_shift = self.held.iter().any(|h| SHIFT.contains(h));
+        let have_altgr = m.altgr || (m.ctrl && m.alt);
+        let (mut lift, mut add) = (Vec::new(), Vec::new());
+        if t.shift && !have_shift {
+            add.push(SHIFT[0]);
+        } else if !t.shift && have_shift {
+            lift.extend(self.held.iter().copied().filter(|h| SHIFT.contains(h)));
+        }
+        if t.altgr && !have_altgr {
+            add.push(RIGHT_ALT);
+        } else if !t.altgr && have_altgr {
+            lift.extend(
+                self.held
+                    .iter()
+                    .copied()
+                    .filter(|h| CTRL.contains(h) || ALT.contains(h)),
+            );
+        }
+        let mut out: Vec<InputEvent> = lift.iter().map(|&h| key(h, false)).collect();
+        out.extend(add.iter().map(|&h| key(h, true)));
+        out.push(key(t.key, true));
+        out.extend(add.iter().rev().map(|&h| key(h, false)));
+        out.extend(lift.iter().map(|&h| key(h, true)));
+        out
     }
 
     /// The session is up; `unicode`: the server announced INPUT_FLAG_UNICODE.
@@ -260,6 +328,12 @@ impl Keys {
             if sc == RIGHT_ALT {
                 self.altgr = false;
             }
+            if let Some(i) = self.mapped.iter().position(|m| m.0 == sc) {
+                let (_, remote) = self.mapped.swap_remove(i);
+                self.translated.retain(|t| *t != sc);
+                out.push(key(remote, false));
+                return out;
+            }
             if let Some(i) = self.translated.iter().position(|t| *t == sc) {
                 self.translated.swap_remove(i);
             } else {
@@ -280,6 +354,28 @@ impl Keys {
             self.altgr = k.altgr;
         }
         self.translated.retain(|t| *t != sc);
+        // A repeat while held: the key it typed so far.
+        let before = self
+            .mapped
+            .iter()
+            .position(|m| m.0 == sc)
+            .map(|i| self.mapped.swap_remove(i).1);
+        let typed = match decide(k, translate, self.mods()) {
+            Decision::Unicode { .. } => {
+                single_char(k.text).and_then(|c| self.layout.as_ref()?.get(&c).copied())
+            }
+            _ => None,
+        };
+        if let Some(b) = before.filter(|b| typed.is_none_or(|t| t.key != *b)) {
+            out.push(key(b, false));
+        }
+        if let Some(t) = typed {
+            // The session's own key for this character (RDP-68).
+            self.translated.push(sc);
+            self.mapped.push((sc, t.key));
+            out.extend(self.typed(t));
+            return out;
+        }
         match decide(k, translate, self.mods()) {
             Decision::Scancode => out.push(key(sc, true)),
             Decision::Swallow => self.translated.push(sc),
@@ -353,6 +449,37 @@ pub fn local() -> (u32, KeyboardInfo) {
 }
 
 /// The active layout of the calling (UI) thread, as a KLID.
+/// The table of a layout (KLID), read from Windows once and kept; None
+/// when Windows has no such layout (RDP-68).
+pub fn layout_table(klid: u32) -> Option<std::sync::Arc<LayoutTable>> {
+    #[cfg(windows)]
+    {
+        use std::collections::HashMap;
+        use std::sync::{Arc, Mutex, OnceLock};
+        static CACHE: OnceLock<Mutex<HashMap<u32, Option<Arc<LayoutTable>>>>> = OnceLock::new();
+        let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+        if let Some(t) = cache.lock().ok()?.get(&klid) {
+            return t.clone();
+        }
+        let t = win::layout_table(klid).map(Arc::new);
+        rdp::trace!(
+            "keyboard: layout {klid:08x}: {}",
+            t.as_ref()
+                .map_or("not available here".to_string(), |t| format!(
+                    "{} characters",
+                    t.len()
+                ))
+        );
+        cache.lock().ok()?.insert(klid, t.clone());
+        t
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = klid;
+        None
+    }
+}
+
 pub fn local_klid() -> u32 {
     #[cfg(windows)]
     {
@@ -461,6 +588,77 @@ mod win {
     fn until_nul(buf: &[u16]) -> String {
         let len = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
         String::from_utf16_lossy(&buf[..len])
+    }
+
+    /// What each key of the typing block types on layout `klid`, with no
+    /// modifier, Shift, AltGr and Shift+AltGr (the first way wins). Dead
+    /// keys are left out: as keys they would start a composition. A layout
+    /// this PC did not have loaded is unloaded again right after.
+    pub fn layout_table(klid: u32) -> Option<super::LayoutTable> {
+        use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+            GetKeyboardLayoutList, KLF_NOTELLSHELL, LoadKeyboardLayoutW, MAPVK_VK_TO_VSC_EX,
+            MapVirtualKeyExW, ToUnicodeEx, UnloadKeyboardLayout,
+        };
+        let name: Vec<u16> = format!("{klid:08X}")
+            .encode_utf16()
+            .chain(Some(0))
+            .collect();
+        // SAFETY: layout APIs with valid buffers; the key state array is ours.
+        unsafe {
+            let n = GetKeyboardLayoutList(0, std::ptr::null_mut());
+            let mut before = vec![std::ptr::null_mut(); n.max(0) as usize];
+            let n = GetKeyboardLayoutList(before.len() as i32, before.as_mut_ptr());
+            before.truncate(n.max(0) as usize);
+            let hkl = LoadKeyboardLayoutW(name.as_ptr(), KLF_NOTELLSHELL);
+            if hkl.is_null() {
+                return None;
+            }
+            let vks: Vec<u32> = std::iter::once(0x20)
+                .chain(0x30..=0x39)
+                .chain(0x41..=0x5A)
+                .chain(0xBA..=0xC0)
+                .chain(0xDB..=0xDF)
+                .chain(Some(0xE2))
+                .collect();
+            let mut table = super::LayoutTable::new();
+            for (shift, altgr) in [(false, false), (true, false), (false, true), (true, true)] {
+                let mut ks = [0u8; 256];
+                if shift {
+                    ks[0x10] = 0x80; // VK_SHIFT
+                    ks[0xA0] = 0x80; // VK_LSHIFT
+                }
+                if altgr {
+                    ks[0x11] = 0x80; // VK_CONTROL
+                    ks[0xA2] = 0x80; // VK_LCONTROL
+                    ks[0x12] = 0x80; // VK_MENU
+                    ks[0xA5] = 0x80; // VK_RMENU
+                }
+                for &vk in &vks {
+                    let sc = MapVirtualKeyExW(vk, MAPVK_VK_TO_VSC_EX, hkl);
+                    if sc == 0 {
+                        continue;
+                    }
+                    let mut buf = [0u16; 8];
+                    // Flag 4: the kernel's dead-key state stays as it is.
+                    let got = ToUnicodeEx(vk, sc, ks.as_ptr(), buf.as_mut_ptr(), 8, 4, hkl);
+                    if got != 1 {
+                        continue; // dead key, nothing, or several characters
+                    }
+                    let Some(c) = char::from_u32(buf[0] as u32).filter(|c| !c.is_control()) else {
+                        continue;
+                    };
+                    table.entry(c).or_insert(super::Typed {
+                        key: ((sc & 0xFF) as u8, sc & 0xFF00 == 0xE000),
+                        shift,
+                        altgr,
+                    });
+                }
+            }
+            if !before.contains(&hkl) {
+                UnloadKeyboardLayout(hkl);
+            }
+            Some(table)
+        }
     }
 
     /// The calling thread's keyboard layout handle.
@@ -823,5 +1021,81 @@ mod tests {
         assert!(layout_name(0x0001_0409).ends_with(" (US), Dvorak"));
         assert!(layout_name(0x0005_0408).ends_with(", variant 5"));
         assert_eq!(builtin_language(0x0807), Some("German (Switzerland)"));
+    }
+
+    /// A German layout's keys for the test characters.
+    fn german() -> std::sync::Arc<LayoutTable> {
+        let t = |key, shift, altgr| Typed { key, shift, altgr };
+        std::sync::Arc::new(LayoutTable::from([
+            ('z', t((0x15, false), false, false)),
+            ('y', t((0x2C, false), false, false)),
+            ('@', t(Q, false, true)),
+            ('"', t((0x03, false), true, false)),
+            ('2', t((0x03, false), false, false)),
+            ('a', t(A, false, false)),
+        ]))
+    }
+
+    const LSHIFT: (u8, bool) = (0x2A, false);
+
+    #[test]
+    fn a_known_layout_types_with_its_keys() {
+        // RDP-68: a Japanese PC into a German session; programs that read
+        // keys (winit apps, games) get keys, not Unicode.
+        let mut s = S::new(KeyboardMode::Auto, 0x0411);
+        s.keys.set_layout(Some(german()));
+        // 'z' sits where the US/JIS 'y' is.
+        assert_eq!(s.press((0x2C, false), Some("z")), ["k15+"]);
+        assert_eq!(s.release((0x2C, false)), ["k15-"]);
+        // '@' is unshifted on JIS, AltGr+Q on German.
+        assert_eq!(
+            s.press((0x1A, false), Some("@")),
+            ["k38e+", "k10+", "k38e-"]
+        );
+        assert_eq!(s.release((0x1A, false)), ["k10-"]);
+        // '"' with Shift held here: Shift+2 there, no extra Shift.
+        assert_eq!(s.press(LSHIFT, None), ["k2A+"]);
+        assert_eq!(s.press((0x03, false), Some("\"")), ["k03+"]);
+        assert_eq!(s.release((0x03, false)), ["k03-"]);
+        // '2' would come with Shift held: it is lifted around the key.
+        assert_eq!(s.press((0x03, false), Some("2")), ["k2A-", "k03+", "k2A+"]);
+        assert_eq!(s.release((0x03, false)), ["k03-"]);
+        assert_eq!(s.release(LSHIFT), ["k2A-"]);
+        // A character the layout cannot type still goes as Unicode.
+        assert_eq!(s.press((0x7D, false), Some("¥")), ["u00A5+", "u00A5-"]);
+        assert_eq!(s.release((0x7D, false)), Vec::<String>::new());
+        // Shortcuts stay keys.
+        assert_eq!(s.press(CTRL[0], None), ["k1D+"]);
+        assert_eq!(s.press(A, Some("a")), ["k1E+"]);
+    }
+
+    #[test]
+    fn a_held_key_repeats_with_the_layouts_key() {
+        let mut s = S::new(KeyboardMode::Auto, 0x0411);
+        s.keys.set_layout(Some(german()));
+        assert_eq!(s.press((0x2C, false), Some("z")), ["k15+"]);
+        assert_eq!(s.press((0x2C, false), Some("z")), ["k15+"], "a repeat");
+        assert_eq!(s.release((0x2C, false)), ["k15-"]);
+    }
+
+    #[test]
+    fn remote_mode_ignores_the_layout() {
+        let mut s = S::new(KeyboardMode::Remote, 0x0411);
+        s.keys.set_layout(Some(german()));
+        assert_eq!(s.press((0x2C, false), Some("z")), ["k2C+"]);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn this_pcs_layout_reads_as_a_table() {
+        // The layout already in use here: nothing is loaded or unloaded.
+        let Some(t) = layout_table(local_klid()) else {
+            return;
+        };
+        if let Some(a) = t.get(&'a') {
+            assert!(!a.shift && !a.altgr);
+            assert_eq!(t.get(&'A').map(|x| (x.key, x.shift)), Some((a.key, true)));
+        }
+        assert!(t.len() > 40, "{} characters", t.len());
     }
 }

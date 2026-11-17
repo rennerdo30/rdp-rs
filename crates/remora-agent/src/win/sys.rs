@@ -418,5 +418,25 @@ pub fn collect(s: &StaticInfo, cpu_prev: &mut Option<CpuTimes>) -> SessionInfo {
         cpu_percent,
         memory: memory(),
         graphics: super::tune::read(),
+        keyboard: foreground_klid(),
     }
+}
+
+/// The keyboard layout (KLID) of the foreground window's thread: what the
+/// user types with in this session now (RDP-68).
+pub fn foreground_klid() -> Option<u32> {
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::GetKeyboardLayout;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GetForegroundWindow, GetWindowThreadProcessId,
+    };
+    // SAFETY: plain queries; a missing window gives thread 0 (ours).
+    let hkl = unsafe {
+        let w = GetForegroundWindow();
+        if w.is_null() {
+            return None;
+        }
+        let tid = GetWindowThreadProcessId(w, std::ptr::null_mut());
+        GetKeyboardLayout(tid) as usize
+    };
+    (hkl != 0).then(|| crate::info::klid_from_hkl(hkl))
 }

@@ -106,6 +106,14 @@ impl App {
             return;
         };
         while let Some(ev) = h.next_event() {
+            if let HelperEvent::KeyboardLayout(klid) = ev {
+                // Typed text now goes as this layout's keys (RDP-68).
+                rdp::trace!("keyboard: the helper reports layout {klid:08x}");
+                s.keys
+                    .borrow_mut()
+                    .set_layout(crate::keyboard::layout_table(klid));
+                continue;
+            }
             let quiet = matches!(
                 ev,
                 HelperEvent::SessionInfo(_) | HelperEvent::Transfer(TransferEvent::Progress { .. })

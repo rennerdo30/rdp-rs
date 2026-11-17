@@ -538,7 +538,13 @@ impl App {
                 cert_reply: None,
                 spanned: false,
                 rail,
-                keys: std::cell::RefCell::new(crate::keyboard::Keys::new(klid, sent_layout)),
+                keys: std::cell::RefCell::new({
+                    let mut k = crate::keyboard::Keys::new(klid, sent_layout);
+                    // The layout the connection names (RDP-68); the
+                    // helper's report replaces it.
+                    k.set_layout(opts.server_layout.and_then(crate::keyboard::layout_table));
+                    k
+                }),
                 last_fb: None,
                 helper,
             },
@@ -609,6 +615,7 @@ impl App {
             t.quality_live = opts.quality;
             t.win_keys = opts.win_keys;
             t.keyboard = opts.keyboard;
+            t.server_layout = opts.server_layout;
             t.speaker = opts.speaker.clone();
             t.microphone = microphone;
             t.mic = opts.mic.clone();
@@ -644,6 +651,7 @@ impl App {
             quality: t.quality,
             win_keys: t.win_keys,
             keyboard: t.keyboard,
+            server_layout: t.server_layout,
             speaker: t.speaker.clone(),
             microphone: t.microphone,
             mic: t.mic.clone(),
@@ -719,7 +727,8 @@ impl App {
         // A reconnect takes this PC's layout as it is now.
         let (klid, keyboard) = crate::keyboard::local();
         cfg.keyboard = keyboard;
-        let keys = crate::keyboard::Keys::new(klid, cfg.keyboard.layout);
+        let mut keys = crate::keyboard::Keys::new(klid, cfg.keyboard.layout);
+        keys.set_layout(opts.server_layout.and_then(crate::keyboard::layout_table));
         if let Some(mut old) = self.sessions.get_mut(&id).and_then(|s| s.worker.take()) {
             old.close();
         }
