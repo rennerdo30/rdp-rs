@@ -471,7 +471,8 @@ impl HelperView {
                 self.stream = match state {
                     0 => StreamView::On(width, height),
                     1 => StreamView::Off,
-                    _ => StreamView::Failed(text),
+                    // The helper's text, one plain line (RDP-71).
+                    _ => StreamView::Failed(text.split_whitespace().collect::<Vec<_>>().join(" ")),
                 };
                 Vec::new()
             }

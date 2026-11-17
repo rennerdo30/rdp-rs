@@ -32,6 +32,40 @@ use crate::{info, warn};
 
 /// Pictures sent and not yet acknowledged before capture pauses.
 const IN_FLIGHT: u32 = 2;
+/// Capture errors in a row (each followed by a new duplication) before the
+/// stream gives up.
+const CAPTURE_RETRIES: u32 = 3;
+
+/// A Windows error in one line with its code (the system text has line
+/// breaks and a hint about the debug layer).
+fn describe(e: &windows::core::Error) -> String {
+    let text = e.message();
+    let first = text
+        .split(['\r', '\n'])
+        .find(|l| !l.trim().is_empty())
+        .unwrap_or("");
+    format!("{} ({:#010x})", first.trim(), e.code().0 as u32)
+}
+
+/// Releases the frame and duplicates the output again: Windows' recovery
+/// for a duplication that lost its state (RDP-71).
+fn reduplicate(d: &mut probe::Dup) -> Result<(), String> {
+    // SAFETY: releasing an unheld frame only fails; then a new duplication
+    // of the same output replaces the old one.
+    unsafe {
+        let _ = d.dupl.ReleaseFrame();
+        match d.output.DuplicateOutput(&d.device) {
+            Ok(n) => {
+                d.dupl = n;
+                Ok(())
+            }
+            Err(e) => Err(format!(
+                "the desktop cannot be captured again: {}",
+                describe(&e)
+            )),
+        }
+    }
+}
 /// Changed rectangles per picture before they become one.
 const MAX_RECTS: usize = remora_link::msg::MAX_STREAM_RECTS;
 
@@ -129,6 +163,7 @@ fn stream(
     // The first full frame: the encoder's size and format.
     let mut first: Option<ID3D11Texture2D> = None;
     let t = Instant::now();
+    let mut retries = 0;
     while first.is_none() {
         if t.elapsed() > Duration::from_secs(3) {
             return Err("no picture from the desktop within 3 s".into());
@@ -144,18 +179,32 @@ fn stream(
                     {
                         probe::keep_frame(&d, &tex, &mut first);
                     }
-                    let _ = d.dupl.ReleaseFrame();
+                    if let Err(e) = d.dupl.ReleaseFrame() {
+                        warn!("picture stream: first frame not released: {}", describe(&e));
+                        reduplicate(&mut d)?;
+                    }
                 }
                 Err(e) if e.code() == DXGI_ERROR_WAIT_TIMEOUT => {
                     // Nothing changed: an empty desktop still has a picture
                     // once something is drawn; keep waiting.
                 }
-                Err(e) => return Err(format!("capture: {e}")),
+                Err(e) => {
+                    retries += 1;
+                    warn!(
+                        "picture stream: first capture: {} (try {retries})",
+                        describe(&e)
+                    );
+                    if retries > CAPTURE_RETRIES {
+                        return Err(format!("first capture: {}", describe(&e)));
+                    }
+                    reduplicate(&mut d)?;
+                }
             }
         }
     }
     let first = first.ok_or("no first picture")?;
-    let mut live = Live::start(&d.device, &d.context, &first, kbps)?;
+    let mut live =
+        Live::start(&d.device, &d.context, &first, kbps).map_err(|e| format!("no encoder: {e}"))?;
     let size = live.encoded_size();
     info!(
         "picture stream started: {}x{}, {} kbit/s, at most {max_fps} fps, {}",
@@ -189,6 +238,7 @@ fn pump(
     let mut seq = 0u32;
     let mut acked = 0u32;
     let mut last = Instant::now() - gap;
+    let mut retries = 0;
     loop {
         // Remora's acknowledgements, or the stop (the sender is gone).
         loop {
@@ -229,22 +279,37 @@ fn pump(
                         last = Instant::now();
                     }
                 }
-                // SAFETY: the frame acquired above.
-                let _ = unsafe { d.dupl.ReleaseFrame() };
+                // SAFETY: the frame acquired above. A frame that cannot be
+                // released would fail every later capture: start over.
+                if let Err(e) = unsafe { d.dupl.ReleaseFrame() } {
+                    warn!("picture stream: frame not released: {}", describe(&e));
+                    reduplicate(d)?;
+                    pending = full.clone();
+                }
+                retries = 0;
             }
             Err(e) if e.code() == DXGI_ERROR_WAIT_TIMEOUT => {}
             Err(e) if e.code() == DXGI_ERROR_ACCESS_LOST => {
                 // The desktop switched (lock screen, UAC, a mode change).
-                // SAFETY: a new duplication of the same output.
-                match unsafe { d.output.DuplicateOutput(&d.device) } {
-                    Ok(n) => {
-                        d.dupl = n;
-                        pending = full.clone();
-                    }
-                    Err(e) => return Err(format!("the desktop cannot be captured again: {e}")),
-                }
+                reduplicate(d)?;
+                pending = full.clone();
             }
-            Err(e) => return Err(format!("capture: {e}")),
+            Err(e) => {
+                retries += 1;
+                warn!(
+                    "picture stream: capture after {seq} pictures: {} (try {retries})",
+                    describe(&e)
+                );
+                if retries > CAPTURE_RETRIES {
+                    return Err(format!(
+                        "capture after {seq} pictures ({}): {}",
+                        live.name,
+                        describe(&e)
+                    ));
+                }
+                reduplicate(d)?;
+                pending = full.clone();
+            }
         }
     }
 }
@@ -339,5 +404,61 @@ fn changed_rects(
     if pending.len() > MAX_RECTS {
         pending.clear();
         pending.push(full);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The stream on this PC's own desktop and GPU encoder (RDP-71):
+    /// captures for a few seconds, reports what came out; nothing is saved
+    /// or shown. `cargo test -p remora-agent stream_on_this_desktop --
+    /// --ignored --nocapture`.
+    #[test]
+    #[ignore = "captures this PC's desktop in memory with its GPU encoder"]
+    fn stream_on_this_desktop() {
+        let (tx, rx) = mpsc::channel();
+        let s = Stream::start(1, 60, 8000, tx);
+        let t = Instant::now();
+        let (mut pictures, mut bytes, mut states) = (0u32, 0usize, Vec::new());
+        let secs = std::env::var("STREAM_TEST_SECS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(4);
+        while t.elapsed() < Duration::from_secs(secs) {
+            match rx.recv_timeout(Duration::from_millis(50)) {
+                Ok(Input::StreamState {
+                    state,
+                    width,
+                    height,
+                    text,
+                    ..
+                }) => {
+                    states.push(format!("{state} {width}x{height} {text}"));
+                    if state != 0 {
+                        break;
+                    }
+                }
+                Ok(Input::StreamPicture { seq, data, .. }) => {
+                    pictures += 1;
+                    bytes += data.len();
+                    s.ack(seq);
+                }
+                _ => {}
+            }
+        }
+        drop(s);
+        while let Ok(i) = rx.try_recv() {
+            if let Input::StreamState { state, text, .. } = i {
+                states.push(format!("{state} {text}"));
+            }
+        }
+        println!("states {states:?}; {pictures} pictures, {bytes} bytes");
+        assert!(
+            states.first().is_some_and(|s| s.starts_with("0 ")),
+            "{states:?}"
+        );
+        assert!(pictures > 0, "{states:?}");
     }
 }
