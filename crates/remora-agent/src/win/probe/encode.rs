@@ -216,6 +216,8 @@ struct Bench {
     gpu: Result<Gpu, String>,
     cpu: Option<Cpu>,
     manager: Option<IMFDXGIDeviceManager>,
+    /// Read-back texture of the copy path.
+    nv12_staging: Option<ID3D11Texture2D>,
     bitrate: u32,
     /// The adapter the captured picture is on.
     luid: Option<u64>,
@@ -288,6 +290,7 @@ impl Bench {
                 gpu,
                 cpu: None,
                 manager,
+                nv12_staging: None,
                 bitrate,
                 luid,
             })
@@ -314,57 +317,62 @@ impl Bench {
             ("HEVC", MFVideoFormat_HEVC),
             ("AV1", MFVideoFormat_AV1),
         ] {
-            // The encoders of the capture's adapter; only when it has none
-            // (or Windows cannot tell), every hardware encoder.
+            // The encoders MF names for the capture's adapter first, then
+            // every hardware encoder (an adapter's own entry is not always
+            // the one that takes its textures).
             let mut hw = match self.luid {
                 Some(l) => list(subtype, true, true, Some(l)),
                 None => Vec::new(),
             };
-            if hw.is_empty() {
-                hw = list(subtype, true, true, None);
-            }
+            hw.extend(list(subtype, true, true, None));
             if hw.is_empty() {
                 continue;
             }
             any_hw = true;
-            // A failure on the GPU path is retried with frames from the CPU,
-            // so the report tells an encoder that cannot share our textures
-            // from one that cannot run at all.
-            let mut lines = Vec::new();
-            for f in &hw {
-                let label = match f.luid {
-                    Some(_) => format!("{} [capture adapter]", f.name),
-                    None => format!("{} [any adapter]", f.name),
-                };
-                let gpu = self.one(codec, subtype, &f.activate, true);
-                // SAFETY: releases what ActivateObject created; the activation
-                // can create a fresh object afterwards.
-                let _ = unsafe { f.activate.ShutdownObject() };
-                match gpu {
-                    Ok(line) => {
-                        lines = vec![format!("  {codec} hardware {label}: {line}\n")];
-                        break;
-                    }
-                    Err(e) => {
-                        lines.push(format!("  {codec} hardware {label} failed: {e}\n"));
-                        let cpu = self.one(codec, subtype, &f.activate, false);
-                        // SAFETY: as above.
-                        let _ = unsafe { f.activate.ShutdownObject() };
-                        match cpu {
-                            Ok(line) => {
-                                lines.push(format!(
-                                    "  {codec} hardware {label} with CPU input: {line}\n"
-                                ));
-                                break;
-                            }
-                            Err(e) => lines.push(format!(
-                                "  {codec} hardware {label} with CPU input failed: {e}\n"
-                            )),
+            let label = |f: &Found, k: usize| match f.luid {
+                Some(_) => format!("{} [capture adapter]", f.name),
+                None => format!("{} [entry {k}]", f.name),
+            };
+            // The GPU path on each entry; when every one refuses our
+            // textures, the frames are copied to memory for the first entry
+            // that runs at all. Every failure is reported.
+            let mut fails = Vec::new();
+            let mut ok = None;
+            for input in [Input::Gpu, Input::Copy] {
+                for (k, f) in hw.iter().enumerate() {
+                    let res = self.one(codec, subtype, &f.activate, input);
+                    // SAFETY: releases what ActivateObject created; the
+                    // activation can create a fresh object afterwards.
+                    let _ = unsafe { f.activate.ShutdownObject() };
+                    match res {
+                        Ok(line) => {
+                            ok = Some(format!("  {codec} hardware {}: {line}\n", label(f, k)));
+                            break;
                         }
+                        Err(e) => fails.push((input, label(f, k), e)),
                     }
                 }
+                if ok.is_some() {
+                    break;
+                }
             }
-            for l in lines {
+            // Identical failures (the same encoder listed several times)
+            // are one line.
+            let mut seen: Vec<(Input, String, Vec<String>)> = Vec::new();
+            for (input, who, e) in fails {
+                match seen.iter_mut().find(|(i, err, _)| *i == input && *err == e) {
+                    Some((_, _, whom)) => whom.push(who),
+                    None => seen.push((input, e, vec![who])),
+                }
+            }
+            for (input, e, whom) in seen {
+                let who = match whom.as_slice() {
+                    [one] => one.clone(),
+                    _ => format!("{} entries", whom.len()),
+                };
+                *r += &format!("  {codec} hardware {who} ({}) failed: {e}\n", input.name());
+            }
+            if let Some(l) = ok {
                 *r += &l;
             }
         }
@@ -373,7 +381,12 @@ impl Bench {
             // path a server without a GPU would have.
             match list(MFVideoFormat_H264, false, true, None).first() {
                 Some(f) => {
-                    let res = self.one("H.264", MFVideoFormat_H264, &f.activate, false);
+                    let input = if self.gpu.is_ok() {
+                        Input::Copy
+                    } else {
+                        Input::Cpu
+                    };
+                    let res = self.one("H.264", MFVideoFormat_H264, &f.activate, input);
                     // SAFETY: releases what ActivateObject created.
                     let _ = unsafe { f.activate.ShutdownObject() };
                     match res {
@@ -436,11 +449,17 @@ impl Bench {
     }
 
     /// The NV12 sample for frame `i` on the GPU or CPU path.
-    fn frame(&mut self, i: u64, on_gpu: bool) -> Result<IMFSample, String> {
+    fn frame(&mut self, i: u64, input: Input) -> Result<IMFSample, String> {
         self.scroll(i);
         // SAFETY: MF and D3D11 calls on valid objects.
         unsafe {
-            let buffer: IMFMediaBuffer = if on_gpu {
+            let buffer: IMFMediaBuffer = if input == Input::Copy {
+                let Ok(gpu) = &self.gpu else {
+                    return Err("no GPU converter".into());
+                };
+                let tex = gpu.convert(i as usize % RING)?.clone();
+                self.copy_nv12(&tex)?
+            } else if input == Input::Gpu {
                 let Ok(gpu) = &self.gpu else {
                     return Err("no GPU converter".into());
                 };
@@ -473,6 +492,64 @@ impl Bench {
         }
     }
 
+    /// Copies a GPU-converted NV12 frame into a memory buffer.
+    fn copy_nv12(&mut self, tex: &ID3D11Texture2D) -> Result<IMFMediaBuffer, String> {
+        let (w, h) = (self.even.0 as usize, self.even.1 as usize);
+        let len = w * h * 3 / 2;
+        // SAFETY: the staging texture is read within its pitch and planes;
+        // the MF buffer is written within its locked length.
+        unsafe {
+            if self.nv12_staging.is_none() {
+                let mut d = D3D11_TEXTURE2D_DESC::default();
+                tex.GetDesc(&mut d);
+                let s = D3D11_TEXTURE2D_DESC {
+                    Usage: D3D11_USAGE_STAGING,
+                    BindFlags: 0,
+                    CPUAccessFlags: D3D11_CPU_ACCESS_READ.0 as u32,
+                    MiscFlags: 0,
+                    ..d
+                };
+                let mut t = None;
+                self.device
+                    .CreateTexture2D(&s, None, Some(&mut t))
+                    .map_err(|e| err("NV12 staging texture", e))?;
+                self.nv12_staging = t;
+            }
+            let Some(st) = &self.nv12_staging else {
+                return Err("NV12 staging texture: none".into());
+            };
+            self.context.CopyResource(st, tex);
+            let mut m = D3D11_MAPPED_SUBRESOURCE::default();
+            self.context
+                .Map(st, 0, D3D11_MAP_READ, 0, Some(&mut m))
+                .map_err(|e| err("map NV12", e))?;
+            let pitch = m.RowPitch as usize;
+            let src = m.pData as *const u8;
+            let result = MFCreateMemoryBuffer(len as u32)
+                .map_err(|e| err("buffer", e))
+                .and_then(|buf| {
+                    let mut p: *mut u8 = std::ptr::null_mut();
+                    let mut max = 0u32;
+                    buf.Lock(&mut p, Some(&mut max), None)
+                        .map_err(|e| err("lock", e))?;
+                    if (max as usize) < len {
+                        let _ = buf.Unlock();
+                        return Err("buffer too small".into());
+                    }
+                    // Y rows, then the interleaved UV rows; the mapped UV
+                    // plane starts after `h` rows of the luma pitch.
+                    for row in 0..h + h / 2 {
+                        std::ptr::copy_nonoverlapping(src.add(row * pitch), p.add(row * w), w);
+                    }
+                    let _ = buf.Unlock();
+                    let _ = buf.SetCurrentLength(len as u32);
+                    Ok(buf)
+                });
+            self.context.Unmap(st, 0);
+            result
+        }
+    }
+
     /// Sets up the encoder behind `a` and measures it; returns the report
     /// line.
     fn one(
@@ -480,22 +557,27 @@ impl Bench {
         codec: &str,
         subtype: GUID,
         a: &IMFActivate,
-        use_gpu: bool,
+        input: Input,
     ) -> Result<String, String> {
         // SAFETY: MF calls on the transform this function owns.
-        let enc = unsafe { Encoder::new(a, codec, subtype, self, use_gpu)? };
-        let on_gpu = enc.d3d;
+        let enc = unsafe { Encoder::new(a, codec, subtype, self, input == Input::Gpu)? };
+        // An encoder that does not take Direct3D textures gets memory.
+        let input = match (input, enc.d3d) {
+            (Input::Gpu, false) if self.gpu.is_ok() => Input::Copy,
+            (Input::Gpu, false) => Input::Cpu,
+            (i, _) => i,
+        };
         let mut stats = Stats::default();
-        let result = self.drive(&enc, on_gpu, &mut stats);
+        let result = self.drive(&enc, input, &mut stats);
         // SAFETY: ends streaming on our transform.
         unsafe {
             let _ = enc.t.ProcessMessage(MFT_MESSAGE_NOTIFY_END_STREAMING, 0);
         }
         result?;
-        Ok(stats.line(on_gpu, &enc.refused))
+        Ok(stats.line(input, &enc.refused))
     }
 
-    fn drive(&mut self, enc: &Encoder, on_gpu: bool, st: &mut Stats) -> Result<(), String> {
+    fn drive(&mut self, enc: &Encoder, input: Input, st: &mut Stats) -> Result<(), String> {
         let frame = Duration::from_nanos(1_000_000_000 / FPS as u64);
         let start = Instant::now();
         let end = start + Duration::from_secs(SECONDS);
@@ -535,7 +617,7 @@ impl Bench {
                     st.missed += 1;
                 }
                 let t0 = Instant::now();
-                let sample = self.frame(i, on_gpu)?;
+                let sample = self.frame(i, input)?;
                 st.prepare += t0.elapsed().as_secs_f64() * 1000.0;
                 sent.insert(i as i64 * FRAME_TICKS, t0);
                 // SAFETY: input for our transform.
@@ -580,6 +662,28 @@ impl Bench {
         }
         st.seconds = start.elapsed().as_secs_f64();
         Ok(())
+    }
+}
+
+/// How frames reach the encoder.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Input {
+    /// NV12 textures on the GPU, shared with the encoder.
+    Gpu,
+    /// Converted on the GPU, copied to memory (for an encoder that refuses
+    /// our textures).
+    Copy,
+    /// Read back and converted on the CPU (no GPU video processor).
+    Cpu,
+}
+
+impl Input {
+    fn name(self) -> &'static str {
+        match self {
+            Input::Gpu => "GPU textures",
+            Input::Copy => "GPU-converted, copied to memory",
+            Input::Cpu => "converted on the CPU",
+        }
     }
 }
 
@@ -833,7 +937,7 @@ impl Stats {
         }
     }
 
-    fn line(&self, on_gpu: bool, refused: &[String]) -> String {
+    fn line(&self, input: Input, refused: &[String]) -> String {
         let out = self.sizes.len();
         let mut lat = self.latencies.clone();
         lat.sort_by(|a, b| a.total_cmp(b));
@@ -861,7 +965,7 @@ impl Stats {
             kb(self.keyframes.iter().map(|&b| b as f64).sum::<f64>()
                 / self.keyframes.len().max(1) as f64),
             total as f64 * 8.0 / self.seconds.max(0.001) / 1e6,
-            if on_gpu { "GPU" } else { "CPU" },
+            input.name(),
             self.prepare / self.input.max(1) as f64,
         );
         if !refused.is_empty() {
@@ -1128,7 +1232,7 @@ mod tests {
         assert_eq!(&dst[8..12], &[128, 128, 128, 128]);
     }
 
-    /// The benchmark on this PC's default GPU with a generated picture: no
+    /// The benchmark on each of this PC's GPUs with a generated picture: no
     /// desktop capture, no window. It exercises the GPU converter and the
     /// asynchronous hardware encoders that the lab VM lacks:
     /// `cargo test -p remora-agent encode_on_this_gpu -- --ignored --nocapture`.
@@ -1136,7 +1240,7 @@ mod tests {
     #[ignore = "uses this PC's GPU encoders for about 15 s"]
     fn encode_on_this_gpu() {
         use windows::Win32::Foundation::HMODULE;
-        use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_HARDWARE;
+        use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_UNKNOWN;
         use windows::Win32::Graphics::Direct3D11::{
             D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
             D3D11_CREATE_DEVICE_VIDEO_SUPPORT, D3D11_SDK_VERSION, D3D11_SUBRESOURCE_DATA,
@@ -1144,6 +1248,9 @@ mod tests {
         };
         use windows::Win32::Graphics::Dxgi::Common::{
             DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC,
+        };
+        use windows::Win32::Graphics::Dxgi::{
+            CreateDXGIFactory1, DXGI_ADAPTER_FLAG_SOFTWARE, IDXGIFactory1,
         };
 
         let (w, h) = std::env::var("ENCODE_TEST_SIZE")
@@ -1164,75 +1271,98 @@ mod tests {
                 px[i..i + 4].copy_from_slice(&[v, v.wrapping_sub((x % 40) as u8), v, 255]);
             }
         }
-        // SAFETY: device and texture creation with valid descriptions and
-        // initial data that outlives the call.
-        unsafe {
-            let mut device = None;
-            let mut context = None;
-            D3D11CreateDevice(
-                None,
-                D3D_DRIVER_TYPE_HARDWARE,
-                HMODULE::default(),
-                D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_VIDEO_SUPPORT,
-                None,
-                D3D11_SDK_VERSION,
-                Some(&mut device),
-                None,
-                Some(&mut context),
-            )
-            .expect("hardware Direct3D 11 device");
-            let (device, context) = (device.unwrap(), context.unwrap());
-            let desc = D3D11_TEXTURE2D_DESC {
-                Width: w,
-                Height: h,
-                MipLevels: 1,
-                ArraySize: 1,
-                Format: DXGI_FORMAT_B8G8R8A8_UNORM,
-                SampleDesc: DXGI_SAMPLE_DESC {
-                    Count: 1,
-                    Quality: 0,
-                },
-                Usage: D3D11_USAGE_DEFAULT,
-                BindFlags: (D3D11_BIND_RENDER_TARGET.0 | D3D11_BIND_SHADER_RESOURCE.0) as u32,
-                CPUAccessFlags: 0,
-                MiscFlags: 0,
-            };
-            let init = D3D11_SUBRESOURCE_DATA {
-                pSysMem: px.as_ptr() as *const _,
-                SysMemPitch: w * 4,
-                SysMemSlicePitch: 0,
-            };
-            let mut tex = None;
-            device
-                .CreateTexture2D(&desc, Some(&init), Some(&mut tex))
-                .expect("picture");
-            let mut r = String::new();
-            let tex = tex.unwrap();
-            super::run(&device, &context, &tex, &mut r);
-            println!("{r}");
-            assert!(r.contains("frames out"), "{r}");
-            assert!(!r.contains("failed"), "{r}");
-            assert!(r.contains("[capture adapter]"), "{r}");
-
-            // The fallback a failed GPU path takes: the same hardware
-            // encoder fed from the CPU.
-            use windows::Win32::Media::MediaFoundation::{
-                MF_VERSION, MFSTARTUP_NOSOCKET, MFShutdown, MFStartup, MFVideoFormat_H264,
-            };
-            MFStartup(MF_VERSION, MFSTARTUP_NOSOCKET).unwrap();
-            {
-                let mut b = super::Bench::new(&device, &context, &tex).unwrap();
-                let f = super::list(MFVideoFormat_H264, true, true, b.luid)
-                    .into_iter()
-                    .next()
-                    .expect("a hardware H.264 encoder on this adapter");
-                let line = b.one("H.264", MFVideoFormat_H264, &f.activate, false);
-                let _ = f.activate.ShutdownObject();
-                let line = line.unwrap();
-                println!("H.264 hardware with CPU input: {line}");
-                assert!(line.contains("input CPU"), "{line}");
+        // Every hardware adapter of this PC, one after the other.
+        let factory: IDXGIFactory1 = unsafe { CreateDXGIFactory1() }.expect("DXGI");
+        let mut adapters = Vec::new();
+        let mut i = 0;
+        // SAFETY: DXGI enumeration; descriptors are plain data.
+        while let Ok(a) = unsafe { factory.EnumAdapters1(i) } {
+            i += 1;
+            let d = unsafe { a.GetDesc1() }.expect("adapter description");
+            if d.Flags & DXGI_ADAPTER_FLAG_SOFTWARE.0 as u32 == 0 && d.VendorId != 0x1414 {
+                adapters.push((a, super::super::wide_str(&d.Description)));
             }
-            let _ = MFShutdown();
         }
+        assert!(!adapters.is_empty(), "no hardware adapter");
+        let mut measured = 0;
+        for (n, (adapter, name)) in adapters.iter().enumerate() {
+            // SAFETY: device and texture creation with valid descriptions and
+            // initial data that outlives the call.
+            unsafe {
+                let mut device = None;
+                let mut context = None;
+                if let Err(e) = D3D11CreateDevice(
+                    adapter,
+                    D3D_DRIVER_TYPE_UNKNOWN,
+                    HMODULE::default(),
+                    D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_VIDEO_SUPPORT,
+                    None,
+                    D3D11_SDK_VERSION,
+                    Some(&mut device),
+                    None,
+                    Some(&mut context),
+                ) {
+                    println!("adapter {n} {name}: no video device: {e}");
+                    continue;
+                }
+                let (device, context) = (device.unwrap(), context.unwrap());
+                let desc = D3D11_TEXTURE2D_DESC {
+                    Width: w,
+                    Height: h,
+                    MipLevels: 1,
+                    ArraySize: 1,
+                    Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                    SampleDesc: DXGI_SAMPLE_DESC {
+                        Count: 1,
+                        Quality: 0,
+                    },
+                    Usage: D3D11_USAGE_DEFAULT,
+                    BindFlags: (D3D11_BIND_RENDER_TARGET.0 | D3D11_BIND_SHADER_RESOURCE.0) as u32,
+                    CPUAccessFlags: 0,
+                    MiscFlags: 0,
+                };
+                let init = D3D11_SUBRESOURCE_DATA {
+                    pSysMem: px.as_ptr() as *const _,
+                    SysMemPitch: w * 4,
+                    SysMemSlicePitch: 0,
+                };
+                let mut tex = None;
+                device
+                    .CreateTexture2D(&desc, Some(&init), Some(&mut tex))
+                    .expect("picture");
+                let tex = tex.unwrap();
+                let mut r = String::new();
+                super::run(&device, &context, &tex, &mut r);
+                println!("adapter {n} {name}:\n{r}");
+                if r.contains("frames out") {
+                    measured += 1;
+                }
+                if n > 0 {
+                    continue;
+                }
+                // The fallback a failed GPU path takes: the same hardware
+                // encoder fed from the CPU.
+                use windows::Win32::Media::MediaFoundation::{
+                    MF_VERSION, MFSTARTUP_NOSOCKET, MFShutdown, MFStartup, MFVideoFormat_H264,
+                };
+                MFStartup(MF_VERSION, MFSTARTUP_NOSOCKET).unwrap();
+                {
+                    let mut b = super::Bench::new(&device, &context, &tex).unwrap();
+                    if let Some(f) = super::list(MFVideoFormat_H264, true, true, b.luid)
+                        .into_iter()
+                        .next()
+                    {
+                        let line =
+                            b.one("H.264", MFVideoFormat_H264, &f.activate, super::Input::Copy);
+                        let _ = f.activate.ShutdownObject();
+                        let line = line.unwrap();
+                        println!("H.264 hardware, copy path: {line}\n");
+                        assert!(line.contains("copied to memory"), "{line}");
+                    }
+                }
+                let _ = MFShutdown();
+            }
+        }
+        assert!(measured > 0, "no adapter encoded");
     }
 }
