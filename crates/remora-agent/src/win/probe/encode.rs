@@ -1764,4 +1764,163 @@ mod tests {
             let _ = MFShutdown();
         }
     }
+
+    /// Our live encoder's time per frame at focalor's size, alone and while
+    /// `ENCODE_LOAD` other encoders (default 2, like RDP's AVC444) keep the
+    /// same GPU busy at 60 fps (RDP-67: is the helper stage GPU contention?).
+    /// `cargo test --release -p remora-agent live_encoder_under_load --
+    /// --ignored --nocapture`.
+    #[test]
+    #[ignore = "loads this PC's GPU encoder for about 10 s"]
+    fn live_encoder_under_load() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::time::{Duration, Instant};
+        use windows::Win32::Foundation::HMODULE;
+        use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_HARDWARE;
+        use windows::Win32::Graphics::Direct3D11::{
+            D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+            D3D11_CREATE_DEVICE_VIDEO_SUPPORT, D3D11_SDK_VERSION, D3D11_SUBRESOURCE_DATA,
+            D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT, D3D11CreateDevice, ID3D11Device,
+            ID3D11DeviceContext, ID3D11Texture2D,
+        };
+        use windows::Win32::Graphics::Dxgi::Common::{
+            DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC,
+        };
+        use windows::Win32::Media::MediaFoundation::{
+            MF_VERSION, MFSTARTUP_NOSOCKET, MFShutdown, MFStartup,
+        };
+        let (w, h) = (3688u32, 1984u32);
+        // SAFETY (all below): devices, textures and MF per thread; the
+        // pixel data outlives each call that reads it.
+        unsafe fn setup() -> (ID3D11Device, ID3D11DeviceContext) {
+            unsafe {
+                let _ = MFStartup(MF_VERSION, MFSTARTUP_NOSOCKET);
+                let mut device = None;
+                let mut context = None;
+                D3D11CreateDevice(
+                    None,
+                    D3D_DRIVER_TYPE_HARDWARE,
+                    HMODULE::default(),
+                    D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_VIDEO_SUPPORT,
+                    None,
+                    D3D11_SDK_VERSION,
+                    Some(&mut device),
+                    None,
+                    Some(&mut context),
+                )
+                .expect("hardware device");
+                (device.unwrap(), context.unwrap())
+            }
+        }
+        fn frame(device: &ID3D11Device, w: u32, h: u32, shade: u8) -> ID3D11Texture2D {
+            let mut px = vec![0u8; (w * h * 4) as usize];
+            for (i, p) in px.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+                let x = (i as u32 % w) as u8;
+                let y = (i as u32 / w) as u8;
+                *p = [x.wrapping_add(shade), y, shade, 255];
+            }
+            let desc = D3D11_TEXTURE2D_DESC {
+                Width: w,
+                Height: h,
+                MipLevels: 1,
+                ArraySize: 1,
+                Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                SampleDesc: DXGI_SAMPLE_DESC {
+                    Count: 1,
+                    Quality: 0,
+                },
+                Usage: D3D11_USAGE_DEFAULT,
+                BindFlags: (D3D11_BIND_RENDER_TARGET.0 | D3D11_BIND_SHADER_RESOURCE.0) as u32,
+                CPUAccessFlags: 0,
+                MiscFlags: 0,
+            };
+            let init = D3D11_SUBRESOURCE_DATA {
+                pSysMem: px.as_ptr() as *const _,
+                SysMemPitch: w * 4,
+                SysMemSlicePitch: 0,
+            };
+            let mut t = None;
+            // SAFETY: valid description and data.
+            unsafe {
+                device
+                    .CreateTexture2D(&desc, Some(&init), Some(&mut t))
+                    .unwrap()
+            };
+            t.unwrap()
+        }
+        /// Per frame: push, wait for its picture; a frame every 50 ms.
+        fn measure(live: &mut super::Live, frames: &[ID3D11Texture2D]) -> Vec<f64> {
+            let mut out = Vec::new();
+            for f in frames {
+                let t0 = Instant::now();
+                while live.push(f).unwrap().is_none() {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                let mut got = Vec::new();
+                while got.is_empty() && t0.elapsed() < Duration::from_secs(2) {
+                    got = live.take().unwrap();
+                    std::thread::sleep(Duration::from_micros(200));
+                }
+                out.push(t0.elapsed().as_secs_f64() * 1000.0);
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            out
+        }
+        fn report(name: &str, mut v: Vec<f64>) -> f64 {
+            v.sort_by(|a, b| a.total_cmp(b));
+            let med = v[v.len() / 2];
+            println!(
+                "{name}: median {med:.1} ms, min {:.1}, max {:.1} ({} frames)",
+                v[0],
+                v[v.len() - 1],
+                v.len()
+            );
+            med
+        }
+        // SAFETY: see above.
+        unsafe {
+            let (device, context) = setup();
+            let frames: Vec<_> = (0..20u8).map(|k| frame(&device, w, h, k * 12)).collect();
+            let mut live = super::Live::start(&device, &context, &frames[0], 22_000).unwrap();
+            println!("encoder: {}", live.name);
+            let _ = measure(&mut live, &frames[..3]); // warm up
+            let alone = report("alone", measure(&mut live, &frames));
+            let load: usize = std::env::var("ENCODE_LOAD")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(2);
+            let stop = Arc::new(AtomicBool::new(false));
+            let mut threads = Vec::new();
+            for _ in 0..load {
+                let stop = stop.clone();
+                threads.push(std::thread::spawn(move || {
+                    let (device, context) = setup();
+                    let frames: Vec<_> = (0..4u8).map(|k| frame(&device, w, h, k * 50)).collect();
+                    let mut l = super::Live::start(&device, &context, &frames[0], 22_000).unwrap();
+                    let mut i = 0;
+                    while !stop.load(Ordering::Relaxed) {
+                        let _ = l.push(&frames[i % 4]);
+                        let _ = l.take();
+                        i += 1;
+                        std::thread::sleep(Duration::from_millis(16));
+                    }
+                    drop(l);
+                    let _ = MFShutdown();
+                }));
+            }
+            std::thread::sleep(Duration::from_secs(1));
+            let busy = report(
+                &format!("with {load} other encoders"),
+                measure(&mut live, &frames),
+            );
+            stop.store(true, Ordering::Relaxed);
+            for t in threads {
+                let _ = t.join();
+            }
+            println!("slowdown: {:.1}x", busy / alone);
+            drop(live);
+            let _ = MFShutdown();
+        }
+    }
 }
