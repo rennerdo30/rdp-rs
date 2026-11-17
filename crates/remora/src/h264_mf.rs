@@ -261,8 +261,27 @@ fn nv12_frame(data: &[u8], w: usize, h: usize, pitch: usize) -> rdp::Result<Yuv4
     })
 }
 
+/// Debug builds only: `REMORA_DEBUG_DECODE_DELAY_MS` makes every decode
+/// that long slower, to check that decoding is in the latency meter's path
+/// (RDP-67).
+#[cfg(debug_assertions)]
+fn debug_delay() {
+    static DELAY: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    let ms = *DELAY.get_or_init(|| {
+        std::env::var("REMORA_DEBUG_DECODE_DELAY_MS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0)
+    });
+    if ms > 0 {
+        std::thread::sleep(std::time::Duration::from_millis(ms));
+    }
+}
+
 impl H264Decoder for MfH264 {
     fn decode(&mut self, nal: &[u8]) -> rdp::Result<Option<Yuv420Frame>> {
+        #[cfg(debug_assertions)]
+        debug_delay();
         let mft = self
             .mft
             .clone()

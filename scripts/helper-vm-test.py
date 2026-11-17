@@ -111,6 +111,15 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--big-mib", type=int, default=1024)
     ap.add_argument("--keep", action="store_true")
+    ap.add_argument("--latency-only", action="store_true",
+                    help="end after the latency meter (RDP-67)")
+    ap.add_argument("--size", help="session size WxH")
+    ap.add_argument("--gfx", action="store_true", help="graphics pipeline with H.264, as the app")
+    ap.add_argument("--decode-delay-ms", type=int, default=0,
+                    help="slow each H.264 decode (debug build), to see it in the latency")
+    ap.add_argument("--delays", default="",
+                    help="with --latency-only: one latency run per value, each a new connection "
+                         "with that --decode-delay-ms (e.g. 0,20,0,20)")
     a = ap.parse_args()
     results: list[tuple[str, bool, str]] = []
 
@@ -144,6 +153,10 @@ def main() -> int:
            elevated=True)
         user = ps("$env:USERNAME").strip().splitlines()[-1]
         wc("push", str(agent), G + r"\remora-agent.exe")
+        if a.gfx:
+            # H.264 (AVC444) preferred, as a server after Remora's Improve.
+            log("tune: " + " ".join(ps(rf"& '{G}\remora-agent.exe' tune apply | Out-String",
+                                       elevated=True).split())[:120])
         log("server files")
         ps(rf"""
 $s = '{G}\srv\Server tree'
@@ -169,6 +182,14 @@ fsutil file createnew "$s\big.bin" {a.big_mib * 1048576} | Out-Null
         trace = open(work / "test.log", "w", encoding="utf-8")
         tenv = dict(os.environ, E2E_HOST="127.0.0.1", E2E_PORT="13389", E2E_USER=user,
                     E2E_PASSWORD_FILE=str(pw), E2E_DIR=str(work))
+        if a.size:
+            tenv["E2E_SIZE"] = a.size
+        if a.gfx:
+            tenv["E2E_GFX"] = "1"
+        if a.latency_only:
+            tenv["E2E_LATENCY_ONLY"] = "1"
+        delays = [int(d) for d in a.delays.split(",") if d] or [a.decode_delay_ms]
+        tenv["REMORA_DEBUG_DECODE_DELAY_MS"] = str(delays[0])
         proc = subprocess.Popen(["cargo", "test", "-p", "remora", "live_helper", "--",
                                  "--ignored", "--nocapture", "--test-threads=1"],
                                 cwd=ROOT, env=tenv, stdout=trace, stderr=subprocess.STDOUT)
@@ -177,7 +198,8 @@ fsutil file createnew "$s\big.bin" {a.big_mib * 1048576} | Out-Null
         log("trust-client: " + " ".join(out.split())[:120])
         (work / "trusted").write_text("ok")
         wait(work, "connected", 120, proc)
-        pw.unlink()
+        if not a.latency_only:
+            pw.unlink()  # later latency rounds log on again
         # The helper in the RDP session, as its logon task would start it.
         wc("exec-background", rf'"{G}\remora-agent.exe" run')
         time.sleep(5)
@@ -194,7 +216,27 @@ fsutil file createnew "$s\big.bin" {a.big_mib * 1048576} | Out-Null
         layout = (work / "layout").read_text() if (work / "layout").exists() else ""
         check("helper reports the keyboard layout", bool(layout), layout)
         latency = wait(work, "latency", 180, proc)
-        check("latency meter measures the picture (RDP-67)", not latency.startswith("failed"), latency)
+        check(f"latency meter measures the picture (RDP-67), decode delay {delays[0]} ms",
+              not latency.startswith("failed"), latency)
+        if a.latency_only:
+            proc.wait(timeout=60)
+            # More connections, each with a new key: the live test
+            # writes client.fp again, the script trusts it, then writes trusted.
+            for i in range(1, len(delays)):
+                tenv["REMORA_DEBUG_DECODE_DELAY_MS"] = str(delays[i])
+                for n in ("client.fp", "trusted", "connected", "latency", "paired", "layout"):
+                    (work / n).unlink(missing_ok=True)
+                proc = subprocess.Popen(["cargo", "test", "-p", "remora", "live_helper", "--",
+                                         "--ignored", "--nocapture", "--test-threads=1"],
+                                        cwd=ROOT, env=tenv, stdout=trace, stderr=subprocess.STDOUT)
+                fp2 = wait(work, "client.fp", 300, proc).strip()
+                out = ps(rf"& '{G}\remora-agent.exe' trust-client '{fp2}' | Out-String")
+                (work / "trusted").write_text("ok")
+                latency = wait(work, "latency", 300, proc)
+                check(f"latency run {i + 1}, decode delay {delays[i]} ms",
+                      not latency.startswith("failed"), latency)
+                proc.wait(timeout=60)
+            return 0 if all(ok for _, ok, _ in results) else 1
 
         want = local_hashes(up.parent)
         t = time.time()
@@ -220,6 +262,8 @@ fsutil file createnew "$s\big.bin" {a.big_mib * 1048576} | Out-Null
     except Exception as e:
         check("run", False, repr(e))
     finally:
+        if "pw" in locals():
+            pw.unlink(missing_ok=True)
         if proc and proc.poll() is None:
             proc.kill()  # our own child only
             proc.wait()

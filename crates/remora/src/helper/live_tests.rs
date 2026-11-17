@@ -15,7 +15,9 @@
 //!   writes `updated <status>`, then `rejoined` when the helper is back.
 //!
 //! Environment: `E2E_HOST`, `E2E_PORT`, `E2E_USER`, `E2E_PASSWORD_FILE`,
-//! `E2E_DIR`.
+//! `E2E_DIR`. Optional: `E2E_SIZE` (`WxH`), `E2E_GFX=1` (graphics pipeline
+//! with the H.264 decoder, as the app connects), `E2E_LATENCY_ONLY=1` (end
+//! after the latency meter).
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -127,6 +129,18 @@ fn live_helper_folders_and_update() {
 
     let mut cfg = rdp::Config::new(&env("E2E_HOST"), &env("E2E_USER"), &password);
     cfg.port = env("E2E_PORT").parse().unwrap();
+    if let Some((w, h)) = std::env::var("E2E_SIZE")
+        .ok()
+        .and_then(|s| s.split_once('x').map(|(w, h)| (w.parse(), h.parse())))
+        .and_then(|(w, h)| Some((w.ok()?, h.ok()?)))
+    {
+        cfg.width = w;
+        cfg.height = h;
+    }
+    if std::env::var("E2E_GFX").is_ok_and(|v| v == "1") {
+        cfg.graphics = rdp::Graphics::Gfx;
+        cfg.h264 = Some(crate::h264_mf::factory());
+    }
     cfg.client_name = "remora-e2e".into();
     let helper = HelperHandle::new();
     helper.set_received_file_hook(|_| Ok(()));
@@ -208,6 +222,10 @@ fn live_helper_folders_and_update() {
             Err(e) => format!("failed: {e}"),
         },
     );
+    if std::env::var("E2E_LATENCY_ONLY").is_ok_and(|v| v == "1") {
+        worker.close();
+        return;
+    }
 
     // PC -> server: one folder.
     let up = std::fs::read_dir(dir.join("up"))
