@@ -123,6 +123,8 @@ pub enum AgentEvent {
     StreamPicture {
         seq: u32,
         key: bool,
+        /// Microseconds from capture to now.
+        helper_us: u32,
         rects: Vec<[u16; 4]>,
         data: Vec<u8>,
     },

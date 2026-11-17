@@ -175,9 +175,10 @@ fn stream_and_measure(
         return Err(format!("started at {w}x{hh}, but no picture was shown"));
     }
     let r = measure_latency(h, &worker.shared, dir)?;
+    let stages = player.stage_times().summary().unwrap_or_default();
     h.stream_stop();
     drop(player);
-    Ok(format!("{} (helper stream {w}x{hh})", r.summary()))
+    Ok(format!("{} (helper stream {w}x{hh}; {stages})", r.summary()))
 }
 
 #[test]

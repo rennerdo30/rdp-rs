@@ -215,8 +215,8 @@ fn stream(
     // The first picture is the whole frame.
     let mut pending: Vec<[u16; 4]> = full.to_vec();
     if let Some(t) = live.push(&first)? {
-        let mut by_time = HashMap::new();
-        by_time.insert(t, std::mem::take(&mut pending));
+        let mut by_time: HashMap<i64, (Vec<[u16; 4]>, Instant)> = HashMap::new();
+        by_time.insert(t, (std::mem::take(&mut pending), Instant::now()));
         return pump(&mut d, &mut live, by_time, size, max_fps, rx, out);
     }
     pump(&mut d, &mut live, HashMap::new(), size, max_fps, rx, out)
@@ -226,7 +226,7 @@ fn stream(
 fn pump(
     d: &mut probe::Dup,
     live: &mut Live,
-    mut by_time: HashMap<i64, Vec<[u16; 4]>>,
+    mut by_time: HashMap<i64, (Vec<[u16; 4]>, Instant)>,
     size: (u32, u32),
     max_fps: u8,
     rx: &Receiver<Cmd>,
@@ -244,6 +244,7 @@ fn pump(
     // be lost on a quiet screen. It goes out as soon as the encoder asks.
     let mut held: Option<ID3D11Texture2D> = None;
     let mut held_waiting = false;
+    let mut held_at = Instant::now();
     loop {
         // Remora's acknowledgements, or the stop (the sender is gone).
         loop {
@@ -255,10 +256,13 @@ fn pump(
         }
         for e in live.take()? {
             seq = seq.wrapping_add(1);
-            let rects = by_time.remove(&e.time).unwrap_or_else(|| full.clone());
+            let (rects, captured) = by_time
+                .remove(&e.time)
+                .unwrap_or_else(|| (full.clone(), Instant::now()));
             let _ = out.send(Input::StreamPicture {
                 seq,
                 key: e.key,
+                helper_us: captured.elapsed().as_micros().min(u32::MAX as u128) as u32,
                 rects,
                 data: e.data,
             });
@@ -271,7 +275,7 @@ fn pump(
             if let Some(h) = held.as_ref()
                 && let Some(t) = live.push(h)?
             {
-                by_time.insert(t, std::mem::take(&mut pending));
+                by_time.insert(t, (std::mem::take(&mut pending), held_at));
                 last = Instant::now();
                 held_waiting = false;
             } else {
@@ -283,6 +287,7 @@ fn pump(
         let mut res: Option<IDXGIResource> = None;
         // SAFETY: the frame is copied by `push` before it is released.
         let got = unsafe { d.dupl.AcquireNextFrame(8, &mut fi, &mut res) };
+        let captured = Instant::now();
         match got {
             Ok(()) => {
                 let changed = fi.LastPresentTime != 0 || fi.TotalMetadataBufferSize > 0;
@@ -293,13 +298,14 @@ fn pump(
                     {
                         match live.push(&tex)? {
                             Some(t) => {
-                                by_time.insert(t, std::mem::take(&mut pending));
+                                by_time.insert(t, (std::mem::take(&mut pending), captured));
                                 last = Instant::now();
                             }
                             None => {
                                 // Busy: keep this picture for the next turn.
                                 probe::keep_frame(d, &tex, &mut held);
                                 held_waiting = held.is_some();
+                                held_at = captured;
                             }
                         }
                     }

@@ -338,7 +338,19 @@ impl App {
                                 t.stats.as_ref()?.gfx.clone()
                             });
                             let mut text = report.summary();
-                            if let Some(g) = gfx {
+                            // With the helper picture on, its own stages;
+                            // RDP's decoder keeps running and would mislead.
+                            #[cfg(windows)]
+                            let stream = s
+                                .stream
+                                .borrow()
+                                .as_ref()
+                                .and_then(|p| p.stage_times().summary());
+                            #[cfg(not(windows))]
+                            let stream: Option<String> = None;
+                            if let Some(st) = stream {
+                                text += &format!("; {st}");
+                            } else if let Some(g) = gfx {
                                 text += &format!(
                                     "; Remora decoding {:.1} ms per frame ({}, {:.0} fps)",
                                     g.decode_ms,

@@ -374,7 +374,7 @@ All on `Remora::Ctl` unless marked Bulk. Maximum string lengths in bytes.
 | `0x0711` | `StreamState`    | H→R | `u8 state` (0 started, 1 stopped, 2 failed), `u32 width, u32 height, str text (≤1024)`; the start's `request_id` when answering it; 1.2 |
 | `0x0712` | `StreamStop`     | R→H | empty; 1.2 |
 | `0x0713` | `StreamAck`      | R→H | `u32 seq`: that picture was decoded; 1.2 |
-| `0x0790` | `StreamData`     | Bulk, H→R | `u32 seq, u8 flags (1 keyframe), u32 offset, u32 total (≤16 MB), u16 count, count × (u16 x, y, w, h), blob data (≤256 KiB)`; rectangles on the first piece only; 1.2 |
+| `0x0790` | `StreamData`     | Bulk, H→R | `u32 seq, u8 flags (1 keyframe), u32 offset, u32 total (≤16 MB), u32 helper_us (capture to sending), u16 count, count × (u16 x, y, w, h), blob data (≤256 KiB)`; rectangles on the first piece only; 1.2 |
 
 - **Unknown types** (a newer minor version) get `Unsupported{type}`; the
   channel stays open. A malformed message of a known type is fatal.

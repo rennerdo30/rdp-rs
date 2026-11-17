@@ -27,6 +27,55 @@ struct Assembly {
     total: u32,
     rects: Vec<[u16; 4]>,
     data: Vec<u8>,
+    helper_us: u32,
+    first: Instant,
+}
+
+/// A complete picture and its timing.
+pub struct Picture {
+    pub seq: u32,
+    pub rects: Vec<[u16; 4]>,
+    pub data: Vec<u8>,
+    /// The helper's capture-to-sending time.
+    pub helper_us: u32,
+    /// When its first piece arrived.
+    pub first: Instant,
+}
+
+/// The stream's stage times over its last pictures, for the latency meter
+/// (RDP-67): where the time goes.
+#[derive(Clone, Debug, Default)]
+pub struct StageTimes {
+    /// (helper, transfer, decode, paint) in ms per picture.
+    recent: std::collections::VecDeque<[f64; 4]>,
+}
+
+impl StageTimes {
+    const KEEP: usize = 60;
+
+    fn add(&mut self, t: [f64; 4]) {
+        if self.recent.len() == Self::KEEP {
+            self.recent.pop_front();
+        }
+        self.recent.push_back(t);
+    }
+
+    /// "stream: helper 14.2 ms, transfer 0.8 ms, decode 5.1 ms, paint 0.3 ms
+    /// (60 pictures)", or None before the first picture.
+    pub fn summary(&self) -> Option<String> {
+        let n = self.recent.len();
+        if n == 0 {
+            return None;
+        }
+        let avg = |k: usize| self.recent.iter().map(|t| t[k]).sum::<f64>() / n as f64;
+        Some(format!(
+            "stream: helper {:.1} ms, transfer {:.1} ms, decode {:.1} ms, paint {:.1} ms ({n} pictures)",
+            avg(0),
+            avg(1),
+            avg(2),
+            avg(3)
+        ))
+    }
 }
 
 /// Puts pictures together; returns a complete one. A piece that does not
@@ -38,13 +87,15 @@ pub struct Assembler {
 }
 
 impl Assembler {
-    pub fn add(&mut self, p: StreamPiece) -> Option<(u32, Vec<[u16; 4]>, Vec<u8>)> {
+    pub fn add(&mut self, p: StreamPiece) -> Option<Picture> {
         if p.offset == 0 {
             self.cur = Some(Assembly {
                 seq: p.seq,
                 total: p.total,
                 rects: p.rects,
                 data: Vec::with_capacity(p.total as usize),
+                helper_us: p.helper_us,
+                first: p.received,
             });
         }
         let a = self.cur.as_mut()?;
@@ -57,7 +108,13 @@ impl Assembler {
             return None;
         }
         let a = self.cur.take()?;
-        Some((a.seq, a.rects, a.data))
+        Some(Picture {
+            seq: a.seq,
+            rects: a.rects,
+            data: a.data,
+            helper_us: a.helper_us,
+            first: a.first,
+        })
     }
 }
 
@@ -117,6 +174,7 @@ pub fn paint(frame: &Yuv420Frame, rects: &[[u16; 4]], fb: &mut rdp::Framebuffer)
 pub struct Player {
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
+    times: Arc<Mutex<StageTimes>>,
 }
 
 impl Player {
@@ -131,12 +189,22 @@ impl Player {
         wake: impl Fn() + Send + 'static,
     ) -> Player {
         let stop = Arc::new(AtomicBool::new(false));
-        let s = stop.clone();
+        let times = Arc::new(Mutex::new(StageTimes::default()));
+        let (s, t) = (stop.clone(), times.clone());
         let thread = std::thread::Builder::new()
             .name("stream-player".into())
-            .spawn(move || run(&rx, &shared, &notified, &helper, &wake, &s))
+            .spawn(move || run(&rx, &shared, &notified, &helper, &wake, &s, &t))
             .ok();
-        Player { stop, thread }
+        Player {
+            stop,
+            thread,
+            times,
+        }
+    }
+
+    /// The stage times over the last pictures.
+    pub fn stage_times(&self) -> StageTimes {
+        self.times.lock().unwrap_or_else(|p| p.into_inner()).clone()
     }
 }
 
@@ -156,6 +224,7 @@ fn run(
     helper: &HelperHandle,
     wake: &dyn Fn(),
     stop: &AtomicBool,
+    times: &Mutex<StageTimes>,
 ) {
     let mut decoder = match crate::h264_mf::MfH264::new() {
         Ok(d) => d,
@@ -173,9 +242,17 @@ fn run(
             Err(RecvTimeoutError::Timeout) => continue,
             Err(RecvTimeoutError::Disconnected) => break,
         };
-        let Some((seq, rects, mut data)) = asm.add(piece) else {
+        let Some(Picture {
+            seq,
+            rects,
+            mut data,
+            helper_us,
+            first,
+        }) = asm.add(piece)
+        else {
             continue;
         };
+        let assembled = Instant::now();
         data.extend_from_slice(&AUD);
         match decoder.decode(&data) {
             Ok(Some(frame)) => {
@@ -189,6 +266,14 @@ fn run(
                     s.ready.get_or_insert(now);
                     s.latency.check(&s.fb, now);
                 }
+                let ms =
+                    |a: Instant, b: Instant| b.saturating_duration_since(a).as_secs_f64() * 1000.0;
+                times.lock().unwrap_or_else(|p| p.into_inner()).add([
+                    f64::from(helper_us) / 1000.0,
+                    ms(first, assembled),
+                    ms(assembled, now),
+                    ms(now, Instant::now()),
+                ]);
                 decoder.recycle(frame);
                 if !notified.swap(true, Ordering::AcqRel) {
                     wake();
@@ -225,6 +310,8 @@ mod tests {
             flags: 0,
             offset,
             total,
+            helper_us: 0,
+            received: Instant::now(),
             rects: if offset == 0 {
                 vec![[0, 0, 4, 4]]
             } else {
@@ -238,16 +325,16 @@ mod tests {
     fn pieces_make_a_picture_and_gaps_drop_it() {
         let mut a = Assembler::default();
         assert!(a.add(piece(1, 0, 6, &[1, 2, 3])).is_none());
-        let (seq, rects, data) = a.add(piece(1, 3, 6, &[4, 5, 6])).unwrap();
+        let p = a.add(piece(1, 3, 6, &[4, 5, 6])).unwrap();
         assert_eq!(
-            (seq, rects, data),
+            (p.seq, p.rects, p.data),
             (1, vec![[0, 0, 4, 4]], vec![1, 2, 3, 4, 5, 6])
         );
         // A piece out of order drops the picture; the next one starts clean.
         assert!(a.add(piece(2, 0, 6, &[1, 2, 3])).is_none());
         assert!(a.add(piece(2, 4, 6, &[5, 6])).is_none());
         assert!(a.add(piece(2, 3, 6, &[4, 5, 6])).is_none());
-        assert_eq!(a.add(piece(3, 0, 2, &[9, 9])).map(|p| p.0), Some(3));
+        assert_eq!(a.add(piece(3, 0, 2, &[9, 9])).map(|p| p.seq), Some(3));
         // A piece of another picture without its start is ignored.
         assert!(a.add(piece(4, 2, 4, &[1, 2])).is_none());
     }

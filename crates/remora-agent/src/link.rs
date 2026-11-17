@@ -452,9 +452,10 @@ impl LinkProtocol {
             AgentEvent::StreamPicture {
                 seq,
                 key,
+                helper_us,
                 rects,
                 data,
-            } => self.stream_picture(seq, key, rects, &data, &mut out),
+            } => self.stream_picture(seq, key, helper_us, rects, &data, &mut out),
             AgentEvent::UpdateInstalled {
                 request_id,
                 installed,
@@ -1305,6 +1306,7 @@ impl LinkProtocol {
         &mut self,
         seq: u32,
         key: bool,
+        helper_us: u32,
         rects: Vec<[u16; 4]>,
         data: &[u8],
         out: &mut Vec<Action>,
@@ -1325,6 +1327,7 @@ impl LinkProtocol {
                 flags,
                 offset: (i * remora_link::msg::MAX_STREAM_PIECE) as u32,
                 total,
+                helper_us,
                 rects: rects.take().unwrap_or_default(),
                 data: piece.to_vec(),
             };

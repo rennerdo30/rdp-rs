@@ -628,11 +628,13 @@ pub enum Message {
     /// Helper → Remora (1.2, Bulk): bytes `offset..offset + data.len()` of
     /// picture `seq` (`total` bytes, `flags` [`STREAM_KEYFRAME`]). The first
     /// piece (offset 0) carries the changed rectangles (x, y, w, h).
+    /// `helper_us`: microseconds from capture to sending, for the stage times.
     StreamData {
         seq: u32,
         flags: u8,
         offset: u32,
         total: u32,
+        helper_us: u32,
         rects: Vec<[u16; 4]>,
         data: Vec<u8>,
     },
@@ -902,6 +904,7 @@ impl Message {
                 flags,
                 offset,
                 total,
+                helper_us,
                 rects,
                 data,
             } => {
@@ -909,6 +912,7 @@ impl Message {
                 p.put_u8(*flags);
                 p.put_u32(*offset);
                 p.put_u32(*total);
+                p.put_u32(*helper_us);
                 let n = rects.len().min(MAX_STREAM_RECTS);
                 p.put_u16(n as u16);
                 for r in &rects[..n] {
@@ -1084,6 +1088,7 @@ impl Message {
                 let flags = r.u8()?;
                 let offset = r.u32()?;
                 let total = r.u32()?;
+                let helper_us = r.u32()?;
                 let n = r.u16()? as usize;
                 if n > MAX_STREAM_RECTS {
                     return Err(Error::Malformed("too many stream rectangles".into()));
@@ -1101,6 +1106,7 @@ impl Message {
                     flags,
                     offset,
                     total,
+                    helper_us,
                     rects,
                     data,
                 }
@@ -1258,6 +1264,7 @@ mod tests {
                 flags: STREAM_KEYFRAME,
                 offset: 0,
                 total: 300,
+                helper_us: 12_345,
                 rects: vec![[0, 0, 32, 32], [100, 8, 4, 4]],
                 data: vec![1; 200],
             },
@@ -1266,6 +1273,7 @@ mod tests {
                 flags: STREAM_KEYFRAME,
                 offset: 200,
                 total: 300,
+                helper_us: 0,
                 rects: Vec::new(),
                 data: vec![2; 100],
             },
@@ -1337,7 +1345,10 @@ mod tests {
     #[test]
     fn channel_assignment() {
         for m in samples() {
-            let bulk = matches!(m.ty(), FILE_CHUNK | FILE_BLOCK_HASH | FILE_END | STREAM_DATA);
+            let bulk = matches!(
+                m.ty(),
+                FILE_CHUNK | FILE_BLOCK_HASH | FILE_END | STREAM_DATA
+            );
             assert_eq!(m.channel() == Channel::Bulk, bulk, "{m:?}");
         }
     }

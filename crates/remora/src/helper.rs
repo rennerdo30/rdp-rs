@@ -190,6 +190,10 @@ pub struct StreamPiece {
     pub flags: u8,
     pub offset: u32,
     pub total: u32,
+    /// The helper's time from capture to sending, microseconds.
+    pub helper_us: u32,
+    /// When this piece arrived here.
+    pub received: std::time::Instant,
     pub rects: Vec<[u16; 4]>,
     pub data: Vec<u8>,
 }
@@ -730,6 +734,7 @@ impl Core {
             flags,
             offset,
             total,
+            helper_us,
             rects,
             data,
         } = msg
@@ -745,6 +750,8 @@ impl Core {
                 flags,
                 offset,
                 total,
+                helper_us,
+                received: std::time::Instant::now(),
                 rects,
                 data,
             };
