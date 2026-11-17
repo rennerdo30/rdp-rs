@@ -29,7 +29,9 @@ pub const PROTO_MAJOR: u16 = 1;
 /// [`Message::ServerSettings`], [`Message::TuneServer`] and
 /// [`Message::TuneResult`] under [`cap::SERVER_TUNING`], and helper updates
 /// ([`Message::UpdateBegin`] and the rest) under [`cap::HELPER_UPDATE`],
-/// and the latency meter ([`Message::LatencyMark`]) under [`cap::LATENCY`].
+/// the latency meter ([`Message::LatencyMark`]) under [`cap::LATENCY`], and
+/// the helper picture stream ([`Message::StreamStart`]) under
+/// [`cap::STREAM`].
 pub const PROTO_MINOR: u16 = 2;
 
 // Session messages (handled inside SecureSession).
@@ -84,6 +86,27 @@ pub const LATENCY_MARK: u16 = 0x0700;
 pub const LATENCY_SHOWN: u16 = 0x0701;
 /// Remora → helper: remove the marker.
 pub const LATENCY_END: u16 = 0x0702;
+// Helper picture stream (1.2, RDP-67): control on Ctl, pictures on Bulk.
+/// Remora → helper: start streaming the session's picture.
+pub const STREAM_START: u16 = 0x0710;
+/// Helper → Remora: the stream started, stopped or failed.
+pub const STREAM_STATE: u16 = 0x0711;
+/// Remora → helper: stop streaming.
+pub const STREAM_STOP: u16 = 0x0712;
+/// Remora → helper: a picture was shown (pacing).
+pub const STREAM_ACK: u16 = 0x0713;
+/// Helper → Remora (Bulk): one piece of an encoded picture.
+pub const STREAM_DATA: u16 = 0x0790;
+/// Largest piece of a picture in one [`Message::StreamData`].
+pub const MAX_STREAM_PIECE: usize = 256 * 1024;
+/// Largest encoded picture (a 4K keyframe is about 1.5 MB).
+pub const MAX_STREAM_PICTURE: u32 = 16 << 20;
+/// Most changed rectangles sent with a picture; more become one.
+pub const MAX_STREAM_RECTS: usize = 256;
+/// [`Message::StreamData`] `flags`: the picture is a keyframe.
+pub const STREAM_KEYFRAME: u8 = 1;
+/// [`Message::StreamStart`] `codec`: H.264 Annex B, 4:2:0.
+pub const STREAM_H264: u8 = 1;
 
 /// Capability bits (Hello offers, HelloAck accepts a subset).
 pub mod cap {
@@ -110,6 +133,10 @@ pub mod cap {
     /// colour Remora asks for ([`super::Message::LatencyMark`]), so Remora
     /// can time the round trip to its own picture.
     pub const LATENCY: u32 = 1 << 8;
+    /// 1.2: the helper streams the session's picture on request
+    /// ([`super::Message::StreamStart`]), encoded on the server's GPU when it
+    /// has one (RDP-67, experimental).
+    pub const STREAM: u32 = 1 << 9;
     /// Every bit this version defines.
     pub const ALL: u32 = SESSION_INFO
         | OPEN_URL
@@ -119,7 +146,8 @@ pub mod cap {
         | HELPER_UPDATE
         | FOLDERS
         | KEYBOARD
-        | LATENCY;
+        | LATENCY
+        | STREAM;
 }
 
 /// Policy flags the helper reads from the server's configuration.
@@ -573,6 +601,41 @@ pub enum Message {
     },
     /// Remora → helper (1.2): remove the marker.
     LatencyEnd,
+    /// Remora → helper (1.2, [`cap::STREAM`]): stream the session's picture
+    /// with `codec` ([`STREAM_H264`]), at most `max_fps` pictures a second
+    /// and about `kbps`; `request_id` ≠ 0.
+    StreamStart {
+        codec: u8,
+        max_fps: u8,
+        kbps: u32,
+    },
+    /// Helper → Remora (1.2): `state` 0 started (the start's
+    /// `request_id`; `width` x `height`), 1 stopped, 2 failed (`text` says
+    /// why; the picture is RDP's again).
+    StreamState {
+        state: u8,
+        width: u32,
+        height: u32,
+        text: String,
+    },
+    /// Remora → helper (1.2): stop streaming.
+    StreamStop,
+    /// Remora → helper (1.2): picture `seq` was decoded; the helper keeps at
+    /// most two pictures unacknowledged and skips captures meanwhile.
+    StreamAck {
+        seq: u32,
+    },
+    /// Helper → Remora (1.2, Bulk): bytes `offset..offset + data.len()` of
+    /// picture `seq` (`total` bytes, `flags` [`STREAM_KEYFRAME`]). The first
+    /// piece (offset 0) carries the changed rectangles (x, y, w, h).
+    StreamData {
+        seq: u32,
+        flags: u8,
+        offset: u32,
+        total: u32,
+        rects: Vec<[u16; 4]>,
+        data: Vec<u8>,
+    },
     /// Remora → helper (1.2): a new helper follows; `request_id` ≠ 0, the
     /// same on every message of this update.
     UpdateBegin {
@@ -649,6 +712,11 @@ impl Message {
             Message::LatencyMark { .. } => LATENCY_MARK,
             Message::LatencyShown { .. } => LATENCY_SHOWN,
             Message::LatencyEnd => LATENCY_END,
+            Message::StreamStart { .. } => STREAM_START,
+            Message::StreamState { .. } => STREAM_STATE,
+            Message::StreamStop => STREAM_STOP,
+            Message::StreamAck { .. } => STREAM_ACK,
+            Message::StreamData { .. } => STREAM_DATA,
             Message::Unknown { ty } => *ty,
         }
     }
@@ -656,9 +724,10 @@ impl Message {
     /// The channel this message must travel on.
     pub fn channel(&self) -> Channel {
         match self {
-            Message::FileChunk { .. } | Message::FileBlockHash { .. } | Message::FileEnd { .. } => {
-                Channel::Bulk
-            }
+            Message::FileChunk { .. }
+            | Message::FileBlockHash { .. }
+            | Message::FileEnd { .. }
+            | Message::StreamData { .. } => Channel::Bulk,
             _ => Channel::Ctl,
         }
     }
@@ -806,6 +875,49 @@ impl Message {
                 p.put_u32(*size);
             }
             Message::LatencyEnd => {}
+            Message::StreamStart {
+                codec,
+                max_fps,
+                kbps,
+            } => {
+                p.put_u8(*codec);
+                p.put_u8(*max_fps);
+                p.put_u32(*kbps);
+            }
+            Message::StreamState {
+                state,
+                width,
+                height,
+                text,
+            } => {
+                p.put_u8(*state);
+                p.put_u32(*width);
+                p.put_u32(*height);
+                p.put_str(text, MAX_TEXT);
+            }
+            Message::StreamStop => {}
+            Message::StreamAck { seq } => p.put_u32(*seq),
+            Message::StreamData {
+                seq,
+                flags,
+                offset,
+                total,
+                rects,
+                data,
+            } => {
+                p.put_u32(*seq);
+                p.put_u8(*flags);
+                p.put_u32(*offset);
+                p.put_u32(*total);
+                let n = rects.len().min(MAX_STREAM_RECTS);
+                p.put_u16(n as u16);
+                for r in &rects[..n] {
+                    for v in r {
+                        p.put_u16(*v);
+                    }
+                }
+                p.put_blob(data);
+            }
             Message::UpdateBegin {
                 version,
                 size,
@@ -954,6 +1066,45 @@ impl Message {
                 size: r.u32()?,
             },
             LATENCY_END => Message::LatencyEnd,
+            STREAM_START => Message::StreamStart {
+                codec: r.u8()?,
+                max_fps: r.u8()?,
+                kbps: r.u32()?,
+            },
+            STREAM_STATE => Message::StreamState {
+                state: r.u8()?,
+                width: r.u32()?,
+                height: r.u32()?,
+                text: r.str(MAX_TEXT)?,
+            },
+            STREAM_STOP => Message::StreamStop,
+            STREAM_ACK => Message::StreamAck { seq: r.u32()? },
+            STREAM_DATA => {
+                let seq = r.u32()?;
+                let flags = r.u8()?;
+                let offset = r.u32()?;
+                let total = r.u32()?;
+                let n = r.u16()? as usize;
+                if n > MAX_STREAM_RECTS {
+                    return Err(Error::Malformed("too many stream rectangles".into()));
+                }
+                let mut rects = Vec::with_capacity(n);
+                for _ in 0..n {
+                    rects.push([r.u16()?, r.u16()?, r.u16()?, r.u16()?]);
+                }
+                let data = r.blob(MAX_STREAM_PIECE)?.to_vec();
+                if total > MAX_STREAM_PICTURE || offset as u64 + data.len() as u64 > total as u64 {
+                    return Err(Error::Malformed("stream piece outside its picture".into()));
+                }
+                Message::StreamData {
+                    seq,
+                    flags,
+                    offset,
+                    total,
+                    rects,
+                    data,
+                }
+            }
             UPDATE_BEGIN => Message::UpdateBegin {
                 version: r.str(MAX_VERSION_TEXT)?,
                 size: r.u64()?,
@@ -1083,6 +1234,41 @@ mod tests {
                 size: 32,
             },
             Message::LatencyEnd,
+            Message::StreamStart {
+                codec: STREAM_H264,
+                max_fps: 60,
+                kbps: 20_000,
+            },
+            Message::StreamState {
+                state: 0,
+                width: 3688,
+                height: 1984,
+                text: String::new(),
+            },
+            Message::StreamState {
+                state: 2,
+                width: 0,
+                height: 0,
+                text: "the desktop cannot be captured".into(),
+            },
+            Message::StreamStop,
+            Message::StreamAck { seq: 7 },
+            Message::StreamData {
+                seq: 7,
+                flags: STREAM_KEYFRAME,
+                offset: 0,
+                total: 300,
+                rects: vec![[0, 0, 32, 32], [100, 8, 4, 4]],
+                data: vec![1; 200],
+            },
+            Message::StreamData {
+                seq: 7,
+                flags: STREAM_KEYFRAME,
+                offset: 200,
+                total: 300,
+                rects: Vec::new(),
+                data: vec![2; 100],
+            },
             Message::UpdateBegin {
                 version: "0.1.0-beta.9".into(),
                 size: 1 << 20,
@@ -1151,7 +1337,7 @@ mod tests {
     #[test]
     fn channel_assignment() {
         for m in samples() {
-            let bulk = matches!(m.ty(), FILE_CHUNK | FILE_BLOCK_HASH | FILE_END);
+            let bulk = matches!(m.ty(), FILE_CHUNK | FILE_BLOCK_HASH | FILE_END | STREAM_DATA);
             assert_eq!(m.channel() == Channel::Bulk, bulk, "{m:?}");
         }
     }
