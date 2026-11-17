@@ -61,6 +61,19 @@ impl Assembler {
     }
 }
 
+/// YCbCr in BT.709 limited range (16-235) to 0x00RRGGBB: the stream's
+/// colours, as the helper converts them (not RDP's full-range formula).
+pub fn rgb709(y: u8, u: u8, v: u8) -> u32 {
+    let c = 298 * (i32::from(y) - 16);
+    let d = i32::from(u) - 128;
+    let e = i32::from(v) - 128;
+    let clamp = |x: i32| ((x + 128) >> 8).clamp(0, 255) as u32;
+    let r = clamp(c + 459 * e);
+    let g = clamp(c - 55 * d - 136 * e);
+    let b = clamp(c + 541 * d);
+    r << 16 | g << 8 | b
+}
+
 /// Copies the changed rectangles of a decoded picture into `fb` (clipped
 /// to both) and returns them as damage.
 pub fn paint(frame: &Yuv420Frame, rects: &[[u16; 4]], fb: &mut rdp::Framebuffer) -> Vec<Damage> {
@@ -75,7 +88,12 @@ pub fn paint(frame: &Yuv420Frame, rects: &[[u16; 4]], fb: &mut rdp::Framebuffer)
         for y in y0..y1 {
             let row = &mut fb.pixels[y * fb.width..y * fb.width + fb.width];
             for (x, px) in row.iter_mut().enumerate().take(x1).skip(x0) {
-                *px = frame.rgb(x, y);
+                let (cx, cy) = (x / 2, y / 2);
+                *px = rgb709(
+                    frame.y[y * frame.y_stride + x],
+                    frame.chroma(false, cx, cy),
+                    frame.chroma(true, cx, cy),
+                );
             }
         }
         damage.push(Damage {
@@ -227,6 +245,33 @@ mod tests {
         assert!(a.add(piece(4, 2, 4, &[1, 2])).is_none());
     }
 
+    /// BT.709 limited range: the standard values of pure colours come back
+    /// within a step or two.
+    #[test]
+    fn stream_colours_are_bt709_limited_range() {
+        let near = |got: u32, want: [u32; 3]| {
+            let g = [got >> 16 & 0xff, got >> 8 & 0xff, got & 0xff];
+            g.iter().zip(want).all(|(a, b)| a.abs_diff(b) <= 2)
+        };
+        assert!(near(rgb709(235, 128, 128), [255, 255, 255]));
+        assert!(near(rgb709(16, 128, 128), [0, 0, 0]));
+        assert!(
+            near(rgb709(63, 102, 240), [255, 0, 0]),
+            "{:06x}",
+            rgb709(63, 102, 240)
+        );
+        assert!(
+            near(rgb709(173, 42, 26), [0, 255, 0]),
+            "{:06x}",
+            rgb709(173, 42, 26)
+        );
+        assert!(
+            near(rgb709(32, 240, 118), [0, 0, 255]),
+            "{:06x}",
+            rgb709(32, 240, 118)
+        );
+    }
+
     #[test]
     fn painting_copies_only_the_changed_rectangles() {
         let frame = Yuv420Frame {
@@ -241,7 +286,7 @@ mod tests {
         let mut fb = rdp::Framebuffer::new(6, 3);
         // One inside, one cut by the picture's edge, one outside.
         let d = paint(&frame, &[[1, 1, 2, 1], [4, 0, 9, 9], [7, 3, 1, 1]], &mut fb);
-        let grey = rdp::gfx::h264::yuv_to_rgb(200, 128, 128);
+        let grey = rgb709(200, 128, 128);
         assert_eq!(fb.pixels[6 + 1], grey);
         assert_eq!(fb.pixels[6 + 2], grey);
         assert_eq!(fb.pixels[0], 0);

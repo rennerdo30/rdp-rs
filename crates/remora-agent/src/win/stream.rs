@@ -239,6 +239,11 @@ fn pump(
     let mut acked = 0u32;
     let mut last = Instant::now() - gap;
     let mut retries = 0;
+    // The newest frame the encoder could not take yet (RDP-71): Windows
+    // returns a frame only when something changes, so a skipped one would
+    // be lost on a quiet screen. It goes out as soon as the encoder asks.
+    let mut held: Option<ID3D11Texture2D> = None;
+    let mut held_waiting = false;
     loop {
         // Remora's acknowledgements, or the stop (the sender is gone).
         loop {
@@ -262,6 +267,18 @@ fn pump(
             std::thread::sleep(Duration::from_millis(1));
             continue;
         }
+        if held_waiting {
+            if let Some(h) = held.as_ref()
+                && let Some(t) = live.push(h)?
+            {
+                by_time.insert(t, std::mem::take(&mut pending));
+                last = Instant::now();
+                held_waiting = false;
+            } else {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            continue;
+        }
         let mut fi = DXGI_OUTDUPL_FRAME_INFO::default();
         let mut res: Option<IDXGIResource> = None;
         // SAFETY: the frame is copied by `push` before it is released.
@@ -273,10 +290,18 @@ fn pump(
                     changed_rects(d, &fi, size, &mut pending);
                     if let Some(tex) = res.and_then(|r| r.cast::<ID3D11Texture2D>().ok())
                         && same_size(&tex, size)
-                        && let Some(t) = live.push(&tex)?
                     {
-                        by_time.insert(t, std::mem::take(&mut pending));
-                        last = Instant::now();
+                        match live.push(&tex)? {
+                            Some(t) => {
+                                by_time.insert(t, std::mem::take(&mut pending));
+                                last = Instant::now();
+                            }
+                            None => {
+                                // Busy: keep this picture for the next turn.
+                                probe::keep_frame(d, &tex, &mut held);
+                                held_waiting = held.is_some();
+                            }
+                        }
                     }
                 }
                 // SAFETY: the frame acquired above. A frame that cannot be

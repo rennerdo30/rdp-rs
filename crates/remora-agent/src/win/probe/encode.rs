@@ -27,10 +27,11 @@ use windows::Win32::Graphics::Direct3D11::{
     D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE, D3D11_BIND_VIDEO_ENCODER, D3D11_BOX,
     D3D11_CPU_ACCESS_READ, D3D11_MAP_READ, D3D11_MAPPED_SUBRESOURCE, D3D11_TEX2D_VPIV,
     D3D11_TEX2D_VPOV, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT, D3D11_USAGE_STAGING,
-    D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE, D3D11_VIDEO_PROCESSOR_CONTENT_DESC,
-    D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC, D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC_0,
-    D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC, D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC_0,
-    D3D11_VIDEO_PROCESSOR_STREAM, D3D11_VIDEO_USAGE_OPTIMAL_SPEED, D3D11_VPIV_DIMENSION_TEXTURE2D,
+    D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE, D3D11_VIDEO_PROCESSOR_COLOR_SPACE,
+    D3D11_VIDEO_PROCESSOR_CONTENT_DESC, D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC,
+    D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC_0, D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC,
+    D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC_0, D3D11_VIDEO_PROCESSOR_STREAM,
+    D3D11_VIDEO_USAGE_OPTIMAL_SPEED, D3D11_VPIV_DIMENSION_TEXTURE2D,
     D3D11_VPOV_DIMENSION_TEXTURE2D, ID3D11Device, ID3D11DeviceContext, ID3D11Multithread,
     ID3D11Texture2D, ID3D11VideoContext, ID3D11VideoDevice, ID3D11VideoProcessor,
     ID3D11VideoProcessorInputView, ID3D11VideoProcessorOutputView,
@@ -1325,6 +1326,15 @@ impl Gpu {
                 right: even.0 as i32,
                 bottom: even.1 as i32,
             };
+            // Full-range RGB in, BT.709 limited range out: the colours the
+            // stream's player converts back (RDP-71).
+            let rgb_full = D3D11_VIDEO_PROCESSOR_COLOR_SPACE { _bitfield: 0 };
+            // YCbCr_Matrix = 1 (BT.709), Nominal_Range = 1 (16-235).
+            let ycbcr_709 = D3D11_VIDEO_PROCESSOR_COLOR_SPACE {
+                _bitfield: (1 << 2) | (1 << 4),
+            };
+            video.VideoProcessorSetStreamColorSpace(&processor, 0, &rgb_full);
+            video.VideoProcessorSetOutputColorSpace(&processor, &ycbcr_709);
             video.VideoProcessorSetStreamSourceRect(&processor, 0, true, Some(&crop));
             video.VideoProcessorSetStreamDestRect(&processor, 0, true, Some(&crop));
             Ok(Gpu {
@@ -1425,8 +1435,8 @@ impl Cpu {
     }
 }
 
-/// BT.601 limited-range BGRA to NV12; chroma from the top-left pixel of
-/// each 2x2 block (enough for a speed and size measurement).
+/// BGRA to NV12 in BT.709 limited range, as the GPU path and the stream's
+/// player (RDP-71); chroma from the top-left pixel of each 2x2 block.
 pub(super) fn bgra_to_nv12(src: &[u8], pitch: usize, w: usize, h: usize, dst: &mut [u8]) {
     let (y_plane, uv_plane) = dst.split_at_mut(w * h);
     for row in 0..h {
@@ -1434,7 +1444,7 @@ pub(super) fn bgra_to_nv12(src: &[u8], pitch: usize, w: usize, h: usize, dst: &m
         let d = &mut y_plane[row * w..row * w + w];
         for (px, y) in s.as_chunks::<4>().0.iter().zip(d.iter_mut()) {
             let (b, g, r) = (px[0] as i32, px[1] as i32, px[2] as i32);
-            *y = (((66 * r + 129 * g + 25 * b + 128) >> 8) + 16) as u8;
+            *y = (((47 * r + 157 * g + 16 * b + 128) >> 8) + 16) as u8;
         }
     }
     for row in 0..h / 2 {
@@ -1443,8 +1453,8 @@ pub(super) fn bgra_to_nv12(src: &[u8], pitch: usize, w: usize, h: usize, dst: &m
         for col in 0..w / 2 {
             let px = &s[col * 8..col * 8 + 4];
             let (b, g, r) = (px[0] as i32, px[1] as i32, px[2] as i32);
-            d[col * 2] = (((-38 * r - 74 * g + 112 * b + 128) >> 8) + 128) as u8;
-            d[col * 2 + 1] = (((112 * r - 94 * g - 18 * b + 128) >> 8) + 128) as u8;
+            d[col * 2] = (((-26 * r - 86 * g + 112 * b + 128) >> 8) + 128) as u8;
+            d[col * 2 + 1] = (((112 * r - 102 * g - 10 * b + 128) >> 8) + 128) as u8;
         }
     }
 }
@@ -1476,7 +1486,7 @@ mod tests {
         bgra_to_nv12(&src, w * 4, w, h, &mut dst);
         assert_eq!(&dst[..2], &[235, 235]);
         assert_eq!(dst[2], 16);
-        assert_eq!(dst[3], 82);
+        assert_eq!(dst[3], 63);
         // White block: neutral chroma; black block: neutral too.
         assert_eq!(&dst[8..12], &[128, 128, 128, 128]);
     }
@@ -1718,6 +1728,30 @@ mod tests {
             assert_eq!(got.len(), pushed.len(), "every frame came out");
             // In order, by the times push returned.
             assert_eq!(got.iter().map(|e| e.time).collect::<Vec<_>>(), pushed);
+            // A single frame on a quiet screen must come out by itself, not
+            // wait for the next one (RDP-71).
+            let one = loop {
+                if let Some(t) = live.push(&frame(77)).unwrap() {
+                    break t;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            };
+            let t1 = std::time::Instant::now();
+            let mut alone = Vec::new();
+            while alone.is_empty() && t1.elapsed() < std::time::Duration::from_secs(2) {
+                alone.extend(live.take().unwrap());
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            println!(
+                "a single frame came out after {:.1} ms: {}",
+                t1.elapsed().as_secs_f64() * 1000.0,
+                !alone.is_empty()
+            );
+            assert_eq!(
+                alone.first().map(|e| e.time),
+                Some(one),
+                "a lone frame is not held back"
+            );
             drop(live);
             let _ = MFShutdown();
         }
