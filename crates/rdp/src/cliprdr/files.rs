@@ -531,8 +531,39 @@ fn unique_dir(temp_root: &Path) -> std::io::Result<PathBuf> {
 
 /// A local file or directory offered to the server.
 pub(super) struct LocalEntry {
-    path: PathBuf,
+    source: LocalSource,
     descriptor: FileDescriptor,
+}
+
+/// Where a local entry's bytes come from.
+enum LocalSource {
+    Path(PathBuf),
+    /// A virtual file of the local clipboard (a zip folder's file, an
+    /// e-mail attachment): its index there.
+    Virtual(u32),
+}
+
+/// Local virtual files as entries: names that could leave the receiver's
+/// folder are left out (the server checks them too).
+fn virtual_entries(list: Vec<FileDescriptor>) -> Vec<LocalEntry> {
+    list.into_iter()
+        .enumerate()
+        .take(MAX_FILE_ENTRIES)
+        .filter(|(_, d)| {
+            let ok = safe_relative_path(&d.name).is_some();
+            if !ok {
+                trace!("cliprdr: virtual file {:?} left out", d.name);
+            }
+            ok
+        })
+        .map(|(i, d)| LocalEntry {
+            source: LocalSource::Virtual(i as u32),
+            descriptor: FileDescriptor {
+                flags: d.flags | FD_SHOWPROGRESSUI,
+                ..d
+            },
+        })
+        .collect()
 }
 
 /// Lists local paths with their directory contents (directories before
@@ -575,7 +606,7 @@ fn add_local(out: &mut Vec<LocalEntry>, path: &Path, rel: String, meta: &fs::Met
         .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
         .map_or(0, |d| UNIX_EPOCH_FILETIME + (d.as_nanos() / 100) as u64);
     out.push(LocalEntry {
-        path: path.to_path_buf(),
+        source: LocalSource::Path(path.to_path_buf()),
         descriptor: FileDescriptor {
             flags: FD_ATTRIBUTES | FD_FILESIZE | FD_WRITESTIME | FD_SHOWPROGRESSUI,
             attributes,
@@ -763,8 +794,11 @@ impl Cliprdr {
         if !self.files_enabled() {
             return None;
         }
-        let paths = self.backend.read_files()?;
-        let entries = collect_local(&paths);
+        let entries = match self.backend.read_files() {
+            Some(paths) => collect_local(&paths),
+            // No paths: files that exist only as data (RDP-63).
+            None => virtual_entries(self.backend.read_virtual_list()?),
+        };
         if entries.is_empty() {
             return None;
         }
@@ -810,12 +844,22 @@ impl Cliprdr {
         if entry.descriptor.is_dir() {
             return Ok(fail);
         }
-        let reply = match req.flags {
-            FILECONTENTS_SIZE => fs::metadata(&entry.path)
+        let n = req.requested.min(MAX_SERVED_RANGE);
+        let reply = match (&entry.source, req.flags) {
+            (LocalSource::Path(p), FILECONTENTS_SIZE) => fs::metadata(p)
                 .ok()
                 .filter(|m| m.is_file())
                 .map(|m| m.len().to_le_bytes().to_vec()),
-            FILECONTENTS_RANGE => read_range(&entry.path, req.position, req.requested),
+            (LocalSource::Path(p), FILECONTENTS_RANGE) => read_range(p, req.position, n),
+            (LocalSource::Virtual(_), FILECONTENTS_SIZE)
+                if entry.descriptor.flags & FD_FILESIZE != 0 =>
+            {
+                Some(entry.descriptor.size.to_le_bytes().to_vec())
+            }
+            (LocalSource::Virtual(i), FILECONTENTS_RANGE) => {
+                let i = *i;
+                self.backend.read_virtual(i, req.position, n)
+            }
             _ => None,
         };
         let Some(data) = reply else {

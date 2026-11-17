@@ -478,3 +478,66 @@ fn an_outdated_offer_fails_fast() {
     assert!(get(&obj, cf.descriptor, TYMED_HGLOBAL.0, -1).is_err());
     assert!(t.elapsed() < Duration::from_secs(1));
 }
+
+#[test]
+fn the_server_reads_virtual_files_of_this_pcs_clipboard() {
+    // Our own data object stands in for a zip folder's files on this PC's
+    // clipboard (the real clipboard is never touched here).
+    let _com = Com::init();
+    let h = serve(Server {
+        files: tree(),
+        ..Server::default()
+    });
+    let (obj, _cache) = RemoteData::create(h.offer.clone());
+    let mut cache = None;
+    let list = read_virtual(&obj, 1, LocalRead::List, &mut cache).unwrap();
+    let list = rdp::cliprdr::files::parse_file_list(&list).unwrap();
+    assert_eq!(list.len(), tree().len());
+    // The big file (index 4) in two ranges, one after a seek back.
+    let tail = read_virtual(
+        &obj,
+        1,
+        LocalRead::Range {
+            lindex: 4,
+            position: 3 * MIB,
+            size: 1 << 20,
+        },
+        &mut cache,
+    )
+    .unwrap();
+    assert_eq!(tail.len(), 12_345, "short at the end");
+    assert!(
+        tail.iter()
+            .enumerate()
+            .all(|(i, &b)| b == pattern(3 * MIB + i as u64))
+    );
+    let head = read_virtual(
+        &obj,
+        1,
+        LocalRead::Range {
+            lindex: 4,
+            position: 10,
+            size: 100,
+        },
+        &mut cache,
+    )
+    .unwrap();
+    assert!(
+        head.iter()
+            .enumerate()
+            .all(|(i, &b)| b == pattern(10 + i as u64))
+    );
+    // Another file: its own stream.
+    let a = read_virtual(
+        &obj,
+        1,
+        LocalRead::Range {
+            lindex: 1,
+            position: 0,
+            size: 64,
+        },
+        &mut cache,
+    )
+    .unwrap();
+    assert_eq!(a, b"hello");
+}

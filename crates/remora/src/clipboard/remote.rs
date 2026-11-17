@@ -74,6 +74,43 @@ enum Cmd {
     Offer(RemoteOffer),
     /// The offer with this id ended.
     Withdraw(u64),
+    /// Read this PC's virtual files (for the server, RDP-63).
+    Local(LocalRead, mpsc::Sender<Option<Vec<u8>>>),
+}
+
+/// What the server reads of this PC's virtual files.
+pub enum LocalRead {
+    /// The FILEGROUPDESCRIPTORW bytes.
+    List,
+    Range {
+        lindex: u32,
+        position: u64,
+        size: u32,
+    },
+}
+
+/// The stream of the virtual file read last, kept for the next range.
+struct LocalStream {
+    seq: u32,
+    lindex: u32,
+    data: LocalData,
+}
+
+enum LocalData {
+    Stream(IStream),
+    Bytes(Vec<u8>),
+}
+
+/// Longest wait for this PC's clipboard to hand over virtual file data.
+const LOCAL_WAIT: Duration = Duration::from_secs(30);
+
+/// Reads this PC's virtual files on the clipboard thread (COM lives there,
+/// never on a session's thread).
+pub fn read_local(req: LocalRead) -> Option<Vec<u8>> {
+    clip_thread()?;
+    let (tx, rx) = mpsc::channel();
+    post(Cmd::Local(req, tx));
+    rx.recv_timeout(LOCAL_WAIT).ok().flatten()
 }
 
 struct ClipThread {
@@ -165,6 +202,7 @@ fn run(rx: mpsc::Receiver<Cmd>, ready: mpsc::Sender<Option<u32>>) {
         TID.store(tid, Ordering::Relaxed);
         let _ = ready.send(Some(tid));
         let mut current: Option<(u64, IDataObject, Arc<Cache>)> = None;
+        let mut local: Option<LocalStream> = None;
         loop {
             let r = GetMessageW(&mut msg, None, 0, 0);
             if r.0 <= 0 {
@@ -176,7 +214,111 @@ fn run(rx: mpsc::Receiver<Cmd>, ready: mpsc::Sender<Option<u32>>) {
             }
             // Thread messages can get lost in modal loops: always drain.
             while let Ok(cmd) = rx.try_recv() {
-                handle(cmd, &mut current);
+                match cmd {
+                    Cmd::Local(req, reply) => {
+                        let _ = reply.send(local_read(req, &mut local));
+                    }
+                    cmd => handle(cmd, &mut current),
+                }
+            }
+        }
+    }
+}
+
+/// The bytes of an HGLOBAL medium (released here).
+///
+/// # Safety
+/// `m` is a medium GetData returned with TYMED_HGLOBAL.
+unsafe fn take_hglobal(m: &mut STGMEDIUM) -> Option<Vec<u8>> {
+    use windows::Win32::System::Memory::GlobalSize;
+    unsafe {
+        let h = m.u.hGlobal;
+        let n = GlobalSize(h);
+        let p = GlobalLock(h) as *const u8;
+        let v = (!p.is_null()).then(|| std::slice::from_raw_parts(p, n).to_vec());
+        let _ = GlobalUnlock(h);
+        windows::Win32::System::Ole::ReleaseStgMedium(m);
+        v
+    }
+}
+
+/// Reads this PC's clipboard as the paste of a virtual file would.
+fn local_read(req: LocalRead, cache: &mut Option<LocalStream>) -> Option<Vec<u8>> {
+    use windows::Win32::System::DataExchange::GetClipboardSequenceNumber;
+    use windows::Win32::System::Ole::OleGetClipboard;
+    // SAFETY: OLE on the clipboard thread.
+    let obj = unsafe { OleGetClipboard() }.ok()?;
+    // SAFETY: a plain counter read.
+    let seq = unsafe { GetClipboardSequenceNumber() };
+    read_virtual(&obj, seq, req, cache)
+}
+
+/// Reads virtual files of a data object; `seq` tells when a cached stream
+/// belongs to older contents.
+fn read_virtual(
+    obj: &IDataObject,
+    seq: u32,
+    req: LocalRead,
+    cache: &mut Option<LocalStream>,
+) -> Option<Vec<u8>> {
+    let cf = Formats::get();
+    // SAFETY: OLE calls on this thread; every medium is released.
+    unsafe {
+        match req {
+            LocalRead::List => {
+                let mut m = obj.GetData(&etc(cf.descriptor, TYMED_HGLOBAL.0)).ok()?;
+                take_hglobal(&mut m)
+            }
+            LocalRead::Range {
+                lindex,
+                position,
+                size,
+            } => {
+                if !cache
+                    .as_ref()
+                    .is_some_and(|c| c.seq == seq && c.lindex == lindex)
+                {
+                    let mut f = etc(cf.contents, TYMED_ISTREAM.0 | TYMED_HGLOBAL.0);
+                    f.lindex = lindex as i32;
+                    let mut m = obj.GetData(&f).ok()?;
+                    let data = if m.tymed == TYMED_ISTREAM.0 as u32 {
+                        let s = (*m.u.pstm).clone();
+                        windows::Win32::System::Ole::ReleaseStgMedium(&mut m);
+                        LocalData::Stream(s?)
+                    } else {
+                        LocalData::Bytes(take_hglobal(&mut m)?)
+                    };
+                    *cache = Some(LocalStream { seq, lindex, data });
+                }
+                match &cache.as_ref()?.data {
+                    LocalData::Bytes(b) => {
+                        let from = (position as usize).min(b.len());
+                        let to = from.saturating_add(size as usize).min(b.len());
+                        Some(b[from..to].to_vec())
+                    }
+                    LocalData::Stream(s) => {
+                        s.Seek(position as i64, STREAM_SEEK_SET, None).ok()?;
+                        let mut out = vec![0u8; size as usize];
+                        let mut done = 0usize;
+                        while done < out.len() {
+                            let mut n = 0u32;
+                            let hr = s.Read(
+                                out[done..].as_mut_ptr().cast(),
+                                (out.len() - done) as u32,
+                                Some(&mut n),
+                            );
+                            if hr.is_err() {
+                                return None;
+                            }
+                            if n == 0 {
+                                break;
+                            }
+                            done += n as usize;
+                        }
+                        out.truncate(done);
+                        Some(out)
+                    }
+                }
             }
         }
     }
@@ -184,6 +326,7 @@ fn run(rx: mpsc::Receiver<Cmd>, ready: mpsc::Sender<Option<u32>>) {
 
 fn handle(cmd: Cmd, current: &mut Option<(u64, IDataObject, Arc<Cache>)>) {
     match cmd {
+        Cmd::Local(..) => {}
         Cmd::Offer(o) => {
             let id = o.id;
             let (obj, cache) = RemoteData::create(o);

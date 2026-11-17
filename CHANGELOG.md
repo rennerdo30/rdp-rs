@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- **Zip folders and e-mail attachments paste on the server.** Files that exist on this PC only as data (inside a zip folder, an Outlook attachment) can be copied here and pasted in the session; files copied on one server can be pasted on another (RDP-63).
+- **The command line checks server certificates.** `remora <host> --screenshot` and `--record` accept a known certificate, ask about a new or changed one on a console (and remember it), and refuse it without a console; scripts pass `--expect-fingerprint` (RDP-54).
+
 - **The setup installs the server helper too.** Choose Remora, the server helper, or both; the helper is preselected on a Windows Server or inside a remote session, set up for your user and started. Silent installs take `/COMPONENTS=helper` or `/COMPONENTS=app,helper`; updates keep what is installed, and uninstalling removes the helper's task and Send To shortcut too (RDP-65).
 
 - **Send folders through the server helper.** Drop a folder onto the session, or use **Send To > Send to my PC (Remora)** on a folder on the server: it goes whole, with its subfolders, and arrives as one folder (`name (2)` when that name is taken). Remora asks once per folder and shows one progress row; every file keeps resume and integrity checks. Needs the helper of this version on the server (RDP-64).

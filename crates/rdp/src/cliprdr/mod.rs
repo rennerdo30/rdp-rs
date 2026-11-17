@@ -146,6 +146,19 @@ pub trait ClipboardBackend: Send {
         None
     }
 
+    /// Files on the local clipboard that exist only as data, when there
+    /// are no paths (Windows: "virtual files", FileGroupDescriptorW and
+    /// FileContents: a zip folder's files, an e-mail attachment).
+    fn read_virtual_list(&mut self) -> Option<Vec<FileDescriptor>> {
+        None
+    }
+
+    /// At most `size` bytes of virtual file `lindex` at `position`; fewer
+    /// at its end.
+    fn read_virtual(&mut self, _lindex: u32, _position: u64, _size: u32) -> Option<Vec<u8>> {
+        None
+    }
+
     /// The local image as PNG bytes, if the clipboard has that format.
     fn read_png(&mut self) -> Option<Vec<u8>> {
         None

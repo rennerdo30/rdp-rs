@@ -120,6 +120,25 @@ impl rdp::cliprdr::ClipboardBackend for WindowsClipboard {
         }
     }
 
+    fn read_virtual_list(&mut self) -> Option<Vec<rdp::cliprdr::FileDescriptor>> {
+        if remote::holds(self.offered) {
+            return None;
+        }
+        let bytes = remote::read_local(remote::LocalRead::List)?;
+        rdp::cliprdr::files::parse_file_list(&bytes).ok()
+    }
+
+    fn read_virtual(&mut self, lindex: u32, position: u64, size: u32) -> Option<Vec<u8>> {
+        if remote::holds(self.offered) {
+            return None;
+        }
+        remote::read_local(remote::LocalRead::Range {
+            lindex,
+            position,
+            size,
+        })
+    }
+
     fn available(&mut self) -> rdp::cliprdr::LocalFormats {
         if remote::holds(self.offered) {
             return rdp::cliprdr::LocalFormats::default();
@@ -214,6 +233,17 @@ mod win {
     /// Largest image read from the clipboard (an 8K screen is 130 MB).
     const MAX_IMAGE: usize = 256 << 20;
 
+    /// The registered "FileGroupDescriptorW" format.
+    fn descriptor_format() -> u32 {
+        static ID: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+        let name: Vec<u16> = "FileGroupDescriptorW"
+            .encode_utf16()
+            .chain(Some(0))
+            .collect();
+        // SAFETY: a NUL-terminated name.
+        *ID.get_or_init(|| unsafe { RegisterClipboardFormatW(name.as_ptr()) })
+    }
+
     /// The registered "PNG" format.
     pub fn png_format() -> u32 {
         static ID: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
@@ -232,7 +262,10 @@ mod win {
                 text: IsClipboardFormatAvailable(CF_UNICODETEXT) != 0,
                 dib: IsClipboardFormatAvailable(CF_DIB) != 0,
                 png: png != 0 && IsClipboardFormatAvailable(png) != 0,
-                files: IsClipboardFormatAvailable(CF_HDROP) != 0,
+                // Paths, or files that exist only as data (a zip folder's
+                // files, an e-mail attachment).
+                files: IsClipboardFormatAvailable(CF_HDROP) != 0
+                    || IsClipboardFormatAvailable(descriptor_format()) != 0,
             }
         }
     }

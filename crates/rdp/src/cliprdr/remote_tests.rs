@@ -337,3 +337,101 @@ fn nothing_on_the_local_clipboard_announces_an_empty_list() {
     fake.lock().unwrap().seq += 1;
     assert_eq!(tick(&mut c), vec![format_list(&[], true)]);
 }
+
+/// Sequence number and the ranges read (lindex, position, size).
+type VirtualState = Arc<Mutex<(u32, Vec<(u32, u64, u32)>)>>;
+
+/// A local clipboard with virtual files only (a zip folder's files).
+struct Virtual(VirtualState);
+
+impl ClipboardBackend for Virtual {
+    fn sequence(&mut self) -> u32 {
+        self.0.lock().unwrap().0
+    }
+    fn read_text(&mut self) -> Option<String> {
+        None
+    }
+    fn write_text(&mut self, _: &str) -> bool {
+        false
+    }
+    fn supports_files(&self) -> bool {
+        true
+    }
+    fn available(&mut self) -> LocalFormats {
+        LocalFormats {
+            files: true,
+            ..LocalFormats::default()
+        }
+    }
+    fn read_virtual_list(&mut self) -> Option<Vec<FileDescriptor>> {
+        let file = |name: &str, size| FileDescriptor {
+            flags: files::FD_FILESIZE,
+            attributes: 0,
+            write_time: 0,
+            size,
+            name: name.into(),
+        };
+        Some(vec![
+            file("report.docx", 10),
+            file(r"..\escape.txt", 1),
+            file("big.iso", 5 << 32),
+        ])
+    }
+    fn read_virtual(&mut self, lindex: u32, position: u64, size: u32) -> Option<Vec<u8>> {
+        self.0.lock().unwrap().1.push((lindex, position, size));
+        Some(vec![lindex as u8; size.min(4) as usize])
+    }
+}
+
+#[test]
+fn virtual_files_are_offered_and_served_by_their_index() {
+    let state = Arc::new(Mutex::new((0, Vec::new())));
+    let (mut c, h) = cliprdr(Box::new(Virtual(state.clone())));
+    h.set_enabled(true);
+    feed(&mut c, &SERVER_CAPS);
+    feed(&mut c, &MONITOR_READY);
+    state.lock().unwrap().0 += 1;
+    let list = tick(&mut c);
+    let (_, _, body) = parse_header(&list[0]).unwrap();
+    let names: Vec<String> = parse_format_list(0, body, true)
+        .unwrap()
+        .into_iter()
+        .map(|(_, n)| n)
+        .collect();
+    assert_eq!(
+        names,
+        [
+            "FileGroupDescriptorW",
+            "FileContents",
+            "Preferred DropEffect"
+        ]
+    );
+    // The list leaves out the name that would escape; indexes stay the
+    // clipboard's own.
+    let out = feed(&mut c, &format_data_request(files::LOCAL_FILE_LIST_ID));
+    let (_, _, body) = parse_header(&out[0]).unwrap();
+    let got = files::parse_file_list(body).unwrap();
+    let names: Vec<&str> = got.iter().map(|d| d.name.as_str()).collect();
+    assert_eq!(names, ["report.docx", "big.iso"]);
+    // Size from the descriptor, ranges from the clipboard's index 2.
+    let size = feed(
+        &mut c,
+        &files::file_contents_request(7, 1, files::FILECONTENTS_SIZE, 0, 8),
+    );
+    assert_eq!(
+        size,
+        vec![files::file_contents_response(
+            7,
+            Some(&(5u64 << 32).to_le_bytes())
+        )]
+    );
+    let range = feed(
+        &mut c,
+        &files::file_contents_request(8, 1, files::FILECONTENTS_RANGE, (1 << 32) + 5, 1 << 20),
+    );
+    assert_eq!(
+        range,
+        vec![files::file_contents_response(8, Some(&[2, 2, 2, 2]))]
+    );
+    assert_eq!(state.lock().unwrap().1, [(2, (1 << 32) + 5, 1 << 20)]);
+}

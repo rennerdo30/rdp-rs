@@ -333,6 +333,11 @@ fn main() {
                 got == want
             },
         )));
+    } else {
+        // Trust on first use, as the connection manager does (RDP-54): a
+        // known certificate passes; a new or changed one is asked about on
+        // a console and refused without one.
+        cfg.verify_certificate = Some(console_certificate_check());
     }
     if args.gfx {
         cfg.graphics = rdp::Graphics::Gfx;
@@ -352,6 +357,50 @@ fn main() {
     } else {
         std::process::exit(app::run(Some((args.host.clone(), cfg))));
     }
+}
+
+/// The command line's certificate check (RDP-54): `known_hosts.json` first;
+/// a new or changed certificate is asked about when stdin is a console,
+/// and refused otherwise (pass `--expect-fingerprint` in scripts).
+fn console_certificate_check() -> rdp::CertificateCheck {
+    rdp::CertificateCheck(std::sync::Arc::new(|c: &rdp::ServerCertificate| {
+        let fp = known_hosts::hex(&c.sha256);
+        let known = known_hosts::lookup(&c.host, c.port);
+        if known.as_deref() == Some(fp.as_str()) {
+            return true;
+        }
+        let what = if known.is_some() {
+            "CHANGED since you last trusted it"
+        } else {
+            "not known yet"
+        };
+        eprintln!(
+            "The certificate of {}:{} is {what}.
+SHA-256 {}",
+            c.host,
+            c.port,
+            c.fingerprint()
+        );
+        use std::io::IsTerminal;
+        if !std::io::stdin().is_terminal() {
+            eprintln!(
+                "refused: no console to ask; connect once interactively, or pass --expect-fingerprint {fp}"
+            );
+            return false;
+        }
+        eprint!("Trust it and remember it on this PC? [y/N] ");
+        let mut answer = String::new();
+        let yes = std::io::stdin().read_line(&mut answer).is_ok()
+            && matches!(answer.trim(), "y" | "Y" | "yes" | "Yes");
+        if !yes {
+            eprintln!("refused");
+            return false;
+        }
+        if let Err(e) = known_hosts::remember(&c.host, c.port, &fp) {
+            eprintln!("warning: cannot remember the certificate: {e}");
+        }
+        true
+    }))
 }
 
 /// The connection manager started from the Start menu or Explorer gets a
