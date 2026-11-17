@@ -227,6 +227,8 @@ fsutil file createnew "$s\big.bin" {a.big_mib * 1048576} | Out-Null
             check("helper picture stream measured (RDP-67)", not streamed.startswith("failed"),
                   streamed)
             log(f"stream screenshot: {work / 'stream.png'}")
+            after = wait(work, "latency-after", 240, proc)
+            check("RDP picture back after the stream (RDP-67)", not after.startswith("failed"), after)
         if a.latency_only:
             proc.wait(timeout=60)
             # More connections, each with a new key: the live test

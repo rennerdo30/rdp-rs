@@ -178,7 +178,10 @@ fn stream_and_measure(
     let stages = player.stage_times().summary().unwrap_or_default();
     h.stream_stop();
     drop(player);
-    Ok(format!("{} (helper stream {w}x{hh}; {stages})", r.summary()))
+    Ok(format!(
+        "{} (helper stream {w}x{hh}; {stages})",
+        r.summary()
+    ))
 }
 
 #[test]
@@ -295,6 +298,17 @@ fn live_helper_folders_and_update() {
             Err(e) => format!("failed: {e}"),
         };
         note(&dir, "latency-stream", &text);
+        // RDP's picture must be back (its output was suppressed meanwhile).
+        std::thread::sleep(Duration::from_secs(1));
+        let after = measure_latency(&h, &worker.shared, &dir);
+        note(
+            &dir,
+            "latency-after",
+            &match after {
+                Ok(r) => r.summary(),
+                Err(e) => format!("failed: {e}"),
+            },
+        );
     }
     if std::env::var("E2E_LATENCY_ONLY").is_ok_and(|v| v == "1") {
         worker.close();
