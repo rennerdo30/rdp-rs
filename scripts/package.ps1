@@ -90,11 +90,11 @@ if (Get-Command cargo-about -ErrorAction SilentlyContinue) {
     "Third-party notices are generated in CI release builds.`r`nThis is a local test package of Remora $version." | Set-Content -LiteralPath $notices -Encoding utf8
 }
 
+# The setup offers Remora, the server helper, or both (RDP-65).
+Copy-Item -LiteralPath $agentExe -Destination $stage
 $setup = Join-Path $out "remora-$version-setup.exe"
 Invoke-Bounded $MakeNsis @('-V3', "-DVERSION=$version", "-DVI_VERSION=$numeric", "-DSRC=$stage", "-DOUTFILE=$setup", (Join-Path $root 'installer/remora.nsi')) 300 | Out-Null
-# The setup installs Remora only (it lists its files); the zip and the
-# separate download also carry the server helper, which runs on servers.
-Copy-Item -LiteralPath $agentExe -Destination $stage
+# The zip carries both too; the helper alone is a separate download.
 $zip = Join-Path $out "remora-$version-windows-x64.zip"
 if (Test-Path -LiteralPath $zip) { Remove-Item -LiteralPath $zip }
 Compress-Archive -Path (Join-Path $stage '*') -DestinationPath $zip

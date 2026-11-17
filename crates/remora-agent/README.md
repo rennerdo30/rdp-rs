@@ -77,7 +77,9 @@ A note appears when a pairing waits for you and when a file from Remora arrived.
 
 ## Install
 
-Put `remora-agent.exe` where it should stay (for example `%LOCALAPPDATA%\Programs\Remora\`), then in that session:
+The easy way: run Remora's setup (`remora-<version>-setup.exe`) on the server and choose **Server helper** (or `remora-<version>-setup.exe /S /COMPONENTS=helper`). It installs the helper for your user, runs `remora-agent install` and starts it; uninstalling Remora removes it again.
+
+By hand: put `remora-agent.exe` where it should stay (for example `%LOCALAPPDATA%\Programs\Remora\`), then in that session:
 
 ```
 remora-agent install

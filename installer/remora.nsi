@@ -1,7 +1,17 @@
 ; Remora per-user Windows setup (NSIS 3). Built by scripts/package.ps1:
 ;   makensis /DVERSION=0.1.0 /DVI_VERSION=0.1.0.0 /DSRC=<dir> /DOUTFILE=<file> installer\remora.nsi
-; SRC holds remora.exe, LICENSE.txt (MIT and Apache-2.0 texts) and
-; THIRD-PARTY-NOTICES.txt.
+; SRC holds remora.exe, remora-agent.exe, LICENSE.txt (MIT and Apache-2.0
+; texts) and THIRD-PARTY-NOTICES.txt.
+;
+; Components (RDP-65): Remora (the app), the server helper (remora-agent), or
+; both; /COMPONENTS=app, =helper or =app,helper chooses without the page. A fresh interactive setup preselects Remora, and the helper too on a
+; Windows Server or inside a remote session. The choice is kept under the
+; uninstall key ("Components"); updates (/S /UPDATE) renew exactly what is
+; installed. The helper is set up with its own `remora-agent install` (a
+; scheduled task for this user and the Send To shortcut) and started; a helper
+; that is running is moved aside (a running program can be renamed) and its
+; new version starts at the next sign-in or reconnect, or when Remora updates
+; it over the connection.
 ;
 ; Installs to %LOCALAPPDATA%\Programs\Remora without admin rights, with a
 ; Start menu shortcut and an Installed apps entry. No PATH or file-type
@@ -38,6 +48,9 @@ SetCompressor /SOLID lzma
 !include MUI2.nsh
 !include LogicLib.nsh
 !include FileFunc.nsh
+!include Sections.nsh
+!include WinVer.nsh
+!include WordFunc.nsh
 
 !define UNINSTALL_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\Remora"
 ; What rdpc 0.1.0-beta.1's setup wrote (installer/rdpc.nsi at v0.1.0-beta.1).
@@ -63,6 +76,9 @@ VIAddVersionKey "LegalCopyright" "MIT OR Apache-2.0"
 !define MUI_FINISHPAGE_RUN_TEXT "Start Remora"
 
 !insertmacro MUI_PAGE_LICENSE "${SRC}\LICENSE.txt"
+!define MUI_COMPONENTSPAGE_TEXT_TOP "Remora connects to remote desktops from this PC. The server helper runs on a server (or any PC you connect to) and adds file transfer, links on your PC and better graphics settings."
+!define MUI_PAGE_CUSTOMFUNCTION_LEAVE ComponentsLeave
+!insertmacro MUI_PAGE_COMPONENTS
 !insertmacro MUI_PAGE_DIRECTORY
 !insertmacro MUI_PAGE_INSTFILES
 !insertmacro MUI_PAGE_FINISH
@@ -71,23 +87,19 @@ VIAddVersionKey "LegalCopyright" "MIT OR Apache-2.0"
 !insertmacro MUI_LANGUAGE "English"
 
 Var Update
-; WaitForExe's arguments: the executable and the name shown for it.
+; WaitForExe's arguments: the executable, the name shown for it and what to
+; do about it.
 Var WaitExe
 Var WaitName
+Var WaitHow
+; 1 when a running helper was moved aside for its update.
+Var AgentWasRunning
 ; rdpc's install folder from its uninstall key, or "" without one.
 Var RdpcDir
 ; 1 when that key names a folder this setup does not remove.
 Var KeepRdpcKey
 
-Function .onInit
-  StrCpy $Update 0
-  ${GetParameters} $0
-  ClearErrors
-  ${GetOptions} $0 "/UPDATE" $1
-  ${IfNot} ${Errors}
-    StrCpy $Update 1
-  ${EndIf}
-FunctionEnd
+
 
 ; A running executable cannot be replaced or deleted. Interactive runs ask to
 ; close it; silent runs (the updaters) wait up to 30 s for it to exit, then
@@ -106,7 +118,7 @@ Function ${un}WaitForExe
     Return
   ${EndIf}
   IfSilent wait
-  MessageBox MB_RETRYCANCEL|MB_ICONEXCLAMATION "$WaitName is running. Close every $WaitName window, then choose Retry." /SD IDCANCEL IDRETRY retry
+  MessageBox MB_RETRYCANCEL|MB_ICONEXCLAMATION "$WaitName is running. $WaitHow, then choose Retry." /SD IDCANCEL IDRETRY retry
   SetErrorLevel 2
   Quit
   wait:
@@ -137,6 +149,7 @@ Function WaitForRdpc
     ${EndIf}
   ${EndIf}
   StrCpy $WaitName "rdpc"
+  StrCpy $WaitHow "Close every rdpc window"
   ${If} $RdpcDir != ""
     StrCpy $WaitExe "$RdpcDir\rdpc.exe"
     Call WaitForExe
@@ -179,24 +192,74 @@ Function RemoveRdpc
   ${EndIf}
 FunctionEnd
 
-Section "Remora"
+Section "Remora" SecApp
   ; Every running copy must be gone before anything changes, so a refused
   ; setup leaves the existing install (Remora or rdpc) as it was.
   Call WaitForRdpc
   StrCpy $WaitExe "$INSTDIR\remora.exe"
   StrCpy $WaitName "Remora"
+  StrCpy $WaitHow "Close every Remora window"
   Call WaitForExe
   SetOutPath "$INSTDIR"
   File "${SRC}\remora.exe"
+  CreateShortcut "$SMPROGRAMS\Remora.lnk" "$INSTDIR\remora.exe"
+  Call RemoveRdpc
+SectionEnd
+
+Section /o "Server helper" SecHelper
+  SetOutPath "$INSTDIR"
+  Delete "$INSTDIR\remora-agent.exe.old"
+  ${If} ${FileExists} "$INSTDIR\remora-agent.exe"
+    ClearErrors
+    Delete "$INSTDIR\remora-agent.exe"
+    ${If} ${Errors}
+      ; Running: a running program can be renamed, not replaced. The helper
+      ; deletes the .old file when its new version starts.
+      Rename "$INSTDIR\remora-agent.exe" "$INSTDIR\remora-agent.exe.old"
+      StrCpy $AgentWasRunning 1
+    ${EndIf}
+  ${EndIf}
+  File "${SRC}\remora-agent.exe"
+  ; Its scheduled task (this user, at sign-in and reconnect) and Send To.
+  nsExec::ExecToLog '"$INSTDIR\remora-agent.exe" install'
+  Pop $0
+  ${If} $0 != 0
+    DetailPrint "remora-agent install exited with $0"
+  ${EndIf}
+  ${If} $AgentWasRunning == 0
+    Exec '"$INSTDIR\remora-agent.exe"'
+  ${Else}
+    DetailPrint "The running helper switches to this version at the next sign-in or reconnect."
+  ${EndIf}
+SectionEnd
+
+Section "-Common"
+  SetOutPath "$INSTDIR"
   File "${SRC}\LICENSE.txt"
   File "${SRC}\THIRD-PARTY-NOTICES.txt"
   WriteUninstaller "$INSTDIR\uninstall.exe"
-  CreateShortcut "$SMPROGRAMS\Remora.lnk" "$INSTDIR\remora.exe"
+  ; What is installed now (an earlier setup may have added the other one).
+  StrCpy $0 ""
+  ${If} ${FileExists} "$INSTDIR\remora.exe"
+    StrCpy $0 "app"
+  ${EndIf}
+  ${If} ${FileExists} "$INSTDIR\remora-agent.exe"
+    ${If} $0 == ""
+      StrCpy $0 "helper"
+    ${Else}
+      StrCpy $0 "$0,helper"
+    ${EndIf}
+  ${EndIf}
+  WriteRegStr HKCU "${UNINSTALL_KEY}" "Components" "$0"
   WriteRegStr HKCU "${UNINSTALL_KEY}" "DisplayName" "Remora"
   WriteRegStr HKCU "${UNINSTALL_KEY}" "DisplayVersion" "${VERSION}"
   WriteRegStr HKCU "${UNINSTALL_KEY}" "Publisher" "rennerdo30"
   WriteRegStr HKCU "${UNINSTALL_KEY}" "URLInfoAbout" "https://github.com/rennerdo30/rdp-rs"
-  WriteRegStr HKCU "${UNINSTALL_KEY}" "DisplayIcon" "$INSTDIR\remora.exe,0"
+  ${If} ${FileExists} "$INSTDIR\remora.exe"
+    WriteRegStr HKCU "${UNINSTALL_KEY}" "DisplayIcon" "$INSTDIR\remora.exe,0"
+  ${Else}
+    WriteRegStr HKCU "${UNINSTALL_KEY}" "DisplayIcon" "$INSTDIR\remora-agent.exe,0"
+  ${EndIf}
   WriteRegStr HKCU "${UNINSTALL_KEY}" "InstallLocation" "$INSTDIR"
   WriteRegStr HKCU "${UNINSTALL_KEY}" "UninstallString" '"$INSTDIR\uninstall.exe"'
   WriteRegStr HKCU "${UNINSTALL_KEY}" "QuietUninstallString" '"$INSTDIR\uninstall.exe" /S'
@@ -205,15 +268,96 @@ Section "Remora"
   ${GetSize} "$INSTDIR" "/S=0K" $0 $1 $2
   IntFmt $0 "0x%08X" $0
   WriteRegDWORD HKCU "${UNINSTALL_KEY}" "EstimatedSize" "$0"
-  Call RemoveRdpc
   ${If} $Update == 1
+  ${AndIf} ${SectionIsSelected} ${SecApp}
     Exec '"$INSTDIR\remora.exe"'
   ${EndIf}
 SectionEnd
 
+!insertmacro MUI_FUNCTION_DESCRIPTION_BEGIN
+  !insertmacro MUI_DESCRIPTION_TEXT ${SecApp} "The Remora app: connect to remote desktops from this PC."
+  !insertmacro MUI_DESCRIPTION_TEXT ${SecHelper} "The server helper (remora-agent) for this user: install it on the computer you connect to."
+!insertmacro MUI_FUNCTION_DESCRIPTION_END
+
+; After the sections: it selects them by their index.
+Function .onInit
+  StrCpy $Update 0
+  StrCpy $AgentWasRunning 0
+  ${GetParameters} $0
+  ClearErrors
+  ${GetOptions} $0 "/UPDATE" $1
+  ${IfNot} ${Errors}
+    StrCpy $Update 1
+  ${EndIf}
+  ; What is installed decides an update: the kept choice, else the files.
+  ReadRegStr $2 HKCU "${UNINSTALL_KEY}" "Components"
+  ReadRegStr $3 HKCU "${UNINSTALL_KEY}" "InstallLocation"
+  ${If} $2 != ""
+    StrCpy $4 $2
+  ${ElseIf} $3 != ""
+    StrCpy $4 ""
+    ${If} ${FileExists} "$3\remora.exe"
+      StrCpy $4 "app"
+    ${EndIf}
+    ${If} ${FileExists} "$3\remora-agent.exe"
+      StrCpy $4 "$4,helper"
+    ${EndIf}
+  ${Else}
+    StrCpy $4 ""
+  ${EndIf}
+  ; /COMPONENTS=app,helper (for scripted installs on servers) wins.
+  ClearErrors
+  ${GetOptions} $0 "/COMPONENTS=" $7
+  ${IfNot} ${Errors}
+    StrCpy $4 $7
+  ${EndIf}
+  ClearErrors
+  ${If} $4 != ""
+    ; An existing install: keep its components.
+    ${WordFind} $4 "app" "E+1{" $5
+    ${If} ${Errors}
+      !insertmacro UnselectSection ${SecApp}
+    ${EndIf}
+    ClearErrors
+    ${WordFind} $4 "helper" "E+1{" $5
+    ${IfNot} ${Errors}
+      !insertmacro SelectSection ${SecHelper}
+    ${EndIf}
+    ClearErrors
+  ${Else}
+    ; A fresh install: the helper too on a server or in a remote session.
+    System::Call 'user32::GetSystemMetrics(i 0x1000) i .r6'
+    ${If} ${IsServerOS}
+    ${OrIf} $6 != 0
+      !insertmacro SelectSection ${SecHelper}
+    ${EndIf}
+  ${EndIf}
+FunctionEnd
+
+; At least one component.
+Function ComponentsLeave
+  ${IfNot} ${SectionIsSelected} ${SecApp}
+  ${AndIfNot} ${SectionIsSelected} ${SecHelper}
+    MessageBox MB_OK|MB_ICONEXCLAMATION "Choose Remora, the server helper, or both."
+    Abort
+  ${EndIf}
+FunctionEnd
+
 Section "Uninstall"
+  ${If} ${FileExists} "$INSTDIR\remora-agent.exe"
+    ; Its scheduled task, Send To shortcut and link registration go first.
+    nsExec::ExecToLog '"$INSTDIR\remora-agent.exe" uninstall'
+    Pop $0
+    StrCpy $WaitExe "$INSTDIR\remora-agent.exe"
+    StrCpy $WaitName "The Remora helper"
+    StrCpy $WaitHow "Quit it from its tray icon (Quit helper)"
+    Call un.WaitForExe
+    Delete "$INSTDIR\remora-agent.exe"
+  ${EndIf}
+  Delete "$INSTDIR\remora-agent.exe.old"
   StrCpy $WaitExe "$INSTDIR\remora.exe"
   StrCpy $WaitName "Remora"
+  StrCpy $WaitHow "Close every Remora window"
   Call un.WaitForExe
   Delete "$INSTDIR\remora.exe"
   Delete "$INSTDIR\LICENSE.txt"

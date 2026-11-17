@@ -5,11 +5,12 @@ Download from [Releases](https://github.com/rennerdo30/rdp-rs/releases).
 ## Windows
 
 - **Setup:** run `remora-<version>-setup.exe`.
+  - Choose **Remora** (the app), the **Server helper** (on the computer you connect to: file transfer, links on your PC, better graphics settings), or both. The helper is preselected too on a Windows Server or inside a remote session. It is set up for your user (its scheduled task and the Send To shortcut) and started.
   - It installs per user to `%LOCALAPPDATA%\Programs\Remora` without admin rights, and adds a Start menu entry and an Installed apps entry.
   - It does not change PATH or file types.
   - The installed copy updates itself.
   - **Coming from rdpc** (Remora's old name, 0.1.0-beta.1): rdpc updates itself to Remora, or run the Remora setup. It removes rdpc's program folder (`%LOCALAPPDATA%\Programs\rdpc`), Start menu shortcut and Installed apps entry; saved connections and settings stay.
-- **Silent install:** `remora-<version>-setup.exe /S`.
+- **Silent install:** `remora-<version>-setup.exe /S`, with `/COMPONENTS=helper` (only the server helper) or `/COMPONENTS=app,helper` (both). Updates keep what is installed.
 - **Portable:** unpack `remora-<version>-windows-x64.zip` anywhere and run `remora.exe`. A portable copy does not look for updates; new versions are on the releases page.
 - **Uninstall:** Settings → Apps → Installed apps → Remora, or `"%LOCALAPPDATA%\Programs\Remora\uninstall.exe" /S`. Your saved connections in `%APPDATA%\rdp-rs` stay.
 
