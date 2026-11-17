@@ -52,6 +52,11 @@ fn pump(
             if !matches!(e, HelperEvent::Transfer(TransferEvent::Progress { .. })) {
                 eprintln!("[live] event {e:?}");
             }
+            if let HelperEvent::KeyboardLayout(klid) = e
+                && let Ok(dir) = std::env::var("E2E_DIR")
+            {
+                note(Path::new(&dir), "layout", &format!("{klid:08x}"));
+            }
             if done(&e, h) {
                 return;
             }

@@ -188,6 +188,11 @@ fsutil file createnew "$s\big.bin" {a.big_mib * 1048576} | Out-Null
         (work / "helper.fp").write_text(helper_fp)
         paired = wait(work, "paired", 180, proc)
         check("helper paired over the session", True, paired)
+        t = time.time()
+        while not (work / "layout").exists() and time.time() - t < 30:
+            time.sleep(1)
+        layout = (work / "layout").read_text() if (work / "layout").exists() else ""
+        check("helper reports the keyboard layout", bool(layout), layout)
 
         want = local_hashes(up.parent)
         t = time.time()

@@ -429,13 +429,15 @@ pub fn foreground_klid() -> Option<u32> {
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         GetForegroundWindow, GetWindowThreadProcessId,
     };
-    // SAFETY: plain queries; a missing window gives thread 0 (ours).
+    // SAFETY: plain queries. Without a foreground window (right after
+    // logon, nothing focused) thread 0 is ours: the session's default.
     let hkl = unsafe {
         let w = GetForegroundWindow();
-        if w.is_null() {
-            return None;
-        }
-        let tid = GetWindowThreadProcessId(w, std::ptr::null_mut());
+        let tid = if w.is_null() {
+            0
+        } else {
+            GetWindowThreadProcessId(w, std::ptr::null_mut())
+        };
         GetKeyboardLayout(tid) as usize
     };
     (hkl != 0).then(|| crate::info::klid_from_hkl(hkl))
