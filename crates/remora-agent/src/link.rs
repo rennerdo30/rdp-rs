@@ -452,10 +452,22 @@ impl LinkProtocol {
             AgentEvent::StreamPicture {
                 seq,
                 key,
+                tiles,
                 helper_us,
                 rects,
                 data,
-            } => self.stream_picture(seq, key, helper_us, rects, &data, &mut out),
+            } => {
+                let flags = if key {
+                    remora_link::msg::STREAM_KEYFRAME
+                } else {
+                    0
+                } | if tiles {
+                    remora_link::msg::STREAM_TILES
+                } else {
+                    0
+                };
+                self.stream_picture(seq, flags, helper_us, rects, &data, &mut out)
+            }
             AgentEvent::UpdateInstalled {
                 request_id,
                 installed,
@@ -1305,7 +1317,7 @@ impl LinkProtocol {
     fn stream_picture(
         &mut self,
         seq: u32,
-        key: bool,
+        flags: u8,
         helper_us: u32,
         rects: Vec<[u16; 4]>,
         data: &[u8],
@@ -1315,11 +1327,6 @@ impl LinkProtocol {
             return;
         }
         let total = data.len() as u32;
-        let flags = if key {
-            remora_link::msg::STREAM_KEYFRAME
-        } else {
-            0
-        };
         let mut rects = Some(rects);
         for (i, piece) in data.chunks(remora_link::msg::MAX_STREAM_PIECE).enumerate() {
             let m = Message::StreamData {

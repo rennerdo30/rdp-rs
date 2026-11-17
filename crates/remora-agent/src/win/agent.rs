@@ -89,6 +89,7 @@ pub enum Input {
     StreamPicture {
         seq: u32,
         key: bool,
+        tiles: bool,
         helper_us: u32,
         rects: Vec<[u16; 4]>,
         data: Vec<u8>,
@@ -454,12 +455,14 @@ impl Loop {
             Input::StreamPicture {
                 seq,
                 key,
+                tiles,
                 helper_us,
                 rects,
                 data,
             } => self.feed(AgentEvent::StreamPicture {
                 seq,
                 key,
+                tiles,
                 helper_us,
                 rects,
                 data,

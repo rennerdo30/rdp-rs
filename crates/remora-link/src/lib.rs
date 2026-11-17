@@ -61,6 +61,7 @@ pub mod msg;
 pub mod pins;
 pub mod session;
 pub mod store;
+pub mod tiles;
 pub mod transfer;
 pub mod update;
 pub mod wire;

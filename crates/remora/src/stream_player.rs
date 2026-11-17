@@ -24,6 +24,7 @@ use crate::session::Shared;
 /// A picture being put together from its pieces.
 struct Assembly {
     seq: u32,
+    flags: u8,
     total: u32,
     rects: Vec<[u16; 4]>,
     data: Vec<u8>,
@@ -34,6 +35,8 @@ struct Assembly {
 /// A complete picture and its timing.
 pub struct Picture {
     pub seq: u32,
+    /// [`remora_link::msg::STREAM_TILES`] and the keyframe flag.
+    pub flags: u8,
     pub rects: Vec<[u16; 4]>,
     pub data: Vec<u8>,
     /// The helper's capture-to-sending time.
@@ -91,6 +94,7 @@ impl Assembler {
         if p.offset == 0 {
             self.cur = Some(Assembly {
                 seq: p.seq,
+                flags: p.flags,
                 total: p.total,
                 rects: p.rects,
                 data: Vec::with_capacity(p.total as usize),
@@ -110,6 +114,7 @@ impl Assembler {
         let a = self.cur.take()?;
         Some(Picture {
             seq: a.seq,
+            flags: a.flags,
             rects: a.rects,
             data: a.data,
             helper_us: a.helper_us,
@@ -157,6 +162,38 @@ pub fn paint(frame: &Yuv420Frame, rects: &[[u16; 4]], fb: &mut rdp::Framebuffer)
                     frame.chroma(false, cx, cy),
                     frame.chroma(true, cx, cy),
                 );
+            }
+        }
+        damage.push(Damage {
+            x: x0,
+            y: y0,
+            w: x1 - x0,
+            h: y1 - y0,
+        });
+    }
+    damage
+}
+
+/// Copies lossless tiles (BGRA, [`remora_link::tiles`]) into `fb` at their
+/// rectangles, clipped, and returns them as damage.
+pub fn paint_tiles(
+    rects: &[[u16; 4]],
+    tiles: &[Vec<u8>],
+    fb: &mut rdp::Framebuffer,
+) -> Vec<Damage> {
+    let mut damage = Vec::new();
+    for (r, px) in rects.iter().zip(tiles) {
+        let (x0, y0, w, h) = (r[0] as usize, r[1] as usize, r[2] as usize, r[3] as usize);
+        let (x1, y1) = ((x0 + w).min(fb.width), (y0 + h).min(fb.height));
+        if x1 <= x0 || y1 <= y0 {
+            continue;
+        }
+        for y in y0..y1 {
+            let src = &px[(y - y0) * w * 4..];
+            let dst = &mut fb.pixels[y * fb.width + x0..y * fb.width + x1];
+            for (d, s) in dst.iter_mut().zip(src.as_chunks::<4>().0) {
+                // BGRA bytes to 0x00RRGGBB.
+                *d = u32::from(s[2]) << 16 | u32::from(s[1]) << 8 | u32::from(s[0]);
             }
         }
         damage.push(Damage {
@@ -244,6 +281,7 @@ fn run(
         };
         let Some(Picture {
             seq,
+            flags,
             rects,
             mut data,
             helper_us,
@@ -253,6 +291,38 @@ fn run(
             continue;
         };
         let assembled = Instant::now();
+        if flags & remora_link::msg::STREAM_TILES != 0 {
+            // Lossless tiles: no decoder, straight into the picture.
+            match remora_link::tiles::decode(&rects, &data) {
+                Ok(tiles) => {
+                    let decoded = Instant::now();
+                    {
+                        let mut s = shared.lock().unwrap_or_else(|p| p.into_inner());
+                        s.stream_owns = true;
+                        let s = &mut *s;
+                        let damage = paint_tiles(&rects, &tiles, &mut s.fb);
+                        s.damage.extend_from_slice(&damage);
+                        s.ready.get_or_insert(decoded);
+                        s.latency.check(&s.fb, decoded);
+                    }
+                    let ms = |a: Instant, b: Instant| {
+                        b.saturating_duration_since(a).as_secs_f64() * 1000.0
+                    };
+                    times.lock().unwrap_or_else(|p| p.into_inner()).add([
+                        f64::from(helper_us) / 1000.0,
+                        ms(first, assembled),
+                        ms(assembled, decoded),
+                        ms(decoded, Instant::now()),
+                    ]);
+                    if !notified.swap(true, Ordering::AcqRel) {
+                        wake();
+                    }
+                }
+                Err(e) => rdp::trace!("stream: tiles {seq} not decoded: {e}"),
+            }
+            helper.stream_ack(seq);
+            continue;
+        }
         data.extend_from_slice(&AUD);
         match decoder.decode(&data) {
             Ok(Some(frame)) => {
@@ -364,6 +434,25 @@ mod tests {
             "{:06x}",
             rgb709(32, 240, 118)
         );
+    }
+
+    #[test]
+    fn tiles_paint_their_rectangles_clipped() {
+        let mut fb = rdp::Framebuffer::new(4, 3);
+        // 2x2 at (1, 1): BGRA blue, green, red, white; then one cut at the edge.
+        let a = vec![
+            255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255,
+        ];
+        let b = vec![9u8; 3 * 2 * 4];
+        let d = paint_tiles(&[[1, 1, 2, 2], [3, 0, 3, 2]], &[a, b], &mut fb);
+        assert_eq!(fb.pixels[4 + 1], 0x0000_00ff);
+        assert_eq!(fb.pixels[4 + 2], 0x0000_ff00);
+        assert_eq!(fb.pixels[2 * 4 + 1], 0x00ff_0000);
+        assert_eq!(fb.pixels[2 * 4 + 2], 0x00ff_ffff);
+        assert_eq!(fb.pixels[3], 0x0009_0909);
+        assert_eq!(fb.pixels[0], 0);
+        assert_eq!(d.len(), 2);
+        assert_eq!((d[1].x, d[1].w, d[1].h), (3, 1, 2));
     }
 
     #[test]

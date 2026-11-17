@@ -1351,6 +1351,7 @@ fn the_picture_stream_runs_for_a_trusted_client() {
     n.agent_event(AgentEvent::StreamPicture {
         seq: 1,
         key: true,
+        tiles: false,
         helper_us: 9000,
         rects: vec![[0, 0, 1280, 800]],
         data: picture.clone(),
@@ -1401,6 +1402,7 @@ fn the_picture_stream_runs_for_a_trusted_client() {
     n.agent_event(AgentEvent::StreamPicture {
         seq: 2,
         key: false,
+        tiles: false,
         helper_us: 0,
         rects: Vec::new(),
         data: vec![1; 10],

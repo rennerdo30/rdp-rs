@@ -105,6 +105,9 @@ pub const MAX_STREAM_PICTURE: u32 = 16 << 20;
 pub const MAX_STREAM_RECTS: usize = 256;
 /// [`Message::StreamData`] `flags`: the picture is a keyframe.
 pub const STREAM_KEYFRAME: u8 = 1;
+/// [`Message::StreamData`] `flags`: lossless tiles ([`crate::tiles`]), not
+/// a video picture.
+pub const STREAM_TILES: u8 = 2;
 /// [`Message::StreamStart`] `codec`: H.264 Annex B, 4:2:0.
 pub const STREAM_H264: u8 = 1;
 

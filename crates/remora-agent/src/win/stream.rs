@@ -15,7 +15,10 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use windows::Win32::Foundation::RECT;
-use windows::Win32::Graphics::Direct3D11::{D3D11_TEXTURE2D_DESC, ID3D11Texture2D};
+use windows::Win32::Graphics::Direct3D11::{
+    D3D11_BOX, D3D11_CPU_ACCESS_READ, D3D11_MAP_READ, D3D11_MAPPED_SUBRESOURCE,
+    D3D11_TEXTURE2D_DESC, D3D11_USAGE_STAGING, ID3D11Texture2D,
+};
 use windows::Win32::Graphics::Dxgi::{
     DXGI_ERROR_ACCESS_LOST, DXGI_ERROR_MORE_DATA, DXGI_ERROR_WAIT_TIMEOUT, DXGI_OUTDUPL_FRAME_INFO,
     DXGI_OUTDUPL_MOVE_RECT, IDXGIResource,
@@ -32,6 +35,11 @@ use crate::{info, warn};
 
 /// Pictures sent and not yet acknowledged before capture pauses.
 const IN_FLIGHT: u32 = 2;
+/// Changes up to this many pixels (in at most [`TILE_RECTS`] rectangles)
+/// travel as lossless tiles, without the video encoder (RDP-67 hybrid):
+/// typing, menus, a cursor in text. Larger ones go through H.264.
+const TILE_PIXELS: usize = 512 * 512;
+const TILE_RECTS: usize = 64;
 /// Capture errors in a row (each followed by a new duplication) before the
 /// stream gives up.
 const CAPTURE_RETRIES: u32 = 3;
@@ -243,6 +251,8 @@ fn pump(
     // returns a frame only when something changes, so a skipped one would
     // be lost on a quiet screen. It goes out as soon as the encoder asks.
     let mut held: Option<ID3D11Texture2D> = None;
+    // The CPU-readable copy small changes are read from.
+    let mut staging: Option<ID3D11Texture2D> = None;
     let mut held_waiting = false;
     let mut held_at = Instant::now();
     loop {
@@ -262,6 +272,7 @@ fn pump(
             let _ = out.send(Input::StreamPicture {
                 seq,
                 key: e.key,
+                tiles: false,
                 helper_us: captured.elapsed().as_micros().min(u32::MAX as u128) as u32,
                 rects,
                 data: e.data,
@@ -293,19 +304,42 @@ fn pump(
                 let changed = fi.LastPresentTime != 0 || fi.TotalMetadataBufferSize > 0;
                 if changed {
                     changed_rects(d, &fi, size, &mut pending);
+                    let area: usize = pending.iter().map(|r| r[2] as usize * r[3] as usize).sum();
+                    // Small, and no video picture in flight (tiles must not
+                    // overtake an older picture that covers them).
+                    let small = !pending.is_empty()
+                        && area <= TILE_PIXELS
+                        && pending.len() <= TILE_RECTS
+                        && by_time.is_empty()
+                        && !held_waiting;
                     if let Some(tex) = res.and_then(|r| r.cast::<ID3D11Texture2D>().ok())
                         && same_size(&tex, size)
                     {
-                        match live.push(&tex)? {
-                            Some(t) => {
-                                by_time.insert(t, (std::mem::take(&mut pending), captured));
-                                last = Instant::now();
-                            }
-                            None => {
-                                // Busy: keep this picture for the next turn.
-                                probe::keep_frame(d, &tex, &mut held);
-                                held_waiting = held.is_some();
-                                held_at = captured;
+                        if small {
+                            let data = read_tiles(d, &tex, &pending, &mut staging)?;
+                            seq = seq.wrapping_add(1);
+                            let _ = out.send(Input::StreamPicture {
+                                seq,
+                                key: false,
+                                tiles: true,
+                                helper_us: captured.elapsed().as_micros().min(u32::MAX as u128)
+                                    as u32,
+                                rects: std::mem::take(&mut pending),
+                                data,
+                            });
+                            last = Instant::now();
+                        } else {
+                            match live.push(&tex)? {
+                                Some(t) => {
+                                    by_time.insert(t, (std::mem::take(&mut pending), captured));
+                                    last = Instant::now();
+                                }
+                                None => {
+                                    // Busy: keep this picture for the next turn.
+                                    probe::keep_frame(d, &tex, &mut held);
+                                    held_waiting = held.is_some();
+                                    held_at = captured;
+                                }
                             }
                         }
                     }
@@ -342,6 +376,72 @@ fn pump(
                 pending = full.clone();
             }
         }
+    }
+}
+
+/// The pixels of `rects` in `tex`, as lossless tiles: the rectangles are
+/// copied into a CPU-readable texture and read row by row (RDP-67 hybrid).
+fn read_tiles(
+    d: &probe::Dup,
+    tex: &ID3D11Texture2D,
+    rects: &[[u16; 4]],
+    staging: &mut Option<ID3D11Texture2D>,
+) -> Result<Vec<u8>, String> {
+    // SAFETY: D3D11 calls on our device; the mapped texture is read within
+    // its pitch and size, then unmapped.
+    unsafe {
+        if staging.is_none() {
+            let mut desc = D3D11_TEXTURE2D_DESC::default();
+            tex.GetDesc(&mut desc);
+            let s = D3D11_TEXTURE2D_DESC {
+                Usage: D3D11_USAGE_STAGING,
+                BindFlags: 0,
+                CPUAccessFlags: D3D11_CPU_ACCESS_READ.0 as u32,
+                MiscFlags: 0,
+                MipLevels: 1,
+                ArraySize: 1,
+                ..desc
+            };
+            let mut t = None;
+            d.device
+                .CreateTexture2D(&s, None, Some(&mut t))
+                .map_err(|e| format!("tile texture: {}", describe(&e)))?;
+            *staging = t;
+        }
+        let st = staging.as_ref().ok_or("tile texture: none")?;
+        for r in rects {
+            let b = D3D11_BOX {
+                left: u32::from(r[0]),
+                top: u32::from(r[1]),
+                front: 0,
+                right: u32::from(r[0]) + u32::from(r[2]),
+                bottom: u32::from(r[1]) + u32::from(r[3]),
+                back: 1,
+            };
+            d.context
+                .CopySubresourceRegion(st, 0, b.left, b.top, 0, tex, 0, Some(&b));
+        }
+        let mut m = D3D11_MAPPED_SUBRESOURCE::default();
+        d.context
+            .Map(st, 0, D3D11_MAP_READ, 0, Some(&mut m))
+            .map_err(|e| format!("tile map: {}", describe(&e)))?;
+        let pitch = m.RowPitch as usize;
+        let base = m.pData as *const u8;
+        let tiles: Vec<Vec<u8>> = rects
+            .iter()
+            .map(|r| {
+                let (x, y, w, h) = (r[0] as usize, r[1] as usize, r[2] as usize, r[3] as usize);
+                let mut px = Vec::with_capacity(w * h * 4);
+                for row in y..y + h {
+                    let line = std::slice::from_raw_parts(base.add(row * pitch + x * 4), w * 4);
+                    px.extend_from_slice(line);
+                }
+                px
+            })
+            .collect();
+        d.context.Unmap(st, 0);
+        let refs: Vec<&[u8]> = tiles.iter().map(Vec::as_slice).collect();
+        Ok(remora_link::tiles::encode(&refs))
     }
 }
 

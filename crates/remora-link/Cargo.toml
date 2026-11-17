@@ -23,3 +23,5 @@ zeroize = "1.9"
 # The pinned-helper store and the transfer sidecar (JSON).
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Lossless tiles of the helper picture stream (RDP-67): fast block compression.
+lz4_flex = { version = "0.14.2", default-features = false, features = ["std", "safe-encode", "safe-decode"] }
