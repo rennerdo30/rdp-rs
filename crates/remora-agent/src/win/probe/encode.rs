@@ -22,7 +22,7 @@ use std::collections::HashMap;
 use std::mem::ManuallyDrop;
 use std::time::{Duration, Instant};
 
-use windows::Win32::Foundation::RECT;
+use windows::Win32::Foundation::{LUID, RECT};
 use windows::Win32::Graphics::Direct3D11::{
     D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE, D3D11_BIND_VIDEO_ENCODER, D3D11_BOX,
     D3D11_CPU_ACCESS_READ, D3D11_MAP_READ, D3D11_MAPPED_SUBRESOURCE, D3D11_TEX2D_VPIV,
@@ -36,6 +36,7 @@ use windows::Win32::Graphics::Direct3D11::{
     ID3D11VideoProcessorInputView, ID3D11VideoProcessorOutputView,
 };
 use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_NV12, DXGI_RATIONAL, DXGI_SAMPLE_DESC};
+use windows::Win32::Graphics::Dxgi::IDXGIDevice;
 use windows::Win32::Media::MediaFoundation::{
     CODECAPI_AVEncCommonMeanBitRate, CODECAPI_AVEncCommonRateControlMode,
     CODECAPI_AVEncMPVDefaultBPictureCount, CODECAPI_AVEncMPVGOPSize, CODECAPI_AVLowLatencyMode,
@@ -47,15 +48,16 @@ use windows::Win32::Media::MediaFoundation::{
     MF_MT_MAJOR_TYPE, MF_MT_MPEG2_PROFILE, MF_MT_SUBTYPE, MF_SA_D3D11_AWARE, MF_TRANSFORM_ASYNC,
     MF_TRANSFORM_ASYNC_UNLOCK, MF_VERSION, MFCreateDXGIDeviceManager, MFCreateDXGISurfaceBuffer,
     MFCreateMediaType, MFCreateMemoryBuffer, MFCreateSample, MFMediaType_Video, MFSTARTUP_NOSOCKET,
-    MFSampleExtension_CleanPoint, MFShutdown, MFStartup, MFT_CATEGORY_VIDEO_ENCODER, MFT_ENUM_FLAG,
-    MFT_ENUM_FLAG_HARDWARE, MFT_ENUM_FLAG_SORTANDFILTER, MFT_ENUM_FLAG_SYNCMFT,
-    MFT_FRIENDLY_NAME_Attribute, MFT_MESSAGE_COMMAND_DRAIN, MFT_MESSAGE_NOTIFY_BEGIN_STREAMING,
-    MFT_MESSAGE_NOTIFY_END_OF_STREAM, MFT_MESSAGE_NOTIFY_END_STREAMING,
-    MFT_MESSAGE_NOTIFY_START_OF_STREAM, MFT_MESSAGE_SET_D3D_MANAGER, MFT_OUTPUT_DATA_BUFFER,
-    MFT_OUTPUT_STREAM_CAN_PROVIDE_SAMPLES, MFT_OUTPUT_STREAM_PROVIDES_SAMPLES,
-    MFT_REGISTER_TYPE_INFO, MFTEnumEx, MFVideoFormat_AV1, MFVideoFormat_H264, MFVideoFormat_HEVC,
-    MFVideoFormat_NV12, MFVideoInterlace_Progressive,
+    MFSampleExtension_CleanPoint, MFShutdown, MFStartup, MFT_CATEGORY_VIDEO_ENCODER,
+    MFT_ENUM_ADAPTER_LUID, MFT_ENUM_FLAG, MFT_ENUM_FLAG_HARDWARE, MFT_ENUM_FLAG_SORTANDFILTER,
+    MFT_ENUM_FLAG_SYNCMFT, MFT_FRIENDLY_NAME_Attribute, MFT_MESSAGE_COMMAND_DRAIN,
+    MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, MFT_MESSAGE_NOTIFY_END_OF_STREAM,
+    MFT_MESSAGE_NOTIFY_END_STREAMING, MFT_MESSAGE_NOTIFY_START_OF_STREAM,
+    MFT_MESSAGE_SET_D3D_MANAGER, MFT_OUTPUT_DATA_BUFFER, MFT_OUTPUT_STREAM_CAN_PROVIDE_SAMPLES,
+    MFT_OUTPUT_STREAM_PROVIDES_SAMPLES, MFT_REGISTER_TYPE_INFO, MFTEnumEx, MFVideoFormat_AV1,
+    MFVideoFormat_H264, MFVideoFormat_HEVC, MFVideoFormat_NV12, MFVideoInterlace_Progressive,
 };
+use windows::Win32::Media::MediaFoundation::{MFCreateAttributes, MFTEnum2};
 use windows::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx, CoTaskMemFree};
 use windows::Win32::System::Variant::{VARIANT, VT_BOOL, VT_UI4};
 use windows::core::{GUID, Interface};
@@ -71,8 +73,34 @@ const FRAME_TICKS: i64 = 10_000_000 / FPS as i64;
 /// overwrites a frame an asynchronous encoder may still be reading.
 const RING: usize = 4;
 
-/// The encoders MF offers for `subtype`, as (friendly name, activation).
-pub(super) fn list(subtype: GUID, hardware: bool, nv12_input: bool) -> Vec<(String, IMFActivate)> {
+/// One encoder MF offers.
+pub(super) struct Found {
+    pub name: String,
+    pub activate: IMFActivate,
+    /// The adapter it was enumerated for (`MFTEnum2` with
+    /// `MFT_ENUM_ADAPTER_LUID`); `None` from the adapter-blind `MFTEnumEx`.
+    pub luid: Option<u64>,
+}
+
+/// An adapter LUID as the probe prints it.
+pub(super) fn luid_str(luid: u64) -> String {
+    format!("{:x}:{:08x}", luid >> 32, luid as u32)
+}
+
+/// Packs a LUID like its memory layout, the form MF stores it in.
+pub(super) fn pack_luid(l: LUID) -> u64 {
+    ((l.HighPart as u32 as u64) << 32) | l.LowPart as u64
+}
+
+/// The encoders MF offers for `subtype`; with `adapter`, only the hardware
+/// encoders of that adapter (a GPU's encoder needs the textures of its own
+/// GPU; a server can list one encoder per adapter, or one for another GPU).
+pub(super) fn list(
+    subtype: GUID,
+    hardware: bool,
+    nv12_input: bool,
+    adapter: Option<u64>,
+) -> Vec<Found> {
     let flags = if hardware {
         MFT_ENUM_FLAG_HARDWARE.0 | MFT_ENUM_FLAG_SORTANDFILTER.0
     } else {
@@ -92,16 +120,40 @@ pub(super) fn list(subtype: GUID, hardware: bool, nv12_input: bool) -> Vec<(Stri
     // SAFETY: MF fills the array; every entry is moved out once and the
     // array freed.
     unsafe {
-        if MFTEnumEx(
-            MFT_CATEGORY_VIDEO_ENCODER,
-            MFT_ENUM_FLAG(flags),
-            nv12_input.then_some(&input as *const _),
-            Some(&output),
-            &mut list,
-            &mut n,
-        )
-        .is_err()
-        {
+        let input = nv12_input.then_some(&input as *const _);
+        let found = match adapter {
+            Some(luid) => {
+                let mut attrs = None;
+                if MFCreateAttributes(&mut attrs, 1).is_err() {
+                    return out;
+                }
+                let Some(attrs) = attrs else { return out };
+                if attrs
+                    .SetBlob(&MFT_ENUM_ADAPTER_LUID, &luid.to_le_bytes())
+                    .is_err()
+                {
+                    return out;
+                }
+                MFTEnum2(
+                    MFT_CATEGORY_VIDEO_ENCODER,
+                    MFT_ENUM_FLAG(flags),
+                    input,
+                    Some(&output),
+                    &attrs,
+                    &mut list,
+                    &mut n,
+                )
+            }
+            None => MFTEnumEx(
+                MFT_CATEGORY_VIDEO_ENCODER,
+                MFT_ENUM_FLAG(flags),
+                input,
+                Some(&output),
+                &mut list,
+                &mut n,
+            ),
+        };
+        if found.is_err() {
             return out;
         }
         for i in 0..n as usize {
@@ -116,7 +168,11 @@ pub(super) fn list(subtype: GUID, hardware: bool, nv12_input: bool) -> Vec<(Stri
                 } else {
                     "(unnamed)".into()
                 };
-                out.push((name, a));
+                out.push(Found {
+                    name,
+                    activate: a,
+                    luid: adapter,
+                });
             }
         }
         CoTaskMemFree(Some(list as *const _));
@@ -161,6 +217,8 @@ struct Bench {
     cpu: Option<Cpu>,
     manager: Option<IMFDXGIDeviceManager>,
     bitrate: u32,
+    /// The adapter the captured picture is on.
+    luid: Option<u64>,
 }
 
 fn err(what: &str, e: windows::core::Error) -> String {
@@ -214,6 +272,12 @@ impl Bench {
             // 3 Mbit/s for 1280x800.
             let bitrate = ((even.0 as f64 * even.1 as f64 * FPS as f64 * 0.05) as u32)
                 .clamp(2_000_000, 50_000_000);
+            let luid = device
+                .cast::<IDXGIDevice>()
+                .and_then(|d| d.GetAdapter())
+                .and_then(|a| a.GetDesc())
+                .ok()
+                .map(|d| pack_luid(d.AdapterLuid));
             Ok(Bench {
                 device: device.clone(),
                 context: context.clone(),
@@ -225,6 +289,7 @@ impl Bench {
                 cpu: None,
                 manager,
                 bitrate,
+                luid,
             })
         }
     }
@@ -240,44 +305,82 @@ impl Bench {
             Ok(_) => *r += "  conversion to NV12: GPU (Direct3D 11 video processor)\n",
             Err(e) => *r += &format!("  conversion to NV12: CPU (no GPU video processor: {e})\n"),
         }
+        if let Some(l) = self.luid {
+            *r += &format!("  captured on adapter {}\n", luid_str(l));
+        }
         let mut any_hw = false;
         for (codec, subtype) in [
             ("H.264", MFVideoFormat_H264),
             ("HEVC", MFVideoFormat_HEVC),
             ("AV1", MFVideoFormat_AV1),
         ] {
-            let hw = list(subtype, true, true);
+            // The encoders of the capture's adapter; only when it has none
+            // (or Windows cannot tell), every hardware encoder.
+            let mut hw = match self.luid {
+                Some(l) => list(subtype, true, true, Some(l)),
+                None => Vec::new(),
+            };
+            if hw.is_empty() {
+                hw = list(subtype, true, true, None);
+            }
             if hw.is_empty() {
                 continue;
             }
             any_hw = true;
-            // Several entries can be the same encoder on different adapters;
-            // the first one that accepts this device is measured.
-            let mut tried = Vec::new();
-            for (name, a) in &hw {
-                match self.one(codec, subtype, a, true) {
+            // A failure on the GPU path is retried with frames from the CPU,
+            // so the report tells an encoder that cannot share our textures
+            // from one that cannot run at all.
+            let mut lines = Vec::new();
+            for f in &hw {
+                let label = match f.luid {
+                    Some(_) => format!("{} [capture adapter]", f.name),
+                    None => format!("{} [any adapter]", f.name),
+                };
+                let gpu = self.one(codec, subtype, &f.activate, true);
+                // SAFETY: releases what ActivateObject created; the activation
+                // can create a fresh object afterwards.
+                let _ = unsafe { f.activate.ShutdownObject() };
+                match gpu {
                     Ok(line) => {
-                        *r += &format!("  {codec} hardware {name}: {line}\n");
-                        tried.clear();
+                        lines = vec![format!("  {codec} hardware {label}: {line}\n")];
                         break;
                     }
-                    Err(e) => tried.push(format!("{name}: {e}")),
+                    Err(e) => {
+                        lines.push(format!("  {codec} hardware {label} failed: {e}\n"));
+                        let cpu = self.one(codec, subtype, &f.activate, false);
+                        // SAFETY: as above.
+                        let _ = unsafe { f.activate.ShutdownObject() };
+                        match cpu {
+                            Ok(line) => {
+                                lines.push(format!(
+                                    "  {codec} hardware {label} with CPU input: {line}\n"
+                                ));
+                                break;
+                            }
+                            Err(e) => lines.push(format!(
+                                "  {codec} hardware {label} with CPU input failed: {e}\n"
+                            )),
+                        }
+                    }
                 }
-                // SAFETY: releases what ActivateObject created.
-                let _ = unsafe { a.ShutdownObject() };
             }
-            for t in tried {
-                *r += &format!("  {codec} hardware failed: {t}\n");
+            for l in lines {
+                *r += &l;
             }
         }
         if !any_hw {
             // Without hardware, measure the software H.264 encoder: the CPU
             // path a server without a GPU would have.
-            match list(MFVideoFormat_H264, false, true).first() {
-                Some((name, a)) => match self.one("H.264", MFVideoFormat_H264, a, false) {
-                    Ok(line) => *r += &format!("  H.264 software {name}: {line}\n"),
-                    Err(e) => *r += &format!("  H.264 software {name} failed: {e}\n"),
-                },
+            match list(MFVideoFormat_H264, false, true, None).first() {
+                Some(f) => {
+                    let res = self.one("H.264", MFVideoFormat_H264, &f.activate, false);
+                    // SAFETY: releases what ActivateObject created.
+                    let _ = unsafe { f.activate.ShutdownObject() };
+                    match res {
+                        Ok(line) => *r += &format!("  H.264 software {}: {line}\n", f.name),
+                        Err(e) => *r += &format!("  H.264 software {} failed: {e}\n", f.name),
+                    }
+                }
                 None => *r += "  no H.264 encoder\n",
             }
         }
@@ -377,10 +480,10 @@ impl Bench {
         codec: &str,
         subtype: GUID,
         a: &IMFActivate,
-        hardware: bool,
+        use_gpu: bool,
     ) -> Result<String, String> {
         // SAFETY: MF calls on the transform this function owns.
-        let enc = unsafe { Encoder::new(a, codec, subtype, self, hardware)? };
+        let enc = unsafe { Encoder::new(a, codec, subtype, self, use_gpu)? };
         let on_gpu = enc.d3d;
         let mut stats = Stats::default();
         let result = self.drive(&enc, on_gpu, &mut stats);
@@ -522,7 +625,7 @@ impl Encoder {
         codec: &str,
         subtype: GUID,
         b: &Bench,
-        hardware: bool,
+        use_gpu: bool,
     ) -> Result<Encoder, String> {
         unsafe {
             let t: IMFTransform = a.ActivateObject().map_err(|e| err("activate", e))?;
@@ -545,7 +648,7 @@ impl Encoder {
                 .unwrap_or(0)
                 != 0;
             let mut d3d = false;
-            if hardware
+            if use_gpu
                 && aware
                 && b.gpu.is_ok()
                 && let Some(m) = &b.manager
@@ -1043,7 +1146,13 @@ mod tests {
             DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC,
         };
 
-        let (w, h) = (2560u32, 1440u32);
+        let (w, h) = std::env::var("ENCODE_TEST_SIZE")
+            .ok()
+            .and_then(|s| {
+                s.split_once('x')
+                    .and_then(|(a, b)| Some((a.parse().ok()?, b.parse().ok()?)))
+            })
+            .unwrap_or((2560u32, 1440u32));
         // Text-like content: a gradient with thin lines, so frames do not
         // compress to nothing.
         let mut px = vec![0u8; (w * h * 4) as usize];
@@ -1098,10 +1207,32 @@ mod tests {
                 .CreateTexture2D(&desc, Some(&init), Some(&mut tex))
                 .expect("picture");
             let mut r = String::new();
-            super::run(&device, &context, &tex.unwrap(), &mut r);
+            let tex = tex.unwrap();
+            super::run(&device, &context, &tex, &mut r);
             println!("{r}");
             assert!(r.contains("frames out"), "{r}");
             assert!(!r.contains("failed"), "{r}");
+            assert!(r.contains("[capture adapter]"), "{r}");
+
+            // The fallback a failed GPU path takes: the same hardware
+            // encoder fed from the CPU.
+            use windows::Win32::Media::MediaFoundation::{
+                MF_VERSION, MFSTARTUP_NOSOCKET, MFShutdown, MFStartup, MFVideoFormat_H264,
+            };
+            MFStartup(MF_VERSION, MFSTARTUP_NOSOCKET).unwrap();
+            {
+                let mut b = super::Bench::new(&device, &context, &tex).unwrap();
+                let f = super::list(MFVideoFormat_H264, true, true, b.luid)
+                    .into_iter()
+                    .next()
+                    .expect("a hardware H.264 encoder on this adapter");
+                let line = b.one("H.264", MFVideoFormat_H264, &f.activate, false);
+                let _ = f.activate.ShutdownObject();
+                let line = line.unwrap();
+                println!("H.264 hardware with CPU input: {line}");
+                assert!(line.contains("input CPU"), "{line}");
+            }
+            let _ = MFShutdown();
         }
     }
 }

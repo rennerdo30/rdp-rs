@@ -90,11 +90,12 @@ fn adapters(r: &mut String) -> Vec<IDXGIAdapter1> {
             let Ok(d) = a.GetDesc1() else { continue };
             let soft = d.Flags & DXGI_ADAPTER_FLAG_SOFTWARE.0 as u32 != 0;
             *r += &format!(
-                "adapter {}: {}{} (video memory {} MB)\n",
+                "adapter {}: {}{} (video memory {} MB, LUID {})\n",
                 i - 1,
                 wide_str(&d.Description),
                 if soft { " [software]" } else { "" },
-                d.DedicatedVideoMemory >> 20
+                d.DedicatedVideoMemory >> 20,
+                encode::luid_str(encode::pack_luid(d.AdapterLuid))
             );
             let mut j = 0;
             while let Ok(o) = a.EnumOutputs(j) {
@@ -373,9 +374,9 @@ fn encoders(r: &mut String) {
         ("AV1", MFVideoFormat_AV1),
     ] {
         for (kind, hardware) in [("hardware", true), ("software", false)] {
-            let names: Vec<String> = encode::list(subtype, hardware, false)
+            let names: Vec<String> = encode::list(subtype, hardware, false, None)
                 .into_iter()
-                .map(|(n, _)| n)
+                .map(|f| f.name)
                 .collect();
             *r += &format!(
                 "encoder {name} {kind}: {}\n",
