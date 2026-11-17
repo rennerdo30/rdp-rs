@@ -481,10 +481,11 @@ own when the server lacks yours or when you reconnect to a session that already
 had one. The **Keyboard** setting (on the editor's Experience page, and live on
 the side panel's Session page) decides how keys go:
 
-- **Automatic** (the default): what you type is sent as text, the characters
-  this PC's layout makes, so they come out right whatever layout the session
-  uses. Shortcuts, navigation and function keys stay keys.
-- **Remote**: always keys; the session's layout decides the characters.
+- **Remote** (the default): always keys; the session's layout decides the
+  characters. Every program reads them.
+- **Automatic**: what you type is sent as the characters this PC's layout
+  makes, so they come out right whatever layout the session uses.
+  Shortcuts, navigation and function keys stay keys.
 - **Translate**: text always as typed here; shortcuts and special keys stay
   keys.
 

@@ -1684,9 +1684,9 @@ mod tests {
     fn keyboard_choices_other_than_the_current_one() {
         let mut live = super::super::sample(true);
         let c = cmds(&live);
-        assert!(c.contains(&Command::Keyboard(1, KeyboardMode::Remote)));
+        assert!(c.contains(&Command::Keyboard(1, KeyboardMode::Auto)));
         assert!(c.contains(&Command::Keyboard(1, KeyboardMode::Translate)));
-        assert!(!c.contains(&Command::Keyboard(1, KeyboardMode::Auto)));
+        assert!(!c.contains(&Command::Keyboard(1, KeyboardMode::Remote)));
         assert_eq!(
             Command::Keyboard(1, KeyboardMode::Translate).hit(),
             Hit::TabKeyboard(1, 2)

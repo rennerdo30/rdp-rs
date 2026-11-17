@@ -207,7 +207,7 @@ enum AnyFile {
 }
 
 /// The file format written now.
-const FILE_VERSION: u32 = 4;
+const FILE_VERSION: u32 = 5;
 
 fn parse(bytes: &[u8]) -> Result<(Vec<Group>, Vec<Connection>), String> {
     let (version, mut groups, mut connections) =
@@ -234,6 +234,18 @@ fn parse(bytes: &[u8]) -> Result<(Vec<Group>, Vec<Connection>), String> {
         // choice: move to today's default, GFX, once. From version 4 on
         // bitmaps is the user's choice and stays.
         let migrate = |o: &mut SessionOptions| o.quality.gfx = true;
+        groups.iter_mut().for_each(|g| migrate(&mut g.options));
+        connections.iter_mut().for_each(|c| migrate(&mut c.options));
+    }
+    if version < 5 {
+        // Automatic was the default before version 5, so it says nothing
+        // about a choice: move to today's default, Remote, once (RDP-68).
+        // Translate was chosen and stays.
+        let migrate = |o: &mut SessionOptions| {
+            if o.keyboard == KeyboardMode::Auto {
+                o.keyboard = KeyboardMode::Remote;
+            }
+        };
         groups.iter_mut().for_each(|g| migrate(&mut g.options));
         connections.iter_mut().for_each(|c| migrate(&mut c.options));
     }
@@ -345,11 +357,14 @@ impl WinKeys {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum KeyboardMode {
-    /// Text as typed on this PC (Unicode); shortcuts and special keys stay
-    /// keys. (The server helper may later tell matching layouts apart.)
-    #[default]
+    /// Text as typed on this PC; shortcuts and special keys stay keys.
+    /// With the session's layout known (helper or Server keyboard layout)
+    /// the text goes as that layout's keys, else as Unicode (RDP-68).
     Auto,
-    /// Always scancodes: the session's layout decides the characters.
+    /// Always scancodes: the session's layout decides the characters. The
+    /// default (owner, 2026-11-17): every program reads keys, while some
+    /// ignore Unicode text (winit apps such as Remora and ffwd, RDP-68).
+    #[default]
     Remote,
     /// Text always as typed on this PC (Unicode); shortcuts and special
     /// keys stay keys.
@@ -1258,6 +1273,28 @@ mod tests {
     }
 
     #[test]
+    fn older_files_move_to_remote_keys_once() {
+        let v4 = br#"{"version":4,"groups":[{"path":"Work","options":{"keyboard":"auto"}}],
+            "connections":[
+              {"name":"a","host":"h","port":3389,"user":"u","width":0,"height":0,"options":{"keyboard":"auto"}},
+              {"name":"b","host":"h","port":3389,"user":"u","width":0,"height":0,"options":{"keyboard":"translate"}}]}"#;
+        let (g, c) = parse(v4).unwrap();
+        assert_eq!(g[0].options.keyboard, KeyboardMode::Remote);
+        assert_eq!(c[0].options.keyboard, KeyboardMode::Remote);
+        assert_eq!(
+            c[1].options.keyboard,
+            KeyboardMode::Translate,
+            "a choice stays"
+        );
+        // Automatic chosen again and saved in today's format stays.
+        let mut s = store_with(vec![], c);
+        s.connections[0].options.keyboard = KeyboardMode::Auto;
+        let (_, back) = parse(&s.file_json(false).unwrap()).unwrap();
+        assert_eq!(back[0].options.keyboard, KeyboardMode::Auto);
+        assert_eq!(KeyboardMode::default(), KeyboardMode::Remote);
+    }
+
+    #[test]
     fn older_files_move_to_gfx_once() {
         let v3 = br#"{"version":3,"groups":[{"path":"Work","options":{"quality":{"gfx":false}}}],
             "connections":[
@@ -1384,10 +1421,10 @@ mod tests {
     }
 
     #[test]
-    fn keyboard_mode_is_inherited_with_display_and_defaults_to_automatic() {
-        // Saved before the setting existed: Automatic.
+    fn keyboard_mode_is_inherited_with_display_and_defaults_to_remote() {
+        // Saved without the setting: today's default, Remote (RDP-68).
         let o: SessionOptions = serde_json::from_str(r#"{"win_keys":"remote"}"#).unwrap();
-        assert_eq!(o.keyboard, KeyboardMode::Auto);
+        assert_eq!(o.keyboard, KeyboardMode::Remote);
         let o: SessionOptions = serde_json::from_str(r#"{"keyboard":"translate"}"#).unwrap();
         assert_eq!(o.keyboard, KeyboardMode::Translate);
         assert!(

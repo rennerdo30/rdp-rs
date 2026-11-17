@@ -1564,15 +1564,11 @@ impl App {
                 "p" if self.mods.shift_key() => Key::Palette,
                 _ => return None,
             },
-            WKey::Character(s) => {
-                let mut chars = s.chars().filter(|c| !c.is_control());
-                let c = chars.next()?;
-                if chars.next().is_some() {
-                    Key::Paste(s.to_string())
-                } else {
-                    Key::Char(c)
-                }
-            }
+            WKey::Character(s) => text_key(s)?,
+            // Typed text without a key (VK_PACKET: an RDP client's Unicode
+            // input, the touch keyboard, injected text): winit leaves the
+            // key unidentified but carries the text (RDP-68).
+            WKey::Unidentified(_) if !ctrl => text_key(ev.text.as_deref()?)?,
             _ => return None,
         })
     }
@@ -2899,6 +2895,17 @@ fn run_update_check(channel: &str) -> Result<Option<remora_update::Candidate>, S
     let v = remora_update::current_version().map_err(|e| e.to_string())?;
     let ch = remora_update::Channel::from_setting(Some(channel), &v);
     remora_update::check(&v, ch).map_err(|e| e.to_string())
+}
+
+/// A field key for typed text: one character, or several pasted.
+fn text_key(s: &str) -> Option<Key> {
+    let mut chars = s.chars().filter(|c| !c.is_control());
+    let c = chars.next()?;
+    Some(if chars.next().is_some() {
+        Key::Paste(s.to_string())
+    } else {
+        Key::Char(c)
+    })
 }
 
 /// Trust on first use: a known, unchanged certificate connects; a new or

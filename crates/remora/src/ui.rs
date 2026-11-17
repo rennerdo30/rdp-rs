@@ -7462,6 +7462,7 @@ pub fn sample_settings(vault: bool) -> Ui {
 /// named (RDP-68).
 pub fn sample_form_keyboard() -> Ui {
     let mut m = sample_form(2);
+    m.opts.keyboard = KeyboardMode::Auto;
     m.opts.server_layout = Some(0x0407);
     m.home_scroll = 1100;
     m
@@ -7891,6 +7892,7 @@ mod tests {
         let mut m = sample(false);
         m.select(2); // top level, no inheritance: every row shown
         m.form_page = 2; // Experience: the tallest page
+        m.opts.keyboard = KeyboardMode::Auto; // with the server layout list
         let (w, h) = (1100usize, 520usize);
         let mut px = vec![0u32; w * h];
         m.paint(&mut Canvas::new(&mut px, w, h), &mut te, &fonts);
