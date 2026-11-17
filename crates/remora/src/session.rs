@@ -85,6 +85,11 @@ pub struct Shared {
     pub ready: Option<std::time::Instant>,
     /// The latency meter's watch on the decoded picture (RDP-67).
     pub latency: crate::latency::Probe,
+    /// The helper's picture stream paints the picture (RDP-67): the worker
+    /// keeps decoding RDP but leaves `fb` alone.
+    pub stream_owns: bool,
+    /// The stream ended: copy RDP's whole picture back.
+    pub resync: bool,
 }
 
 pub struct Worker {
@@ -157,6 +162,8 @@ pub fn spawn(
         full: true,
         ready: None,
         latency: Default::default(),
+        stream_owns: false,
+        resync: false,
     }));
     let notified = Arc::new(AtomicBool::new(false));
     let recorder = Arc::new(Mutex::new(None));
@@ -270,16 +277,21 @@ fn run(
             Err(e) => return emit(failed(&e, None)),
         };
         let now = std::time::Instant::now();
-        if out.resized || !out.damage.is_empty() {
+        // The helper stream just ended (RDP-67): RDP's picture again.
+        let resync = {
+            let mut s = shared.lock().unwrap();
+            std::mem::take(&mut s.resync)
+        };
+        if out.resized || !out.damage.is_empty() || resync {
             meter.picture(now);
             let fb = client.framebuffer();
             let mut s = shared.lock().unwrap();
-            if out.resized || s.fb.width != fb.width || s.fb.height != fb.height {
+            if out.resized || resync || s.fb.width != fb.width || s.fb.height != fb.height {
                 s.fb = Framebuffer::new(fb.width, fb.height);
                 s.fb.pixels.copy_from_slice(&fb.pixels);
                 s.damage.clear();
                 s.full = true;
-            } else {
+            } else if !s.stream_owns {
                 for &d in &out.damage {
                     copy_rect(fb, &mut s.fb, d);
                 }

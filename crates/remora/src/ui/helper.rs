@@ -262,6 +262,21 @@ pub struct HelperView {
     pub update: HelperUpdate,
     /// The latency meter (RDP-67).
     pub latency: LatencyView,
+    /// The helper's picture stream (RDP-67).
+    pub stream: StreamView,
+}
+
+/// The helper's picture stream as the tab shows it (RDP-67).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum StreamView {
+    #[default]
+    Off,
+    /// Asked; waiting for the helper.
+    Starting,
+    /// Running at this size.
+    On(u32, u32),
+    /// Why it stopped or could not start.
+    Failed(String),
 }
 
 /// The latency meter as the tab shows it (RDP-67).
@@ -446,6 +461,20 @@ impl HelperView {
                 Vec::new()
             }
             HelperEvent::KeyboardLayout(_) | HelperEvent::LatencyShown { .. } => Vec::new(),
+            HelperEvent::StreamState {
+                state,
+                width,
+                height,
+                text,
+                ..
+            } => {
+                self.stream = match state {
+                    0 => StreamView::On(width, height),
+                    1 => StreamView::Off,
+                    _ => StreamView::Failed(text),
+                };
+                Vec::new()
+            }
             HelperEvent::UpdateResult(st) => {
                 self.update = HelperUpdate::Finished(st);
                 let (text, tone) = match st {
@@ -1254,6 +1283,13 @@ impl Ui {
                 }
                 Some(Action::TuneServer(id, apply))
             }
+            Hit::ToggleStream(id) => {
+                let t = self.tab_mut(id)?;
+                if matches!(t.helper.stream, StreamView::Starting) {
+                    return None;
+                }
+                Some(Action::ToggleStream(id))
+            }
             Hit::MeasureLatency(id) => {
                 let t = self.tab_mut(id)?;
                 if matches!(t.helper.latency, LatencyView::Running(..)) {
@@ -2027,7 +2063,85 @@ impl Ui {
         if v.accepted & cap::LATENCY != 0 {
             y = self.latency_card(cv, te, f, x, y + p(14.0), w, id, &v.latency);
         }
+        if v.accepted & cap::STREAM != 0 {
+            y = self.stream_card(cv, te, f, x, y + p(14.0), w, id, &v.stream);
+        }
         y + p(24.0)
+    }
+
+    /// The helper's picture stream (RDP-67, experimental): its state and the
+    /// switch.
+    #[allow(clippy::too_many_arguments)]
+    fn stream_card(
+        &mut self,
+        cv: &mut Canvas,
+        te: &mut TextEngine,
+        f: &Fonts,
+        x: i32,
+        mut y: i32,
+        w: i32,
+        id: u64,
+        view: &StreamView,
+    ) -> i32 {
+        let s = self.scale;
+        let p = |v: f32| (v * s).round() as i32;
+        let c = pal();
+        let (text, tone) = match view {
+            StreamView::Off => (
+                "Experimental: the helper sends the picture itself, encoded on the server's GPU. Compare with Measure latency.".to_string(),
+                Tone::Muted,
+            ),
+            StreamView::Starting => ("Starting\u{2026}".to_string(), Tone::Accent),
+            StreamView::On(w, h) => (format!("On: {w}\u{d7}{h} from the helper"), Tone::Success),
+            StreamView::Failed(why) => (format!("Stopped: {why}"), Tone::Warning),
+        };
+        let lines = Kit::new(cv, te, f, s).wrap(Font::Regular, 12.0, &text, w - p(28.0));
+        let shown = lines.len().clamp(1, 4);
+        let h = p(46.0) + shown as i32 * p(16.0);
+        let cells = self.card(cv, x, y, w, &[h]);
+        if let Some(r) = cells.first() {
+            let mut k = Kit::new(cv, te, f, s);
+            k.text(
+                Font::Regular,
+                12.5,
+                r.x + p(14.0),
+                r.y + p(20.0),
+                "Helper picture",
+                c.text_muted,
+                r.w - p(28.0),
+            );
+            let mut ty = r.y + p(38.0);
+            for l in lines.iter().take(shown) {
+                k.text(
+                    Font::Regular,
+                    12.0,
+                    r.x + p(14.0),
+                    ty,
+                    l,
+                    tone.color(),
+                    r.w - p(28.0),
+                );
+                ty += p(16.0);
+            }
+        }
+        y += h + p(10.0);
+        let label = match view {
+            StreamView::On(..) => Some("Back to the RDP picture"),
+            StreamView::Starting => None,
+            _ => Some("Use the helper picture"),
+        };
+        if let Some(label) = label {
+            self.btn(
+                cv,
+                te,
+                f,
+                Rect::new(x, y, w, p(34.0)),
+                &Button::secondary(label),
+                Hit::ToggleStream(id),
+            );
+            y += p(34.0);
+        }
+        y
     }
 
     /// The latency meter (RDP-67): its last result and the button.
@@ -3028,6 +3142,22 @@ pub fn sample_server_graphics(waiting: bool) -> Ui {
         }
     }
     m.drawer_scroll = 420;
+    m
+}
+
+/// The helper picture switch under the latency meter (RDP-67): off (0),
+/// running (1) or stopped with a reason (2).
+pub fn sample_stream(state: u8) -> Ui {
+    let mut m = sample_latency(2);
+    if let Some(t) = m.tab_mut(1) {
+        t.helper.accepted |= cap::STREAM;
+        t.helper.stream = match state {
+            0 => StreamView::Off,
+            1 => StreamView::On(3688, 1984),
+            _ => StreamView::Failed("this session's picture cannot be captured".into()),
+        };
+    }
+    m.drawer_scroll = 760;
     m
 }
 

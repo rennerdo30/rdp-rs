@@ -163,6 +163,9 @@ struct Session {
     helper: helpers::TabHelper,
     /// The latency meter while it measures (RDP-67).
     latency: std::cell::RefCell<Option<crate::latency::Run>>,
+    /// The helper's picture stream while it shows (RDP-67).
+    #[cfg(windows)]
+    stream: std::cell::RefCell<Option<crate::stream_player::Player>>,
 }
 
 #[derive(Clone, PartialEq)]
@@ -550,6 +553,8 @@ impl App {
                 last_fb: None,
                 helper,
                 latency: Default::default(),
+                #[cfg(windows)]
+                stream: Default::default(),
             },
         );
         if remote_app {
@@ -1278,6 +1283,7 @@ impl App {
             | Action::RetryHelperPairing(_)
             | Action::TuneServer(..)
             | Action::MeasureLatency(_)
+            | Action::ToggleStream(_)
             | Action::OpenHelperGuide
             | Action::HelperHintNever(_)
             | Action::HelperUpdateNever(_)

@@ -399,6 +399,7 @@ fn capabilities_follow_user_setting_and_policy() {
             | cap::HELPER_UPDATE
             | cap::KEYBOARD
             | cap::LATENCY
+            | cap::STREAM
     );
     assert_eq!(r.handle.accepted_capabilities(), ack.capabilities);
 }

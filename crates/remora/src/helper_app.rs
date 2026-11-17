@@ -22,9 +22,14 @@ pub fn capabilities(o: &HelperOptions) -> u32 {
     // Updates likewise need a click on Update helper (RDP-61).
     // Folders only matter with a file direction on (RDP-64).
     // The keyboard layout is only reported (RDP-68).
-    // The latency meter paints a square only when asked here (RDP-67).
-    let mut bits =
-        cap::SESSION_INFO | cap::SERVER_TUNING | cap::HELPER_UPDATE | cap::KEYBOARD | cap::LATENCY;
+    // The latency meter paints a square only when asked here (RDP-67); the
+    // picture stream likewise only runs when asked here.
+    let mut bits = cap::SESSION_INFO
+        | cap::SERVER_TUNING
+        | cap::HELPER_UPDATE
+        | cap::KEYBOARD
+        | cap::LATENCY
+        | cap::STREAM;
     if o.open_links {
         bits |= cap::OPEN_URL;
     }
@@ -335,6 +340,7 @@ mod tests {
                 | cap::HELPER_UPDATE
                 | cap::KEYBOARD
                 | cap::LATENCY
+                | cap::STREAM
         );
         let all = HelperOptions {
             open_links: true,
@@ -354,6 +360,7 @@ mod tests {
                 | cap::HELPER_UPDATE
                 | cap::KEYBOARD
                 | cap::LATENCY
+                | cap::STREAM
                 | cap::FILE_DOWN
                 | cap::FOLDERS
         );

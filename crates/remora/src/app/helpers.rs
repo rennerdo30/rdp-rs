@@ -5,7 +5,7 @@
 //! The adapter wakes the event loop at most once per batch of events
 //! (`pending`); progress repaints at most every [`PROGRESS_REDRAW`].
 
-use crate::ui::helper::LatencyView;
+use crate::ui::helper::{LatencyView, StreamView};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -116,6 +116,13 @@ impl App {
                     run.shown(&mut link, request_id, square, Instant::now());
                 }
                 continue;
+            }
+            #[cfg(windows)]
+            if let HelperEvent::StreamState { state, .. } = &ev
+                && *state != 0
+            {
+                // Stopped or failed: the player ends, RDP's picture is back.
+                *s.stream.borrow_mut() = None;
             }
             if let HelperEvent::KeyboardLayout(klid) = ev {
                 // Typed text now goes as this layout's keys (RDP-68).
@@ -233,6 +240,65 @@ impl App {
             t.helper.latency = view;
         }
         self.dirty();
+    }
+
+    /// Starts or stops the helper's picture stream on a tab (RDP-67).
+    pub(super) fn toggle_stream(&mut self, id: u64) {
+        #[cfg(windows)]
+        {
+            let Some(s) = self.sessions.get(&id) else {
+                return;
+            };
+            let view = if s.stream.borrow().is_some() {
+                s.helper.handle.stream_stop();
+                *s.stream.borrow_mut() = None;
+                StreamView::Off
+            } else if let Some(w) = s.worker.as_ref() {
+                let (tx, rx) = std::sync::mpsc::channel();
+                let (fw, fh) = {
+                    let sh = w.shared.lock().unwrap_or_else(|p| p.into_inner());
+                    (sh.fb.width, sh.fb.height)
+                };
+                // About 0.05 bit per pixel at 60 fps, as the benchmark.
+                let kbps = ((fw * fh) as f64 * 60.0 * 0.05 / 1000.0) as u32;
+                match s
+                    .helper
+                    .handle
+                    .stream_start(60, kbps.clamp(2_000, 50_000), tx)
+                {
+                    Some(_) => {
+                        let (proxy, serial) = (self.proxy.clone(), w.serial);
+                        let wake = move || {
+                            let _ = proxy.send_event(super::UserEvent::Session(
+                                id,
+                                serial,
+                                session::Event::Frame,
+                            ));
+                        };
+                        let player = crate::stream_player::Player::start(
+                            rx,
+                            w.shared.clone(),
+                            w.notified.clone(),
+                            s.helper.handle.clone(),
+                            wake,
+                        );
+                        *s.stream.borrow_mut() = Some(player);
+                        StreamView::Starting
+                    }
+                    None => StreamView::Failed(
+                        "the server helper does not offer it (update the helper)".into(),
+                    ),
+                }
+            } else {
+                StreamView::Failed("the session is not connected".into())
+            };
+            if let Some(t) = self.win.as_mut().and_then(|w| w.ui.tab_mut(id)) {
+                t.helper.stream = view;
+            }
+            self.dirty();
+        }
+        #[cfg(not(windows))]
+        let _ = id;
     }
 
     /// Drives running latency meters (from `about_to_wait`); the next time
@@ -540,6 +606,7 @@ impl App {
                 self.dirty();
             }
             Action::MeasureLatency(id) => self.start_latency(id),
+            Action::ToggleStream(id) => self.toggle_stream(id),
             Action::TuneServer(id, apply) => {
                 let h = self.helper_of(id)?;
                 let action = if apply {

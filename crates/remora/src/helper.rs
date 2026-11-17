@@ -166,12 +166,32 @@ pub enum HelperEvent {
     UpdateResult(UpdateStatus),
     /// The session's keyboard layout (KLID) changed (1.2, RDP-68).
     KeyboardLayout(u32),
+    /// The picture stream started (`state` 0, its size), stopped (1) or
+    /// failed (2, `text`) (1.2, RDP-67).
+    StreamState {
+        request_id: u32,
+        state: u8,
+        width: u32,
+        height: u32,
+        text: String,
+    },
     /// The helper painted the latency marker of mark `request_id` (1.2,
     /// RDP-67).
     LatencyShown {
         request_id: u32,
         square: crate::latency::Square,
     },
+}
+
+/// One piece of a stream picture, for the stream's player (RDP-67).
+#[derive(Debug)]
+pub struct StreamPiece {
+    pub seq: u32,
+    pub flags: u8,
+    pub offset: u32,
+    pub total: u32,
+    pub rects: Vec<[u16; 4]>,
+    pub data: Vec<u8>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -256,6 +276,8 @@ struct Core {
     server_settings: Option<ServerSettings>,
     /// The request id of a `TuneServer` waiting for its result.
     tune_rid: Option<u32>,
+    /// Where picture stream pieces go while the stream runs (RDP-67).
+    stream_tx: Option<std::sync::mpsc::Sender<StreamPiece>>,
     /// The request id of a helper update waiting for its result.
     update_rid: Option<u32>,
     next_rid: u32,
@@ -594,6 +616,8 @@ impl Core {
 
     fn closed(&mut self, ch: Channel) {
         *self.link(ch) = None;
+        // The stream's player sees its sender go and ends.
+        self.stream_tx = None;
         if ch == Channel::Ctl {
             if let Some(l) = &mut self.bulk {
                 l.close = true;
@@ -677,6 +701,9 @@ impl Core {
                 Event::Sas(sas) => self.on_sas(sas),
                 Event::Message { request_id, msg } => match ch {
                     Channel::Ctl => self.on_ctl(request_id, msg),
+                    Channel::Bulk if matches!(msg, Message::StreamData { .. }) => {
+                        self.stream_piece(msg)
+                    }
                     Channel::Bulk => {
                         // Only file data travels on Bulk; the session
                         // already refused Ctl-only types.
@@ -691,6 +718,38 @@ impl Core {
                         self.flush_engine();
                     }
                 },
+            }
+        }
+    }
+
+    /// A picture stream piece: to the player while the stream runs, else
+    /// dropped (the stream just stopped).
+    fn stream_piece(&mut self, msg: Message) {
+        let Message::StreamData {
+            seq,
+            flags,
+            offset,
+            total,
+            rects,
+            data,
+        } = msg
+        else {
+            return;
+        };
+        if self.accepted & cap::STREAM == 0 {
+            return;
+        }
+        if let Some(tx) = &self.stream_tx {
+            let piece = StreamPiece {
+                seq,
+                flags,
+                offset,
+                total,
+                rects,
+                data,
+            };
+            if tx.send(piece).is_err() {
+                self.stream_tx = None;
             }
         }
     }
@@ -975,6 +1034,25 @@ impl Core {
                     });
                 }
             }
+            Message::StreamState {
+                state,
+                width,
+                height,
+                text,
+            } => {
+                if self.accepted & cap::STREAM != 0 {
+                    if state != 0 {
+                        self.stream_tx = None;
+                    }
+                    self.push(HelperEvent::StreamState {
+                        request_id,
+                        state,
+                        width,
+                        height,
+                        text,
+                    });
+                }
+            }
             Message::TuneResult { status } => {
                 // Only the answer to the request this side made.
                 if self.tune_rid == Some(request_id) {
@@ -1170,6 +1248,7 @@ impl HelperHandle {
                 session_info: None,
                 server_settings: None,
                 tune_rid: None,
+                stream_tx: None,
                 update_rid: None,
                 next_rid: 1,
                 last_seen: None,
@@ -1432,6 +1511,55 @@ impl HelperHandle {
         c.next_rid = rid.wrapping_add(1).max(1);
         c.send(rid, &Message::LatencyMark { rgb });
         Some(rid)
+    }
+
+    /// Starts the helper's picture stream (RDP-67): its pieces go to `sink`.
+    /// The request's id, or None when it cannot be asked (not paired, or
+    /// the helper does not offer the stream).
+    pub fn stream_start(
+        &self,
+        max_fps: u8,
+        kbps: u32,
+        sink: std::sync::mpsc::Sender<StreamPiece>,
+    ) -> Option<u32> {
+        let mut c = self.lock();
+        if !c.ack_sent || c.accepted & cap::STREAM == 0 {
+            return None;
+        }
+        let rid = c.next_rid.max(1);
+        c.next_rid = rid.wrapping_add(1).max(1);
+        c.stream_tx = Some(sink);
+        c.send(
+            rid,
+            &Message::StreamStart {
+                codec: remora_link::msg::STREAM_H264,
+                max_fps,
+                kbps,
+            },
+        );
+        Some(rid)
+    }
+
+    /// Stops the picture stream.
+    pub fn stream_stop(&self) {
+        let mut c = self.lock();
+        if c.stream_tx.take().is_some() && c.ack_sent {
+            c.send(0, &Message::StreamStop);
+        }
+    }
+
+    /// Picture `seq` was decoded: the helper may send more.
+    pub fn stream_ack(&self, seq: u32) {
+        let mut c = self.lock();
+        if c.stream_tx.is_some() && c.ack_sent {
+            c.send(0, &Message::StreamAck { seq });
+        }
+    }
+
+    /// Whether the helper offers the picture stream on this connection.
+    pub fn stream_available(&self) -> bool {
+        let c = self.lock();
+        c.ack_sent && c.accepted & cap::STREAM != 0
     }
 
     /// Asks the helper to remove the latency marker.

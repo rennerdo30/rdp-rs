@@ -50,6 +50,8 @@ mod span;
 mod sspi;
 mod stats;
 mod store;
+#[cfg(windows)]
+mod stream_player;
 mod text_field;
 mod theme;
 mod thumb;
@@ -627,6 +629,9 @@ fn snapshot_ui(
         ("-latency-running", || ui::sample_latency(1)),
         ("-latency-done", || ui::sample_latency(2)),
         ("-latency-failed", || ui::sample_latency(3)),
+        ("-stream-off", || ui::sample_stream(0)),
+        ("-stream-on", || ui::sample_stream(1)),
+        ("-stream-failed", || ui::sample_stream(2)),
         ("-helper-hint", ui::sample_helper_hint),
         ("-helper-update", ui::sample_helper_update),
         ("-update-ask", || ui::sample_update_ask(false)),
