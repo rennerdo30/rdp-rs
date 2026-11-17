@@ -91,6 +91,13 @@ impl Yuv420Frame {
 /// the decoder produced no picture for it.
 pub trait H264Decoder: Send {
     fn decode(&mut self, annex_b: &[u8]) -> Result<Option<Yuv420Frame>>;
+
+    /// A picture the caller is done with, so the decoder can reuse its
+    /// memory for the next one (a 4K picture is 11 MB, and fresh memory
+    /// costs more than the copy into it). The default drops it.
+    fn recycle(&mut self, frame: Yuv420Frame) {
+        drop(frame);
+    }
 }
 
 /// Creates a decoder for a new session, or `None` when no decoder is

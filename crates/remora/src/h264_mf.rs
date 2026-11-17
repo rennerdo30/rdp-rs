@@ -42,7 +42,16 @@ pub struct MfH264 {
     /// MFStartup / CoInitializeEx succeeded and need their counterpart.
     mf_started: bool,
     com_init: bool,
+    /// The output sample the decoder writes into, kept between pictures:
+    /// fresh memory for every 4K picture cost more than decoding (RDP-67).
+    out_sample: Option<(IMFSample, u32)>,
+    /// Pictures handed back ([`H264Decoder::recycle`]), reused for the
+    /// next copies.
+    spare: Vec<Yuv420Frame>,
 }
+
+/// Recycled pictures kept: one main and one auxiliary view in flight.
+const SPARE: usize = 3;
 
 // SAFETY: the Microsoft H.264 decoder MFT is free-threaded (registered with
 // ThreadingModel "Both") and is created in the multithreaded apartment; the
@@ -58,6 +67,8 @@ impl MfH264 {
             stride: 0,
             mf_started: false,
             com_init: false,
+            out_sample: None,
+            spare: Vec::new(),
         };
         // SAFETY: plain COM / Media Foundation initialisation and calls on
         // interfaces this struct owns; every pointer passed is valid.
@@ -159,11 +170,17 @@ impl MfH264 {
                 let sample = if provides {
                     None
                 } else {
-                    let s = MFCreateSample().map_err(|e| err("sample", e))?;
-                    let b =
-                        MFCreateMemoryBuffer(info.cbSize.max(1)).map_err(|e| err("buffer", e))?;
-                    s.AddBuffer(&b).map_err(|e| err("buffer", e))?;
-                    Some(s)
+                    let size = info.cbSize.max(1);
+                    match &self.out_sample {
+                        Some((s, n)) if *n == size => Some(s.clone()),
+                        _ => {
+                            let s = MFCreateSample().map_err(|e| err("sample", e))?;
+                            let b = MFCreateMemoryBuffer(size).map_err(|e| err("buffer", e))?;
+                            s.AddBuffer(&b).map_err(|e| err("buffer", e))?;
+                            self.out_sample = Some((s.clone(), size));
+                            Some(s)
+                        }
+                    }
                 };
                 let mut buf = [MFT_OUTPUT_DATA_BUFFER {
                     dwStreamID: 0,
@@ -190,9 +207,13 @@ impl MfH264 {
         }
     }
 
+    fn spare_frame(&mut self) -> Yuv420Frame {
+        self.spare.pop().unwrap_or_default()
+    }
+
     /// Copies an NV12 picture into planar I420. The row pitch comes from
     /// IMF2DBuffer2 where the buffer has one, else from the media type.
-    unsafe fn read(&self, sample: &IMFSample) -> rdp::Result<Yuv420Frame> {
+    unsafe fn read(&mut self, sample: &IMFSample) -> rdp::Result<Yuv420Frame> {
         let (w, h) = (self.width, self.height);
         // SAFETY: each buffer stays locked while its bytes are read, and the
         // length Media Foundation reports bounds every access.
@@ -212,9 +233,10 @@ impl MfH264 {
                 )
                 .map_err(|e| err("lock", e))?;
                 let offset = scan0.offset_from(start);
+                let reuse = self.spare_frame();
                 let frame = if pitch > 0 && offset >= 0 && (offset as usize) <= len as usize {
                     let data = std::slice::from_raw_parts(scan0, len as usize - offset as usize);
-                    nv12_frame(data, w, h, pitch as usize)
+                    nv12_frame(data, w, h, pitch as usize, reuse)
                 } else {
                     Err(rdp::Error::Protocol("h264: bottom-up NV12 buffer".into()))
                 };
@@ -226,11 +248,13 @@ impl MfH264 {
             buffer
                 .Lock(&mut p, None, Some(&mut len))
                 .map_err(|e| err("lock", e))?;
+            let reuse = self.spare_frame();
             let frame = nv12_frame(
                 std::slice::from_raw_parts(p, len as usize),
                 w,
                 h,
                 self.stride,
+                reuse,
             );
             let _ = buffer.Unlock();
             frame
@@ -241,7 +265,13 @@ impl MfH264 {
 /// NV12 (a luma plane, then interleaved U/V rows at half height, both with
 /// pitch `pitch`) as a frame: two block copies, the decoder's pitch kept
 /// (splitting U and V byte by byte cost 3 ms per 4K picture, RDP-67).
-fn nv12_frame(data: &[u8], w: usize, h: usize, pitch: usize) -> rdp::Result<Yuv420Frame> {
+fn nv12_frame(
+    data: &[u8],
+    w: usize,
+    h: usize,
+    pitch: usize,
+    reuse: Yuv420Frame,
+) -> rdp::Result<Yuv420Frame> {
     let (cw, ch) = (w.div_ceil(2), h.div_ceil(2));
     if w == 0 || h == 0 || pitch < w || data.len() < pitch * h + pitch * (ch - 1) + cw * 2 {
         return Err(rdp::Error::Protocol(format!(
@@ -250,11 +280,17 @@ fn nv12_frame(data: &[u8], w: usize, h: usize, pitch: usize) -> rdp::Result<Yuv4
         )));
     }
     let uv_end = (pitch * h + pitch * ch).min(data.len());
+    // The recycled picture's memory, already touched: no fresh pages.
+    let (mut y, mut uv) = (reuse.y, reuse.uv);
+    y.clear();
+    y.extend_from_slice(&data[..pitch * h]);
+    uv.clear();
+    uv.extend_from_slice(&data[pitch * h..uv_end]);
     Ok(Yuv420Frame {
         width: w,
         height: h,
-        y: data[..pitch * h].to_vec(),
-        uv: data[pitch * h..uv_end].to_vec(),
+        y,
+        uv,
         y_stride: pitch,
         uv_stride: pitch,
         ..Default::default()
@@ -279,6 +315,12 @@ fn debug_delay() {
 }
 
 impl H264Decoder for MfH264 {
+    fn recycle(&mut self, frame: Yuv420Frame) {
+        if self.spare.len() < SPARE && !frame.uv.is_empty() {
+            self.spare.push(frame);
+        }
+    }
+
     fn decode(&mut self, nal: &[u8]) -> rdp::Result<Option<Yuv420Frame>> {
         #[cfg(debug_assertions)]
         debug_delay();
@@ -331,15 +373,26 @@ mod tests {
             5, 6, 7, 8, 0, 0, //
             10, 20, 11, 21, 0, 0,
         ];
-        let f = nv12_frame(&data, 4, 2, 6).unwrap();
+        let f = nv12_frame(&data, 4, 2, 6, Yuv420Frame::default()).unwrap();
         assert_eq!(f.y[..4], [1, 2, 3, 4]);
         assert_eq!(f.y[6..10], [5, 6, 7, 8]);
         assert_eq!((f.chroma(false, 0, 0), f.chroma(true, 0, 0)), (10, 20));
         assert_eq!((f.chroma(false, 1, 0), f.chroma(true, 1, 0)), (11, 21));
         assert_eq!(f.chroma_get(false, 2, 0), None);
         f.validate().unwrap();
-        assert!(nv12_frame(&data[..15], 4, 2, 6).is_err());
-        assert!(nv12_frame(&data, 4, 2, 3).is_err());
+        assert!(nv12_frame(&data[..15], 4, 2, 6, Yuv420Frame::default()).is_err());
+        assert!(nv12_frame(&data, 4, 2, 3, Yuv420Frame::default()).is_err());
+        // A recycled picture's memory is reused, and its old bytes are gone.
+        let big = Yuv420Frame {
+            y: vec![9; 64],
+            uv: vec![9; 64],
+            ..Default::default()
+        };
+        let cap = big.y.capacity();
+        let f = nv12_frame(&data, 4, 2, 6, big).unwrap();
+        assert_eq!(f.y.capacity(), cap);
+        assert_eq!(f.y.len(), 12);
+        assert_eq!((f.chroma(false, 1, 0), f.chroma(true, 1, 0)), (11, 21));
     }
 
     /// Bit writer for an H.264 RBSP (ITU-T H.264 7.2: u(n), ue(v), se(v)).
@@ -544,10 +597,20 @@ fn bench_nv12_copy() {
     let t = std::time::Instant::now();
     let n = 50;
     for _ in 0..n {
-        std::hint::black_box(nv12_frame(&data, w, h, pitch).unwrap());
+        std::hint::black_box(nv12_frame(&data, w, h, pitch, Yuv420Frame::default()).unwrap());
     }
     println!(
-        "nv12_frame {w}x{h}: {:.2} ms",
+        "fresh memory {w}x{h}: {:.2} ms",
+        t.elapsed().as_secs_f64() * 1000.0 / n as f64
+    );
+    let t = std::time::Instant::now();
+    let mut spare = Yuv420Frame::default();
+    for _ in 0..n {
+        let f = nv12_frame(&data, w, h, pitch, spare).unwrap();
+        spare = std::hint::black_box(f);
+    }
+    println!(
+        "recycled memory {w}x{h}: {:.2} ms",
         t.elapsed().as_secs_f64() * 1000.0 / n as f64
     );
 }

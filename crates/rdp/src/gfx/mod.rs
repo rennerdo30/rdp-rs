@@ -572,12 +572,15 @@ impl GraphicsChannel {
             (frame.width, frame.height),
             |x, y| frame.rgb(x, y),
         );
-        self.main_view = Some(MainView {
+        let old = self.main_view.replace(MainView {
             surface: id,
             x: dest.left,
             y: dest.top,
             frame,
         });
+        if let Some(old) = old {
+            self.recycle(old.frame);
+        }
         Ok(())
     }
 
@@ -611,7 +614,15 @@ impl GraphicsChannel {
             avc444::rgb444(&main.frame, &aux, layout, x, y)
         });
         self.main_view = Some(main);
+        self.recycle(aux);
         Ok(())
+    }
+
+    /// Hands a picture's memory back to the decoder.
+    fn recycle(&mut self, frame: Yuv420Frame) {
+        if let Some(d) = self.h264.as_mut() {
+            d.recycle(frame);
+        }
     }
 
     /// Copies the region rectangles (surface coordinates inside `dest`)
