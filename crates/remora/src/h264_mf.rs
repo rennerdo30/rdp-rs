@@ -172,7 +172,14 @@ impl MfH264 {
                 } else {
                     let size = info.cbSize.max(1);
                     match &self.out_sample {
-                        Some((s, n)) if *n == size => Some(s.clone()),
+                        Some((s, n)) if *n == size => {
+                            // Empty again, as a fresh one: the decoder writes
+                            // nothing into a buffer that still holds a picture.
+                            if let Ok(b) = s.GetBufferByIndex(0) {
+                                let _ = b.SetCurrentLength(0);
+                            }
+                            Some(s.clone())
+                        }
                         _ => {
                             let s = MFCreateSample().map_err(|e| err("sample", e))?;
                             let b = MFCreateMemoryBuffer(size).map_err(|e| err("buffer", e))?;
@@ -527,8 +534,13 @@ mod tests {
         for mb in 0..9 {
             let (mx, my) = ((mb % 3) * 16, (mb / 3) * 16);
             assert_eq!(f.y[(my + 5) * f.y_stride + mx + 7], 40 + 16 * mb as u8);
-            let c = (my / 2 + 3) * f.uv_stride + mx / 2 + 2;
-            assert_eq!((f.u[c], f.v[c]), (100 + mb as u8, 150 + mb as u8));
+            assert_eq!(
+                (
+                    f.chroma(false, mx / 2 + 2, my / 2 + 3),
+                    f.chroma(true, mx / 2 + 2, my / 2 + 3)
+                ),
+                (100 + mb as u8, 150 + mb as u8)
+            );
         }
     }
 

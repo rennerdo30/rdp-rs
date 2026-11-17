@@ -23,12 +23,27 @@ import string
 import subprocess
 import sys
 import tempfile
+import zlib
 from importlib import import_module
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 h = import_module("helper-vm-test")  # wc, ps, log, G
 ROOT = Path(__file__).resolve().parent.parent
+
+
+def lit_share(png: Path) -> float:
+    """Share of the screenshot's bytes that are not black: a session that
+    decodes frames but shows nothing (RDP-70) has almost none."""
+    b = png.read_bytes()
+    i, data = 8, b""
+    while i < len(b):
+        n = int.from_bytes(b[i:i + 4], "big")
+        if b[i + 4:i + 8] == b"IDAT":
+            data += b[i + 8:i + 8 + n]
+        i += 12 + n
+    raw = zlib.decompress(data)[::7]
+    return sum(1 for x in raw if x > 8) / max(len(raw), 1)
 
 
 def main() -> int:
@@ -84,6 +99,9 @@ def main() -> int:
             (work / f"{size}.log").write_text(text, encoding="utf-8")
             line = next((l for l in text.splitlines() if l.startswith("graphics pipeline:")),
                         f"no graphics pipeline figures (exit {out.returncode})")
+            shot = work / f"{size}.png"
+            lit = lit_share(shot) if shot.exists() else 0.0
+            line += f"; picture {lit:.0%} not black" + ("" if lit > 0.2 else " (FAIL: black)")
             rows.append((size, line))
             h.log(f"{size}: {line}")
     finally:
@@ -94,7 +112,7 @@ def main() -> int:
             h.log(f"could not stop the clone: {e}")
     for size, line in rows:
         print(f"{size:>10}  {line}")
-    return 0 if rows and all("ms decoding" in l for _, l in rows) else 1
+    return 0 if rows and all("ms decoding" in l and "FAIL" not in l for _, l in rows) else 1
 
 
 if __name__ == "__main__":
