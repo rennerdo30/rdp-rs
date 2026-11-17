@@ -260,6 +260,19 @@ pub struct HelperView {
     pub server: Option<ServerSettings>,
     pub tune: Tune,
     pub update: HelperUpdate,
+    /// The latency meter (RDP-67).
+    pub latency: LatencyView,
+}
+
+/// The latency meter as the tab shows it (RDP-67).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum LatencyView {
+    #[default]
+    Idle,
+    /// Marks measured, of how many.
+    Running(usize, usize),
+    /// The summary, or why it could not measure.
+    Finished(Result<String, String>),
 }
 
 /// Updating the helper from here (RDP-61).
@@ -432,7 +445,7 @@ impl HelperView {
                 self.server = Some(s);
                 Vec::new()
             }
-            HelperEvent::KeyboardLayout(_) => Vec::new(),
+            HelperEvent::KeyboardLayout(_) | HelperEvent::LatencyShown { .. } => Vec::new(),
             HelperEvent::UpdateResult(st) => {
                 self.update = HelperUpdate::Finished(st);
                 let (text, tone) = match st {
@@ -1241,6 +1254,13 @@ impl Ui {
                 }
                 Some(Action::TuneServer(id, apply))
             }
+            Hit::MeasureLatency(id) => {
+                let t = self.tab_mut(id)?;
+                if matches!(t.helper.latency, LatencyView::Running(..)) {
+                    return None;
+                }
+                Some(Action::MeasureLatency(id))
+            }
             Hit::FormHelper(i) => {
                 let h = &mut self.opts.helper;
                 match i {
@@ -2004,7 +2024,87 @@ impl Ui {
             }
             y += p(34.0);
         }
+        if v.accepted & cap::LATENCY != 0 {
+            y = self.latency_card(cv, te, f, x, y + p(14.0), w, id, &v.latency);
+        }
         y + p(24.0)
+    }
+
+    /// The latency meter (RDP-67): its last result and the button.
+    #[allow(clippy::too_many_arguments)]
+    fn latency_card(
+        &mut self,
+        cv: &mut Canvas,
+        te: &mut TextEngine,
+        f: &Fonts,
+        x: i32,
+        mut y: i32,
+        w: i32,
+        id: u64,
+        view: &LatencyView,
+    ) -> i32 {
+        let s = self.scale;
+        let p = |v: f32| (v * s).round() as i32;
+        let c = pal();
+        let (text, tone) = match view {
+            LatencyView::Idle => (
+                "How long a change on the server takes to reach this picture.".to_string(),
+                Tone::Muted,
+            ),
+            LatencyView::Running(done, total) => {
+                (format!("Measuring\u{2026} {done} of {total}"), Tone::Accent)
+            }
+            LatencyView::Finished(Ok(summary)) => (summary.clone(), Tone::Success),
+            LatencyView::Finished(Err(why)) => (format!("Not measured: {why}"), Tone::Warning),
+        };
+        // The card grows with the text (a failure explains itself).
+        let lines = Kit::new(cv, te, f, s).wrap(Font::Regular, 12.0, &text, w - p(28.0));
+        let shown = lines.len().clamp(1, 4);
+        let h = p(46.0) + shown as i32 * p(16.0);
+        let cells = self.card(cv, x, y, w, &[h]);
+        if let Some(r) = cells.first() {
+            let mut k = Kit::new(cv, te, f, s);
+            k.text(
+                Font::Regular,
+                12.5,
+                r.x + p(14.0),
+                r.y + p(20.0),
+                "Picture latency",
+                c.text_muted,
+                r.w - p(28.0),
+            );
+            let mut ty = r.y + p(38.0);
+            for l in lines.iter().take(shown) {
+                k.text(
+                    Font::Regular,
+                    12.0,
+                    r.x + p(14.0),
+                    ty,
+                    l,
+                    tone.color(),
+                    r.w - p(28.0),
+                );
+                ty += p(16.0);
+            }
+        }
+        y += h + p(10.0);
+        if !matches!(view, LatencyView::Running(..)) {
+            let label = if matches!(view, LatencyView::Idle) {
+                "Measure latency"
+            } else {
+                "Measure again"
+            };
+            self.btn(
+                cv,
+                te,
+                f,
+                Rect::new(x, y, w, p(34.0)),
+                &Button::secondary(label),
+                Hit::MeasureLatency(id),
+            );
+            y += p(34.0);
+        }
+        y
     }
 
     /// The Session page's helper card (nothing without a helper).
@@ -2928,6 +3028,27 @@ pub fn sample_server_graphics(waiting: bool) -> Ui {
         }
     }
     m.drawer_scroll = 420;
+    m
+}
+
+/// The latency meter under the server graphics (RDP-67): not yet run (0),
+/// measuring (1), measured (2) or failed (3).
+pub fn sample_latency(state: u8) -> Ui {
+    let mut m = sample_server_graphics(false);
+    if let Some(t) = m.tab_mut(1) {
+        t.helper.accepted |= cap::LATENCY;
+        t.helper.latency = match state {
+            0 => LatencyView::Idle,
+            1 => LatencyView::Running(7, 20),
+            2 => LatencyView::Finished(Ok(
+                "23 ms to the picture (median of 20, 18\u{2013}41 ms, 95% under 35 ms); helper channel 4 ms".into(),
+            )),
+            _ => LatencyView::Finished(Err(
+                "the marker never appeared in the picture (is the top-left corner of the session covered?)".into(),
+            )),
+        };
+    }
+    m.drawer_scroll = 600;
     m
 }
 

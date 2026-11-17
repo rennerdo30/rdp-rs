@@ -77,6 +77,13 @@ pub enum Input {
         request_id: u32,
         status: remora_link::msg::TuneStatus,
     },
+    /// The latency marker is painted (RDP-67).
+    MarkerShown {
+        request_id: u32,
+        x: u32,
+        y: u32,
+        size: u32,
+    },
     /// Exit; `done` is signalled once the loop has finished.
     Shutdown { done: Option<Sender<()>> },
 }
@@ -170,6 +177,8 @@ struct Loop {
     next_request: u64,
     pending_urls: BTreeMap<u64, Sender<UrlOutcome>>,
     pending_sends: BTreeMap<u64, Sender<SendOutcome>>,
+    /// The latency meter's marker window, while Remora measures.
+    marker: Option<super::marker::Marker>,
     static_info: Option<sys::StaticInfo>,
     cpu_prev: Option<CpuTimes>,
     shutting_down: bool,
@@ -235,6 +244,7 @@ fn event_loop(key: StaticKey) -> i32 {
         next_request: 1,
         pending_urls: BTreeMap::new(),
         pending_sends: BTreeMap::new(),
+        marker: None,
         static_info: None,
         cpu_prev: None,
         shutting_down: false,
@@ -404,6 +414,17 @@ impl Loop {
                     self.shutdown();
                 }
             }
+            Input::MarkerShown {
+                request_id,
+                x,
+                y,
+                size,
+            } => self.feed(AgentEvent::MarkerShown {
+                request_id,
+                x,
+                y,
+                size,
+            }),
             Input::TuneDone { request_id, status } => {
                 self.feed(AgentEvent::TuneDone { request_id, status });
                 // Read the settings again and send them if they changed.
@@ -575,6 +596,13 @@ impl Loop {
                         installed,
                     });
                 }
+                Action::ShowMarker { request_id, rgb } => {
+                    let tx = &self.tx;
+                    self.marker
+                        .get_or_insert_with(|| super::marker::Marker::start(tx.clone()))
+                        .show(request_id, rgb);
+                }
+                Action::HideMarker => self.marker = None,
                 Action::TuneServer { request_id, action } => {
                     // The administrator prompt waits for the user: off
                     // this loop.

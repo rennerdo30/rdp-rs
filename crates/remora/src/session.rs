@@ -83,6 +83,8 @@ pub struct Shared {
     /// When the oldest update not yet shown was ready here (decoded), for
     /// the statistics' update-to-screen time (RDP-56).
     pub ready: Option<std::time::Instant>,
+    /// The latency meter's watch on the decoded picture (RDP-67).
+    pub latency: crate::latency::Probe,
 }
 
 pub struct Worker {
@@ -154,6 +156,7 @@ pub fn spawn(
         damage: Vec::new(),
         full: true,
         ready: None,
+        latency: Default::default(),
     }));
     let notified = Arc::new(AtomicBool::new(false));
     let recorder = Arc::new(Mutex::new(None));
@@ -283,6 +286,15 @@ fn run(
                 s.damage.extend_from_slice(&out.damage);
             }
             s.ready.get_or_insert(now);
+            {
+                // The latency meter times the decoded picture (RDP-67).
+                let Shared {
+                    fb: picture,
+                    latency,
+                    ..
+                } = &mut *s;
+                latency.check(picture, now);
+            }
             drop(s);
             if !notified.swap(true, Ordering::AcqRel) {
                 emit(Event::Frame);

@@ -161,6 +161,8 @@ struct Session {
     last_fb: Option<rdp::Framebuffer>,
     /// The tab's server helper, kept across its reconnects.
     helper: helpers::TabHelper,
+    /// The latency meter while it measures (RDP-67).
+    latency: std::cell::RefCell<Option<crate::latency::Run>>,
 }
 
 #[derive(Clone, PartialEq)]
@@ -547,6 +549,7 @@ impl App {
                 }),
                 last_fb: None,
                 helper,
+                latency: Default::default(),
             },
         );
         if remote_app {
@@ -1274,6 +1277,7 @@ impl App {
             | Action::ForgetHelper(_)
             | Action::RetryHelperPairing(_)
             | Action::TuneServer(..)
+            | Action::MeasureLatency(_)
             | Action::OpenHelperGuide
             | Action::HelperHintNever(_)
             | Action::HelperUpdateNever(_)
@@ -2046,6 +2050,7 @@ impl ApplicationHandler<UserEvent> for App {
         }
         self.sync_touch();
         self.helper_tick();
+        let latency_at = self.latency_tick();
         // Idle auto-lock of the vault.
         let lock_at = self.auto_lock_deadline();
         if lock_at.is_some_and(|t| std::time::Instant::now() >= t) {
@@ -2058,10 +2063,15 @@ impl ApplicationHandler<UserEvent> for App {
         }
         // RemoteApp sessions whose apps all closed end after a while.
         let rail_at = self.rail_timers();
-        let lock_at = [self.auto_lock_deadline(), rail_at, self.helper_redraw]
-            .into_iter()
-            .flatten()
-            .min();
+        let lock_at = [
+            self.auto_lock_deadline(),
+            rail_at,
+            self.helper_redraw,
+            latency_at,
+        ]
+        .into_iter()
+        .flatten()
+        .min();
         let wait = |t: Option<std::time::Instant>| match t {
             Some(t) => ControlFlow::WaitUntil(t),
             None => ControlFlow::Wait,

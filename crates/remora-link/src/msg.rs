@@ -28,7 +28,8 @@ pub const PROTO_MAJOR: u16 = 1;
 /// helper pins Remora's client key). 1.2 adds the server graphics settings:
 /// [`Message::ServerSettings`], [`Message::TuneServer`] and
 /// [`Message::TuneResult`] under [`cap::SERVER_TUNING`], and helper updates
-/// ([`Message::UpdateBegin`] and the rest) under [`cap::HELPER_UPDATE`].
+/// ([`Message::UpdateBegin`] and the rest) under [`cap::HELPER_UPDATE`],
+/// and the latency meter ([`Message::LatencyMark`]) under [`cap::LATENCY`].
 pub const PROTO_MINOR: u16 = 2;
 
 // Session messages (handled inside SecureSession).
@@ -76,6 +77,13 @@ pub const UPDATE_BEGIN: u16 = 0x0600;
 pub const UPDATE_DATA: u16 = 0x0601;
 pub const UPDATE_END: u16 = 0x0602;
 pub const UPDATE_RESULT: u16 = 0x0603;
+// Latency meter (Ctl, 1.2, RDP-67).
+/// Remora → helper: show the marker square in this colour.
+pub const LATENCY_MARK: u16 = 0x0700;
+/// Helper → Remora: the marker is painted; where it is.
+pub const LATENCY_SHOWN: u16 = 0x0701;
+/// Remora → helper: remove the marker.
+pub const LATENCY_END: u16 = 0x0702;
 
 /// Capability bits (Hello offers, HelloAck accepts a subset).
 pub mod cap {
@@ -98,6 +106,10 @@ pub mod cap {
     /// 1.2: the helper reports the session's keyboard layout
     /// ([`super::Message::KeyboardLayout`]), so Remora can type with keys.
     pub const KEYBOARD: u32 = 1 << 7;
+    /// 1.2: the latency meter: the helper paints a small square in the
+    /// colour Remora asks for ([`super::Message::LatencyMark`]), so Remora
+    /// can time the round trip to its own picture.
+    pub const LATENCY: u32 = 1 << 8;
     /// Every bit this version defines.
     pub const ALL: u32 = SESSION_INFO
         | OPEN_URL
@@ -106,7 +118,8 @@ pub mod cap {
         | SERVER_TUNING
         | HELPER_UPDATE
         | FOLDERS
-        | KEYBOARD;
+        | KEYBOARD
+        | LATENCY;
 }
 
 /// Policy flags the helper reads from the server's configuration.
@@ -545,6 +558,21 @@ pub enum Message {
     TuneResult {
         status: TuneStatus,
     },
+    /// Remora → helper (1.2, [`cap::LATENCY`]): paint the marker square in
+    /// `rgb` (0xRRGGBB); `request_id` ≠ 0 names this mark.
+    LatencyMark {
+        rgb: u32,
+    },
+    /// Helper → Remora (1.2), the mark's `request_id`: painted. The square
+    /// is `size` pixels at (`x`, `y`) of Remora's picture (the session's
+    /// desktop from its top-left corner).
+    LatencyShown {
+        x: u32,
+        y: u32,
+        size: u32,
+    },
+    /// Remora → helper (1.2): remove the marker.
+    LatencyEnd,
     /// Remora → helper (1.2): a new helper follows; `request_id` ≠ 0, the
     /// same on every message of this update.
     UpdateBegin {
@@ -618,6 +646,9 @@ impl Message {
             Message::UpdateData { .. } => UPDATE_DATA,
             Message::UpdateEnd => UPDATE_END,
             Message::UpdateResult { .. } => UPDATE_RESULT,
+            Message::LatencyMark { .. } => LATENCY_MARK,
+            Message::LatencyShown { .. } => LATENCY_SHOWN,
+            Message::LatencyEnd => LATENCY_END,
             Message::Unknown { ty } => *ty,
         }
     }
@@ -768,6 +799,13 @@ impl Message {
             }
             Message::TuneServer { action } => p.put_u8(action.to_u8()),
             Message::TuneResult { status } => p.put_u8(status.to_u8()),
+            Message::LatencyMark { rgb } => p.put_u32(*rgb),
+            Message::LatencyShown { x, y, size } => {
+                p.put_u32(*x);
+                p.put_u32(*y);
+                p.put_u32(*size);
+            }
+            Message::LatencyEnd => {}
             Message::UpdateBegin {
                 version,
                 size,
@@ -909,6 +947,13 @@ impl Message {
             TUNE_RESULT => Message::TuneResult {
                 status: TuneStatus::from_u8(r.u8()?)?,
             },
+            LATENCY_MARK => Message::LatencyMark { rgb: r.u32()? },
+            LATENCY_SHOWN => Message::LatencyShown {
+                x: r.u32()?,
+                y: r.u32()?,
+                size: r.u32()?,
+            },
+            LATENCY_END => Message::LatencyEnd,
             UPDATE_BEGIN => Message::UpdateBegin {
                 version: r.str(MAX_VERSION_TEXT)?,
                 size: r.u64()?,
@@ -1031,6 +1076,13 @@ mod tests {
             Message::TuneResult {
                 status: TuneStatus::Declined,
             },
+            Message::LatencyMark { rgb: 0x00ff_00ff },
+            Message::LatencyShown {
+                x: 8,
+                y: 1032,
+                size: 32,
+            },
+            Message::LatencyEnd,
             Message::UpdateBegin {
                 version: "0.1.0-beta.9".into(),
                 size: 1 << 20,

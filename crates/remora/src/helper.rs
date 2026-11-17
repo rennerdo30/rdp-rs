@@ -166,6 +166,12 @@ pub enum HelperEvent {
     UpdateResult(UpdateStatus),
     /// The session's keyboard layout (KLID) changed (1.2, RDP-68).
     KeyboardLayout(u32),
+    /// The helper painted the latency marker of mark `request_id` (1.2,
+    /// RDP-67).
+    LatencyShown {
+        request_id: u32,
+        square: crate::latency::Square,
+    },
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -957,6 +963,18 @@ impl Core {
                     self.push(HelperEvent::UpdateResult(status));
                 }
             }
+            Message::LatencyShown { x, y, size } => {
+                if self.accepted & cap::LATENCY != 0 {
+                    self.push(HelperEvent::LatencyShown {
+                        request_id,
+                        square: crate::latency::Square {
+                            x: x as usize,
+                            y: y as usize,
+                            size: size as usize,
+                        },
+                    });
+                }
+            }
             Message::TuneResult { status } => {
                 // Only the answer to the request this side made.
                 if self.tune_rid == Some(request_id) {
@@ -1400,6 +1418,34 @@ impl HelperHandle {
         c.tune_rid = Some(rid);
         c.send(rid, &Message::TuneServer { action });
         true
+    }
+
+    /// Latency meter (RDP-67): asks the helper to paint its marker in `rgb`
+    /// (0xRRGGBB). The mark's id, or None when it cannot be asked (not
+    /// paired, or the helper does not offer the meter).
+    pub fn latency_mark(&self, rgb: u32) -> Option<u32> {
+        let mut c = self.lock();
+        if !c.ack_sent || c.accepted & cap::LATENCY == 0 {
+            return None;
+        }
+        let rid = c.next_rid.max(1);
+        c.next_rid = rid.wrapping_add(1).max(1);
+        c.send(rid, &Message::LatencyMark { rgb });
+        Some(rid)
+    }
+
+    /// Asks the helper to remove the latency marker.
+    pub fn latency_end(&self) {
+        let mut c = self.lock();
+        if c.ack_sent && c.accepted & cap::LATENCY != 0 {
+            c.send(0, &Message::LatencyEnd);
+        }
+    }
+
+    /// Whether the latency meter can run on this connection.
+    pub fn latency_available(&self) -> bool {
+        let c = self.lock();
+        c.ack_sent && c.accepted & cap::LATENCY != 0
     }
 
     /// How many second helper instances were refused on this connection.

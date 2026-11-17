@@ -391,6 +391,8 @@ struct Net {
     send_results: Vec<(u64, SendOutcome)>,
     /// `TuneServer` actions the agent asked for.
     tunes: Vec<(u32, remora_link::msg::TuneAction)>,
+    /// `ShowMarker` (request id, colour) and `HideMarker` (None).
+    markers: Vec<Option<(u32, u32)>>,
     /// `InstallUpdate` actions.
     installs: Vec<(u32, String, Vec<u8>)>,
     /// Channels the agent closed.
@@ -428,6 +430,7 @@ impl Net {
             url_results: Vec::new(),
             send_results: Vec::new(),
             tunes: Vec::new(),
+            markers: Vec::new(),
             installs: Vec::new(),
             agent_closes: Vec::new(),
             opens_requested: Vec::new(),
@@ -478,6 +481,10 @@ impl Net {
                 Action::OpenUrlResult { id, outcome } => self.url_results.push((id, outcome)),
                 Action::SendFilesResult { id, outcome } => self.send_results.push((id, outcome)),
                 Action::TuneServer { request_id, action } => self.tunes.push((request_id, action)),
+                Action::ShowMarker { request_id, rgb } => {
+                    self.markers.push(Some((request_id, rgb)))
+                }
+                Action::HideMarker => self.markers.push(None),
                 Action::InstallUpdate {
                     request_id,
                     version,
@@ -785,7 +792,12 @@ fn policy_turns_file_capabilities_off() {
     let hello = n.remora.hello.clone().unwrap();
     assert_eq!(
         hello.capabilities,
-        cap::SESSION_INFO | cap::OPEN_URL | cap::SERVER_TUNING | cap::HELPER_UPDATE | cap::KEYBOARD
+        cap::SESSION_INFO
+            | cap::OPEN_URL
+            | cap::SERVER_TUNING
+            | cap::HELPER_UPDATE
+            | cap::KEYBOARD
+            | cap::LATENCY
     );
     assert_eq!(hello.policy, policy::CLIPBOARD_DISABLED);
     assert!(n.opens_requested.is_empty(), "no Bulk without file caps");
@@ -1206,6 +1218,65 @@ fn tune_requests_run_once_and_answer_with_their_id() {
     n.settle();
     assert!(n.tunes.is_empty());
     assert_eq!(tune_results(&n), vec![(3, TuneStatus::NotAllowed)]);
+}
+
+fn shown(n: &Net) -> Vec<(u32, u32, u32, u32)> {
+    n.remora
+        .got
+        .iter()
+        .filter_map(|(rid, m)| match m {
+            Message::LatencyShown { x, y, size } => Some((*rid, *x, *y, *size)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// RDP-67: a trusted client's marks are painted and answered with the
+/// square's place; the end, or the session closing, removes it; without
+/// the capability nothing is painted.
+#[test]
+fn latency_marks_are_painted_for_a_trusted_client() {
+    let mut n = paired_net(Remora::new());
+    n.agent_event(AgentEvent::SessionInfoTick(
+        snapshot(PolicyFlags::default()),
+    ));
+    n.answer_locally(true);
+    n.remora.send(4, &Message::LatencyMark { rgb: 0x00ff_00ff });
+    n.settle();
+    assert_eq!(n.markers, vec![Some((4, 0x00ff_00ff))]);
+    n.agent_event(AgentEvent::MarkerShown {
+        request_id: 4,
+        x: 8,
+        y: 8,
+        size: 32,
+    });
+    assert_eq!(shown(&n), vec![(4, 8, 8, 32)]);
+    n.remora.send(0, &Message::LatencyEnd);
+    n.settle();
+    assert_eq!(n.markers.last(), Some(&None));
+    // After the end, a late paint is not reported.
+    n.agent_event(AgentEvent::MarkerShown {
+        request_id: 4,
+        x: 8,
+        y: 8,
+        size: 32,
+    });
+    assert_eq!(shown(&n).len(), 1);
+    // A session that closes while the marker is up removes it.
+    n.remora.send(5, &Message::LatencyMark { rgb: 0 });
+    n.settle();
+    let before = n.markers.len();
+    n.agent_event(AgentEvent::ChannelClosed(Channel::Ctl));
+    assert_eq!(n.markers.len(), before + 1);
+    assert_eq!(n.markers.last(), Some(&None));
+    // Not accepted: never painted.
+    let mut r = Remora::new();
+    r.user_caps = cap::SESSION_INFO;
+    let mut n = paired_net(r);
+    n.answer_locally(true);
+    n.remora.send(6, &Message::LatencyMark { rgb: 0 });
+    n.settle();
+    assert!(n.markers.is_empty());
 }
 
 fn update_results(n: &Net) -> Vec<(u32, remora_link::msg::UpdateStatus)> {

@@ -5,6 +5,7 @@
 //! The adapter wakes the event loop at most once per batch of events
 //! (`pending`); progress repaints at most every [`PROGRESS_REDRAW`].
 
+use crate::ui::helper::LatencyView;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -106,6 +107,16 @@ impl App {
             return;
         };
         while let Some(ev) = h.next_event() {
+            if let HelperEvent::LatencyShown { request_id, square } = ev {
+                if let Some(run) = s.latency.borrow_mut().as_mut() {
+                    let mut link = AppLink {
+                        helper: &h,
+                        shared: s.worker.as_ref().map(|w| &w.shared),
+                    };
+                    run.shown(&mut link, request_id, square, Instant::now());
+                }
+                continue;
+            }
             if let HelperEvent::KeyboardLayout(klid) = ev {
                 // Typed text now goes as this layout's keys (RDP-68).
                 rdp::trace!("keyboard: the helper reports layout {klid:08x}");
@@ -193,6 +204,96 @@ impl App {
                 self.message(format!("Could not open the link: {e}"), Tone::Warning);
             }
         }
+    }
+
+    /// Starts the latency meter on a tab's session (RDP-67).
+    pub(super) fn start_latency(&mut self, id: u64) {
+        let Some(s) = self.sessions.get(&id) else {
+            return;
+        };
+        let mut link = AppLink {
+            helper: &s.helper.handle,
+            shared: s.worker.as_ref().map(|w| &w.shared),
+        };
+        let view = if link.shared.is_none() {
+            LatencyView::Finished(Err("the session is not connected".into()))
+        } else {
+            if let Some(old) = s.latency.borrow_mut().as_mut() {
+                old.cancel(&mut link);
+            }
+            match crate::latency::Run::start(&mut link, Instant::now()) {
+                Ok(run) => {
+                    *s.latency.borrow_mut() = Some(run);
+                    LatencyView::Running(0, crate::latency::ROUNDS)
+                }
+                Err(e) => LatencyView::Finished(Err(e)),
+            }
+        };
+        if let Some(t) = self.win.as_mut().and_then(|w| w.ui.tab_mut(id)) {
+            t.helper.latency = view;
+        }
+        self.dirty();
+    }
+
+    /// Drives running latency meters (from `about_to_wait`); the next time
+    /// one needs a look.
+    pub(super) fn latency_tick(&mut self) -> Option<Instant> {
+        let now = Instant::now();
+        let mut views = Vec::new();
+        let mut running = false;
+        for (&id, s) in &self.sessions {
+            let mut slot = s.latency.borrow_mut();
+            let Some(run) = slot.as_mut() else {
+                continue;
+            };
+            let mut link = AppLink {
+                helper: &s.helper.handle,
+                shared: s.worker.as_ref().map(|w| &w.shared),
+            };
+            if link.shared.is_none() {
+                run.cancel(&mut link);
+                *slot = None;
+                views.push((
+                    id,
+                    LatencyView::Finished(Err("the session closed while measuring".into())),
+                ));
+                continue;
+            }
+            match run.poll(&mut link, now) {
+                Some(result) => {
+                    *slot = None;
+                    let view = match result {
+                        Ok(report) => {
+                            rdp::trace!("latency meter: {}", report.summary());
+                            LatencyView::Finished(Ok(report.summary()))
+                        }
+                        Err(e) => {
+                            rdp::trace!("latency meter: {e}");
+                            LatencyView::Finished(Err(e))
+                        }
+                    };
+                    views.push((id, view));
+                }
+                None => {
+                    running = true;
+                    let (done, total) = run.progress();
+                    views.push((id, LatencyView::Running(done, total)));
+                }
+            }
+        }
+        let mut changed = false;
+        for (id, view) in views {
+            if let Some(t) = self.win.as_mut().and_then(|w| w.ui.tab_mut(id))
+                && t.helper.latency != view
+            {
+                t.helper.latency = view;
+                changed = true;
+            }
+        }
+        if changed {
+            self.dirty();
+        }
+        running.then(|| now + std::time::Duration::from_millis(4))
     }
 
     /// A progress repaint that waited for its turn (from `about_to_wait`).
@@ -422,6 +523,7 @@ impl App {
                 }
                 self.dirty();
             }
+            Action::MeasureLatency(id) => self.start_latency(id),
             Action::TuneServer(id, apply) => {
                 let h = self.helper_of(id)?;
                 let action = if apply {
@@ -488,4 +590,28 @@ fn folder_size(dir: &std::path::Path) -> u64 {
         }
     }
     total
+}
+
+/// The latency meter's view of one session: its helper and the picture
+/// the worker decodes (RDP-67).
+struct AppLink<'a> {
+    helper: &'a HelperHandle,
+    shared: Option<&'a std::sync::Arc<std::sync::Mutex<crate::session::Shared>>>,
+}
+
+impl crate::latency::Link for AppLink<'_> {
+    fn mark(&mut self, rgb: u32) -> Option<u32> {
+        self.helper.latency_mark(rgb)
+    }
+
+    fn end(&mut self) {
+        self.helper.latency_end();
+    }
+
+    fn probe(&mut self, f: &mut dyn FnMut(&mut crate::latency::Probe)) {
+        if let Some(s) = self.shared {
+            let mut g = s.lock().unwrap_or_else(|p| p.into_inner());
+            f(&mut g.latency);
+        }
+    }
 }

@@ -31,7 +31,7 @@ pub use sidebar::{Divider, sample_rail, sample_resized};
 pub use helper::{
     HelperView, sample_cards as sample_helper_cards, sample_drop as sample_helper_drop,
     sample_folder_offer as sample_helper_folder, sample_helper_blocked, sample_helper_form,
-    sample_helper_hint, sample_helper_panel, sample_helper_update,
+    sample_helper_hint, sample_helper_panel, sample_helper_update, sample_latency,
     sample_pairing as sample_helper_pairing, sample_server_graphics, sample_update_ask,
 };
 pub use home::ThumbDue;
@@ -358,6 +358,8 @@ pub enum Hit {
     /// Change the server's graphics settings (RDP-59): improve (true) or
     /// restore Windows' defaults.
     TuneServer(u64, bool),
+    /// Run the latency meter on this tab's session (RDP-67).
+    MeasureLatency(u64),
     /// The no-helper notice (RDP-60).
     HelperHintInstall,
     HelperHintLater(u64),
@@ -629,6 +631,8 @@ pub enum Action {
     /// Change the server's graphics settings (RDP-59): improve (true) or
     /// restore Windows' defaults.
     TuneServer(u64, bool),
+    /// Run the latency meter on this tab's session (RDP-67).
+    MeasureLatency(u64),
     /// Open the user guide's server helper section (RDP-60).
     OpenHelperGuide,
     /// Never show the no-helper notice for this server again.
@@ -2073,6 +2077,7 @@ impl Ui {
             | Hit::ForgetHelper(_)
             | Hit::RetryHelperPairing(_)
             | Hit::TuneServer(..)
+            | Hit::MeasureLatency(_)
             | Hit::HelperHintInstall
             | Hit::HelperHintLater(_)
             | Hit::HelperHintNever(_)

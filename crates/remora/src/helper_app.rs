@@ -22,7 +22,9 @@ pub fn capabilities(o: &HelperOptions) -> u32 {
     // Updates likewise need a click on Update helper (RDP-61).
     // Folders only matter with a file direction on (RDP-64).
     // The keyboard layout is only reported (RDP-68).
-    let mut bits = cap::SESSION_INFO | cap::SERVER_TUNING | cap::HELPER_UPDATE | cap::KEYBOARD;
+    // The latency meter paints a square only when asked here (RDP-67).
+    let mut bits =
+        cap::SESSION_INFO | cap::SERVER_TUNING | cap::HELPER_UPDATE | cap::KEYBOARD | cap::LATENCY;
     if o.open_links {
         bits |= cap::OPEN_URL;
     }
@@ -328,7 +330,11 @@ mod tests {
     fn capabilities_follow_the_switches_and_default_to_session_info() {
         assert_eq!(
             capabilities(&HelperOptions::default()),
-            cap::SESSION_INFO | cap::SERVER_TUNING | cap::HELPER_UPDATE | cap::KEYBOARD
+            cap::SESSION_INFO
+                | cap::SERVER_TUNING
+                | cap::HELPER_UPDATE
+                | cap::KEYBOARD
+                | cap::LATENCY
         );
         let all = HelperOptions {
             open_links: true,
@@ -347,6 +353,7 @@ mod tests {
                 | cap::SERVER_TUNING
                 | cap::HELPER_UPDATE
                 | cap::KEYBOARD
+                | cap::LATENCY
                 | cap::FILE_DOWN
                 | cap::FOLDERS
         );

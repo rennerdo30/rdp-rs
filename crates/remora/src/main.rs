@@ -34,6 +34,7 @@ mod keyboard;
 mod keyhook;
 mod kit;
 mod known_hosts;
+mod latency;
 mod link_key;
 mod mic;
 mod monitors;
@@ -612,6 +613,10 @@ fn snapshot_ui(
         ("-helper-drop-off", || ui::sample_helper_drop(false)),
         ("-helper-panel-session", || ui::sample_helper_panel(3, true)),
         ("-server-graphics", || ui::sample_server_graphics(false)),
+        ("-latency-idle", || ui::sample_latency(0)),
+        ("-latency-running", || ui::sample_latency(1)),
+        ("-latency-done", || ui::sample_latency(2)),
+        ("-latency-failed", || ui::sample_latency(3)),
         ("-helper-hint", ui::sample_helper_hint),
         ("-helper-update", ui::sample_helper_update),
         ("-update-ask", || ui::sample_update_ask(false)),

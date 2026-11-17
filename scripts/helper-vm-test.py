@@ -193,6 +193,8 @@ fsutil file createnew "$s\big.bin" {a.big_mib * 1048576} | Out-Null
             time.sleep(1)
         layout = (work / "layout").read_text() if (work / "layout").exists() else ""
         check("helper reports the keyboard layout", bool(layout), layout)
+        latency = wait(work, "latency", 180, proc)
+        check("latency meter measures the picture (RDP-67)", not latency.startswith("failed"), latency)
 
         want = local_hashes(up.parent)
         t = time.time()

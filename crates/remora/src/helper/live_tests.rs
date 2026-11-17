@@ -6,6 +6,8 @@
 //! - the test writes `client.fp` (this run's Remora key), waits for
 //!   `trusted` (the script ran `remora-agent trust-client` there), connects,
 //!   and writes `paired` once the helper said Hello;
+//! - it runs the latency meter (RDP-67) and writes `latency` (the summary,
+//!   or `failed: <why>`);
 //! - it sends the folder `E2E_DIR/up/<one folder>` and writes `sent`;
 //! - it accepts the folder the script sends from the server (`remora-agent
 //!   send`) into `E2E_DIR/down` and writes `received`;
@@ -63,6 +65,51 @@ fn pump(
         }
         assert!(t.elapsed() < limit, "timed out after {limit:?}");
         std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+struct LiveLink<'a> {
+    h: &'a HelperHandle,
+    shared: &'a std::sync::Arc<std::sync::Mutex<crate::session::Shared>>,
+}
+
+impl crate::latency::Link for LiveLink<'_> {
+    fn mark(&mut self, rgb: u32) -> Option<u32> {
+        self.h.latency_mark(rgb)
+    }
+    fn end(&mut self) {
+        self.h.latency_end();
+    }
+    fn probe(&mut self, f: &mut dyn FnMut(&mut crate::latency::Probe)) {
+        f(&mut self.shared.lock().unwrap().latency);
+    }
+}
+
+/// Runs the meter like the app does: poll every couple of milliseconds,
+/// hand it the helper's answers.
+fn measure_latency(
+    h: &HelperHandle,
+    shared: &std::sync::Arc<std::sync::Mutex<crate::session::Shared>>,
+    dir: &Path,
+) -> Result<crate::latency::Report, String> {
+    let mut link = LiveLink { h, shared };
+    let mut run = crate::latency::Run::start(&mut link, Instant::now())?;
+    let t = Instant::now();
+    loop {
+        while let Some(e) = h.next_event() {
+            match e {
+                HelperEvent::LatencyShown { request_id, square } => {
+                    run.shown(&mut link, request_id, square, Instant::now())
+                }
+                HelperEvent::KeyboardLayout(klid) => note(dir, "layout", &format!("{klid:08x}")),
+                other => eprintln!("[live] event {other:?}"),
+            }
+        }
+        if let Some(r) = run.poll(&mut link, Instant::now()) {
+            return r;
+        }
+        assert!(t.elapsed() < Duration::from_secs(120), "latency meter hung");
+        std::thread::sleep(Duration::from_millis(2));
     }
 }
 
@@ -149,6 +196,17 @@ fn live_helper_folders_and_update() {
     assert!(
         h.accepted_capabilities() & cap::FOLDERS != 0,
         "folders agreed"
+    );
+
+    // RDP-67: the latency meter over this session's own picture.
+    let result = measure_latency(&h, &worker.shared, &dir);
+    note(
+        &dir,
+        "latency",
+        &match result {
+            Ok(r) => r.summary(),
+            Err(e) => format!("failed: {e}"),
+        },
     );
 
     // PC -> server: one folder.

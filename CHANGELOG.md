@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- **Latency meter.** **Measure latency** on the side panel's Session page (with a paired server helper) times how long a change on the server takes to reach Remora's picture: the helper paints a small square in a colour Remora names, 20 times, and Remora times each change from asking to the decoded frame. It shows the median, the range and the helper channel's own round trip. The same meter will compare the server's RDP picture with a helper stream (RDP-67; helper protocol 1.2, `LatencyMark`).
 - **Keyboard: Remote is the default.** Keys go to the session as keys and its layout decides the characters, which every program reads. Connections saved with the old default, Automatic, switch once; Translate stays. Remora's own text fields also take typed text that comes without a key (another RDP client's Unicode input, the touch keyboard) (RDP-68).
 - **Compression no longer breaks sessions.** With RDP 5.0 or RDP 6.1 compression the connection failed within a second ("copy-offset … outside the history"), and RDP 6.1 garbled the picture before that. Two decoder faults, both fixed: RDP 5.0 matches may reach "behind" the start of the history into its end (it is a ring), and RDP 6.1 keeps its level-1 history when it starts over at the front instead of clearing it. Virtual channel data is also no longer offered for compression, as with FreeRDP. A new live test holds each of the four types for 45 s against Windows' own server (RDP-69).
 

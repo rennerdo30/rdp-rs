@@ -413,6 +413,15 @@ or decline and nothing changes. Restart the server for the frame rate;
 reconnect for H.264. **Restore defaults** removes the three settings again.
 Without the GPU, Windows encodes H.264 in software.
 
+**Measure latency** (below the server graphics) times how long a change on
+the server takes to reach this window's picture. The helper shows a small
+square at the top-left corner of the session and changes its colour 20
+times; Remora times each change from asking to the decoded picture. The
+result shows the median, the range, and the helper channel's own round trip
+for comparison. It takes a few seconds; keep the corner uncovered. Use it to
+compare settings, servers or networks: the time includes the server's
+encoder, the network and Remora's decoder.
+
 ### Transfers
 
 The side panel's Sharing page lists the files on their way, with progress,

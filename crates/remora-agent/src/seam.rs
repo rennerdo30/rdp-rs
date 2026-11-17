@@ -102,6 +102,14 @@ pub enum AgentEvent {
         request_id: u32,
         status: remora_link::msg::TuneStatus,
     },
+    /// The marker of [`Action::ShowMarker`] is painted: `size` pixels at
+    /// (`x`, `y`) from the session desktop's top-left corner.
+    MarkerShown {
+        request_id: u32,
+        x: u32,
+        y: u32,
+        size: u32,
+    },
     /// The deadline from [`Protocol::next_deadline`] passed.
     Timer,
     /// The agent is exiting (logoff, `WM_ENDSESSION`). Last chance to send.
@@ -130,6 +138,11 @@ pub enum Action {
         request_id: u32,
         action: remora_link::msg::TuneAction,
     },
+    /// Remora's latency meter (RDP-67): paint the marker square in `rgb`
+    /// (0xRRGGBB), then answer with [`AgentEvent::MarkerShown`].
+    ShowMarker { request_id: u32, rgb: u32 },
+    /// Remove the marker.
+    HideMarker,
     /// A checked helper update from a trusted Remora (RDP-61): install it
     /// and start it, then answer with [`AgentEvent::UpdateInstalled`].
     InstallUpdate {

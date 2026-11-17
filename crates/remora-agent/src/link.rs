@@ -232,6 +232,8 @@ struct Ctl {
     keyboard_sent: Option<u32>,
     /// A `TuneServer` waiting for its elevated process: its request id.
     tune_pending: Option<u32>,
+    /// The latency meter's marker is up (RDP-67).
+    marker: bool,
     /// A helper update being received, by its request id (RDP-61).
     update: Option<(u32, remora_link::update::Receiver)>,
     /// An update handed to the agent to install, by its request id.
@@ -432,6 +434,12 @@ impl LinkProtocol {
             AgentEvent::TuneDone { request_id, status } => {
                 self.tune_done(request_id, status, &mut out)
             }
+            AgentEvent::MarkerShown {
+                request_id,
+                x,
+                y,
+                size,
+            } => self.marker_shown(request_id, x, y, size, &mut out),
             AgentEvent::UpdateInstalled {
                 request_id,
                 installed,
@@ -564,6 +572,9 @@ impl LinkProtocol {
     /// an answer here counts towards the back-off.
     fn drop_ctl(&mut self, out: &mut Vec<Action>) {
         if let Some(c) = self.ctl.take() {
+            if c.marker {
+                out.push(Action::HideMarker);
+            }
             let trusted = c.client_known || c.local_confirmed;
             if !trusted {
                 for id in &c.created {
@@ -720,6 +731,7 @@ impl LinkProtocol {
                     settings_sent: None,
                     keyboard_sent: None,
                     tune_pending: None,
+                    marker: false,
                     update: None,
                     installing: None,
                 });
@@ -837,6 +849,8 @@ impl LinkProtocol {
             }
             Message::OpenUrlResult(status) => self.on_url_result(request_id, status, out),
             Message::TuneServer { action } => self.tune_server(request_id, action, out),
+            Message::LatencyMark { rgb } => self.latency_mark(request_id, rgb, out),
+            Message::LatencyEnd => self.latency_end(out),
             Message::UpdateBegin {
                 version,
                 size,
@@ -1127,6 +1141,42 @@ impl LinkProtocol {
         }
         info!("Remora asks to change the server's graphics settings ({action:?})");
         out.push(Action::TuneServer { request_id, action });
+    }
+
+    // --------------------------------------------------- latency meter
+
+    /// Remora's latency meter (RDP-67): a trusted client that accepted the
+    /// capability gets the marker painted; anything else is ignored.
+    fn latency_mark(&mut self, request_id: u32, rgb: u32, out: &mut Vec<Action>) {
+        let allowed = self.acked().is_some_and(|c| c & cap::LATENCY != 0)
+            && self.client_trusted()
+            && request_id != 0;
+        if !allowed {
+            info!("latency mark refused");
+            return;
+        }
+        if let Some(ctl) = self.ctl.as_mut() {
+            if !ctl.marker {
+                info!("latency meter started by Remora");
+            }
+            ctl.marker = true;
+        }
+        out.push(Action::ShowMarker { request_id, rgb });
+    }
+
+    fn latency_end(&mut self, out: &mut Vec<Action>) {
+        if let Some(ctl) = self.ctl.as_mut()
+            && std::mem::take(&mut ctl.marker)
+        {
+            info!("latency meter ended");
+            out.push(Action::HideMarker);
+        }
+    }
+
+    fn marker_shown(&mut self, request_id: u32, x: u32, y: u32, size: u32, out: &mut Vec<Action>) {
+        if self.ctl.as_ref().is_some_and(|c| c.marker) {
+            self.send(request_id, &Message::LatencyShown { x, y, size }, out);
+        }
     }
 
     // --------------------------------------------------- helper update

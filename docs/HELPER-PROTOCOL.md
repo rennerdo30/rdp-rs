@@ -367,6 +367,9 @@ All on `Remora::Ctl` unless marked Bulk. Maximum string lengths in bytes.
 | `0x0601` | `UpdateData`     | R→H | `u64 offset, blob data (64 KiB chunks, in order)`; 1.2 |
 | `0x0602` | `UpdateEnd`      | R→H | empty; 1.2 |
 | `0x0603` | `UpdateResult`   | H→R | `u8 status` (0 installed, 1 refused, 2 failed); same `request_id`; 1.2 |
+| `0x0700` | `LatencyMark`    | R→H | `u32 rgb` (0xRRGGBB): paint the marker in this colour; `request_id` ≠ 0; 1.2, capability `256` |
+| `0x0701` | `LatencyShown`   | H→R | `u32 x, u32 y, u32 size`: painted, at these picture pixels; same `request_id`; 1.2 |
+| `0x0702` | `LatencyEnd`     | R→H | empty: remove the marker; 1.2 |
 
 - **Unknown types** (a newer minor version) get `Unsupported{type}`; the
   channel stays open. A malformed message of a known type is fatal.
@@ -378,7 +381,8 @@ All on `Remora::Ctl` unless marked Bulk. Maximum string lengths in bytes.
   `8` file transfer down (server → client), `16` server tuning (1.2),
   `32` helper update (1.2), `64` folders (1.2: a `FileOffer` may carry a
   folder, section 7.2), `128` keyboard layout (1.2: `KeyboardLayout`, so
-  Remora types with the session's keys). Remora accepts only what the user enabled
+  Remora types with the session's keys), `256` latency meter (1.2,
+  section 6.3). Remora accepts only what the user enabled
   (default: session info, server tuning and helper update; the last two act
   only on a click).
 - **Policy flags** (`Hello`): `1` clipboard redirection disabled, `2` drive
@@ -434,6 +438,21 @@ Under capability `32` Remora can send the helper a newer `remora-agent.exe`
   task keeps the same path. On any failure the old exe stays and the answer
   is failed (or refused, before receiving).
 - Helpers before 1.2 cannot take an update; they are replaced by hand once.
+
+### 6.3 Latency meter (1.2)
+
+Under capability `256` Remora can time how long a change on the server takes
+to reach its picture. It sends `LatencyMark{rgb}`; the helper (only for a
+trusted client) paints a 32-pixel square in that colour near the top-left
+corner of the primary monitor, in a topmost window that never takes the
+focus, and answers `LatencyShown` with the square's place in Remora's
+picture (physical pixels from the session desktop's top-left corner).
+Remora notes when it asked and when a decoded frame first shows the colour
+at that place: the round trip through the server's capture, encoder, the
+network and Remora's decoder, on one clock. The `LatencyShown` answer times
+the channel alone. Remora cycles through colours (each differs from the one
+before in every channel), 20 marks with random pauses, then `LatencyEnd`;
+the helper also removes the marker when the session ends.
 
 ## 7. File transfer
 

@@ -6,6 +6,7 @@ mod agent;
 mod apply;
 mod dpapi;
 mod files;
+mod marker;
 mod pipe;
 mod probe;
 mod shortcut;
