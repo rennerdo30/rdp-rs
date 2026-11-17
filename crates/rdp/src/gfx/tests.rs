@@ -475,6 +475,7 @@ fn yuv_frame_validate_and_sample() {
         u: vec![128, 255, 128, 128],
         v: vec![128; 4],
         y_stride: 3,
+        uv: Vec::new(),
         uv_stride: 2,
     };
     f.validate().unwrap();
@@ -494,6 +495,7 @@ fn yuv_frame_validate_and_sample() {
         u: vec![128, 128, 0],
         v: vec![128; 3],
         y_stride: 6,
+        uv: Vec::new(),
         uv_stride: 3,
     };
     assert_eq!(wide.rgb(4, 1), yuv_to_rgb(128, 0, 128));
@@ -674,6 +676,7 @@ impl H264Decoder for FakeH264 {
             u: vec![128; 64],
             v: vec![self.v; 64],
             y_stride: 16,
+            uv: Vec::new(),
             uv_stride: 8,
         }))
     }

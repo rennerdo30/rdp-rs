@@ -482,6 +482,16 @@ fn screenshot(
     if last_update.is_none() {
         eprintln!("warning: no screen updates received within {max_wait:?}");
     }
+    // What the picture cost to decode here (the overlay's figures, RDP-56),
+    // for measuring Remora's own share of the latency (RDP-67).
+    if let Some(g) = client.stats().gfx.filter(|g| g.frames > 0) {
+        eprintln!(
+            "graphics pipeline: {} frames, {:.2} ms decoding per frame, last codec {}",
+            g.frames,
+            g.decode.as_secs_f64() * 1000.0 / g.frames as f64,
+            g.codec.unwrap_or("none")
+        );
+    }
     if let Some(r) = recorder {
         let i = r.finish()?;
         eprintln!(

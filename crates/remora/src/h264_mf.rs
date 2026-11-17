@@ -214,7 +214,7 @@ impl MfH264 {
                 let offset = scan0.offset_from(start);
                 let frame = if pitch > 0 && offset >= 0 && (offset as usize) <= len as usize {
                     let data = std::slice::from_raw_parts(scan0, len as usize - offset as usize);
-                    nv12_to_i420(data, w, h, pitch as usize)
+                    nv12_frame(data, w, h, pitch as usize)
                 } else {
                     Err(rdp::Error::Protocol("h264: bottom-up NV12 buffer".into()))
                 };
@@ -226,7 +226,7 @@ impl MfH264 {
             buffer
                 .Lock(&mut p, None, Some(&mut len))
                 .map_err(|e| err("lock", e))?;
-            let frame = nv12_to_i420(
+            let frame = nv12_frame(
                 std::slice::from_raw_parts(p, len as usize),
                 w,
                 h,
@@ -239,8 +239,9 @@ impl MfH264 {
 }
 
 /// NV12 (a luma plane, then interleaved U/V rows at half height, both with
-/// pitch `pitch`) to planar YUV 4:2:0.
-fn nv12_to_i420(data: &[u8], w: usize, h: usize, pitch: usize) -> rdp::Result<Yuv420Frame> {
+/// pitch `pitch`) as a frame: two block copies, the decoder's pitch kept
+/// (splitting U and V byte by byte cost 3 ms per 4K picture, RDP-67).
+fn nv12_frame(data: &[u8], w: usize, h: usize, pitch: usize) -> rdp::Result<Yuv420Frame> {
     let (cw, ch) = (w.div_ceil(2), h.div_ceil(2));
     if w == 0 || h == 0 || pitch < w || data.len() < pitch * h + pitch * (ch - 1) + cw * 2 {
         return Err(rdp::Error::Protocol(format!(
@@ -248,26 +249,15 @@ fn nv12_to_i420(data: &[u8], w: usize, h: usize, pitch: usize) -> rdp::Result<Yu
             data.len()
         )));
     }
-    let mut y = Vec::with_capacity(w * h);
-    for row in 0..h {
-        y.extend_from_slice(&data[row * pitch..row * pitch + w]);
-    }
-    let (mut u, mut v) = (Vec::with_capacity(cw * ch), Vec::with_capacity(cw * ch));
-    for row in 0..ch {
-        let line = &data[pitch * h + row * pitch..][..cw * 2];
-        for pair in line.chunks(2) {
-            u.push(pair[0]);
-            v.push(pair[1]);
-        }
-    }
+    let uv_end = (pitch * h + pitch * ch).min(data.len());
     Ok(Yuv420Frame {
         width: w,
         height: h,
-        y,
-        u,
-        v,
-        y_stride: w,
-        uv_stride: cw,
+        y: data[..pitch * h].to_vec(),
+        uv: data[pitch * h..uv_end].to_vec(),
+        y_stride: pitch,
+        uv_stride: pitch,
+        ..Default::default()
     })
 }
 
@@ -322,13 +312,15 @@ mod tests {
             5, 6, 7, 8, 0, 0, //
             10, 20, 11, 21, 0, 0,
         ];
-        let f = nv12_to_i420(&data, 4, 2, 6).unwrap();
-        assert_eq!(f.y, [1, 2, 3, 4, 5, 6, 7, 8]);
-        assert_eq!(f.u, [10, 11]);
-        assert_eq!(f.v, [20, 21]);
+        let f = nv12_frame(&data, 4, 2, 6).unwrap();
+        assert_eq!(f.y[..4], [1, 2, 3, 4]);
+        assert_eq!(f.y[6..10], [5, 6, 7, 8]);
+        assert_eq!((f.chroma(false, 0, 0), f.chroma(true, 0, 0)), (10, 20));
+        assert_eq!((f.chroma(false, 1, 0), f.chroma(true, 1, 0)), (11, 21));
+        assert_eq!(f.chroma_get(false, 2, 0), None);
         f.validate().unwrap();
-        assert!(nv12_to_i420(&data[..15], 4, 2, 6).is_err());
-        assert!(nv12_to_i420(&data, 4, 2, 3).is_err());
+        assert!(nv12_frame(&data[..15], 4, 2, 6).is_err());
+        assert!(nv12_frame(&data, 4, 2, 3).is_err());
     }
 
     /// Bit writer for an H.264 RBSP (ITU-T H.264 7.2: u(n), ue(v), se(v)).
@@ -522,4 +514,21 @@ mod tests {
         assert_eq!(fb.pixels[31 * 48 + 31], inside);
         assert_eq!(fb.pixels[5 * 48 + 5], 0, "outside the region");
     }
+}
+
+#[cfg(test)]
+#[test]
+#[ignore]
+fn bench_nv12_copy() {
+    let (w, h, pitch) = (3688usize, 1984usize, 3712usize);
+    let data = vec![7u8; pitch * h * 3 / 2];
+    let t = std::time::Instant::now();
+    let n = 50;
+    for _ in 0..n {
+        std::hint::black_box(nv12_frame(&data, w, h, pitch).unwrap());
+    }
+    println!(
+        "nv12_frame {w}x{h}: {:.2} ms",
+        t.elapsed().as_secs_f64() * 1000.0 / n as f64
+    );
 }

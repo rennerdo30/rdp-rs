@@ -21,6 +21,7 @@ fn frame(w: usize, h: usize, y: u8, u: u8, v: u8) -> Yuv420Frame {
         u: vec![u; cw * ch],
         v: vec![v; cw * ch],
         y_stride: w,
+        uv: Vec::new(),
         uv_stride: cw,
     }
 }

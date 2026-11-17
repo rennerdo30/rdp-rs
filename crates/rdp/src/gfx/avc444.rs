@@ -38,9 +38,8 @@ fn luma(f: &Yuv420Frame, x: usize, y: usize) -> Option<u8> {
     sample(&f.y, f.y_stride, f.width, f.height, x, y)
 }
 
-fn chroma(f: &Yuv420Frame, plane: &[u8], x: usize, y: usize) -> Option<u8> {
-    let (w, h) = (f.width.div_ceil(2), f.height.div_ceil(2));
-    sample(plane, f.uv_stride, w, h, x, y)
+fn chroma(f: &Yuv420Frame, v: bool, x: usize, y: usize) -> Option<u8> {
+    f.chroma_get(v, x, y)
 }
 
 /// U444 (`v` false) or V444 at (x, y) with x or y odd: the sample the
@@ -59,7 +58,7 @@ fn aux_sample(aux: &Yuv420Frame, layout: Layout, v: bool, x: usize, y: usize) ->
                 luma(aux, x, row)
             } else {
                 // B6/B7: U420(x, y) = U444(2x + 1, 2y), V420 likewise V444.
-                chroma(aux, if v { &aux.v } else { &aux.u }, x / 2, y / 2)
+                chroma(aux, v, x / 2, y / 2)
             }
         }
         Layout::V2 => {
@@ -73,8 +72,7 @@ fn aux_sample(aux: &Yuv420Frame, layout: Layout, v: bool, x: usize, y: usize) ->
                 // U420(W/4 + x, y) = V444(4x, 2y + 1), and V420 the same
                 // for column 4x + 2.
                 let col = x / 4 + if v { aux.width / 4 } else { 0 };
-                let plane = if x.is_multiple_of(4) { &aux.u } else { &aux.v };
-                chroma(aux, plane, col, y / 2)
+                chroma(aux, !x.is_multiple_of(4), col, y / 2)
             }
         }
     }
@@ -112,11 +110,11 @@ pub fn yuv444(
     x: usize,
     y: usize,
 ) -> (u8, u8, u8) {
-    let c = (y / 2) * main.uv_stride + x / 2;
+    let (cx, cy) = (x / 2, y / 2);
     (
         main.y[y * main.y_stride + x],
-        component(main.u[c], aux, layout, false, x, y),
-        component(main.v[c], aux, layout, true, x, y),
+        component(main.chroma(false, cx, cy), aux, layout, false, x, y),
+        component(main.chroma(true, cx, cy), aux, layout, true, x, y),
     )
 }
 

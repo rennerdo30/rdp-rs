@@ -9,18 +9,24 @@ use std::sync::Arc;
 
 use crate::error::{Result, proto};
 
-/// One decoded picture in planar YUV 4:2:0 (I420): a full-size luma plane and
-/// two chroma planes of half width and half height (rounded up).
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// One decoded picture in YUV 4:2:0: a full-size luma plane and chroma at
+/// half width and half height (rounded up), either as two planes (I420:
+/// `u` and `v`) or interleaved (NV12: `uv`, U then V per sample, as
+/// hardware and Media Foundation decoders return it; then `u` and `v` are
+/// empty). NV12 is kept as it comes: splitting it cost 3 ms per 4K picture
+/// (RDP-67).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Yuv420Frame {
     pub width: usize,
     pub height: usize,
     pub y: Vec<u8>,
     pub u: Vec<u8>,
     pub v: Vec<u8>,
+    /// NV12 chroma rows; empty for I420.
+    pub uv: Vec<u8>,
     /// Bytes per row of `y`.
     pub y_stride: usize,
-    /// Bytes per row of `u` and `v`.
+    /// Bytes per row of `u` and `v`, or of `uv`.
     pub uv_stride: usize,
 }
 
@@ -31,19 +37,51 @@ impl Yuv420Frame {
         let fits = |len: usize, stride: usize, w: usize, h: usize| {
             h == 0 || stride >= w && len >= stride * (h - 1) + w
         };
-        if !fits(self.y.len(), self.y_stride, self.width, self.height)
-            || !fits(self.u.len(), self.uv_stride, cw, ch)
-            || !fits(self.v.len(), self.uv_stride, cw, ch)
-        {
+        let chroma = if self.uv.is_empty() {
+            fits(self.u.len(), self.uv_stride, cw, ch) && fits(self.v.len(), self.uv_stride, cw, ch)
+        } else {
+            fits(self.uv.len(), self.uv_stride, 2 * cw, ch)
+        };
+        if !fits(self.y.len(), self.y_stride, self.width, self.height) || !chroma {
             return proto("h264: decoded frame planes too small");
         }
         Ok(())
     }
 
+    /// The U (`v` false) or V sample at chroma position (cx, cy); the
+    /// caller keeps it in range.
+    pub fn chroma(&self, v: bool, cx: usize, cy: usize) -> u8 {
+        if self.uv.is_empty() {
+            let plane = if v { &self.v } else { &self.u };
+            plane[cy * self.uv_stride + cx]
+        } else {
+            self.uv[cy * self.uv_stride + 2 * cx + usize::from(v)]
+        }
+    }
+
+    /// [`Yuv420Frame::chroma`], `None` outside the planes.
+    pub fn chroma_get(&self, v: bool, cx: usize, cy: usize) -> Option<u8> {
+        if cx >= self.width.div_ceil(2) || cy >= self.height.div_ceil(2) {
+            return None;
+        }
+        if self.uv.is_empty() {
+            let plane = if v { &self.v } else { &self.u };
+            plane.get(cy * self.uv_stride + cx).copied()
+        } else {
+            self.uv
+                .get(cy * self.uv_stride + 2 * cx + usize::from(v))
+                .copied()
+        }
+    }
+
     /// The 0x00RRGGBB pixel at (x, y); the caller keeps (x, y) in range.
     pub fn rgb(&self, x: usize, y: usize) -> u32 {
-        let c = (y / 2) * self.uv_stride + x / 2;
-        yuv_to_rgb(self.y[y * self.y_stride + x], self.u[c], self.v[c])
+        let (cx, cy) = (x / 2, y / 2);
+        yuv_to_rgb(
+            self.y[y * self.y_stride + x],
+            self.chroma(false, cx, cy),
+            self.chroma(true, cx, cy),
+        )
     }
 }
 
