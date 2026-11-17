@@ -29,6 +29,8 @@ pub struct AppSettings {
     pub stats_overlay: bool,
     /// Servers without the helper whose notice was switched off (RDP-60).
     pub helper_hint_off: Vec<String>,
+    /// Servers whose outdated helper Remora does not ask to update (RDP-66).
+    pub helper_update_off: Vec<String>,
 }
 
 /// Update channel choices offered in Settings: (setting, label).
@@ -100,6 +102,7 @@ impl Default for AppSettings {
             panel_pinned: false,
             stats_overlay: false,
             helper_hint_off: Vec::new(),
+            helper_update_off: Vec::new(),
         }
     }
 }

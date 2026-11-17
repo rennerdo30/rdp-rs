@@ -407,6 +407,13 @@ impl App {
                 }
                 self.dirty();
             }
+            Action::HelperUpdateNever(server) => {
+                if !self.settings.helper_update_off.contains(&server) {
+                    self.settings.helper_update_off.push(server);
+                    let _ = self.settings.save();
+                }
+                self.dirty();
+            }
             Action::TuneServer(id, apply) => {
                 let h = self.helper_of(id)?;
                 let action = if apply {

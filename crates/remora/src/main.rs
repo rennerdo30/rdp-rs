@@ -564,6 +564,8 @@ fn snapshot_ui(
         ("-server-graphics", || ui::sample_server_graphics(false)),
         ("-helper-hint", ui::sample_helper_hint),
         ("-helper-update", ui::sample_helper_update),
+        ("-update-ask", || ui::sample_update_ask(false)),
+        ("-update-ask-old", || ui::sample_update_ask(true)),
         ("-server-graphics-waiting", || {
             ui::sample_server_graphics(true)
         }),

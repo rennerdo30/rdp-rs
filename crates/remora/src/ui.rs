@@ -32,7 +32,7 @@ pub use helper::{
     HelperView, sample_cards as sample_helper_cards, sample_drop as sample_helper_drop,
     sample_folder_offer as sample_helper_folder, sample_helper_blocked, sample_helper_form,
     sample_helper_hint, sample_helper_panel, sample_helper_update,
-    sample_pairing as sample_helper_pairing, sample_server_graphics,
+    sample_pairing as sample_helper_pairing, sample_server_graphics, sample_update_ask,
 };
 pub use home::ThumbDue;
 pub mod session_view;
@@ -362,6 +362,9 @@ pub enum Hit {
     HelperHintNever(u64),
     /// Send the paired helper Remora's version of it (RDP-61).
     UpdateHelper(u64),
+    /// The update question over the session (RDP-66).
+    HelperUpdateLater(u64),
+    HelperUpdateNever(u64),
     /// Editor: a helper switch (0 links, 1 receive, 2 send, 3 links
     /// without asking), the download folder, Forget; the forget question.
     FormHelper(u8),
@@ -463,6 +466,8 @@ pub struct Tab {
     /// whether it is on screen now.
     pub helper_hint_closed: bool,
     pub helper_hint_shown: bool,
+    /// The update question was closed for this connection (RDP-66).
+    pub helper_update_closed: bool,
     /// The statistics overlay's latest reading (RDP-56).
     pub stats: Option<crate::stats::Stats>,
     /// Connection steps, timings, and why it failed or ended.
@@ -624,6 +629,8 @@ pub enum Action {
     OpenHelperGuide,
     /// Never show the no-helper notice for this server again.
     HelperHintNever(String),
+    /// Never ask to update this server's helper again (RDP-66).
+    HelperUpdateNever(String),
     /// Download and send the helper update (RDP-61).
     UpdateHelper(u64),
 }
@@ -789,6 +796,8 @@ pub struct Ui {
     /// Servers the no-helper notice is switched off for (RDP-60); the app
     /// sets it from the settings.
     pub helper_hint_off: Vec<String>,
+    /// Servers whose helper Remora never asks to update (RDP-66).
+    pub helper_update_off: Vec<String>,
     /// The floating panel's state and where it was painted.
     panel: panel::PanelState,
     /// The server helper's cards over the session, as laid out.
@@ -893,6 +902,7 @@ impl Ui {
             panel_pinned: true,
             stats_overlay: false,
             helper_hint_off: Vec::new(),
+            helper_update_off: Vec::new(),
             panel: Default::default(),
             helper_ov: Default::default(),
             dropping: 0,
@@ -988,6 +998,7 @@ impl Ui {
             network: None,
             helper_hint_closed: false,
             helper_hint_shown: false,
+            helper_update_closed: false,
             stats: None,
             live: Live::default(),
             helper: HelperView::default(),
@@ -2061,6 +2072,8 @@ impl Ui {
             | Hit::HelperHintLater(_)
             | Hit::HelperHintNever(_)
             | Hit::UpdateHelper(_)
+            | Hit::HelperUpdateLater(_)
+            | Hit::HelperUpdateNever(_)
             | Hit::FormHelper(_)
             | Hit::FormDownloads
             | Hit::FormForgetHelper

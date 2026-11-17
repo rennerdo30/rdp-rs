@@ -1267,6 +1267,7 @@ impl App {
             | Action::TuneServer(..)
             | Action::OpenHelperGuide
             | Action::HelperHintNever(_)
+            | Action::HelperUpdateNever(_)
             | Action::UpdateHelper(_) => {}
         }
     }
@@ -2148,6 +2149,7 @@ impl ApplicationHandler<UserEvent> for App {
                             ui.panel_pinned = self.settings.panel_pinned;
                             ui.stats_overlay = self.settings.stats_overlay;
                             ui.helper_hint_off = self.settings.helper_hint_off.clone();
+                            ui.helper_update_off = self.settings.helper_update_off.clone();
                             ui.helper_pins = crate::helper_app::pinned_servers();
                             ui.client_fp = crate::link_key::fingerprint();
                             if self.settings.check_updates {

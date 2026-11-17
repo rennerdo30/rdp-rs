@@ -718,6 +718,8 @@ enum CardKind {
     Offer(usize),
     /// No helper on this server: what installing it adds (RDP-60).
     NoHelper,
+    /// The paired helper is older than Remora: update it? (RDP-66)
+    UpdateAsk,
 }
 
 /// How long a session runs without a helper before the notice shows.
@@ -736,6 +738,40 @@ fn hint_buttons(id: u64) -> [(Button<'static>, Hit); 3] {
             Hit::HelperHintInstall,
         ),
     ]
+}
+
+fn update_h(s: f32) -> i32 {
+    (128.0 * s).round() as i32
+}
+
+/// The update question's buttons for the helper's state (RDP-66).
+fn update_buttons(id: u64, v: &HelperView) -> Vec<(Button<'static>, Hit)> {
+    match &v.update {
+        HelperUpdate::Downloading | HelperUpdate::Sending => {
+            vec![(Button::secondary("Hide"), Hit::HelperUpdateLater(id))]
+        }
+        HelperUpdate::Finished(UpdateStatus::Installed) => {
+            vec![(Button::secondary("Close"), Hit::HelperUpdateLater(id))]
+        }
+        _ => {
+            let go = if v.updatable() {
+                (
+                    Button::primary("Update").icon(Icon::Download),
+                    Hit::UpdateHelper(id),
+                )
+            } else {
+                (
+                    Button::primary("How to update").icon(Icon::Info),
+                    Hit::HelperHintInstall,
+                )
+            };
+            vec![
+                (Button::ghost("Don't ask again"), Hit::HelperUpdateNever(id)),
+                (Button::secondary("Later"), Hit::HelperUpdateLater(id)),
+                go,
+            ]
+        }
+    }
 }
 
 /// Where the helper's cards were laid out over the session (physical px).
@@ -946,11 +982,25 @@ impl Ui {
             ));
             ov.cards.push((r, CardKind::NoHelper));
             top = top.max(r.bottom() + p(10.0));
+        } else if self.helper_update_due(id) && area.h > update_h(s) + p(32.0) {
+            let r = Rect::new(right - w, area.y + p(16.0), w, update_h(s));
+            let by = r.bottom() - p(16.0) - p(30.0);
+            ov.buttons.extend(button_row(
+                te,
+                f,
+                s,
+                r.right() - p(16.0),
+                by,
+                p(30.0),
+                &update_buttons(id, &t.helper),
+            ));
+            ov.cards.push((r, CardKind::UpdateAsk));
+            top = top.max(r.bottom() + p(10.0));
         }
         for kind in kinds.iter().take(MAX_CARDS) {
             let h = match kind {
                 CardKind::Link(_) => link_h(s),
-                CardKind::Offer(_) | CardKind::NoHelper => offer_h(s),
+                CardKind::Offer(_) | CardKind::NoHelper | CardKind::UpdateAsk => offer_h(s),
             };
             if bottom - h < top {
                 break;
@@ -961,7 +1011,7 @@ impl Ui {
             let b = match kind {
                 CardKind::Link(_) => button_row(te, f, s, br, by, p(30.0), &link_buttons(id)),
                 CardKind::Offer(i) => button_row(te, f, s, br, by, p(30.0), &offer_buttons(id, *i)),
-                CardKind::NoHelper => Vec::new(),
+                CardKind::NoHelper | CardKind::UpdateAsk => Vec::new(),
             };
             ov.buttons.extend(b);
             ov.cards.push((r, *kind));
@@ -970,7 +1020,7 @@ impl Ui {
         let shown = ov
             .cards
             .iter()
-            .filter(|(_, k)| *k != CardKind::NoHelper)
+            .filter(|(_, k)| !matches!(k, CardKind::NoHelper | CardKind::UpdateAsk))
             .count();
         ov.more = kinds.len() - shown;
         self.helper_ov = ov;
@@ -997,6 +1047,23 @@ impl Ui {
             && t.remote_app.is_none()
             && !t.spanned
             && !self.helper_hint_off.contains(&server)
+    }
+
+    /// The update question is due for this tab (RDP-66): a paired helper
+    /// older than Remora, not closed for this connection and not switched
+    /// off for this server. It stays while an update runs and closes
+    /// itself when the updated helper reports Remora's version.
+    pub(super) fn helper_update_due(&self, id: u64) -> bool {
+        let Some(t) = self.tabs.iter().find(|t| t.id == id) else {
+            return false;
+        };
+        let server = remora_link::server_id(&t.host, t.live.port);
+        matches!(t.state, TabState::Connected { .. })
+            && t.helper.paired()
+            && t.helper.outdated().is_some()
+            && !t.helper_update_closed
+            && t.remote_app.is_none()
+            && !self.helper_update_off.contains(&server)
     }
 
     /// Whether the notice changed on screen since the last call; the app
@@ -1144,6 +1211,19 @@ impl Ui {
                 self.tab_mut(id)?.helper_hint_closed = true;
                 None
             }
+            Hit::HelperUpdateLater(id) => {
+                self.tab_mut(id)?.helper_update_closed = true;
+                None
+            }
+            Hit::HelperUpdateNever(id) => {
+                let t = self.tab_mut(id)?;
+                t.helper_update_closed = true;
+                let server = remora_link::server_id(&t.host, t.live.port);
+                if !self.helper_update_off.contains(&server) {
+                    self.helper_update_off.push(server.clone());
+                }
+                Some(Action::HelperUpdateNever(server))
+            }
             Hit::HelperHintNever(id) => {
                 let t = self.tab_mut(id)?;
                 t.helper_hint_closed = true;
@@ -1250,6 +1330,7 @@ impl Ui {
                         }
                     }
                     CardKind::NoHelper => self.paint_hint_card(cv, te, f, *r),
+                    CardKind::UpdateAsk => self.paint_update_card(cv, te, f, *r, &view),
                 }
                 // "+N" on the top card.
                 if ov.more > 0 && i + 1 == ov.cards.len() {
@@ -1278,9 +1359,22 @@ impl Ui {
 
     /// The button a laid-out hit stands for.
     fn helper_button(&self, hit: Hit, id: u64, changed: bool) -> Option<Button<'static>> {
+        let update = self
+            .tabs
+            .iter()
+            .find(|t| t.id == id)
+            .filter(|_| {
+                self.helper_ov
+                    .cards
+                    .iter()
+                    .any(|c| c.1 == CardKind::UpdateAsk)
+            })
+            .map(|t| update_buttons(id, &t.helper))
+            .unwrap_or_default();
         let all = pairing_buttons(id, changed)
             .into_iter()
             .chain(link_buttons(id))
+            .chain(update)
             .chain(hint_buttons(id))
             .collect::<Vec<_>>();
         if let Some((b, _)) = all.into_iter().find(|(_, h)| *h == hit) {
@@ -1513,6 +1607,72 @@ impl Ui {
             "Install it there for file transfer, links on this PC and faster graphics settings.";
         let mut y = r.y + p(47.0);
         for line in k.wrap(Font::Regular, 12.0, body, tw).iter().take(2) {
+            k.text(Font::Regular, 12.0, tx, y, line, c.text_muted, tw);
+            y += p(16.0);
+        }
+    }
+
+    fn paint_update_card(
+        &mut self,
+        cv: &mut Canvas,
+        te: &mut TextEngine,
+        f: &Fonts,
+        r: Rect,
+        v: &HelperView,
+    ) {
+        let s = self.scale;
+        let c = pal();
+        let mut k = Kit::new(cv, te, f, s);
+        let p = |v: f32| (v * s).round() as i32;
+        k.dialog(r);
+        let d = p(32.0);
+        let tile = Rect::new(r.x + p(16.0), r.y + p(16.0), d, d);
+        k.cv.fill_round(tile, 9.0 * s, c.accent_subtle);
+        k.icon_in(Icon::Download, tile, 16.0, c.accent);
+        let tx = tile.right() + p(12.0);
+        let tw = r.right() - tx - p(16.0);
+        let newer = v.outdated().unwrap_or_default();
+        let theirs = v
+            .hello
+            .as_ref()
+            .map(|h| h.version.clone())
+            .unwrap_or_default();
+        let (title, body) = match &v.update {
+            HelperUpdate::Downloading => (
+                "Updating the helper…".to_string(),
+                format!("Getting helper {newer} from Remora's release."),
+            ),
+            HelperUpdate::Sending => (
+                "Updating the helper…".to_string(),
+                "Installing it on the server; it reconnects by itself.".to_string(),
+            ),
+            HelperUpdate::Finished(UpdateStatus::Installed) => (
+                "Helper updated".to_string(),
+                "It restarts on the server and reconnects in a moment.".to_string(),
+            ),
+            HelperUpdate::Finished(UpdateStatus::Refused) => (
+                "The helper refused the update".to_string(),
+                "Confirm this PC on the server first, then try again.".to_string(),
+            ),
+            HelperUpdate::Finished(UpdateStatus::Failed) => (
+                "The update failed".to_string(),
+                "The helper could not install it; it keeps running as before.".to_string(),
+            ),
+            HelperUpdate::NotDownloaded(why) => ("The update failed".to_string(), why.clone()),
+            HelperUpdate::Idle if v.updatable() => (
+                "Update the helper on this server?".to_string(),
+                format!("It runs {theirs}; Remora is {newer}. Takes a few seconds."),
+            ),
+            HelperUpdate::Idle => (
+                "The helper on this server is outdated".to_string(),
+                format!(
+                    "Version {theirs} can't update from here: replace remora-agent.exe on the server once."
+                ),
+            ),
+        };
+        k.text(Font::Semi, 14.0, tx, r.y + p(29.0), &title, c.text, tw);
+        let mut y = r.y + p(47.0);
+        for line in k.wrap(Font::Regular, 12.0, &body, tw).iter().take(2) {
             k.text(Font::Regular, 12.0, tx, y, line, c.text_muted, tw);
             y += p(16.0);
         }
@@ -2741,6 +2901,21 @@ pub fn sample_helper_update() -> Ui {
     m
 }
 
+/// The update question over the session (RDP-66): a paired helper older
+/// than Remora; `old`: one before 1.2 that cannot take an update.
+pub fn sample_update_ask(old: bool) -> Ui {
+    let mut m = sample_with(Status::Paired);
+    if let Some(t) = m.tab_mut(1) {
+        if let Some(h) = t.helper.hello.as_mut() {
+            h.version = "0.1.0-beta.5".into();
+        }
+        if old {
+            t.helper.accepted = cap::SESSION_INFO;
+        }
+    }
+    m
+}
+
 /// The Session page scrolled to the server's graphics settings (RDP-59):
 /// Windows' defaults, or a change waiting for the administrator prompt.
 pub fn sample_server_graphics(waiting: bool) -> Ui {
@@ -3225,6 +3400,46 @@ mod tests {
         let t = m.tab_mut(1).unwrap();
         assert!(t.helper.offers.is_empty() && t.helper.links.is_empty());
         assert_eq!(t.helper.transfers.len(), 1);
+    }
+
+    #[test]
+    fn an_outdated_helper_asks_to_update() {
+        let Some((mut te, fonts)) = painted(&mut sample_update_ask(false), 1320, 860) else {
+            return;
+        };
+        let mut px = vec![0u32; 1320 * 860];
+        let mut paint = |m: &mut Ui, te: &mut TextEngine| {
+            m.paint_snapshot(&mut Canvas::new(&mut px, 1320, 860), te, &fonts);
+        };
+        let mut m = sample_update_ask(false);
+        paint(&mut m, &mut te);
+        assert!(m.helper_ov.cards.iter().any(|c| c.1 == CardKind::UpdateAsk));
+        assert!(matches!(
+            click(&mut m, &mut te, &fonts, Hit::UpdateHelper(1)),
+            Some(Action::UpdateHelper(1))
+        ));
+        paint(&mut m, &mut te);
+        assert!(click(&mut m, &mut te, &fonts, Hit::HelperUpdateLater(1)).is_none());
+        assert!(!m.helper_update_due(1), "closed for this connection");
+        // Never: for this server, kept by the app.
+        let mut m = sample_update_ask(false);
+        paint(&mut m, &mut te);
+        let a = click(&mut m, &mut te, &fonts, Hit::HelperUpdateNever(1));
+        assert!(matches!(a, Some(Action::HelperUpdateNever(_))));
+        assert_eq!(m.helper_update_off.len(), 1);
+        assert!(!m.helper_update_due(1));
+        // A helper of Remora's own version: no question.
+        let mut m = sample_update_ask(false);
+        let ours = remora_update::current_version().unwrap().to_string();
+        m.tab_mut(1).unwrap().helper.hello.as_mut().unwrap().version = ours;
+        assert!(!m.helper_update_due(1));
+        // Too old to update from here: the guide instead.
+        let mut m = sample_update_ask(true);
+        paint(&mut m, &mut te);
+        assert!(matches!(
+            click(&mut m, &mut te, &fonts, Hit::HelperHintInstall),
+            Some(Action::OpenHelperGuide)
+        ));
     }
 
     #[test]
