@@ -649,9 +649,20 @@ fn local_files_listed_and_served() {
     assert_eq!(
         announced,
         vec![format_list(
-            &[(LOCAL_FILE_LIST_ID, "FileGroupDescriptorW")],
+            &[
+                (LOCAL_FILE_LIST_ID, "FileGroupDescriptorW"),
+                (LOCAL_FILE_CONTENTS_ID, "FileContents"),
+                (LOCAL_DROP_EFFECT_ID, "Preferred DropEffect"),
+            ],
             true
-        )]
+        )],
+        "the contents format too: the server's clipboard mirrors this list"
+    );
+    let effect = feed(&mut c, &format_data_request(LOCAL_DROP_EFFECT_ID));
+    assert_eq!(
+        effect,
+        vec![pdu(CB_FORMAT_DATA_RESPONSE, CB_RESPONSE_OK, &[1, 0, 0, 0])],
+        "DROPEFFECT_COPY"
     );
     feed(&mut c, &LIST_RESPONSE_OK);
     let out = feed(&mut c, &format_data_request(LOCAL_FILE_LIST_ID));
@@ -732,7 +743,12 @@ fn local_files_and_text_announced_together() {
     assert_eq!(
         tick(&mut c),
         vec![format_list(
-            &[(LOCAL_FILE_LIST_ID, FILE_LIST_FORMAT), (CF_UNICODETEXT, "")],
+            &[
+                (LOCAL_FILE_LIST_ID, FILE_LIST_FORMAT),
+                (LOCAL_FILE_CONTENTS_ID, FILE_CONTENTS_FORMAT),
+                (LOCAL_DROP_EFFECT_ID, DROP_EFFECT_FORMAT),
+                (CF_UNICODETEXT, "")
+            ],
             true
         )]
     );

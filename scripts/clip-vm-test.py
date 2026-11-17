@@ -3,10 +3,10 @@
 
     python scripts/clip-vm-test.py [--big-gib 4.3] [--keep] [--winclone <winclone.ps1>]
 
-A throwaway clone of the renner.dev OS lab's Windows VM is the server: the
-script turns Remote Desktop on inside the clone (port 3390 through a port
-proxy, forwarded to 127.0.0.1:13390 on this PC), gives the clone's user a
-random password for this run, and connects `examples/clip_e2e` (a client
+A throwaway clone of the renner.dev OS lab's Windows VM is the server
+(`winclone start --rdp --headless`: Remote Desktop on, guest 3389 at
+127.0.0.1:13389, no window on this PC). The script gives the clone's user a
+random password for this run and connects `examples/clip_e2e` (a client
 with a scripted clipboard: this PC's clipboard and desktop are never
 touched). Then, in both directions, it copies:
 
@@ -34,12 +34,13 @@ import tempfile
 import threading
 import time
 from pathlib import Path
+from urllib.parse import unquote
 
 ROOT = Path(__file__).resolve().parent.parent
 WINCLONE = r"E:\AgentData\renneros-lab\winclone\winclone.ps1"
 PWSH = "pwsh"
 GUEST = r"C:\Users\Public\e2e"
-HOST_PORT = 13390
+HOST_PORT = 13389
 
 
 def log(msg: str) -> None:
@@ -73,9 +74,10 @@ class Clone:
 class Client:
     """examples/clip_e2e, driven over stdin/stdout."""
 
-    def __init__(self, exe: Path, env: dict):
+    def __init__(self, exe: Path, env: dict, trace: Path):
+        self.trace = open(trace, "w", encoding="utf-8")
         self.p = subprocess.Popen(
-            [str(exe)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            [str(exe)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=self.trace,
             text=True, encoding="utf-8", env=env, bufsize=1,
         )
         self.lines: queue.Queue[str] = queue.Queue()
@@ -155,9 +157,9 @@ def main() -> int:
         log(f"{'PASS' if ok else 'FAIL'} {name} {detail}")
 
     try:
-        log("starting the clone (no GPU)")
-        clone.run("start", "--minutes", "90", "--no-gpu", timeout=900)
-        log("turning Remote Desktop on in the clone (port 3390), test password")
+        log("starting the clone (Remote Desktop on, headless: no window here)")
+        clone.run("start", "--rdp", "--headless", "--minutes", "90", timeout=900)
+        log("test password for the clone's user")
         alphabet = string.ascii_letters + string.digits
         password = "Rm-" + "".join(secrets.choice(alphabet) for _ in range(20)) + "!9"
         pw_file = work / "pw.txt"
@@ -168,14 +170,6 @@ $ErrorActionPreference = 'Stop'
 $p = Get-Content -Raw '{GUEST}\pw.txt'
 Remove-Item '{GUEST}\pw.txt'
 net user $env:USERNAME $p.Trim() | Out-Null
-# Like the Settings switch: TermService opens its listener at once.
-Get-CimInstance -Namespace root\cimv2\TerminalServices -ClassName Win32_TerminalServiceSetting |
-  Invoke-CimMethod -MethodName SetAllowTSConnections -Arguments @{{AllowTSConnections = 1; ModifyFirewallException = 1}} | Out-Null
-$end = (Get-Date).AddSeconds(60)
-while (-not (netstat -an | Select-String ':3389 .*LISTENING') -and (Get-Date) -lt $end) {{ Start-Sleep 2 }}
-if (-not (netstat -an | Select-String ':3389 .*LISTENING')) {{ throw 'Remote Desktop does not listen' }}
-netsh interface portproxy add v4tov4 listenport=3390 listenaddress=0.0.0.0 connectport=3389 connectaddress=127.0.0.1 | Out-Null
-netsh advfirewall firewall add rule name=e2e-rdp dir=in action=allow protocol=TCP localport=3390 | Out-Null
 'ok'
 """, elevated=True)
         user = clone.ps("$env:USERNAME").strip().splitlines()[-1]
@@ -187,7 +181,7 @@ $s = '{GUEST}\src\Remora folder'
 New-Item -ItemType Directory -Force "$s\sub\deeper" | Out-Null
 New-Item -ItemType Directory -Force "$s\empty dir" | Out-Null
 New-Item -ItemType Directory -Force '{GUEST}\dst' | Out-Null
-Set-Content -Encoding utf8 "$s\readme ü.txt" 'hello from the server'
+Set-Content -Encoding utf8 "$s\readme $([char]0xFC).txt" 'hello from the server'
 $b = New-Object byte[] (5MB + 123); (New-Object Random 42).NextBytes($b)
 [IO.File]::WriteAllBytes("$s\sub\random.bin", $b)
 [IO.File]::WriteAllBytes("$s\sub\deeper\empty.txt", @())
@@ -197,16 +191,28 @@ fsutil file createnew "$s\huge.bin" {big} | Out-Null
         log("connecting the test client as the clone's user")
         env = dict(os.environ, E2E_HOST="127.0.0.1", E2E_PORT=str(HOST_PORT), E2E_USER=user,
                    E2E_PASSWORD_FILE=str(pw_file))
-        client = Client(exe, env)
+        trace = Path(tempfile.gettempdir()) / "clip-e2e-client.log"
+        env["E2E_TRACE"] = "1"  # the client's protocol trace (credentials redacted)
+        client = Client(exe, env, trace)
+        log(f"client trace: {trace}")
         client.expect("connected", timeout=120)
         pw_file.unlink()
-        time.sleep(5)  # the session settles (rdpclip starts)
+        # A copy made before rdpclip runs in the new session is never
+        # announced: wait for it (at most 90 s), then a little more.
+        out = clone.ps(r"""
+$end = (Get-Date).AddSeconds(90)
+while (-not (Get-Process rdpclip -ErrorAction SilentlyContinue) -and (Get-Date) -lt $end) { Start-Sleep 1 }
+if (Get-Process rdpclip -ErrorAction SilentlyContinue) { 'rdpclip up' } else { 'no rdpclip' }
+""", timeout=150)
+        log(out.strip().splitlines()[-1])
+        time.sleep(3)
 
         # ---- server -> PC: text
-        clone.ps("Set-Clipboard -Value 'héllo from the server ✓'")
+        # Non-ASCII from code points: the pushed scripts stay ASCII.
+        clone.ps("Set-Clipboard -Value \"h$([char]0xE9)llo from the server $([char]0x2713)\"")
         client.cmd("wait-offer text", "offer", timeout=60)
-        out = client.cmd("get-text", timeout=60)[-1]
-        check("server->pc text", out == "text héllo from the server ✓", out)
+        out = client.cmd("get-text", "text", timeout=60)[-1]
+        check("server->pc text", out == "text h\u00e9llo from the server \u2713", out)
 
         # ---- server -> PC: image
         clone.ps(r"""
@@ -217,17 +223,17 @@ $g = [Drawing.Graphics]::FromImage($b); $g.Clear([Drawing.Color]::Orange); $g.Di
 'ok'
 """)
         offer = client.cmd("wait-offer dib", "offer", timeout=60)[-1]
-        out = client.cmd("get-dib", timeout=60)[-1]
+        out = client.cmd("get-dib", "dib", timeout=60)[-1]
         parts = out.split()
         check("server->pc image", len(parts) == 5 and parts[2:4] == ["123", "45"], f"{offer}; {out}")
 
         # ---- server -> PC: folder tree with a big file
         hashes = clone.ps(rf"""
 Get-ChildItem -Recurse -File '{GUEST}\src' | ForEach-Object {{
-  "{{0}}|{{1}}" -f $_.FullName.Substring('{GUEST}\src\'.Length), (Get-FileHash -Algorithm SHA256 $_.FullName).Hash.ToLower()
+  "{{0}}|{{1}}" -f [uri]::EscapeDataString($_.FullName.Substring('{GUEST}\src\'.Length)), (Get-FileHash -Algorithm SHA256 $_.FullName).Hash.ToLower()
 }}
 """, timeout=900)
-        want = dict(l.strip().split("|", 1) for l in hashes.splitlines() if "|" in l)
+        want = {unquote(k): v for k, v in (l.strip().split("|", 1) for l in hashes.splitlines() if "|" in l)}
         clone.ps(rf"Set-Clipboard -Path '{GUEST}\src\Remora folder'")
         client.cmd("wait-offer files", "offer", timeout=60)
         lines = client.cmd("get-files", "files", timeout=3600)
@@ -243,8 +249,10 @@ Get-ChildItem -Recurse -File '{GUEST}\src' | ForEach-Object {{
         # ---- PC -> server: text
         client.cmd("set-text Grüße vom PC ✓", "set-text")
         time.sleep(1)
-        out = clone.ps("Get-Clipboard -Raw").strip()
-        check("pc->server text", out == "Grüße vom PC ✓", out)
+        # Compared as UTF-16 code units: no console encoding in between.
+        out = clone.ps("((Get-Clipboard -Raw).ToCharArray() | ForEach-Object { [int]$_ }) -join ' '")
+        want = " ".join(str(ord(c)) for c in "Grüße vom PC ✓")
+        check("pc->server text", out.strip().splitlines()[-1].strip() == want, out.strip())
 
         # ---- PC -> server: image
         client.cmd("set-dib 64 48", "set-dib")
@@ -256,43 +264,72 @@ if ($i) { "{0}x{1}" -f $i.Width, $i.Height } else { 'none' }
 """).strip()
         check("pc->server image", out.endswith("64x48"), out)
 
-        # ---- PC -> server: folder tree with a big sparse file
-        up = work / "Upload tree"
-        (up / "deep" / "deeper").mkdir(parents=True)
-        (up / "empty dir").mkdir()
-        (up / "notes ä.txt").write_text("from the pc\n", encoding="utf-8")
-        (up / "deep" / "random.bin").write_bytes(os.urandom(3 * (1 << 20) + 77))
-        (up / "deep" / "deeper" / "zero.txt").write_bytes(b"")
-        make_sparse(up / "huge.bin", big)
-        want = {}
-        for f in sorted(up.rglob("*")):
-            if f.is_file():
-                rel = str(f.relative_to(up.parent)).replace("/", "\\")
-                want[rel] = sha256_file(f)
-        client.cmd(f"set-files {up}", "set-files")
-        time.sleep(1)
-        t = time.time()
-        total = sum((f.stat().st_size for f in up.rglob("*") if f.is_file()))
-        out = clone.ps(rf"""
-$d = '{GUEST}\dst'
+        # ---- PC -> server: folder trees
+        def tree(root: Path, huge: bool) -> dict:
+            (root / "deep" / "deeper").mkdir(parents=True)
+            (root / "empty dir").mkdir()
+            (root / "notes \u00e4.txt").write_text("from the pc\n", encoding="utf-8")
+            (root / "deep" / "random.bin").write_bytes(os.urandom(3 * (1 << 20) + 77))
+            (root / "deep" / "deeper" / "zero.txt").write_bytes(b"")
+            if huge:
+                make_sparse(root / "huge.bin", big)
+            return {str(f.relative_to(root.parent)).replace("/", "\\"): sha256_file(f)
+                    for f in sorted(root.rglob("*")) if f.is_file()}
+
+        def listing(out: str) -> dict:
+            return {unquote(k): v for k, v in (l.strip().split("|", 1) for l in out.splitlines() if "|" in l)}
+
+        list_ps = r"""
+Get-ChildItem -Recurse -File $d | ForEach-Object {
+  "{0}|{1}" -f [uri]::EscapeDataString($_.FullName.Substring($d.Length + 1)), (Get-FileHash -Algorithm SHA256 $_.FullName).Hash.ToLower()
+}
+"""
+        # Explorer itself pastes (in the session's own logon session: a
+        # process started by the test runs in another one, and OLE then
+        # hides the per-file FileContents of rdpclip's data object).
+        def explorer_paste(dest: str, total: int, minutes: int) -> str:
+            return clone.ps(rf"""
+$d = '{dest}'
+New-Item -ItemType Directory -Force $d | Out-Null
 $sh = New-Object -ComObject Shell.Application
-$sh.Namespace($d).Self.InvokeVerb('Paste')
-$end = (Get-Date).AddMinutes(30)
+$sh.Open($d)
+$w = $null
+for ($i = 0; $i -lt 30 -and -not $w; $i++) {{
+  Start-Sleep 1
+  $w = $sh.Windows() | Where-Object {{ try {{ $_.Document.Folder.Self.Path -eq $d }} catch {{ $false }} }} | Select-Object -First 1
+}}
+if (-not $w) {{ 'no explorer window'; exit }}
+$w.Document.Folder.Self.InvokeVerb('Paste')
+$end = (Get-Date).AddMinutes({minutes})
 do {{
   Start-Sleep -Seconds 2
   $n = (Get-ChildItem -Recurse -File $d -ErrorAction SilentlyContinue | Measure-Object Length -Sum).Sum
 }} while ($n -lt {total} -and (Get-Date) -lt $end)
 Start-Sleep -Seconds 3
-Get-ChildItem -Recurse -File $d | ForEach-Object {{
-  "{{0}}|{{1}}" -f $_.FullName.Substring($d.Length + 1), (Get-FileHash -Algorithm SHA256 $_.FullName).Hash.ToLower()
-}}
-if (Test-Path "$d\Upload tree\empty dir") {{ 'EMPTYDIR' }}
-""", timeout=2400)
+""" + list_ps, timeout=minutes * 60 + 600)
+
+        small = work / "Small tree"
+        want = tree(small, huge=False)
+        client.cmd(f"set-files {small}", "set-files")
+        time.sleep(1)
+        total = sum(f.stat().st_size for f in small.rglob("*") if f.is_file())
+        out = explorer_paste(GUEST + r"\dst-small", total, 3)
+        got = listing(out)
+        check("pc->server folder (Explorer paste)", got == want, f"{len(got)}/{len(want)} files")
+        check("pc->server empty folder", bool(clone.ps(
+            rf"if (Test-Path '{GUEST}\dst-small\Small tree\empty dir') {{ 'EMPTYDIR' }}").strip()))
+
+        up = work / "Upload tree"
+        want = tree(up, huge=True)
+        total = sum(f.stat().st_size for f in up.rglob("*") if f.is_file())
+        client.cmd(f"set-files {up}", "set-files")
+        time.sleep(1)
+        t = time.time()
+        out = explorer_paste(GUEST + r"\dst", total, 40)
         secs = time.time() - t
-        got = dict(l.strip().split("|", 1) for l in out.splitlines() if "|" in l)
-        check("pc->server folder tree", got == want,
+        got = listing(out)
+        check("pc->server folder with a file over 4 GiB (Explorer paste)", got == want,
               f"{len(got)}/{len(want)} files, {total / secs / 1e6:.0f} MB/s incl. hashing")
-        check("pc->server empty folder", "EMPTYDIR" in out)
     except Exception as e:
         check("run", False, repr(e))
     finally:

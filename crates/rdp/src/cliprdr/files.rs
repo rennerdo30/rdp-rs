@@ -39,7 +39,9 @@ pub const CB_CAN_LOCK_CLIPDATA: u32 = 0x0000_0010;
 pub const CB_HUGE_FILE_SUPPORT_ENABLED: u32 = 0x0000_0020;
 
 /// File flags the client advertises when its backend handles files; only
-/// those the server also set are sent (3.2.5.1.3). Locking is not used.
+/// those the server also set are sent (3.2.5.1.3). Not CB_CAN_LOCK_CLIPDATA:
+/// with it, Windows fails every File Contents Request that has no
+/// clipDataId of a locked clipboard (seen against rdpclip, RDP-63).
 pub(super) const CLIENT_FILE_FLAGS: u32 =
     CB_STREAM_FILECLIP_ENABLED | CB_FILECLIP_NO_FILE_PATHS | CB_HUGE_FILE_SUPPORT_ENABLED;
 
@@ -61,6 +63,18 @@ pub const FILE_LIST_FORMAT: &str = "FileGroupDescriptorW";
 /// Format id this client gives its own File List (registered formats use
 /// 0xC000 to 0xFFFF; the peer maps it by name, 3.1.1.1).
 pub const LOCAL_FILE_LIST_ID: u32 = 0xC0BC;
+/// Registered name of the file contents format. It carries no Format Data
+/// (contents travel in File Contents PDUs), but it must be announced with
+/// the File List: the server's clipboard mirrors the announced formats, and
+/// without "FileContents" a paste on the server finds no contents to read
+/// and copies nothing (RDP-63, seen against Windows Server's rdpclip).
+pub const FILE_CONTENTS_FORMAT: &str = "FileContents";
+/// Format id this client gives "FileContents".
+pub const LOCAL_FILE_CONTENTS_ID: u32 = 0xC0BE;
+/// Registered name of the drop effect a paste should use.
+pub const DROP_EFFECT_FORMAT: &str = "Preferred DropEffect";
+/// Format id this client gives "Preferred DropEffect" (data: DROPEFFECT_COPY).
+pub const LOCAL_DROP_EFFECT_ID: u32 = 0xC0BF;
 
 /// Bytes per FILECONTENTS_RANGE request when fetching remote files.
 pub const CHUNK: u32 = 1 << 20;

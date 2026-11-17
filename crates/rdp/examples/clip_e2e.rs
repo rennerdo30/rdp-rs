@@ -248,6 +248,9 @@ fn run_command(line: &str, local: &Arc<Mutex<Local>>, served: &rdp::ClipboardHan
 
 fn main() {
     let env = |k: &str| std::env::var(k).unwrap_or_else(|_| panic!("{k} not set"));
+    if std::env::var_os("E2E_TRACE").is_some() {
+        rdp::log::set_verbose(true); // to stderr; credentials stay redacted
+    }
     let password = std::fs::read_to_string(env("E2E_PASSWORD_FILE"))
         .expect("password file")
         .trim()

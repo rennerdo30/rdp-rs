@@ -41,8 +41,11 @@ use crate::trace;
 pub mod files;
 pub mod remote;
 
+use files::{
+    DROP_EFFECT_FORMAT, FILE_CONTENTS_FORMAT, FILE_LIST_FORMAT, Incoming, LOCAL_DROP_EFFECT_ID,
+    LOCAL_FILE_CONTENTS_ID, LOCAL_FILE_LIST_ID, LocalEntry,
+};
 pub use files::{Direction, FileDescriptor, Transfer};
-use files::{FILE_LIST_FORMAT, Incoming, LOCAL_FILE_LIST_ID, LocalEntry};
 pub use remote::{Pending, RemoteFormat, RemoteOffer, RemoteSource};
 use remote::{Reply, SourceRequest};
 
@@ -359,7 +362,11 @@ impl Cliprdr {
         let have = self.backend.available();
         let mut formats = Vec::new();
         if have.files && self.files_enabled() {
+            // As Windows itself announces files: the list, the contents
+            // format and the drop effect (a copy).
             formats.push((LOCAL_FILE_LIST_ID, FILE_LIST_FORMAT));
+            formats.push((LOCAL_FILE_CONTENTS_ID, FILE_CONTENTS_FORMAT));
+            formats.push((LOCAL_DROP_EFFECT_ID, DROP_EFFECT_FORMAT));
         }
         if have.text {
             formats.push((CF_UNICODETEXT, ""));
@@ -550,6 +557,10 @@ impl Cliprdr {
             CF_DIB => self.backend.read_dib(),
             LOCAL_PNG_ID => self.backend.read_png(),
             LOCAL_FILE_LIST_ID => self.local_file_list(),
+            // DROPEFFECT_COPY: a paste copies, never moves.
+            LOCAL_DROP_EFFECT_ID if !self.outgoing.is_empty() || self.files_enabled() => {
+                Some(1u32.to_le_bytes().to_vec())
+            }
             _ => None,
         };
         match data {
