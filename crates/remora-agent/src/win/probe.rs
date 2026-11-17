@@ -11,18 +11,23 @@
 //!   error (lost access, a disconnected session).
 //! - Lists the H.264, HEVC and AV1 encoders Media Foundation offers, and
 //!   which are hardware.
+//! - Benchmarks the hardware encoders on the captured picture ([`encode`],
+//!   RDP-67 second step).
 //!
 //! Only reads and measures: nothing is sent anywhere; the square is the one
 //! visible effect, and it closes when the probe ends.
+
+mod encode;
 
 use std::time::{Duration, Instant};
 
 use windows::Win32::Foundation::{HMODULE, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_UNKNOWN;
 use windows::Win32::Graphics::Direct3D11::{
-    D3D11_CPU_ACCESS_READ, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_MAP_READ,
-    D3D11_MAPPED_SUBRESOURCE, D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC, D3D11_USAGE_STAGING,
-    D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D,
+    D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE, D3D11_CPU_ACCESS_READ,
+    D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_CREATE_DEVICE_VIDEO_SUPPORT, D3D11_MAP_READ,
+    D3D11_MAPPED_SUBRESOURCE, D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT,
+    D3D11_USAGE_STAGING, D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D,
 };
 use windows::Win32::Graphics::Dxgi::{
     CreateDXGIFactory1, DXGI_ADAPTER_FLAG_SOFTWARE, DXGI_ERROR_ACCESS_LOST,
@@ -33,12 +38,8 @@ use windows::Win32::Graphics::Gdi::{
     BeginPaint, CreateSolidBrush, DeleteObject, EndPaint, FillRect, InvalidateRect, PAINTSTRUCT,
 };
 use windows::Win32::Media::MediaFoundation::{
-    IMFActivate, MFMediaType_Video, MFT_CATEGORY_VIDEO_ENCODER, MFT_ENUM_FLAG,
-    MFT_ENUM_FLAG_HARDWARE, MFT_ENUM_FLAG_SORTANDFILTER, MFT_ENUM_FLAG_SYNCMFT,
-    MFT_FRIENDLY_NAME_Attribute, MFT_REGISTER_TYPE_INFO, MFTEnumEx, MFVideoFormat_AV1,
-    MFVideoFormat_H264, MFVideoFormat_HEVC,
+    MFVideoFormat_AV1, MFVideoFormat_H264, MFVideoFormat_HEVC,
 };
-use windows::Win32::System::Com::CoTaskMemFree;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Performance::{QueryPerformanceCounter, QueryPerformanceFrequency};
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -61,9 +62,14 @@ pub fn run(seconds: u64) -> String {
     r += &format!("session: {}\n", if remote { "remote" } else { "console" });
     let adapters = adapters(&mut r);
     let anim = Animation::start();
-    capture(&adapters, seconds, &mut r);
+    let captured = capture(&adapters, seconds, &mut r);
     drop(anim);
     encoders(&mut r);
+    match captured {
+        Some((d, Some(snapshot))) => encode::run(&d.device, &d.context, &snapshot, &mut r),
+        Some((_, None)) => r += "encode: no frame was captured to encode\n",
+        None => r += "encode: skipped (no capture)\n",
+    }
     r
 }
 
@@ -133,17 +139,29 @@ fn duplicate(adapters: &[IDXGIAdapter1], r: &mut String) -> Option<Dup> {
             };
             let mut device = None;
             let mut context = None;
-            if let Err(e) = D3D11CreateDevice(
-                a,
-                D3D_DRIVER_TYPE_UNKNOWN,
-                HMODULE::default(),
-                D3D11_CREATE_DEVICE_BGRA_SUPPORT,
-                None,
-                D3D11_SDK_VERSION,
-                Some(&mut device),
-                None,
-                Some(&mut context),
-            ) {
+            // Video support for the encode benchmark's converter; not every
+            // adapter has it.
+            let create = |flags, device: &mut Option<_>, context: &mut Option<_>| {
+                D3D11CreateDevice(
+                    a,
+                    D3D_DRIVER_TYPE_UNKNOWN,
+                    HMODULE::default(),
+                    flags,
+                    None,
+                    D3D11_SDK_VERSION,
+                    Some(device),
+                    None,
+                    Some(context),
+                )
+            };
+            if create(
+                D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_VIDEO_SUPPORT,
+                &mut device,
+                &mut context,
+            )
+            .is_err()
+                && let Err(e) = create(D3D11_CREATE_DEVICE_BGRA_SUPPORT, &mut device, &mut context)
+            {
                 *r += &format!("adapter {i}: no Direct3D 11 device: {e}\n");
                 continue;
             }
@@ -174,11 +192,18 @@ fn qpc() -> i64 {
     t
 }
 
-fn capture(adapters: &[IDXGIAdapter1], seconds: u64, r: &mut String) {
+/// Measures capture; returns the duplication's device and the last full
+/// frame for the encode benchmark.
+fn capture(
+    adapters: &[IDXGIAdapter1],
+    seconds: u64,
+    r: &mut String,
+) -> Option<(Dup, Option<ID3D11Texture2D>)> {
     let Some(mut d) = duplicate(adapters, r) else {
         *r += "capture: not possible in this session\n";
-        return;
+        return None;
     };
+    let mut snapshot: Option<ID3D11Texture2D> = None;
     let mut freq = 0;
     // SAFETY: an out value.
     let _ = unsafe { QueryPerformanceFrequency(&mut freq) };
@@ -211,6 +236,11 @@ fn capture(adapters: &[IDXGIAdapter1], seconds: u64, r: &mut String) {
                         if copy_to_cpu(&d, &tex, &mut staging, &mut size) {
                             copy_sum += t.elapsed().as_secs_f64() * 1000.0;
                             copies += 1;
+                        }
+                        // The source of the encode benchmark (kept after the
+                        // timing above, so it does not count there).
+                        if snapshot.is_none() || presented % 60 == 0 {
+                            keep_frame(&d, &tex, &mut snapshot);
                         }
                     }
                 }
@@ -260,6 +290,35 @@ fn capture(adapters: &[IDXGIAdapter1], seconds: u64, r: &mut String) {
     }
     for e in errors {
         *r += &format!("  error: {e}\n");
+    }
+    Some((d, snapshot))
+}
+
+/// Copies a captured frame into `snapshot` (created on first use).
+fn keep_frame(d: &Dup, tex: &ID3D11Texture2D, snapshot: &mut Option<ID3D11Texture2D>) {
+    // SAFETY: a GPU copy between textures of the same description.
+    unsafe {
+        if snapshot.is_none() {
+            let mut desc = D3D11_TEXTURE2D_DESC::default();
+            tex.GetDesc(&mut desc);
+            let s = D3D11_TEXTURE2D_DESC {
+                Usage: D3D11_USAGE_DEFAULT,
+                BindFlags: (D3D11_BIND_RENDER_TARGET.0 | D3D11_BIND_SHADER_RESOURCE.0) as u32,
+                CPUAccessFlags: 0,
+                MiscFlags: 0,
+                MipLevels: 1,
+                ArraySize: 1,
+                ..desc
+            };
+            let mut t = None;
+            if d.device.CreateTexture2D(&s, None, Some(&mut t)).is_err() {
+                return;
+            }
+            *snapshot = t;
+        }
+        if let Some(s) = snapshot.as_ref() {
+            d.context.CopyResource(s, tex);
+        }
     }
 }
 
@@ -313,55 +372,11 @@ fn encoders(r: &mut String) {
         ("HEVC", MFVideoFormat_HEVC),
         ("AV1", MFVideoFormat_AV1),
     ] {
-        for (kind, flags) in [
-            (
-                "hardware",
-                MFT_ENUM_FLAG_HARDWARE.0 | MFT_ENUM_FLAG_SORTANDFILTER.0,
-            ),
-            (
-                "software",
-                MFT_ENUM_FLAG_SYNCMFT.0 | MFT_ENUM_FLAG_SORTANDFILTER.0,
-            ),
-        ] {
-            let out = MFT_REGISTER_TYPE_INFO {
-                guidMajorType: MFMediaType_Video,
-                guidSubtype: subtype,
-            };
-            let mut list: *mut Option<IMFActivate> = std::ptr::null_mut();
-            let mut n = 0u32;
-            // SAFETY: MF fills the array; each entry is dropped and the array freed.
-            let names = unsafe {
-                if MFTEnumEx(
-                    MFT_CATEGORY_VIDEO_ENCODER,
-                    MFT_ENUM_FLAG(flags),
-                    None,
-                    Some(&out),
-                    &mut list,
-                    &mut n,
-                )
-                .is_err()
-                {
-                    Vec::new()
-                } else {
-                    let mut v = Vec::new();
-                    for i in 0..n as usize {
-                        let a = std::ptr::read(list.add(i));
-                        if let Some(a) = a {
-                            let mut buf = [0u16; 256];
-                            let mut len = 0u32;
-                            if a.GetString(&MFT_FRIENDLY_NAME_Attribute, &mut buf, Some(&mut len))
-                                .is_ok()
-                            {
-                                v.push(String::from_utf16_lossy(&buf[..len as usize]));
-                            } else {
-                                v.push("(unnamed)".into());
-                            }
-                        }
-                    }
-                    CoTaskMemFree(Some(list as *const _));
-                    v
-                }
-            };
+        for (kind, hardware) in [("hardware", true), ("software", false)] {
+            let names: Vec<String> = encode::list(subtype, hardware, false)
+                .into_iter()
+                .map(|(n, _)| n)
+                .collect();
             *r += &format!(
                 "encoder {name} {kind}: {}\n",
                 if names.is_empty() {
