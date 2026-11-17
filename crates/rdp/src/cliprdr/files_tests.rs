@@ -502,7 +502,10 @@ fn new_local_copy_cancels_transfer() {
         f.seq += 1;
         f.text = Some("local".into());
     }
-    assert_eq!(tick(&mut c), vec![format_list(LOCAL_FORMATS, true)]);
+    assert_eq!(
+        tick(&mut c),
+        vec![format_list(&[(CF_UNICODETEXT, "")], true)]
+    );
     assert!(transfer_dirs(&tmp.0).is_empty(), "partial files deleted");
     assert_eq!(h.transfer(), None);
     // The late answer is ignored; nothing more is requested or written.

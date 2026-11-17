@@ -829,7 +829,7 @@ impl App {
             Action::SetFullscreen(on) => self.set_fullscreen(on),
             Action::CopyText(text) => {
                 use rdp::ClipboardBackend;
-                let mut cb = crate::clipboard::WindowsClipboard { owner: self.hwnd() };
+                let mut cb = crate::clipboard::WindowsClipboard::new(self.hwnd());
                 if !cb.write_text(&text) {
                     self.message("Could not copy to the clipboard.", Tone::Warning);
                 }

@@ -274,7 +274,10 @@ need a reconnect.
 
 ![The side panel's Sharing page in a session](images/panel-sharing.webp)
 
-- **Clipboard**: copy and paste text and files, both ways.
+- **Clipboard**: copy and paste text, images and files, both ways. Files
+  and folders copied on the server can be pasted on this PC at once: Explorer
+  copies them straight from the server with its own progress window, with
+  no size limit, and nothing is downloaded until you paste.
 - **Sound**: the session's sound plays on this PC, on the output you choose
   under **Play sound on**.
 - **Microphone**: this PC's microphone in the session, from the device you

@@ -53,7 +53,7 @@ impl Controls {
         helper: &crate::helper::HelperHandle,
     ) -> (Vec<Box<dyn StaticChannel>>, Controls) {
         let (display_channel, display) = rdp::display_control();
-        let (cliprdr, clipboard) = rdp::cliprdr(Box::new(WindowsClipboard { owner }));
+        let (cliprdr, clipboard) = rdp::cliprdr(Box::new(WindowsClipboard::new(owner)));
         let (rdpdr, devices) = rdp::rdpdr(client_name);
         // Windows 8+ opens audio as the AUDIO_PLAYBACK_DVC dynamic channel and
         // falls back to the static rdpsnd channel, which also needs rdpdr

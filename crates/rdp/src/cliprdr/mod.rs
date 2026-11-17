@@ -1,10 +1,15 @@
 //! Clipboard redirection, client side (MS-RDPECLIP) on the `cliprdr` static
 //! virtual channel.
 //!
-//! Scope: Unicode text (CF_UNICODETEXT) and files (stream-based File List
-//! transfer, see [`files`]) in both directions. Other formats (images, HTML)
-//! are answered with CB_RESPONSE_FAIL; they plug in through
-//! [`LOCAL_FORMATS`], [`Cliprdr::format_data`] and [`Cliprdr::received_data`].
+//! Scope: Unicode text (CF_UNICODETEXT), images (CF_DIB, CF_DIBV5 and the
+//! registered "PNG" format) and files (stream-based File List transfer, see
+//! [`files`]) in both directions. Other formats (HTML, RTF) are answered
+//! with CB_RESPONSE_FAIL.
+//!
+//! Server to local: a backend that can fill the local clipboard on demand
+//! ([`ClipboardBackend::lazy_remote`], Windows: an OLE data object) gets a
+//! [`RemoteOffer`] and fetches on paste ([`remote`]); other backends get the
+//! text, and files copied into a temporary folder, right away.
 //!
 //! Sharing starts off and is toggled live through [`ClipboardHandle`]: the
 //! channel stays joined for the whole session and only the data exchange is
@@ -20,10 +25,10 @@
 //!
 //! Clipboard contents are never traced; only lengths and format ids.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, mpsc};
 
 use crate::channel::{
     CHANNEL_OPTION_ENCRYPT_RDP, CHANNEL_OPTION_INITIALIZED, CHANNEL_OPTION_SHOW_PROTOCOL,
@@ -34,9 +39,12 @@ use crate::error::{Result, proto};
 use crate::trace;
 
 pub mod files;
+pub mod remote;
 
-pub use files::{Direction, Transfer};
+pub use files::{Direction, FileDescriptor, Transfer};
 use files::{FILE_LIST_FORMAT, Incoming, LOCAL_FILE_LIST_ID, LocalEntry};
+pub use remote::{Pending, RemoteFormat, RemoteOffer, RemoteSource};
+use remote::{Reply, SourceRequest};
 
 // CLIPRDR_HEADER msgType values (MS-RDPECLIP 2.2.1).
 pub const CB_MONITOR_READY: u16 = 0x0001;
@@ -63,11 +71,26 @@ pub const CB_USE_LONG_FORMAT_NAMES: u32 = 0x0000_0002;
 
 /// Standard clipboard format: UTF-16LE text with a NUL terminator.
 pub const CF_UNICODETEXT: u32 = 13;
+/// Standard clipboard format: a BITMAPINFO header, color table and bits.
+pub const CF_DIB: u32 = 8;
+/// Standard clipboard format: a BITMAPV5HEADER, color table and bits.
+pub const CF_DIBV5: u32 = 17;
+/// Registered name of PNG image data (browsers, Office, Snipping Tool).
+pub const PNG_FORMAT: &str = "PNG";
+/// Format id this client gives its own PNG data (a registered format, so
+/// the peer maps it by name, MS-RDPECLIP 3.1.1.1).
+pub const LOCAL_PNG_ID: u32 = 0xC0BD;
 
-/// Formats this client can serve from the local clipboard, as (id, name).
-/// Standard formats have no name. New formats are added here and in
-/// [`Cliprdr::format_data`].
-pub const LOCAL_FORMATS: &[(u32, &str)] = &[(CF_UNICODETEXT, "")];
+/// What the local clipboard holds, as far as this client shares it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct LocalFormats {
+    pub text: bool,
+    /// A bitmap (Windows also counts CF_BITMAP and CF_DIBV5, which it
+    /// converts to CF_DIB).
+    pub dib: bool,
+    pub png: bool,
+    pub files: bool,
+}
 
 /// General flags the client advertises.
 const CLIENT_GENERAL_FLAGS: u32 = CB_USE_LONG_FORMAT_NAMES;
@@ -102,6 +125,46 @@ pub trait ClipboardBackend: Send {
     /// Replaces the local clipboard with these files and folders, to be
     /// pasted as a copy (Windows: CF_HDROP and Preferred DropEffect).
     fn write_files(&mut self, _paths: &[PathBuf]) -> bool {
+        false
+    }
+
+    /// The formats on the local clipboard. Called on every local change, so
+    /// it must be cheap (Windows: IsClipboardFormatAvailable, no open).
+    fn available(&mut self) -> LocalFormats {
+        LocalFormats {
+            text: self.read_text().is_some(),
+            files: self.supports_files() && self.read_files().is_some_and(|f| !f.is_empty()),
+            ..LocalFormats::default()
+        }
+    }
+
+    /// The local image as CF_DIB bytes.
+    fn read_dib(&mut self) -> Option<Vec<u8>> {
+        None
+    }
+
+    /// The local image as PNG bytes, if the clipboard has that format.
+    fn read_png(&mut self) -> Option<Vec<u8>> {
+        None
+    }
+
+    /// True if this backend puts the server's clipboard on the local one on
+    /// demand through [`Self::remote_offer`]; read once, when the channel is
+    /// made. Otherwise the channel fetches text and files right away and
+    /// writes them with [`Self::write_text`] and [`Self::write_files`].
+    fn lazy_remote(&self) -> bool {
+        false
+    }
+
+    /// The server's clipboard changed (`Some`), or what was offered before
+    /// is no longer available (`None`: sharing off, session ended). On
+    /// `None` the backend clears the local clipboard if it still holds
+    /// the earlier offer.
+    fn remote_offer(&mut self, _offer: Option<RemoteOffer>) {}
+
+    /// True if the local clipboard currently holds this backend's own
+    /// remote offer (so the change is not announced back to the server).
+    fn owns_clipboard(&mut self) -> bool {
         false
     }
 }
@@ -144,9 +207,17 @@ pub fn cliprdr(backend: Box<dyn ClipboardBackend>) -> (Cliprdr, ClipboardHandle)
         enabled: enabled.clone(),
         status: status.clone(),
     };
+    let (source_tx, source_rx) = mpsc::channel();
     let channel = Cliprdr {
         backend_files: backend.supports_files(),
+        lazy: backend.lazy_remote(),
         backend,
+        latest: Arc::new(AtomicU64::new(0)),
+        offered: false,
+        remote_ids: RemoteIds::default(),
+        source_tx,
+        source_rx,
+        external: HashMap::new(),
         enabled,
         applied: false,
         ready: false,
@@ -165,9 +236,65 @@ pub fn cliprdr(backend: Box<dyn ClipboardBackend>) -> (Cliprdr, ClipboardHandle)
     (channel, handle)
 }
 
+/// Server format ids of the formats this client fetches.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct RemoteIds {
+    text: Option<u32>,
+    dib: Option<u32>,
+    png: Option<u32>,
+    files: Option<u32>,
+}
+
+impl RemoteIds {
+    fn new(formats: &[(u32, String)], files: bool) -> Self {
+        let id = |want: u32| formats.iter().any(|(id, _)| *id == want).then_some(want);
+        let named = |want: &str| {
+            formats
+                .iter()
+                .find(|(_, n)| n.eq_ignore_ascii_case(want))
+                .map(|(id, _)| *id)
+        };
+        RemoteIds {
+            text: id(CF_UNICODETEXT),
+            dib: id(CF_DIB).or_else(|| id(CF_DIBV5)),
+            png: named(PNG_FORMAT),
+            files: if files { named(FILE_LIST_FORMAT) } else { None },
+        }
+    }
+
+    fn get(&self, f: RemoteFormat) -> Option<u32> {
+        match f {
+            RemoteFormat::Text => self.text,
+            RemoteFormat::Dib => self.dib,
+            RemoteFormat::Png => self.png,
+            RemoteFormat::FileList => self.files,
+        }
+    }
+}
+
+/// An outstanding Format Data Request.
+enum Requested {
+    /// The channel's own (text, or the File List of an eager transfer).
+    Own(u32),
+    /// A [`RemoteSource`] asked; the answer goes back on `Reply`.
+    Source(Reply),
+}
+
 /// Client side of the clipboard virtual channel.
 pub struct Cliprdr {
     backend: Box<dyn ClipboardBackend>,
+    /// The backend takes [`RemoteOffer`]s.
+    lazy: bool,
+    /// Id of the latest offer; older [`RemoteSource`]s answer None.
+    latest: Arc<AtomicU64>,
+    /// An offer went to the backend and was not withdrawn.
+    offered: bool,
+    /// Server ids of the formats in the latest offer.
+    remote_ids: RemoteIds,
+    source_tx: mpsc::Sender<SourceRequest>,
+    source_rx: mpsc::Receiver<SourceRequest>,
+    /// File Contents Requests of sources, by streamId.
+    external: HashMap<u32, Reply>,
     enabled: Arc<AtomicBool>,
     /// Sharing state last applied by `tick` (announced to the server).
     applied: bool,
@@ -177,9 +304,9 @@ pub struct Cliprdr {
     server_flags: u32,
     /// Local clipboard sequence already seen (or caused by our own write).
     last_seq: u32,
-    /// Format ids of our outstanding Format Data Requests, oldest first
-    /// (responses carry no format id; MS-RDPECLIP 3.1.5.2.2).
-    requested: VecDeque<u32>,
+    /// Our outstanding Format Data Requests, oldest first (responses carry
+    /// no format id; MS-RDPECLIP 3.1.5.2.2).
+    requested: VecDeque<Requested>,
     /// Remote text the busy local clipboard did not take yet, with tries left.
     pending_write: Option<(String, u8)>,
     /// The backend handles files.
@@ -218,22 +345,30 @@ impl Cliprdr {
     }
 
     fn send_format_list(&self, formats: &[(u32, &str)], out: &mut ChannelOut) {
-        trace!("cliprdr: format list with {} formats", formats.len());
+        trace!(
+            "cliprdr: format list with {} formats {}",
+            formats.len(),
+            describe(formats.iter().map(|&(id, n)| (id, n)))
+        );
         out.send(format_list(formats, self.long_names()));
     }
 
-    /// Formats to announce for the local clipboard. Files come first when
-    /// present; text is checked with the backend only when `check_text` or
-    /// files are there, else it is announced as before (and served or
-    /// failed on request).
-    fn local_formats(&mut self, check_text: bool) -> Vec<(u32, &'static str)> {
-        let files = self.local_has_files();
+    /// Formats to announce for the local clipboard: only those it holds
+    /// (RDP-62: an image was announced as text before), files first.
+    fn local_formats(&mut self) -> Vec<(u32, &'static str)> {
+        let have = self.backend.available();
         let mut formats = Vec::new();
-        if files {
+        if have.files && self.files_enabled() {
             formats.push((LOCAL_FILE_LIST_ID, FILE_LIST_FORMAT));
         }
-        if (!files && !check_text) || self.backend.read_text().is_some() {
-            formats.extend_from_slice(LOCAL_FORMATS);
+        if have.text {
+            formats.push((CF_UNICODETEXT, ""));
+        }
+        if have.dib {
+            formats.push((CF_DIB, ""));
+        }
+        if have.png && self.long_names() {
+            formats.push((LOCAL_PNG_ID, PNG_FORMAT));
         }
         formats
     }
@@ -242,7 +377,7 @@ impl Cliprdr {
     /// are there.
     fn announce_current(&mut self, out: &mut ChannelOut, send_empty: bool) {
         let formats = if self.sharing() {
-            self.local_formats(true)
+            self.local_formats()
         } else {
             Vec::new()
         };
@@ -282,12 +417,20 @@ impl Cliprdr {
                 return;
             }
         };
-        trace!("cliprdr: server offers {} formats", formats.len());
+        trace!(
+            "cliprdr: server offers {} formats {}",
+            formats.len(),
+            describe(formats.iter().map(|(id, n)| (*id, n.as_str())))
+        );
         out.send(pdu(CB_FORMAT_LIST_RESPONSE, CB_RESPONSE_OK, &[]));
         // A new remote copy replaces whatever was being fetched.
         self.cancel_incoming("new remote copy");
         self.pending_files = None;
         if !self.sharing() {
+            return;
+        }
+        if self.lazy {
+            self.offer_remote(&formats);
             return;
         }
         if self.files_enabled()
@@ -298,7 +441,102 @@ impl Cliprdr {
         }
         if formats.iter().any(|(id, _)| *id == CF_UNICODETEXT) {
             out.send(format_data_request(CF_UNICODETEXT));
-            self.requested.push_back(CF_UNICODETEXT);
+            self.requested.push_back(Requested::Own(CF_UNICODETEXT));
+        }
+    }
+
+    /// Hands the server's formats to a lazy backend as a new offer; older
+    /// sources stop answering.
+    fn offer_remote(&mut self, formats: &[(u32, String)]) {
+        let ids = RemoteIds::new(formats, self.files_enabled());
+        let id = remote::next_offer_id();
+        self.latest.store(id, Ordering::Relaxed);
+        self.external.clear();
+        self.remote_ids = ids;
+        let offer = RemoteOffer {
+            id,
+            text: ids.text.is_some(),
+            dib: ids.dib.is_some(),
+            dib_v5: ids.dib == Some(CF_DIBV5),
+            png: ids.png.is_some(),
+            files: ids.files.is_some(),
+            source: RemoteSource {
+                offer: id,
+                tx: self.source_tx.clone(),
+                latest: self.latest.clone(),
+            },
+        };
+        if offer.any() {
+            trace!(
+                "cliprdr: offered on the local clipboard (text {}, image {}, png {}, files {})",
+                offer.text, offer.dib, offer.png, offer.files
+            );
+            self.offered = true;
+            self.backend.remote_offer(Some(offer));
+        } else if self.offered {
+            self.offered = false;
+            self.backend.remote_offer(None);
+        }
+    }
+
+    /// Ends the current offer: its sources answer None and the backend
+    /// clears the local clipboard if it still holds it.
+    fn withdraw_remote(&mut self) {
+        self.latest
+            .store(remote::next_offer_id(), Ordering::Relaxed);
+        self.external.clear();
+        if self.offered {
+            self.offered = false;
+            self.backend.remote_offer(None);
+        }
+    }
+
+    /// Sends the requests sources made since the last tick.
+    fn serve_sources(&mut self, out: &mut ChannelOut) {
+        let latest = self.latest.load(Ordering::Relaxed);
+        let on = self.sharing();
+        while let Ok(req) = self.source_rx.try_recv() {
+            match req {
+                SourceRequest::Data {
+                    offer,
+                    format,
+                    reply,
+                } => {
+                    let Some(id) = self
+                        .remote_ids
+                        .get(format)
+                        .filter(|_| on && offer == latest)
+                    else {
+                        continue; // dropping `reply` answers None
+                    };
+                    out.send(format_data_request(id));
+                    self.requested.push_back(Requested::Source(reply));
+                }
+                SourceRequest::Contents {
+                    offer,
+                    lindex,
+                    position,
+                    size,
+                    reply,
+                } => {
+                    if !on || offer != latest || self.remote_ids.files.is_none() {
+                        continue;
+                    }
+                    self.next_stream = self.next_stream.wrapping_add(1);
+                    let (flags, n) = match size {
+                        Some(n) => (files::FILECONTENTS_RANGE, n),
+                        None => (files::FILECONTENTS_SIZE, 8),
+                    };
+                    out.send(files::file_contents_request(
+                        self.next_stream,
+                        lindex,
+                        flags,
+                        position,
+                        n,
+                    ));
+                    self.external.insert(self.next_stream, reply);
+                }
+            }
         }
     }
 
@@ -309,6 +547,8 @@ impl Cliprdr {
         }
         let data = match format {
             CF_UNICODETEXT => self.backend.read_text().map(|t| utf16le_z(&t)),
+            CF_DIB => self.backend.read_dib(),
+            LOCAL_PNG_ID => self.backend.read_png(),
             LOCAL_FILE_LIST_ID => self.local_file_list(),
             _ => None,
         };
@@ -326,9 +566,21 @@ impl Cliprdr {
 
     /// Server Format Data Response to our request (MS-RDPECLIP 2.2.5.2).
     fn received_data(&mut self, flags: u16, body: &[u8]) {
-        let Some(format) = self.requested.pop_front() else {
-            trace!("cliprdr: unsolicited format data response ignored");
-            return;
+        let format = match self.requested.pop_front() {
+            None => {
+                trace!("cliprdr: unsolicited format data response ignored");
+                return;
+            }
+            Some(Requested::Source(reply)) => {
+                let ok = flags & CB_RESPONSE_OK != 0 && self.sharing();
+                trace!(
+                    "cliprdr: format data for the local clipboard, {} bytes",
+                    body.len()
+                );
+                let _ = reply.try_send(ok.then(|| body.to_vec()));
+                return;
+            }
+            Some(Requested::Own(format)) => format,
         };
         if self
             .incoming
@@ -441,23 +693,29 @@ impl StaticChannel for Cliprdr {
                 self.pending_files = None;
                 self.cancel_incoming("sharing off");
                 self.clear_outgoing();
+                self.withdraw_remote();
                 self.send_format_list(&[], out);
             }
             return Ok(());
         }
+        self.serve_sources(out);
         if !on {
             return Ok(());
         }
         let seq = self.backend.sequence();
         if seq != self.last_seq {
+            self.last_seq = seq;
+            if self.backend.owns_clipboard() {
+                // Our own remote offer landed on the local clipboard.
+                return Ok(());
+            }
             // A local copy wins over remote data still being fetched or
             // waiting to be written.
-            self.last_seq = seq;
             self.pending_write = None;
             self.pending_files = None;
             self.cancel_incoming("new local copy");
             self.clear_outgoing();
-            let formats = self.local_formats(false);
+            let formats = self.local_formats();
             self.send_format_list(&formats, out);
             return Ok(());
         }
@@ -470,6 +728,31 @@ impl StaticChannel for Cliprdr {
         self.advance_incoming(out);
         Ok(())
     }
+}
+
+impl Drop for Cliprdr {
+    /// The session is over: nothing offered can be fetched any more.
+    fn drop(&mut self) {
+        if self.offered {
+            self.offered = false;
+            self.backend.remote_offer(None);
+        }
+    }
+}
+
+/// "[13, 0xc0bc FileGroupDescriptorW]" for the log: ids and format names,
+/// never contents.
+fn describe<'a>(formats: impl Iterator<Item = (u32, &'a str)>) -> String {
+    let parts: Vec<String> = formats
+        .map(|(id, name)| {
+            if name.is_empty() {
+                format!("{id}")
+            } else {
+                format!("{id:#x} {name}")
+            }
+        })
+        .collect();
+    format!("[{}]", parts.join(", "))
 }
 
 /// CLIPRDR_HEADER (MS-RDPECLIP 2.2.1) followed by `body`.
@@ -609,3 +892,6 @@ mod tests;
 
 #[cfg(test)]
 mod files_tests;
+
+#[cfg(test)]
+mod remote_tests;

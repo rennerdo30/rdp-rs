@@ -627,16 +627,11 @@ impl Cliprdr {
         }
     }
 
-    /// True if the local clipboard holds files the server can be offered.
-    pub(super) fn local_has_files(&mut self) -> bool {
-        self.files_enabled() && self.backend.read_files().is_some_and(|f| !f.is_empty())
-    }
-
     /// Starts fetching the server's files: requests its File List.
     pub(super) fn start_incoming(&mut self, format_id: u32, out: &mut ChannelOut) {
         trace!("cliprdr: server offers files (format {format_id:#x})");
         out.send(super::format_data_request(format_id));
-        self.requested.push_back(format_id);
+        self.requested.push_back(super::Requested::Own(format_id));
         self.incoming = Some(Incoming::new(format_id));
     }
 
@@ -711,6 +706,11 @@ impl Cliprdr {
     pub(super) fn contents_received(&mut self, flags: u16, body: &[u8]) -> Result<()> {
         let mut r = Reader::new(body);
         let stream_id = r.u32()?;
+        if let Some(reply) = self.external.remove(&stream_id) {
+            let ok = flags & CB_RESPONSE_OK != 0;
+            let _ = reply.try_send(ok.then(|| r.rest().to_vec()));
+            return Ok(());
+        }
         let Some(inc) = &mut self.incoming else {
             trace!("cliprdr: file contents response without a transfer ignored");
             return Ok(());

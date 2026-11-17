@@ -1,7 +1,14 @@
 //! The system clipboard: reading text (paste into fields) and the
 //! [`WindowsClipboard`] backend for clipboard sharing in sessions.
+//!
+//! The server's copies reach this PC's clipboard through [`remote`] (an OLE
+//! data object, fetched on paste); this PC's text, images and files are
+//! read here when the server asks for them.
 
 use std::path::PathBuf;
+
+#[cfg(windows)]
+mod remote;
 
 #[cfg(windows)]
 pub fn read_text() -> Option<String> {
@@ -34,6 +41,17 @@ pub fn read_text() -> Option<String> {
 #[derive(Default)]
 pub struct WindowsClipboard {
     pub owner: isize,
+    /// Id of the server copy this session put on the clipboard last.
+    offered: Option<u64>,
+}
+
+impl WindowsClipboard {
+    pub fn new(owner: isize) -> Self {
+        WindowsClipboard {
+            owner,
+            offered: None,
+        }
+    }
 }
 
 #[cfg(windows)]
@@ -45,7 +63,10 @@ impl rdp::cliprdr::ClipboardBackend for WindowsClipboard {
 
     fn read_text(&mut self) -> Option<String> {
         use windows_sys::Win32::System::DataExchange::CloseClipboard;
-        if !win::open(self.owner) {
+        // This session's own offer would render through this very session:
+        // never read it back on the session's thread. Another session's
+        // offer is fine (copy from server A, paste on server B).
+        if remote::holds(self.offered) || !win::open(self.owner) {
             return None;
         }
         // SAFETY: the clipboard is open on this thread until CloseClipboard.
@@ -75,7 +96,7 @@ impl rdp::cliprdr::ClipboardBackend for WindowsClipboard {
 
     fn read_files(&mut self) -> Option<Vec<PathBuf>> {
         use windows_sys::Win32::System::DataExchange::CloseClipboard;
-        if !win::open(self.owner) {
+        if remote::holds(self.offered) || !win::open(self.owner) {
             return None;
         }
         // SAFETY: the clipboard is open on this thread until CloseClipboard.
@@ -97,6 +118,61 @@ impl rdp::cliprdr::ClipboardBackend for WindowsClipboard {
             CloseClipboard();
             ok
         }
+    }
+
+    fn available(&mut self) -> rdp::cliprdr::LocalFormats {
+        if remote::holds(self.offered) {
+            return rdp::cliprdr::LocalFormats::default();
+        }
+        win::available()
+    }
+
+    fn read_dib(&mut self) -> Option<Vec<u8>> {
+        use windows_sys::Win32::System::DataExchange::CloseClipboard;
+        if remote::holds(self.offered) || !win::open(self.owner) {
+            return None;
+        }
+        // SAFETY: the clipboard is open on this thread until CloseClipboard.
+        unsafe {
+            let d = win::bytes(win::CF_DIB);
+            CloseClipboard();
+            d
+        }
+    }
+
+    fn read_png(&mut self) -> Option<Vec<u8>> {
+        use windows_sys::Win32::System::DataExchange::CloseClipboard;
+        if remote::holds(self.offered) || !win::open(self.owner) {
+            return None;
+        }
+        // SAFETY: the clipboard is open on this thread until CloseClipboard.
+        unsafe {
+            let d = win::bytes(win::png_format());
+            CloseClipboard();
+            d
+        }
+    }
+
+    fn lazy_remote(&self) -> bool {
+        true
+    }
+
+    fn remote_offer(&mut self, offer: Option<rdp::cliprdr::RemoteOffer>) {
+        match offer {
+            Some(o) => {
+                self.offered = Some(o.id);
+                remote::offer(o);
+            }
+            None => {
+                if let Some(id) = self.offered.take() {
+                    remote::withdraw(id);
+                }
+            }
+        }
+    }
+
+    fn owns_clipboard(&mut self) -> bool {
+        remote::holds(self.offered)
     }
 }
 
@@ -133,6 +209,57 @@ mod win {
     const CF_UNICODETEXT: u32 = 13;
     /// Standard clipboard format: a DROPFILES list of paths.
     const CF_HDROP: u32 = 15;
+    /// Standard clipboard format: a device-independent bitmap.
+    pub const CF_DIB: u32 = 8;
+    /// Largest image read from the clipboard (an 8K screen is 130 MB).
+    const MAX_IMAGE: usize = 256 << 20;
+
+    /// The registered "PNG" format.
+    pub fn png_format() -> u32 {
+        static ID: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+        let name: Vec<u16> = "PNG".encode_utf16().chain(Some(0)).collect();
+        // SAFETY: a NUL-terminated name.
+        *ID.get_or_init(|| unsafe { RegisterClipboardFormatW(name.as_ptr()) })
+    }
+
+    /// What the clipboard holds, without opening it.
+    pub fn available() -> rdp::cliprdr::LocalFormats {
+        use windows_sys::Win32::System::DataExchange::IsClipboardFormatAvailable;
+        let png = png_format();
+        // SAFETY: plain queries.
+        unsafe {
+            rdp::cliprdr::LocalFormats {
+                text: IsClipboardFormatAvailable(CF_UNICODETEXT) != 0,
+                dib: IsClipboardFormatAvailable(CF_DIB) != 0,
+                png: png != 0 && IsClipboardFormatAvailable(png) != 0,
+                files: IsClipboardFormatAvailable(CF_HDROP) != 0,
+            }
+        }
+    }
+
+    /// The bytes of a global-memory format of the open clipboard.
+    ///
+    /// # Safety
+    /// The clipboard must be open on this thread.
+    pub unsafe fn bytes(format: u32) -> Option<Vec<u8>> {
+        unsafe {
+            let handle = GetClipboardData(format);
+            if handle.is_null() {
+                return None;
+            }
+            let size = GlobalSize(handle);
+            if size == 0 || size > MAX_IMAGE {
+                return None;
+            }
+            let p = GlobalLock(handle) as *const u8;
+            if p.is_null() {
+                return None;
+            }
+            let v = std::slice::from_raw_parts(p, size).to_vec();
+            GlobalUnlock(handle);
+            Some(v)
+        }
+    }
     /// DROPEFFECT_COPY: a paste copies the files, never moves them.
     const DROPEFFECT_COPY: u32 = 1;
     /// Most paths read from one CF_HDROP.

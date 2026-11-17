@@ -64,4 +64,21 @@ windows-sys = { version = "0.61.2", features = [
 ] }
 # COM interfaces for the Media Foundation H.264 decoder (AVC420 in the
 # graphics pipeline); windows-sys has no COM vtables.
-windows = { version = "0.62.2", features = ["Win32_Media_MediaFoundation", "Win32_System_Com"] }
+# OLE for the server's clipboard on this PC's clipboard (a data object with
+# virtual files, fetched on paste).
+windows = { version = "0.62.2", features = [
+    "Win32_Graphics_Gdi",
+    "Win32_Media_MediaFoundation",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_DataExchange",
+    "Win32_System_Memory",
+    "Win32_System_Ole",
+    "Win32_System_SystemServices",
+    "Win32_System_Threading",
+    "Win32_UI_Shell",
+    "Win32_UI_Shell_Common",
+    "Win32_UI_WindowsAndMessaging",
+] }
+# `#[implement]` of the data object and its streams expands to windows-core.
+windows-core = "0.62.2"

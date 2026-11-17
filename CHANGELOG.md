@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **Copy images, and big files and folders, through the clipboard.** Images now copy both ways (they were announced as text before, so nothing arrived). Files and folders copied on the server are on this PC's clipboard at once and are fetched only when you paste: Explorer copies them straight from the server with its own progress window, like Microsoft's client, with no 4 GB limit and no download before the paste. Several sessions can pass text and images from one server to another (RDP-62, RDP-63).
+
 - **Remora updates the server helper.** When a paired helper is older than Remora, the side panel's Session page offers **Update helper to …**. Remora downloads the helper of its own version from the GitHub release, checks it against the release's checksums, and sends it over the encrypted helper connection. The helper accepts it only from a PC confirmed on the server, checks it again, replaces itself and reconnects. Helpers older than this version are replaced by hand once (RDP-61).
 
 - **A hint on servers without the helper.** When a desktop session has run for 15 seconds and no Remora helper showed up, a small card at the picture's top right says what the helper adds (file transfer, links on this PC, faster graphics settings). **How to install** opens the guide, **Later** hides it for this connection, and **Don't show again** hides it for that server (RDP-60).
