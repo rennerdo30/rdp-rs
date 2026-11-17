@@ -85,7 +85,7 @@ impl Mppc {
             }
             let offset = self.copy_offset(&mut r)?;
             let length = self.length_of_match(&mut r)?;
-            self.history.copy_back(offset as usize, length as usize)?;
+            self.history.copy_ring(offset as usize, length as usize)?;
         }
         Ok(Some(self.history.since(start)))
     }

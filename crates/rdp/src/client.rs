@@ -294,9 +294,11 @@ pub struct Client {
     color_depth: u16,
     fb: Framebuffer,
     fastpath: Reassembler,
-    /// Server-to-client bulk decompression, shared by slow-path, fast-path
-    /// and virtual channel data.
+    /// Server-to-client bulk decompression of slow-path and fast-path data.
     bulk: Decompressor,
+    /// A separate history for channel data a server compresses although
+    /// the client did not offer it (RDP-69); normally unused.
+    channel_bulk: Decompressor,
     info: ConnectionInfo,
     active: bool,
     last_error_info: u32,
@@ -895,6 +897,7 @@ impl Client {
             fb: Framebuffer::new(demand.width as usize, demand.height as usize),
             fastpath: Reassembler::default(),
             bulk: Decompressor::new(cfg.compression),
+            channel_bulk: Decompressor::new(cfg.compression),
             info: ConnectionInfo {
                 protocol,
                 certificate_sha256,
@@ -964,7 +967,11 @@ impl Client {
             (demand.width, demand.height),
             &self.keyboard,
             self.color_depth,
-            self.bulk.max() != Compression::Off,
+            // No VCCAPS_COMPR_SC (RDP-69): channel data stays out of the
+            // bulk history, as FreeRDP does; the graphics pipeline
+            // compresses its own data already. (The "copy-offset" failures
+            // themselves were decoder faults, fixed in mppc and xcrush.)
+            false,
             rail_caps.as_ref(),
         );
         let confirm = match &mut self.surface {
@@ -1386,7 +1393,7 @@ impl Client {
             return Ok(());
         }
         let cap = slot.handler.max_message_size();
-        let msg = match slot.defrag.feed(chunk, &mut self.bulk, cap) {
+        let msg = match slot.defrag.feed(chunk, &mut self.channel_bulk, cap) {
             Ok(Some(m)) => m,
             Ok(None) => return Ok(()),
             Err(e) => {

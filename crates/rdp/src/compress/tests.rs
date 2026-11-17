@@ -489,10 +489,13 @@ fn mppc_flush_and_at_front() {
         m.decompress(&copy, PACKET_COMPRESSED).unwrap().unwrap(),
         b"abc"
     );
-    // AT_FRONT: decoding restarts at offset 0, so offset 3 reaches nothing.
-    assert!(
+    // AT_FRONT: decoding restarts at offset 0, and offset 3 wraps to the
+    // end of the ring (still zeros here), as Windows' compressor expects.
+    assert_eq!(
         m.decompress(&copy, PACKET_COMPRESSED | PACKET_AT_FRONT)
-            .is_err()
+            .unwrap()
+            .unwrap(),
+        [0, 0, 0]
     );
     m.decompress(&abc, PACKET_COMPRESSED | PACKET_AT_FRONT)
         .unwrap();
@@ -506,9 +509,13 @@ fn mppc_flush_and_at_front() {
         m.decompress(&copy, PACKET_COMPRESSED).unwrap().unwrap(),
         b"abc"
     );
-    // FLUSHED alone (no data) resets HistoryOffset to 0.
+    // FLUSHED alone (no data) zeroes the ring and resets HistoryOffset.
     assert!(m.decompress(&[], PACKET_FLUSHED).unwrap().is_none());
-    assert!(m.decompress(&copy, PACKET_COMPRESSED).is_err());
+    assert_eq!(
+        m.decompress(&copy, PACKET_COMPRESSED).unwrap().unwrap(),
+        [0, 0, 0]
+    );
+    assert!(m.decompress(&[], PACKET_FLUSHED).unwrap().is_none());
     // FLUSHED is processed before the data of the same packet.
     let both = msb_bits(&format!(
         "0{:07b} 0{:07b} 0{:07b} 1111 000011 0",
@@ -830,7 +837,7 @@ fn xcrush_rejects_bad_matches() {
 }
 
 #[test]
-fn xcrush_at_front_resets_level1() {
+fn xcrush_at_front_rewinds_level1() {
     let flags = PACKET_COMPRESSED | 3;
     let mut x = Xcrush::new();
     x.decompress(&rdp61(xcrush::L1_NO_COMPRESSION, 0, &[], b"hello"), flags)
@@ -843,7 +850,18 @@ fn xcrush_at_front_resets_level1() {
         &[(5, 0, 0)],
         b"",
     );
-    assert_eq!(x.decompress(&front, flags).unwrap().unwrap(), &[0u8; 5]);
+    // The offset goes back to 0, the bytes stay (RDP-69): the match still
+    // reads "hello", and the output overwrites the start of the history.
+    assert_eq!(x.decompress(&front, flags).unwrap().unwrap(), b"hello");
+    let tail = rdp61(
+        xcrush::L1_NO_COMPRESSION | xcrush::L1_PACKET_AT_FRONT,
+        0,
+        &[],
+        b"J",
+    );
+    assert_eq!(x.decompress(&tail, flags).unwrap().unwrap(), b"J");
+    let rest = rdp61(xcrush::L1_COMPRESSED, 0, &[(4, 0, 1)], b"");
+    assert_eq!(x.decompress(&rest, flags).unwrap().unwrap(), b"ello");
 }
 
 // ------------------------------------------------------ dispatch and fuzz
@@ -908,4 +926,32 @@ fn random_and_truncated_input_never_panics() {
             let _ = d.decompress(&bad, flags | PACKET_FLUSHED);
         }
     }
+}
+
+#[test]
+fn mppc_matches_wrap_around_the_ring() {
+    // Fill an 8K history to the end, then AT_FRONT: a match behind offset 0
+    // reads the previous round's last bytes (RDP-69).
+    let mut m = Mppc::new(Variant::Rdp4);
+    let mut bits = String::new();
+    for i in 0..8192u32 {
+        let b = (i % 100) as u8;
+        bits.push_str(&format!("0{b:07b} "));
+    }
+    let fill = msb_bits(&bits);
+    assert_eq!(
+        m.decompress(&fill, PACKET_COMPRESSED)
+            .unwrap()
+            .unwrap()
+            .len(),
+        8192
+    );
+    // <3,3> at offset 0 copies bytes 8189..8192 = 89, 90, 91.
+    let copy = msb_bits("1111 000011 0");
+    assert_eq!(
+        m.decompress(&copy, PACKET_COMPRESSED | PACKET_AT_FRONT)
+            .unwrap()
+            .unwrap(),
+        [89, 90, 91]
+    );
 }

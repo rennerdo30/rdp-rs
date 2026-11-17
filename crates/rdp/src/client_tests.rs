@@ -24,6 +24,7 @@ fn session() -> (Client, TcpStream) {
         fb: Framebuffer::new(4, 4),
         fastpath: Reassembler::default(),
         bulk: Decompressor::default(),
+        channel_bulk: Decompressor::default(),
         info: ConnectionInfo {
             protocol: x224::PROTOCOL_HYBRID,
             certificate_sha256: [0; 32],

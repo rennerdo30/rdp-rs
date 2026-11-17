@@ -66,8 +66,11 @@ impl Xcrush {
             payload = inner;
         }
         if l1_flags & L1_PACKET_AT_FRONT != 0 {
-            // "MUST be reinitialized (by filling it with zeros)" (2.2.2.4.1).
-            l1.reset();
+            // Only the offset goes back to 0 (RDP-69). Matches carry absolute
+            // history offsets and keep pointing into the previous round's
+            // data, so zero-filling here (as 2.2.2.4.1 reads) garbles the
+            // output; Windows servers and FreeRDP keep the bytes.
+            l1.rewind();
         }
         let start = l1.pos();
         match l1_flags & (L1_COMPRESSED | L1_NO_COMPRESSION) {

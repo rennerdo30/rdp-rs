@@ -78,6 +78,31 @@ impl History {
         self.copy_from(self.pos - distance, len)
     }
 
+    /// [`copy_back`](Self::copy_back) for MPPC, whose history is a ring for
+    /// the source (RDP-69): after PACKET_AT_FRONT, and on the first packets
+    /// after a flush, Windows' compressor matches bytes "behind" offset 0,
+    /// which are the end of the buffer (the previous round's data, or the
+    /// zeros it starts with). FreeRDP masks the source offset the same way.
+    /// Seen live with RDP 5.0 and 6.1: "copy-offset 60893 at offset 0".
+    pub fn copy_ring(&mut self, distance: usize, len: usize) -> Result<()> {
+        let size = self.buf.len();
+        if distance == 0 || distance >= size {
+            return proto(format!(
+                "copy-offset {distance} outside the {size}-byte history"
+            ));
+        }
+        if distance <= self.pos {
+            return self.copy_from(self.pos - distance, len);
+        }
+        self.room(len)?;
+        let src = self.pos + size - distance;
+        for i in 0..len {
+            self.buf[self.pos + i] = self.buf[(src + i) % size];
+        }
+        self.pos += len;
+        Ok(())
+    }
+
     /// Replicating copy of `len` bytes from the absolute offset `src`.
     pub fn copy_from(&mut self, src: usize, len: usize) -> Result<()> {
         self.room(len)?;
