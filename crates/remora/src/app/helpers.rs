@@ -264,8 +264,24 @@ impl App {
                     *slot = None;
                     let view = match result {
                         Ok(report) => {
-                            rdp::trace!("latency meter: {}", report.summary());
-                            LatencyView::Finished(Ok(report.summary()))
+                            // What this PC spent decoding meanwhile (the
+                            // overlay's last reading): the meter explains its
+                            // own number.
+                            let gfx = self.win.as_ref().and_then(|w| {
+                                let t = w.ui.tabs.iter().find(|t| t.id == id)?;
+                                t.stats.as_ref()?.gfx.clone()
+                            });
+                            let mut text = report.summary();
+                            if let Some(g) = gfx {
+                                text += &format!(
+                                    "; Remora decoding {:.1} ms per frame ({}, {:.0} fps)",
+                                    g.decode_ms,
+                                    g.codec.unwrap_or("no codec"),
+                                    g.fps
+                                );
+                            }
+                            rdp::trace!("latency meter: {text}");
+                            LatencyView::Finished(Ok(text))
                         }
                         Err(e) => {
                             rdp::trace!("latency meter: {e}");
