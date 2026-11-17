@@ -1723,6 +1723,14 @@ mod tests {
                 got.iter().take(5).map(|e| e.data.len()).collect::<Vec<_>>()
             );
             assert!(!got.is_empty(), "no pictures");
+            // STREAM_DUMP=<folder>: keep the pictures for the decoder test
+            // on Remora's side (RDP-71).
+            if let Ok(dir) = std::env::var("STREAM_DUMP") {
+                let _ = std::fs::create_dir_all(&dir);
+                for (i, e) in got.iter().enumerate() {
+                    let _ = std::fs::write(format!("{dir}/{i:03}.h264"), &e.data);
+                }
+            }
             assert!(got[0].key, "the first picture is a keyframe");
             assert!(super::has_sps(&got[0].data), "with its sequence header");
             assert_eq!(got.len(), pushed.len(), "every frame came out");

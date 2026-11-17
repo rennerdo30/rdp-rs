@@ -61,6 +61,12 @@ impl Assembler {
     }
 }
 
+/// An access unit delimiter (H.264 NAL type 9): appended to every picture
+/// so Windows' decoder knows it is complete. Without it the decoder waits
+/// for the next picture's start, so a quiet screen never showed its last
+/// change (RDP-71: one picture held back, shown with the AMD encoder).
+pub const AUD: [u8; 6] = [0, 0, 0, 1, 9, 0xf0];
+
 /// YCbCr in BT.709 limited range (16-235) to 0x00RRGGBB: the stream's
 /// colours, as the helper converts them (not RDP's full-range formula).
 pub fn rgb709(y: u8, u: u8, v: u8) -> u32 {
@@ -167,9 +173,10 @@ fn run(
             Err(RecvTimeoutError::Timeout) => continue,
             Err(RecvTimeoutError::Disconnected) => break,
         };
-        let Some((seq, rects, data)) = asm.add(piece) else {
+        let Some((seq, rects, mut data)) = asm.add(piece) else {
             continue;
         };
+        data.extend_from_slice(&AUD);
         match decoder.decode(&data) {
             Ok(Some(frame)) => {
                 let now = Instant::now();

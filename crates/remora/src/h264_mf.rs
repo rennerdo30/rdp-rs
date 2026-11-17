@@ -626,3 +626,35 @@ fn bench_nv12_copy() {
         t.elapsed().as_secs_f64() * 1000.0 / n as f64
     );
 }
+
+#[cfg(test)]
+#[test]
+#[ignore = "needs pictures from the helper's encoder (STREAM_DUMP)"]
+fn decodes_helper_stream_pictures_at_once() {
+    // RDP-71: each picture of the helper's stream must come out of the
+    // decoder when it goes in, or a quiet screen never shows a change.
+    let dir = std::env::var("STREAM_DUMP").expect("STREAM_DUMP");
+    let mut files: Vec<_> = std::fs::read_dir(&dir)
+        .unwrap()
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.extension().is_some_and(|x| x == "h264"))
+        .collect();
+    files.sort();
+    let mut d = MfH264::new().unwrap();
+    let mut late = Vec::new();
+    for (i, f) in files.iter().enumerate() {
+        // As the stream's player hands them over.
+        let mut data = std::fs::read(f).unwrap();
+        data.extend_from_slice(&crate::stream_player::AUD);
+        let out = d.decode(&data).unwrap();
+        println!(
+            "picture {i}: {} bytes in, picture out: {}",
+            data.len(),
+            out.is_some()
+        );
+        if out.is_none() {
+            late.push(i);
+        }
+    }
+    assert!(late.is_empty(), "held back: {late:?}");
+}
