@@ -127,7 +127,7 @@ pub struct Inherit {
     pub credentials: bool,
     /// Size and scale.
     pub display: bool,
-    /// Clipboard, sound, printers, smart cards and shared folders.
+    /// Clipboard, sound, printers, smart cards, ports and shared folders.
     pub sharing: bool,
 }
 
@@ -266,6 +266,10 @@ pub struct SessionOptions {
     pub smart_cards: bool,
     /// Local folders shared as drives.
     pub drives: Vec<String>,
+    /// Local serial and parallel ports shared with the session ("COM3",
+    /// "LPT1"); none by default (RDP-74).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub ports: Vec<String>,
     /// Output device for the session's sound, by name; None: the default.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub speaker: Option<String>,
@@ -1530,6 +1534,44 @@ mod tests {
             ..Default::default()
         }));
         assert_eq!(display.options.helper, own.helper, "display keeps its own");
+    }
+
+    #[test]
+    fn serial_ports_default_off_round_trip_and_inherit_with_sharing() {
+        // Saved before ports existed: none shared, nothing written.
+        let o: SessionOptions = serde_json::from_str(r#"{"clipboard":true}"#).unwrap();
+        assert!(o.ports.is_empty());
+        assert!(!serde_json::to_string(&o).unwrap().contains("ports"));
+        let o = SessionOptions {
+            ports: vec!["COM3".into(), "LPT1".into()],
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&o).unwrap();
+        assert!(json.contains(r#""ports":["COM3","LPT1"]"#), "{json}");
+        let back: SessionOptions = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.ports, o.ports);
+        // A group's ports come with Sharing, not with Display.
+        let g = Group {
+            path: "Lab".into(),
+            options: o.clone(),
+            ..Default::default()
+        };
+        let s = store_with(vec![g], vec![]);
+        let conn = |inherit| Connection {
+            group: "Lab".into(),
+            inherit,
+            ..Default::default()
+        };
+        let sharing = s.resolve(&conn(Inherit {
+            sharing: true,
+            ..Default::default()
+        }));
+        assert_eq!(sharing.options.ports, o.ports);
+        let display = s.resolve(&conn(Inherit {
+            display: true,
+            ..Default::default()
+        }));
+        assert!(display.options.ports.is_empty());
     }
 
     #[test]

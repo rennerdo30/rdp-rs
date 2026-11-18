@@ -184,6 +184,14 @@ A session that ends without an error shows why and how long it ran, with
 - **The picture looks wrong with GFX (H.264).** The graphics pipeline is
   experimental. Switch the connection back to **Bitmaps** on the editor's
   Advanced page, and please report it.
+- **A shared COM or LPT port does not show in the session, or cannot be
+  opened there.** The port must be on this PC when you switch it on (the
+  message says so otherwise). The server must allow port redirection: its
+  Remote Desktop Session Host policies "Do not allow COM port redirection"
+  and "Do not allow LPT port redirection" must not be enabled. A program on this PC that has the port open blocks it for the
+  session: the session's program then gets "access denied". Some servers
+  keep showing a port after you switch it off; it no longer works there
+  and goes away at the next connection.
 - **Windows warns when starting the setup.** The setup is not code-signed yet.
   Choose **More info**, then **Run anyway**.
 

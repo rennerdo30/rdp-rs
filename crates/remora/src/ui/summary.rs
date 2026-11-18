@@ -178,6 +178,14 @@ impl Ui {
         if folders > 0 {
             shared.push(&folder_text);
         }
+        // One port by its name ("COM3"), several as a count.
+        let port_text = match o.ports.as_slice() {
+            [one] => one.clone(),
+            many => plural(many.len(), "port", "ports"),
+        };
+        if !o.ports.is_empty() {
+            shared.push(&port_text);
+        }
         out.push(Line {
             icon: if shared.is_empty() {
                 Icon::Lock

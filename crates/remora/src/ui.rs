@@ -280,12 +280,16 @@ pub enum Hit {
     Printers(u64),
     Sound(u64),
     SmartCards(u64),
+    /// A port row of the panel: index into `port_rows`.
+    Port(u64, usize),
     Fit(u64),
     /// Scale choice: 0 = Auto, else an index into SCALES + 1.
     Scale(u64, usize),
     /// Connection form: scale choice, sharing chip, folder remove/add.
     FormScale(usize),
     FormShare(u8),
+    /// A port row of the editor: index into `port_rows`.
+    FormPort(usize),
     FormRemoveDrive(usize),
     FormAddDrive,
     /// Vault: save-password chip, unlock, remember, create, cancel, lock.
@@ -428,6 +432,14 @@ pub struct SharedDrive {
     pub path: String,
 }
 
+/// The port rows of the editor and the panel: this PC's ports, then the
+/// chosen ones it does not have now (a USB adapter unplugged).
+pub fn port_rows(local: &[String], chosen: &[String]) -> Vec<String> {
+    let mut rows = local.to_vec();
+    rows.extend(chosen.iter().filter(|c| !local.contains(c)).cloned());
+    rows
+}
+
 /// One session tab and its live settings.
 pub struct Tab {
     pub id: u64,
@@ -442,6 +454,8 @@ pub struct Tab {
     /// Remote desktop scale in percent; None follows this PC's scaling.
     pub scale: Option<u32>,
     pub drives: Vec<SharedDrive>,
+    /// Serial and parallel ports shared now ("COM3").
+    pub ports: Vec<String>,
     /// Quality chosen in the panel, and the one the session logged on with.
     pub quality: Quality,
     pub quality_live: Quality,
@@ -506,6 +520,7 @@ struct TabView {
     fit: bool,
     scale: Option<u32>,
     drives: Vec<SharedDrive>,
+    ports: Vec<String>,
     quality: Quality,
     quality_live: Quality,
     state: TabState,
@@ -543,6 +558,8 @@ pub enum Action {
     SetPrinters(u64, bool),
     SetSound(u64, bool),
     SetSmartCards(u64, bool),
+    /// Share a serial or parallel port ("COM3") or stop sharing it.
+    SetPort(u64, String, bool),
     SetFit(u64, bool),
     SetScale(u64, Option<u32>),
     AddDrive(u64, String),
@@ -731,6 +748,8 @@ pub struct Ui {
     pub speakers: Vec<String>,
     /// Local microphones (the app fills it in).
     pub mics: Vec<String>,
+    /// This PC's serial and parallel ports, "COM3" (the app fills it in).
+    pub local_ports: Vec<String>,
     /// This PC's monitors (the app fills it in).
     pub local_monitors: Vec<crate::monitors::LocalMonitor>,
     /// Connection editor page.
@@ -873,6 +892,7 @@ impl Ui {
             session_clip: None,
             speakers: Vec::new(),
             mics: Vec::new(),
+            local_ports: Vec::new(),
             local_monitors: Vec::new(),
             form_page: 0,
             settings_open: false,
@@ -1000,6 +1020,7 @@ impl Ui {
             fit,
             scale: None,
             drives: Vec::new(),
+            ports: Vec::new(),
             quality: Quality::default(),
             quality_live: Quality::default(),
             cert: None,
@@ -2236,6 +2257,18 @@ impl Ui {
                 t.smart_cards = !t.smart_cards;
                 return Some(Action::SetSmartCards(id, t.smart_cards));
             }
+            Hit::Port(id, i) => {
+                let local = self.local_ports.clone();
+                let t = self.tab_mut(id)?;
+                let name = port_rows(&local, &t.ports).into_iter().nth(i)?;
+                let on = !t.ports.contains(&name);
+                if on {
+                    t.ports.push(name.clone());
+                } else {
+                    t.ports.retain(|p| *p != name);
+                }
+                return Some(Action::SetPort(id, name, on));
+            }
             Hit::Clipboard(id) => {
                 let t = self.tab_mut(id)?;
                 t.clipboard = !t.clipboard;
@@ -2254,6 +2287,18 @@ impl Ui {
                     _ => &mut o.microphone,
                 };
                 *flag = !*flag;
+            }
+            Hit::FormPort(i) => {
+                if let Some(name) = port_rows(&self.local_ports, &self.opts.ports)
+                    .into_iter()
+                    .nth(i)
+                {
+                    if self.opts.ports.contains(&name) {
+                        self.opts.ports.retain(|p| *p != name);
+                    } else {
+                        self.opts.ports.push(name);
+                    }
+                }
             }
             Hit::FormRemoveDrive(i) => {
                 if i < self.opts.drives.len() {
@@ -5566,6 +5611,7 @@ impl Ui {
             self.card_switch_i(cv, te, f, *r, Some(icon), label, sub, on, Hit::FormShare(i));
         }
         y += 5 * p(58.0) + p(24.0);
+        y = self.ports_card(cv, te, f, (x, y, w), &o.ports, 58.0, Hit::FormPort);
 
         if o.sound {
             y = self.device_card(
@@ -5677,6 +5723,40 @@ impl Ui {
         );
         let y = y + heights.iter().sum::<i32>();
         self.form_helper(cv, te, f, x, y, w)
+    }
+
+    /// The Ports card (RDP-74): a switch per serial or parallel port; none
+    /// at all on a PC without ports. Returns the y below it.
+    #[allow(clippy::too_many_arguments)]
+    fn ports_card(
+        &mut self,
+        cv: &mut Canvas,
+        te: &mut TextEngine,
+        f: &Fonts,
+        (x, mut y, w): (i32, i32, i32),
+        chosen: &[String],
+        row_h: f32,
+        hit: impl Fn(usize) -> Hit,
+    ) -> i32 {
+        let rows = port_rows(&self.local_ports, chosen);
+        if rows.is_empty() {
+            return y;
+        }
+        let s = self.scale;
+        let p = |v: f32| (v * s).round() as i32;
+        self.caption(cv, te, f, x, y, w, "Ports");
+        y += p(26.0);
+        let cells = self.card(cv, x, y, w, &vec![p(row_h); rows.len()]);
+        for (i, (r, name)) in cells.iter().zip(&rows).enumerate() {
+            let sub = match (self.local_ports.contains(name), name.starts_with("LPT")) {
+                (false, _) => "Not on this PC now",
+                (true, false) => "Serial port of this PC",
+                (true, true) => "Parallel port of this PC",
+            };
+            let on = chosen.contains(name);
+            self.card_switch_i(cv, te, f, *r, Some(Icon::SerialPort), name, sub, on, hit(i));
+        }
+        y + rows.len() as i32 * p(row_h) + p(24.0)
     }
 
     /// The panel's device card (hits carry the session id).
@@ -6301,6 +6381,7 @@ impl Ui {
             fit: tab.fit,
             scale: tab.scale,
             drives: tab.drives.clone(),
+            ports: tab.ports.clone(),
             quality: tab.quality,
             quality_live: tab.quality_live,
             state: tab.state.clone(),
@@ -6437,6 +6518,7 @@ impl Ui {
             self.card_switch_i(cv, te, f, *r, Some(icon), label, sub, on, hit);
         }
         y += 5 * p(56.0) + p(24.0);
+        y = self.ports_card(cv, te, f, (x, y, w), &t.ports, 56.0, |i| Hit::Port(id, i));
         if t.microphone {
             let mics = self.mics.clone();
             y = self.device_card_tab(
@@ -7561,6 +7643,26 @@ pub fn sample_form(page: u8) -> Ui {
     m
 }
 
+/// The Ports card: this PC has COM3, COM4 and LPT1; COM3 is shared and the
+/// connection also names COM7, which is unplugged. `panel`: the session's
+/// Sharing page, else the editor's.
+pub fn sample_ports(panel: bool) -> Ui {
+    let local: Vec<String> = ["COM3", "COM4", "LPT1"].map(String::from).to_vec();
+    let mut m = if panel {
+        let mut m = sample_panel(0, false);
+        if let Some(t) = m.tab_mut(1) {
+            t.ports = vec!["COM3".into()];
+        }
+        m
+    } else {
+        let mut m = sample_form(3);
+        m.opts.ports = vec!["COM3".into(), "COM7".into()];
+        m
+    };
+    m.local_ports = local;
+    m
+}
+
 /// A session tab waiting for the user to trust the server certificate.
 pub fn sample_cert(changed: bool) -> Ui {
     let mut m = sample(true);
@@ -7933,6 +8035,57 @@ mod tests {
         let mut locked = Ui::new(Store::locked_sample(), 1.0);
         locked.key(Key::Tab);
         assert_eq!(locked.focus, Some(Field::Master));
+    }
+
+    #[test]
+    fn port_switches_follow_the_rows_and_go_live_in_a_session() {
+        let local: Vec<String> = ["COM3", "LPT1"].map(String::from).to_vec();
+        assert_eq!(
+            port_rows(&local, &["COM7".into(), "COM3".into()]),
+            ["COM3", "LPT1", "COM7"]
+        );
+        // Editor: rows are this PC's ports, then chosen ones it lacks.
+        let mut m = sample_ports(false); // local COM3 COM4 LPT1; chosen COM3 COM7
+        m.activate(Hit::FormPort(2)); // LPT1 on
+        m.activate(Hit::FormPort(0)); // COM3 off
+        m.activate(Hit::FormPort(3)); // COM7 (unplugged) off
+        assert_eq!(m.opts.ports, ["LPT1"]);
+        // Panel: a switch is a live change for that session.
+        let mut m = sample_ports(true); // COM3 shared
+        match m.activate(Hit::Port(1, 1)) {
+            Some(Action::SetPort(1, name, true)) => assert_eq!(name, "COM4"),
+            _ => panic!("expected SetPort on"),
+        }
+        match m.activate(Hit::Port(1, 0)) {
+            Some(Action::SetPort(1, name, false)) => assert_eq!(name, "COM3"),
+            _ => panic!("expected SetPort off"),
+        }
+        assert_eq!(m.tab_mut(1).unwrap().ports, ["COM4"]);
+        assert!(m.activate(Hit::Port(1, 9)).is_none(), "no such row");
+    }
+
+    #[test]
+    fn the_ports_card_shows_only_when_there_are_ports() {
+        let mut te = TextEngine::new();
+        let Some(fonts) = load_fonts(&mut te) else {
+            return; // no UI font on this machine (headless CI)
+        };
+        let painted = |m: &mut Ui, te: &mut TextEngine| {
+            let (w, h) = (1320usize, 2400usize);
+            let mut px = vec![0u32; w * h];
+            m.paint(&mut Canvas::new(&mut px, w, h), te, &fonts);
+            m.hits
+                .iter()
+                .filter(|(_, h)| matches!(h, Hit::FormPort(_) | Hit::Port(..)))
+                .count()
+        };
+        assert_eq!(
+            painted(&mut sample_form(3), &mut te),
+            0,
+            "no ports: no card"
+        );
+        assert_eq!(painted(&mut sample_ports(false), &mut te), 4);
+        assert_eq!(painted(&mut sample_ports(true), &mut te), 3);
     }
 
     #[test]
