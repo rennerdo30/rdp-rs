@@ -716,6 +716,21 @@ fn sharing_off_closes_the_camera_at_once_and_removes_it() {
 }
 
 #[test]
+fn a_request_after_sharing_off_closes_the_camera_before_any_tick() {
+    let mut r = Rig::streaming();
+    assert!(r.send(1, &hex("02 11 00")).is_empty());
+    r.handle.set_enabled(0, false);
+    assert_eq!(
+        r.send(1, &hex("02 11 00")),
+        vec![hex("02 13 00 03 00 00 00"), hex("02 13 00 03 00 00 00")]
+    );
+    assert!(!r.scripts[0].lock().unwrap().capturing);
+    // Deactivated: sharing again starts from Activate.
+    r.handle.set_enabled(0, true);
+    assert_eq!(r.send(1, &hex("02 09")), vec![hex("02 02 03 00 00 00")]);
+}
+
+#[test]
 fn channel_close_and_drop_close_the_camera() {
     let mut r = Rig::streaming();
     r.channels[1].closed();

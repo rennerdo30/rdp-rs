@@ -475,7 +475,7 @@ mod win {
                 .name("camera capture".into())
                 .spawn(move || run(&link, wanted, &samples, &flag, &tx))
                 .map_err(|e| format!("camera capture: {e}"))?;
-            match rx.recv_timeout(super::win::OPEN_TIMEOUT) {
+            match rx.recv_timeout(OPEN_TIMEOUT) {
                 Ok(Ok(source)) => Ok(Capture {
                     source,
                     stop,
@@ -559,6 +559,7 @@ mod win {
         }
         if ready.send(Ok(SourceHandle(source.clone()))).is_err() {
             // The session gave up waiting.
+            // SAFETY: releases the device.
             unsafe {
                 let _ = source.Shutdown();
             }

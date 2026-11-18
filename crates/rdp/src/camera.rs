@@ -1060,7 +1060,11 @@ impl DynamicChannel for DeviceChannel {
         };
         let version = self.version(request_version);
         if !self.device().wanted() {
-            // Not shared (any more): nothing reaches the camera.
+            // Not shared (any more): nothing reaches the camera, and one
+            // still capturing closes now rather than on the next tick.
+            if self.streaming.is_some() || self.activations > 0 {
+                self.reset(Some(out));
+            }
             let code = ERR_NOT_INITIALIZED;
             if id == MSG_SAMPLE_REQUEST {
                 out.send(sample_error_response(
