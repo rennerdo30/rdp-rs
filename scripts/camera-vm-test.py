@@ -54,12 +54,14 @@ $actT = ($ext | ? { $_.Name -eq 'AsTask' -and $_.GetParameters().Count -eq 1 -an
     $_.GetParameters()[0].ParameterType.Name -eq 'IAsyncAction' })[0]
 function Await($op, $type) {
     $t = $opT.MakeGenericMethod($type).Invoke($null, @($op))
-    if (-not $t.Wait(30000)) { throw 'timed out' }
+    try { $ok = $t.Wait(30000) } catch { throw ('WinRT: ' + $_.Exception.GetBaseException().Message) }
+    if (-not $ok) { throw 'timed out' }
     $t.Result
 }
 function AwaitAction($op) {
     $t = $actT.Invoke($null, @($op))
-    if (-not $t.Wait(30000)) { throw 'timed out' }
+    try { $ok = $t.Wait(30000) } catch { throw ('WinRT: ' + $_.Exception.GetBaseException().Message) }
+    if (-not $ok) { throw 'timed out' }
 }
 [Windows.Devices.Enumeration.DeviceInformation, Windows.Devices.Enumeration, ContentType = WindowsRuntime] | Out-Null
 [Windows.Media.Capture.MediaCapture, Windows.Media.Capture, ContentType = WindowsRuntime] | Out-Null
