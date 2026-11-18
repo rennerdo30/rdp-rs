@@ -306,6 +306,80 @@ impl Ntlm {
         Ok(out)
     }
 
+    /// GSS_WrapEx (sealed) or GSS_GetMICEx (signed only) for one DCE/RPC
+    /// PDU (MS-NLMP 3.4.3, 3.4.4; MS-RPCE 3.3.1.5.2.2): the signature covers
+    /// the plaintext of `sign` (the body, or header, body and sec_trailer
+    /// with header signing), then `seal`, if given, is encrypted in place.
+    /// Returns the 16-byte NTLMSSP_MESSAGE_SIGNATURE.
+    pub fn wrap_pdu(
+        &mut self,
+        pdu: &mut [u8],
+        seal: Option<std::ops::Range<usize>>,
+        sign: std::ops::Range<usize>,
+    ) -> Result<[u8; 16]> {
+        let s = self
+            .session
+            .as_mut()
+            .ok_or_else(|| Error::Auth("NTLM not established".into()))?;
+        let signed = pdu
+            .get(sign)
+            .ok_or_else(|| Error::Protocol("NTLM signed range out of bounds".into()))?;
+        let seq = s.client_seq.to_le_bytes();
+        let mut checksum: [u8; 8] = hmac_md5(&s.client_sign, &[&seq[..], signed].concat())[..8]
+            .try_into()
+            .expect("8 of 16 bytes");
+        if let Some(r) = seal {
+            let body = pdu
+                .get_mut(r)
+                .ok_or_else(|| Error::Protocol("NTLM sealed range out of bounds".into()))?;
+            s.client_seal.process(body);
+        }
+        if s.key_exch {
+            s.client_seal.process(&mut checksum);
+        }
+        s.client_seq = s.client_seq.wrapping_add(1);
+        let mut out = [0u8; 16];
+        out[..4].copy_from_slice(&1u32.to_le_bytes());
+        out[4..12].copy_from_slice(&checksum);
+        out[12..].copy_from_slice(&seq);
+        Ok(out)
+    }
+
+    /// The receive side of [`Self::wrap_pdu`] (GSS_UnwrapEx / GSS_VerifyMICEx):
+    /// decrypts `seal` in place, then checks `signature` over `sign`.
+    pub fn unwrap_pdu(
+        &mut self,
+        pdu: &mut [u8],
+        seal: Option<std::ops::Range<usize>>,
+        sign: std::ops::Range<usize>,
+        signature: &[u8],
+    ) -> Result<()> {
+        let s = self
+            .session
+            .as_mut()
+            .ok_or_else(|| Error::Auth("NTLM not established".into()))?;
+        if signature.len() < 16 || pdu.get(sign.clone()).is_none() {
+            return proto("NTLM signature or signed range out of bounds");
+        }
+        if let Some(r) = seal {
+            let body = pdu
+                .get_mut(r)
+                .ok_or_else(|| Error::Protocol("NTLM sealed range out of bounds".into()))?;
+            s.server_seal.process(body);
+        }
+        let mut checksum: [u8; 8] = signature[4..12].try_into().expect("checked length");
+        if s.key_exch {
+            s.server_seal.process(&mut checksum);
+        }
+        let seq = s.server_seq.to_le_bytes();
+        let expected = hmac_md5(&s.server_sign, &[&seq[..], &pdu[sign]].concat());
+        if checksum != expected[..8] || signature[12..16] != seq {
+            return Err(Error::Auth("RPC message signature mismatch".into()));
+        }
+        s.server_seq = s.server_seq.wrapping_add(1);
+        Ok(())
+    }
+
     pub fn decrypt(&mut self, data: &[u8]) -> Result<Vec<u8>> {
         let s = self
             .session
@@ -327,6 +401,55 @@ impl Ntlm {
         }
         s.server_seq += 1;
         Ok(plain)
+    }
+}
+
+/// The server's side of a session, for loopback tests that play a peer.
+#[cfg(test)]
+impl Ntlm {
+    /// A session from an exported session key, seen from the client, or
+    /// (with `server`) from the server, whose send keys are the client's
+    /// receive keys (MS-NLMP 3.4.5).
+    pub(crate) fn with_session_key(exported: [u8; 16], server: bool) -> Ntlm {
+        let derive = |magic: &[u8]| md5(&[&exported[..], magic].concat());
+        let c_sign = derive(b"session key to client-to-server signing key magic constant\0");
+        let s_sign = derive(b"session key to server-to-client signing key magic constant\0");
+        let c_seal = derive(b"session key to client-to-server sealing key magic constant\0");
+        let s_seal = derive(b"session key to server-to-client sealing key magic constant\0");
+        let (cs, ss, ce, se) = if server {
+            (s_sign, c_sign, s_seal, c_seal)
+        } else {
+            (c_sign, s_sign, c_seal, s_seal)
+        };
+        let mut n = Ntlm::new("", "", "", "");
+        n.session = Some(Session {
+            key_exch: true,
+            client_sign: cs,
+            server_sign: ss,
+            client_seal: Rc4::new(&ce),
+            server_seal: Rc4::new(&se),
+            client_seq: 0,
+            server_seq: 0,
+        });
+        n
+    }
+
+    /// What a server learns from an AUTHENTICATE_MESSAGE (MS-NLMP 3.2.5.1.2)
+    /// when it knows the password: the exported session key.
+    pub(crate) fn exported_key(
+        authenticate: &[u8],
+        password: &str,
+        user: &str,
+        domain: &str,
+    ) -> [u8; 16] {
+        let field = |at: usize| {
+            let len = u16::from_le_bytes([authenticate[at], authenticate[at + 1]]) as usize;
+            let off = u32::from_le_bytes(authenticate[at + 4..at + 8].try_into().unwrap()) as usize;
+            &authenticate[off..off + len]
+        };
+        let nt_proof = &field(20)[..16];
+        let base = hmac_md5(&ntowf_v2(password, user, domain), nt_proof);
+        rc4_once(&base, field(52)).try_into().unwrap()
     }
 }
 
@@ -375,6 +498,79 @@ mod tests {
         );
         let encrypted = rc4_once(&v2.session_base_key, &[0x55; 16]);
         assert_eq!(hex(&encrypted), "c5dad2544fc9799094ce1ce90bc9d03e");
+    }
+
+    fn unhex(s: &str) -> Vec<u8> {
+        let s: String = s.split_whitespace().collect();
+        (0..s.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+            .collect()
+    }
+
+    fn session_with(sign: &[u8], seal: &[u8]) -> Session {
+        let sign: [u8; 16] = sign.try_into().unwrap();
+        let seal: [u8; 16] = seal.try_into().unwrap();
+        Session {
+            key_exch: true,
+            client_sign: sign,
+            server_sign: sign,
+            client_seal: Rc4::new(&seal),
+            server_seal: Rc4::new(&seal),
+            client_seq: 0,
+            server_seq: 0,
+        }
+    }
+
+    /// MS-NLMP 4.2.4.4 GSS_WrapEx example (NTLMv2, key exchange): the sealed
+    /// data and the signature of "Plaintext".
+    #[test]
+    fn wrap_pdu_matches_the_spec_example() {
+        let sealkey = unhex("59 f6 00 97 3c c4 96 0a 25 48 0a 7c 19 6e 4c 58");
+        let signkey = unhex("47 88 dc 86 1b 47 82 f3 5d 43 fd 98 fe 1a 2d 39");
+        let mut a = Ntlm::new("u", "", "p", "w");
+        a.session = Some(session_with(&signkey, &sealkey));
+        let mut msg = utf16le("Plaintext");
+        let n = msg.len();
+        let sig = a.wrap_pdu(&mut msg, Some(0..n), 0..n).unwrap();
+        assert_eq!(
+            hex(&msg),
+            "54e50165bf1936dc996020c1811b0f06fb5f",
+            "sealed data"
+        );
+        assert_eq!(hex(&sig), "010000007fb38ec5c55d497600000000");
+    }
+
+    /// The DCE/RPC case: header and trailer are signed but stay clear, only
+    /// the body is sealed; the peer with the same keys unwraps it, and a
+    /// changed header byte fails the signature.
+    #[test]
+    fn wrap_pdu_signs_more_than_it_seals() {
+        let key = [9u8; 16];
+        let pdu0: Vec<u8> = (0..64u8).collect();
+        let mut a = Ntlm::new("u", "", "p", "w");
+        a.session = Some(session_with(&key, &key));
+        let mut pdu = pdu0.clone();
+        let sig = a.wrap_pdu(&mut pdu, Some(24..48), 0..56).unwrap();
+        assert_eq!(&pdu[..24], &pdu0[..24], "header stays clear");
+        assert_ne!(&pdu[24..48], &pdu0[24..48], "body sealed");
+        assert_eq!(&pdu[48..], &pdu0[48..]);
+
+        let mut b = Ntlm::new("u", "", "p", "w");
+        b.session = Some(session_with(&key, &key));
+        let mut got = pdu.clone();
+        b.unwrap_pdu(&mut got, Some(24..48), 0..56, &sig).unwrap();
+        assert_eq!(got, pdu0);
+
+        let mut c = Ntlm::new("u", "", "p", "w");
+        c.session = Some(session_with(&key, &key));
+        let mut bad = pdu.clone();
+        bad[3] ^= 1;
+        assert!(matches!(
+            c.unwrap_pdu(&mut bad, Some(24..48), 0..56, &sig),
+            Err(Error::Auth(_))
+        ));
+        assert!(c.unwrap_pdu(&mut bad, Some(24..99), 0..56, &sig).is_err());
     }
 
     #[test]

@@ -123,8 +123,27 @@ and password), and that the gateway's policy lets you reach this server.
 ### The RD Gateway cannot be reached
 
 Check the gateway address in the connection's **Gateway** field and this PC's
-network. Remora connects to gateways over HTTPS (HTTP transport and
-WebSocket); gateways that offer only RPC over HTTP are not supported yet.
+network. Remora connects to gateways over HTTPS: the HTTP transport (over a
+WebSocket) first, and RPC over HTTP when the gateway does not offer HTTP.
+Turn on **Gateway over RPC** for a gateway that should only be reached over
+RPC over HTTP.
+
+The message names the step that failed:
+
+- **RPC OUT channel** or **RPC IN channel**: the gateway's
+  `/rpc/rpcproxy.dll` did not take the request. HTTP 404 means the gateway
+  does not offer RPC over HTTP either; "rejected the credentials" means the
+  user name or password.
+- **RPC virtual connection** or **RPC bind**: the gateway's RPC proxy did not
+  reach its own RPC service (port 3388 on the gateway).
+- **TsProxyCreateTunnel**, **TsProxyAuthorizeTunnel**: the gateway's
+  connection policy (RD CAP) refused the user.
+- **TsProxyCreateChannel**: the gateway's resource policy (RD RAP) refused
+  the server, or the gateway could not reach it.
+
+A session through RPC over HTTP ends after about 1 GB in either direction
+(Remora does not renew the gateway's RPC channels); it then reconnects on
+its own.
 
 ### The RD Gateway could not reach the server
 

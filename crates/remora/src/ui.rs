@@ -203,6 +203,8 @@ pub enum Hit {
     FormKerberos,
     /// Allow legacy RDP security (no TLS) for this connection.
     FormLegacySecurity,
+    /// Reach the gateway over RPC over HTTP only, on or off.
+    FormGatewayRpc,
     /// Group form: colour swatch (index into GROUP_COLORS; past the end: automatic).
     FormColor(usize),
     /// Settings page and its controls.
@@ -741,6 +743,8 @@ pub struct Ui {
     kerberos: bool,
     /// The edited connection allows legacy RDP security (never a group's).
     legacy_security: bool,
+    /// The edited connection or group reaches its gateway over RPC over HTTP.
+    gateway_rpc: bool,
     /// The edited group's chosen colour (None: automatic).
     group_color: Option<u8>,
     /// Collapsed group paths in the sidebar.
@@ -904,6 +908,7 @@ impl Ui {
             inherit: Inherit::default(),
             kerberos: false,
             legacy_security: false,
+            gateway_rpc: false,
             group_color: None,
             collapsed: Default::default(),
             opts: SessionOptions::default(),
@@ -1123,6 +1128,7 @@ impl Ui {
             .set(c.options.helper.fingerprint.as_deref().unwrap_or(""));
         self.kerberos = c.kerberos;
         self.legacy_security = c.legacy_security;
+        self.gateway_rpc = c.gateway_rpc;
         self.size = size_index(c.width, c.height);
         self.opts = c.options.clone();
         self.opens = c.opens;
@@ -1155,6 +1161,7 @@ impl Ui {
         self.field_mut(Field::User).set(&g.user);
         self.field_mut(Field::Gateway).set(&g.gateway);
         self.kerberos = g.kerberos;
+        self.gateway_rpc = g.gateway_rpc;
         self.group_color = g.color;
         self.size = size_index(g.width, g.height);
         self.opts = g.options.clone();
@@ -1327,6 +1334,7 @@ impl Ui {
             password: self.form_password(inherit.credentials),
             group: normalize_path(&self.field(Field::GroupPath).text),
             gateway: self.field(Field::Gateway).text.trim().to_string(),
+            gateway_rpc: self.gateway_rpc,
             kerberos: self.kerberos,
             legacy_security: self.legacy_security,
             inherit,
@@ -1500,6 +1508,7 @@ impl Ui {
             user: self.field(Field::User).text.trim().to_string(),
             password: self.form_password(inherit.credentials),
             gateway: self.field(Field::Gateway).text.trim().to_string(),
+            gateway_rpc: self.gateway_rpc,
             kerberos: self.kerberos,
             width,
             height,
@@ -2095,6 +2104,7 @@ impl Ui {
             }
             Hit::FormKerberos => self.kerberos = !self.kerberos,
             Hit::FormLegacySecurity => self.legacy_security = !self.legacy_security,
+            Hit::FormGatewayRpc => self.gateway_rpc = !self.gateway_rpc,
             Hit::FormPage(i) => {
                 self.form_page = i;
                 self.home_scroll = 0;
@@ -4955,7 +4965,10 @@ impl Ui {
             return y + rh;
         }
         let saved = self.save_password && self.own_password().is_some();
-        let cells = self.card(cv, x, y, w, &[rh, rh, p(60.0), p(60.0), rh]);
+        // The transport switch only once a gateway is entered.
+        let has_gateway = !self.field(Field::Gateway).text.trim().is_empty();
+        let rows = [rh, rh, p(60.0), p(60.0), rh, p(60.0)];
+        let cells = self.card(cv, x, y, w, &rows[..if has_gateway { 6 } else { 5 }]);
         self.field_row_i(
             cv,
             te,
@@ -5021,7 +5034,22 @@ impl Ui {
             Field::Gateway,
             "None (direct), or rdg.example.com",
         );
-        y + 3 * rh + 2 * p(60.0)
+        if !has_gateway {
+            return y + 3 * rh + 2 * p(60.0);
+        }
+        let gateway_rpc = self.gateway_rpc;
+        self.card_switch_i(
+            cv,
+            te,
+            f,
+            cells[5],
+            Some(Icon::Globe),
+            "Gateway over RPC",
+            "Always RPC over HTTP; off: only when the gateway lacks HTTP",
+            gateway_rpc,
+            Hit::FormGatewayRpc,
+        );
+        y + 3 * rh + 3 * p(60.0)
     }
 
     /// The group's colour: eight swatches and Auto.
@@ -7718,6 +7746,9 @@ fn session_action(r: &Connection, password: &str, app: Option<&AppEntry>) -> Act
         // The gateway login uses the connection's credentials.
         let mut g = rdp::GatewayConfig::new(&gw.0, &r.user, password);
         g.port = gw.1;
+        if r.gateway_rpc {
+            g.transport = rdp::gateway::GatewayTransport::Rpc;
+        }
         cfg.gateway = Some(g);
     }
     let fit = r.width == 0 && app.is_none();
@@ -7830,6 +7861,18 @@ pub fn sample_ports(panel: bool) -> Ui {
         m
     };
     m.local_ports = local;
+    m
+}
+
+/// The editor's sign-in with a gateway: the "Gateway over RPC" switch on.
+pub fn sample_form_gateway_rpc() -> Ui {
+    let mut m = sample(false);
+    m.store.connections[2].gateway = "rdg.corp.example".into();
+    m.store.connections[2].gateway_rpc = true;
+    m.select(2);
+    m.focus = None;
+    m.form_page = 0;
+    m.home_scroll = 480;
     m
 }
 

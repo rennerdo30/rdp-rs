@@ -76,6 +76,8 @@ struct Args {
     domain: String,
     /// RD Gateway `host[:port]`; it takes the RDP credentials.
     gateway: Option<(String, u16)>,
+    /// `--gateway-rpc`: reach the gateway over RPC over HTTP only.
+    gateway_rpc: bool,
     size: Option<(u16, u16)>,
     screenshot: Option<String>,
     /// `--record out.mp4`: headless recording for `--wait` seconds.
@@ -132,6 +134,7 @@ fn usage() -> ! {
         "usage: remora                                 (connection manager)\n\
          \x20      remora <host[:port]> -u <[DOMAIN\\]user> [-d domain] [--size WxH] [-v]\n\
          \x20           [--gateway gwhost[:port]]   (RD Gateway, same credentials)\n\
+         \x20           [--gateway-rpc]   (the gateway over RPC over HTTP only)\n\
          \x20           [--compression off|rdp4|rdp5|rdp6|rdp61]\n\
          \x20           [--gfx]   (graphics pipeline, MS-RDPEGFX)\n\
          \x20           [--video]   (with --gfx: video redirection, MS-RDPEVOR)\n\
@@ -178,6 +181,7 @@ fn parse_args() -> Args {
                     None => (v, 443),
                 });
             }
+            "--gateway-rpc" => a.gateway_rpc = true,
             "--size" => {
                 let v = val();
                 let (w, h) = v.split_once('x').unwrap_or_else(|| usage());
@@ -473,6 +477,9 @@ fn main() {
         let mut gw = rdp::GatewayConfig::new(host, &args.user, &password);
         gw.port = *port;
         gw.domain = args.domain.clone();
+        if args.gateway_rpc {
+            gw.transport = rdp::gateway::GatewayTransport::Rpc;
+        }
         cfg.gateway = Some(gw);
     }
     cfg.compression = args.compression;
@@ -808,6 +815,7 @@ fn snapshot_ui(
         // The session screens and toolbar (RDP-31).
         ("-connecting-steps", || sv::sample_connecting(false)),
         ("-connecting-gateway", || sv::sample_connecting(true)),
+        ("-editor-gateway-rpc", ui::sample_form_gateway_rpc),
         ("-reconnecting", sv::sample_reconnecting),
         ("-ended-signed-out", || {
             sv::sample_ended(failure::EndReason::SignedOut)
