@@ -305,6 +305,9 @@ impl Shared {
     }
 }
 
+/// How long the OUT channel may still deliver after the IN channel ended.
+const IN_CLOSED_GRACE: Duration = Duration::from_secs(2);
+
 /// The OUT channel side: PDUs from the outbound proxy, RTS handled here.
 struct Rx {
     shared: Arc<Shared>,
@@ -350,7 +353,17 @@ impl Rx {
     /// deadline (setup) it polls the IN channel every 50 ms.
     fn fill(&mut self, deadline: Option<Instant>) -> Result<()> {
         loop {
-            self.poll_in()?;
+            if let Err(e) = self.poll_in() {
+                // The IN channel ended: the reason (an RPC fault) may still be
+                // on its way on the OUT channel, and it says more (RDP-81).
+                if matches!(e, Error::ConnectionLost(_))
+                    && !self.out.eof
+                    && let Ok(chunk) = self.out.rx.recv_timeout(IN_CLOSED_GRACE)
+                {
+                    return self.out.take(&self.shared.out_link, chunk);
+                }
+                return Err(e);
+            }
             if self.out.eof {
                 return Err(closed());
             }
