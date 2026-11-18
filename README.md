@@ -112,6 +112,11 @@ USB and plug and play devices, lossy UDP, FIPS-level legacy security and
 MS-RDPEV video. Everything listed as done above is built and unit tested; most
 of it has not yet been tried against every kind of Windows server.
 
+Built but not yet tried against a real server: RD Gateway over RPC, shadowing,
+UDP itself (only the fallback to TCP is checked) and video redirection (Windows
+opens its channels but did not redirect a video in tests). The user guide and
+[troubleshooting](docs/TROUBLESHOOTING.md) list each feature's limits.
+
 ## Layout
 
 | Crate | What |
