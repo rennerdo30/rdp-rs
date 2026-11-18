@@ -271,7 +271,7 @@ impl Drop for Keys {
 }
 
 /// SaltedHash(S, I) = MD5(S + SHA-1(I + S + A + B)).
-fn salted_hash(s: &[u8], i: &[u8], a: &[u8], b: &[u8]) -> [u8; 16] {
+pub(crate) fn salted_hash(s: &[u8], i: &[u8], a: &[u8], b: &[u8]) -> [u8; 16] {
     let inner = sha1(&[i, s, a, b].concat());
     md5(&[s, &inner[..]].concat())
 }
