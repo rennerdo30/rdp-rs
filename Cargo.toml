@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/rdp", "crates/remora", "crates/remora-agent", "crates/remora-host", "crates/remora-link", "crates/remora-update"]
 
 [workspace.package]
-version = "0.1.0-beta.10"
+version = "0.1.0-beta.11"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/rennerdo30/rdp-rs"
@@ -16,9 +16,9 @@ rust-version = "1.100"
 # projects, so the library is `rdp-proto` and the app `remora-client`; the
 # library and the program keep their names (`use rdp::...`, `remora.exe`).
 [workspace.dependencies]
-rdp = { package = "rdp-proto", path = "crates/rdp", version = "=0.1.0-beta.10" }
-remora-link = { path = "crates/remora-link", version = "=0.1.0-beta.10" }
-remora-update = { path = "crates/remora-update", version = "=0.1.0-beta.10" }
+rdp = { package = "rdp-proto", path = "crates/rdp", version = "=0.1.0-beta.11" }
+remora-link = { path = "crates/remora-link", version = "=0.1.0-beta.11" }
+remora-update = { path = "crates/remora-update", version = "=0.1.0-beta.11" }
 
 [profile.dev]
 debug = "line-tables-only"
