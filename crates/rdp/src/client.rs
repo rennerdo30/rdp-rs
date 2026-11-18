@@ -92,6 +92,11 @@ pub struct Config {
     /// H.264 decoder for AVC420 with [`crate::Graphics::Gfx`]; without one
     /// (or if it returns `None`) the client advertises AVC as disabled.
     pub h264: Option<crate::H264Factory>,
+    /// Video redirection: offer Video Optimized Remoting (MS-RDPEVOR) and
+    /// geometry tracking (MS-RDPEGT), so the server can send video it
+    /// detects as an H.264 stream placed over the picture. Offered only with
+    /// [`crate::Graphics::Gfx`] and a working H.264 decoder (MS-RDPEVOR 1.5).
+    pub video: bool,
     /// Several monitors (MS-RDPBCGR 2.2.1.3.6); empty is one monitor of
     /// `width` x `height`. When set, the desktop is their bounding box and
     /// `width`/`height` are not used.
@@ -157,6 +162,7 @@ impl Config {
             compression: Compression::Off,
             graphics: crate::Graphics::Bitmap,
             h264: None,
+            video: false,
             monitors: Vec::new(),
             auth: None,
             redirection: None,
@@ -433,13 +439,26 @@ fn add_gfx_channel(
             "not available"
         }
     );
-    let (channel, handle) = crate::gfx::graphics(decoder);
-    let mut channel: Option<Box<dyn crate::DynamicChannel>> = Some(Box::new(channel));
-    if let Some(host) = handlers.iter_mut().find_map(|h| h.as_drdynvc()) {
-        host.add(channel.take().expect("not yet added"));
+    // Video redirection needs the graphics pipeline and a decoder that
+    // works here (MS-RDPEVOR 1.5): the graphics channel's decoder says so.
+    let video = cfg.video && decoder.is_some();
+    let (channel, mut handle) = crate::gfx::graphics(decoder);
+    let mut channels: Vec<Box<dyn crate::DynamicChannel>> = vec![Box::new(channel)];
+    if let (true, Some(factory)) = (video, cfg.h264.clone()) {
+        trace!("video redirection offered (MS-RDPEVOR, MS-RDPEGT)");
+        let (video_channels, video) = crate::video::video(factory);
+        channels.extend(video_channels);
+        handle = handle.with_video(video);
+    } else if cfg.video {
+        trace!("video redirection not offered: no H.264 decoder");
     }
-    if let Some(channel) = channel {
-        handlers.push(Box::new(crate::Drdynvc::new(vec![channel])));
+    if let Some(host) = handlers.iter_mut().find_map(|h| h.as_drdynvc()) {
+        for c in channels.drain(..) {
+            host.add(c);
+        }
+    }
+    if !channels.is_empty() {
+        handlers.push(Box::new(crate::Drdynvc::new(channels)));
     }
     handle
 }
@@ -1035,6 +1054,11 @@ impl Client {
 
     /// The TCP connection of a direct session (None through a gateway),
     /// for socket-level measurements such as the round-trip time.
+    /// Video redirection statistics, when [`Config::video`] was offered.
+    pub fn video_stats(&self) -> Option<crate::video::VideoStats> {
+        self.gfx.as_ref().and_then(|g| g.video_stats())
+    }
+
     pub fn tcp_stream(&self) -> Option<&std::net::TcpStream> {
         self.f.tcp()
     }

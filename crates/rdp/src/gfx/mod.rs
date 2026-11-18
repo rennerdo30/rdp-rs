@@ -146,24 +146,54 @@ pub fn codec_name(codec: u16) -> &'static str {
     }
 }
 
-/// The session side of the graphics channel: composed output to present.
+/// The session side of the graphics channel: composed output to present,
+/// with redirected video (MS-RDPEVOR) painted over it when attached.
 #[derive(Clone)]
-pub struct GfxHandle(Arc<Mutex<GfxState>>);
+pub struct GfxHandle {
+    state: Arc<Mutex<GfxState>>,
+    video: Option<crate::video::VideoHandle>,
+}
 
 impl GfxHandle {
     fn lock(&self) -> MutexGuard<'_, GfxState> {
-        self.0.lock().unwrap_or_else(|p| p.into_inner())
+        self.state.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// Paints redirected video over the composed picture from now on.
+    pub fn with_video(mut self, video: crate::video::VideoHandle) -> GfxHandle {
+        self.video = Some(video);
+        self
     }
 
     /// Copies what finished frames changed into `fb` and appends the areas
     /// to `damage`. Returns true if `fb` was resized (RDPGFX_RESET_GRAPHICS).
+    /// With video attached, areas the video left are copied back from the
+    /// output first, and due video frames are painted last, as are current
+    /// ones where the graphics just painted over them.
     pub fn present(&self, fb: &mut Framebuffer, damage: &mut Vec<Damage>) -> bool {
-        self.lock().present(fb, damage)
+        let from = damage.len();
+        let mut st = self.lock();
+        if let Some(v) = &self.video {
+            for d in v.take_restore() {
+                st.restore(d);
+            }
+        }
+        let resized = st.present(fb, damage);
+        drop(st);
+        if let Some(v) = &self.video {
+            v.present(fb, damage, from, Instant::now());
+        }
+        resized
     }
 
     /// Decoding statistics since the channel opened.
     pub fn stats(&self) -> GfxStats {
         self.lock().stats
+    }
+
+    /// Video redirection statistics, when video is attached.
+    pub fn video_stats(&self) -> Option<crate::video::VideoStats> {
+        self.video.as_ref().map(|v| v.stats())
     }
 }
 
@@ -211,7 +241,7 @@ pub fn graphics(h264: Option<Box<dyn H264Decoder>>) -> (GraphicsChannel, GfxHand
             frames: 0,
             main_view: None,
         },
-        GfxHandle(state),
+        GfxHandle { state, video: None },
     )
 }
 
