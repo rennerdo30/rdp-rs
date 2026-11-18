@@ -60,6 +60,78 @@ pub struct AssistanceLogon {
     /// listener that does not expect it fails the connection, so it is
     /// opt-in (FreeRDP connects to shadow invitations without it).
     pub preconnection_id: Option<u32>,
+    /// The invitation's `KH` and `KH2` ([`Invitation::key_hash`]): a TLS
+    /// certificate whose RSA key hashes to one of them is the sharer's own
+    /// and needs no trust prompt ([`AssistanceLogon::certificate_matches`]).
+    pub key_hash: Option<String>,
+    pub key_hash2: Option<String>,
+}
+
+impl AssistanceLogon {
+    /// The Client Info and key pins of `inv`.
+    pub fn from_invitation(inv: &Invitation, preconnection_id: Option<u32>) -> Self {
+        Self {
+            auth_id: inv.auth_id.clone(),
+            password: None,
+            preconnection_id,
+            key_hash: inv.key_hash.clone(),
+            key_hash2: inv.key_hash2.clone(),
+        }
+    }
+
+    /// Whether the TLS certificate `cert` (DER) carries the key the
+    /// invitation names. KH is the base64 SHA-1 of the server's RSA public
+    /// key blob (MS-RAI 2.2.2, MS-RDPBCGR 2.2.1.4.3.1.1.1); KH2 is
+    /// `sha256:`, `sha384:` or `sha512:` and the base64 hash. The spec
+    /// defines them on the Standard RDP Security certificate; here the same
+    /// blob is built from the TLS certificate's RSA key. No match (or no
+    /// hash) leaves the decision to the normal certificate check.
+    pub fn certificate_matches(&self, cert: &[u8]) -> bool {
+        let Ok(blob) = crate::der::subject_public_key(cert).and_then(|k| rsa_key_blob(&k)) else {
+            return false;
+        };
+        let b64 = crate::gateway::ws::base64_encode;
+        let kh = self
+            .key_hash
+            .as_deref()
+            .is_some_and(|kh| kh == b64(&crate::crypto::sha1(&blob)));
+        let kh2 = self
+            .key_hash2
+            .as_deref()
+            .and_then(|v| v.split_once(':'))
+            .is_some_and(|(alg, hash)| {
+                alg.eq_ignore_ascii_case("sha256") && hash == b64(&crate::crypto::sha256(&blob))
+            });
+        kh || kh2
+    }
+}
+
+/// RSA_PUBLIC_KEY (MS-RDPBCGR 2.2.1.4.3.1.1.1) of an X.509 RSAPublicKey:
+/// magic "RSA1", keylen (modulus bytes plus 8 zero bytes of padding),
+/// bitlen, datalen (bitlen / 8 - 1), pubExp, then the modulus little-endian.
+pub fn rsa_key_blob(rsa_public_key: &[u8]) -> Result<Vec<u8>> {
+    use crate::cursor::Put;
+    use crate::der::DerReader;
+    let seq = DerReader::new(rsa_public_key).expect(0x30)?;
+    let mut r = DerReader::new(seq);
+    let n = r.expect(0x02)?;
+    let e = r.expect(0x02)?;
+    let n: Vec<u8> = n.iter().copied().skip_while(|&b| b == 0).collect();
+    let e: Vec<u8> = e.iter().copied().skip_while(|&b| b == 0).collect();
+    if n.is_empty() || e.is_empty() || e.len() > 4 {
+        return proto("invitation: certificate key is not a usable RSA key");
+    }
+    let exponent = e.iter().fold(0u32, |a, &b| a << 8 | u32::from(b));
+    let bits = n.len() as u32 * 8;
+    let mut out = Vec::with_capacity(20 + n.len() + 8);
+    out.put_u32(0x3141_5352); // "RSA1"
+    out.put_u32(n.len() as u32 + 8);
+    out.put_u32(bits);
+    out.put_u32(bits / 8 - 1);
+    out.put_u32(exponent);
+    out.extend(n.iter().rev());
+    out.put_zeros(8);
+    Ok(out)
 }
 
 impl Invitation {

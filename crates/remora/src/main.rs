@@ -282,11 +282,10 @@ fn shared_desktop_config(args: &Args) -> Result<(String, Config), String> {
         .unwrap_or_else(|| "Remora".into());
     let mut cfg = Config::new(&host, &viewer, "");
     cfg.port = port;
-    cfg.assistance = Some(rdp::AssistanceLogon {
-        auth_id: inv.auth_id.clone(),
-        password: None,
-        preconnection_id: args.preconnection.then_some(sid),
-    });
+    cfg.assistance = Some(rdp::AssistanceLogon::from_invitation(
+        &inv,
+        args.preconnection.then_some(sid),
+    ));
     let name = match (server, args.shadow) {
         (Some(s), Some(id)) => format!("{s} session {id} (shadow)"),
         _ => format!("Shared desktop {host}"),

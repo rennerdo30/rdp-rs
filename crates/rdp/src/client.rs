@@ -683,7 +683,11 @@ impl Client {
                 "the redirection target's certificate differs from the one the broker named".into(),
             ));
         }
-        if let Some(check) = &cfg.verify_certificate {
+        // A sharer whose key the invitation names needs no prompt.
+        let pinned_by_invitation = assistance.is_some_and(|a| a.certificate_matches(&cert));
+        if pinned_by_invitation {
+            trace!("the shared desktop's certificate carries the invitation's key");
+        } else if let Some(check) = &cfg.verify_certificate {
             let server = ServerCertificate {
                 host: host.clone(),
                 port: cfg.port,

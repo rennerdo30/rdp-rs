@@ -108,6 +108,73 @@ fn encrypted_remote_assistance_files_are_unsupported() {
     ));
 }
 
+/// RSAPublicKey DER with a 512-bit modulus 0x81 0x02 .. 0x40 (big-endian;
+/// the leading 0x00 of the INTEGER keeps it positive) and exponent 65537.
+fn rsa_public_key() -> Vec<u8> {
+    use crate::der::{seq, tlv};
+    let mut n = vec![0x00, 0x81];
+    n.extend(2..=64u8);
+    seq(&[tlv(0x02, &n), tlv(0x02, &[0x01, 0x00, 0x01])].concat())
+}
+
+/// A certificate shell whose subjectPublicKeyInfo holds `key`.
+fn certificate(key: &[u8]) -> Vec<u8> {
+    use crate::der::{ctx, integer, seq, tlv};
+    let bits = [&[0u8][..], key].concat();
+    let spki = seq(&[seq(&[]), tlv(0x03, &bits)].concat());
+    let tbs = seq(&[
+        ctx(0, &integer(2)),
+        integer(1),
+        seq(&[]),
+        seq(&[]),
+        seq(&[]),
+        seq(&[]),
+        spki,
+    ]
+    .concat());
+    seq(&[tbs, seq(&[]), tlv(0x03, &[0])].concat())
+}
+
+#[test]
+fn rsa_key_blob_has_the_rsa1_layout() {
+    // MS-RDPBCGR 2.2.1.4.3.1.1.1: magic, keylen = 64 + 8, bitlen 512,
+    // datalen 63, pubExp, modulus little-endian, 8 zero bytes.
+    let blob = rsa_key_blob(&rsa_public_key()).unwrap();
+    assert_eq!(&blob[..4], b"RSA1");
+    assert_eq!(
+        &blob[4..20],
+        &[72, 0, 0, 0, 0, 2, 0, 0, 63, 0, 0, 0, 1, 0, 1, 0]
+    );
+    let mut modulus: Vec<u8> = (2..=64u8).rev().collect();
+    modulus.push(0x81);
+    assert_eq!(&blob[20..84], &modulus[..]);
+    assert_eq!(&blob[84..], &[0; 8]);
+    assert!(rsa_key_blob(&crate::der::seq(&crate::der::integer(5))).is_err());
+}
+
+#[test]
+fn certificate_matches_the_invitations_key_hashes() {
+    let cert = certificate(&rsa_public_key());
+    let blob = rsa_key_blob(&rsa_public_key()).unwrap();
+    let b64 = crate::gateway::ws::base64_encode;
+    let logon = |kh: Option<String>, kh2: Option<String>| AssistanceLogon {
+        auth_id: "id".into(),
+        password: None,
+        preconnection_id: None,
+        key_hash: kh,
+        key_hash2: kh2,
+    };
+    let sha1 = b64(&crate::crypto::sha1(&blob));
+    let sha256 = b64(&crate::crypto::sha256(&blob));
+    assert!(logon(Some(sha1.clone()), None).certificate_matches(&cert));
+    assert!(logon(None, Some(format!("sha256:{sha256}"))).certificate_matches(&cert));
+    assert!(logon(Some("x".into()), Some(format!("SHA256:{sha256}"))).certificate_matches(&cert));
+    assert!(!logon(Some(sha256.clone()), None).certificate_matches(&cert));
+    assert!(!logon(None, Some(format!("sha384:{sha256}"))).certificate_matches(&cert));
+    assert!(!logon(None, None).certificate_matches(&cert));
+    assert!(!logon(Some(sha1), None).certificate_matches(b"not a certificate"));
+}
+
 /// The connection to a sharer: the Preconnection PDU comes first, then an
 /// X.224 request for TLS only (no NLA). A sharer that answers with Standard
 /// RDP Security gets a clear "not implemented" error.
@@ -140,6 +207,8 @@ fn connecting_to_a_sharer_sends_preconnection_then_asks_for_tls_only() {
         auth_id: "id".into(),
         password: None,
         preconnection_id: Some(1_440_550_163),
+        key_hash: None,
+        key_hash2: None,
     });
     let err = crate::Client::connect(&cfg).err().expect("no TLS offered");
     assert!(
