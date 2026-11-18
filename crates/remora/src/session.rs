@@ -36,6 +36,11 @@ pub enum Event {
     RailReady(rdp::RailHandle),
     /// RemoteApp window and channel events, in order.
     Rail(Vec<rdp::RailEvent>),
+    /// A shared desktop (Desktop Sharing, shadowing; MS-RDPEMC): the
+    /// control handle, right after `Connected` (RDP-77).
+    SharedReady(rdp::MultipartyHandle),
+    /// A shared desktop's control level, participant and pause changes.
+    Shared(Vec<rdp::MultipartyEvent>),
     /// The server redirected the running session (MS-RDPBCGR 3.2.5.13):
     /// connect `cfg` (the next hop, from [`Client::follow_redirection`])
     /// with new channel handlers. `to` names the target for the status line.
@@ -194,7 +199,7 @@ fn copy_rect(src: &Framebuffer, dst: &mut Framebuffer, d: Damage) {
 
 fn run(
     mut cfg: Config,
-    channels: Vec<Box<dyn StaticChannel>>,
+    mut channels: Vec<Box<dyn StaticChannel>>,
     rx: Receiver<Cmd>,
     shared: Arc<Mutex<Shared>>,
     notified: Arc<AtomicBool>,
@@ -222,6 +227,12 @@ fn run(
             (out.lock().unwrap_or_else(|p| p.into_inner()))(Event::Progress(step.clone()));
         }));
     }
+    // A shared desktop says who may control it on `encomsp` (MS-RDPEMC).
+    let desk = cfg.assistance.is_some().then(|| {
+        let (channel, handle) = rdp::multiparty();
+        channels.push(Box::new(channel));
+        handle
+    });
     let mut client = match Client::connect_with(&cfg, channels) {
         Ok(c) => c,
         Err(e) => {
@@ -245,6 +256,9 @@ fn run(
         .map(|a| crate::stats::Pinger::start(a.ip()));
     if let Some(rail) = client.rail() {
         emit(Event::RailReady(rail));
+    }
+    if let Some(h) = &desk {
+        emit(Event::SharedReady(h.clone()));
     }
 
     loop {
@@ -321,6 +335,11 @@ fn run(
         }
         if !out.rail.is_empty() {
             emit(Event::Rail(out.rail));
+        }
+        if let Some(events) = desk.as_ref().map(|h| h.take_events())
+            && !events.is_empty()
+        {
+            emit(Event::Shared(events));
         }
         if let Some(n) = out.network {
             emit(Event::Network(n));

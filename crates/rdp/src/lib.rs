@@ -28,7 +28,10 @@
 //!   bitmap updates and input (MS-RDPBCGR)
 //! - [`video`]: video redirection, Video Optimized Remoting (MS-RDPEVOR) with geometry tracking (MS-RDPEGT)
 //! - [`rdpdr`]: device redirection (MS-RDPEFS) with shared drives, printers (MS-RDPEPC), smart cards (MS-RDPESC) and serial/parallel ports (MS-RDPESP)
+//! - [`assistance`] + [`encomsp`] + [`preconnection`]: joining a shared desktop
+//!   (Desktop Sharing, shadowing) from an invitation (MS-RAI, MS-RA, MS-RDPEMC, MS-RDPEPS)
 
+pub mod assistance;
 pub mod audin;
 pub mod autodetect;
 pub mod camera;
@@ -43,6 +46,7 @@ pub mod cursor;
 pub mod der;
 pub mod disp;
 pub mod dvc;
+pub mod encomsp;
 pub mod error;
 pub mod experience;
 pub mod fastpath;
@@ -59,6 +63,7 @@ pub mod ntlm;
 pub mod orders;
 pub mod pdu;
 pub mod pointer;
+pub mod preconnection;
 pub mod progress;
 pub mod rail;
 pub mod rdpdr;
@@ -72,6 +77,7 @@ pub mod transport;
 pub mod video;
 pub mod x224;
 
+pub use assistance::{AssistanceLogon, Invitation};
 pub use audin::{AudioInput, AudioInputHandle, CaptureBackend, audin};
 pub use autodetect::NetworkCharacteristics;
 pub use camera::{CameraBackend, CameraHandle, cameras};
@@ -85,6 +91,7 @@ pub use compress::Compression;
 pub use credssp::{AuthFactory, AuthPackage, AuthParams, Step};
 pub use disp::{DisplayControl, DisplayHandle, display_control};
 pub use dvc::{Drdynvc, DvcOut, DynamicChannel, LocalClose, StaticOverDvc};
+pub use encomsp::{Control, MultipartyEvent, MultipartyHandle, MultipartyState, multiparty};
 pub use error::{Error, Result};
 pub use experience::{ConnectionType, Experience};
 pub use framebuffer::{Damage, Framebuffer};

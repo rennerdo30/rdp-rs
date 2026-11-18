@@ -159,6 +159,22 @@ on the diagnostic log, reproduce it, and [report it](#reporting-a-bug).
 
 No more specific cause was found. **Copy details** has the technical text.
 
+## Shadowing
+
+These are the messages of `remora <server> --shadow ID` and `--list-sessions`.
+
+| Message | What to do |
+|---|---|
+| … is not reachable over SMB (TCP 445) … (RPC status 1722) | Remora requests the invitation over File and Printer Sharing. Allow **File and Printer Sharing (SMB-In)** on the server, and check the name. |
+| access denied by …: shadowing needs an administrator there | Sign in to this PC as an administrator of the server. `runas /netonly` also works. |
+| … refused to shadow session N: the user declined the request | The session's user clicked **No**, or did not answer within about 30 seconds. |
+| … policy requires the user's permission / allows view-only shadowing | The server's group policy **Set rules for remote control of Remote Desktop Services user sessions** forbids what you asked for. Leave out `--no-consent-prompt` or `--control`, or change the policy. |
+| … shadowing is disabled by policy on the server | The same policy turns remote control off. |
+| another shadow session already controls this session | Only one viewer can control a session at a time. Watch, or try again later. |
+| The connection to the shared desktop times out | Enable the firewall rule **Remote Desktop - Shadow (TCP-In)** on the server. The shadow connection uses a new port each time. |
+| the shared desktop only offers Standard RDP Security (no TLS) | This sharer offers only the old RDP encryption, which Remora does not implement. [Report it](#reporting-a-bug) with the diagnostic log. |
+| server refused negotiation: … | The sharer wanted another security protocol. Try again with `--preconnection`, then report it. |
+
 ## When a session ends
 
 A session that ends without an error shows why and how long it ran, with

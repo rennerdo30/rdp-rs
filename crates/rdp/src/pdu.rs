@@ -85,8 +85,26 @@ pub fn client_info_redirected(ci: &ClientInfo, password_blob: &[u8]) -> Vec<u8> 
     client_info_with(ci, &password)
 }
 
+/// Client Info PDU of a Remote Assistance, Desktop Sharing or shadow
+/// connection (MS-RA 2.2.7.2): Password "*", AlternateShell the invitation
+/// password or "*", WorkingDir the invitation's authorization string
+/// (`<A ID>`). `ci.password` is ignored; `ci.user` is the viewer's name.
+pub fn client_info_assistance(ci: &ClientInfo, auth_id: &str, password: Option<&str>) -> Vec<u8> {
+    client_info_fields(
+        ci,
+        &utf16le_z("*"),
+        &utf16le_z(password.unwrap_or("*")),
+        &utf16le_z(auth_id),
+    )
+}
+
 /// `password`: UTF-16LE with its null terminator.
 fn client_info_with(ci: &ClientInfo, password: &[u8]) -> Vec<u8> {
+    client_info_fields(ci, password, &utf16le_z(""), &utf16le_z(""))
+}
+
+/// `password`, `shell`, `dir`: UTF-16LE with their null terminators.
+fn client_info_fields(ci: &ClientInfo, password: &[u8], shell: &[u8], dir: &[u8]) -> Vec<u8> {
     const INFO_MOUSE: u32 = 0x0001;
     const INFO_DISABLECTRLALTDEL: u32 = 0x0002;
     const INFO_AUTOLOGON: u32 = 0x0008;
@@ -129,8 +147,8 @@ fn client_info_with(ci: &ClientInfo, password: &[u8]) -> Vec<u8> {
         utf16le_z(ci.domain),
         utf16le_z(ci.user),
         password.to_vec(),
-        utf16le_z(""),
-        utf16le_z(""),
+        shell.to_vec(),
+        dir.to_vec(),
     ];
     for f in &fields {
         out.put_u16(f.len().saturating_sub(2) as u16); // without the terminator
@@ -864,6 +882,43 @@ mod tests {
         assert!(error_info_name(0x112F).contains("GRAPHICSSUBSYSTEMFAILED"));
         assert!(error_info_name(0x112E).contains("RESETFAILED"));
         assert!(error_info_name(0x10CA).contains("rejected a client PDU"));
+    }
+
+    #[test]
+    fn assistance_client_info_carries_the_invitation_fields() {
+        // MS-RA 2.2.7.2: Password "*", AlternateShell the invitation password
+        // or "*", WorkingDir the <A ID> string; the real password never goes out.
+        let ci = ClientInfo {
+            domain: "",
+            user: "viewer",
+            password: "not sent",
+            auto_reconnect: None,
+            performance_flags: 0,
+            compression: None,
+            rail: false,
+        };
+        let fields = |pdu: &[u8]| -> Vec<String> {
+            let mut at = 22; // security header, CodePage, flags, 5 lengths
+            (0..5)
+                .map(|i| {
+                    let cb = u16::from_le_bytes([pdu[12 + 2 * i], pdu[13 + 2 * i]]) as usize;
+                    let units: Vec<u16> = pdu[at..at + cb]
+                        .chunks(2)
+                        .map(|c| u16::from_le_bytes([c[0], c[1]]))
+                        .collect();
+                    at += cb + 2;
+                    String::from_utf16(&units).unwrap()
+                })
+                .collect()
+        };
+        let pdu = client_info_assistance(&ci, "8rYm30/x+", None);
+        assert_eq!(fields(&pdu), ["", "viewer", "*", "*", "8rYm30/x+"]);
+        let pdu = client_info_assistance(&ci, "id", Some("pw"));
+        assert_eq!(fields(&pdu), ["", "viewer", "*", "pw", "id"]);
+        assert_eq!(
+            fields(&client_info(&ci)),
+            ["", "viewer", "not sent", "", ""]
+        );
     }
 
     #[test]

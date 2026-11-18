@@ -136,6 +136,8 @@ struct Session {
     worker: Option<Worker>,
     cfg: Config,
     controls: Controls,
+    /// A shared desktop's control handle (MS-RDPEMC), once connected (RDP-77).
+    shared: Option<rdp::MultipartyHandle>,
     mouse: (u16, u16),
     /// The size last requested for fit-to-window.
     fit_requested: Option<(u32, u32)>,
@@ -535,6 +537,7 @@ impl App {
                 worker: Some(worker),
                 cfg,
                 controls,
+                shared: None,
                 mouse: (0, 0),
                 fit_requested: None,
                 cursor: RemoteCursor::Default,
@@ -821,6 +824,32 @@ impl App {
         self.send(id, events);
     }
 
+    /// A shared desktop's control level, for the tab's commands (RDP-77).
+    fn set_shared_level(&mut self, id: u64, level: rdp::Control) {
+        if let Some(t) = self.win.as_mut().and_then(|w| w.ui.tab_mut(id)) {
+            t.shared = Some(level);
+        }
+        self.dirty();
+    }
+
+    /// Asks the sharer for control, or gives it back (MS-RDPEMC 2.2.4.3);
+    /// the answer arrives as a Shared event.
+    fn request_shared_control(&mut self, id: u64) {
+        let Some(h) = self.sessions.get(&id).and_then(|s| s.shared.clone()) else {
+            return;
+        };
+        let interact = h.control() != rdp::Control::Interact;
+        h.request_control(interact);
+        self.message(
+            if interact {
+                "Asked the sharer for control..."
+            } else {
+                "Gave control back to the sharer."
+            },
+            Tone::Muted,
+        );
+    }
+
     fn message(&mut self, text: impl Into<String>, tone: Tone) {
         if let Some(w) = &mut self.win {
             w.ui.set_message(text, tone);
@@ -1087,6 +1116,7 @@ impl App {
             Action::WinClose => self.request_quit(),
             Action::Quit => self.quit = true,
             Action::ToggleRecording(id) => self.toggle_recording(id),
+            Action::ShareControl(id) => self.request_shared_control(id),
             Action::Unspan(id) => self.unspan(id),
             Action::Relayout => {
                 if let Some(m) = &mut self.win {
@@ -2549,6 +2579,28 @@ impl ApplicationHandler<UserEvent> for App {
             }
             session::Event::RailReady(handle) => self.rail_ready(id, handle),
             session::Event::Rail(events) => self.rail_events(el, id, events),
+            session::Event::SharedReady(handle) => {
+                let level = handle.control();
+                if let Some(s) = self.sessions.get_mut(&id) {
+                    s.shared = Some(handle);
+                }
+                self.set_shared_level(id, level);
+            }
+            session::Event::Shared(events) => {
+                for ev in &events {
+                    if let rdp::MultipartyEvent::ControlChanged(level) = ev {
+                        self.set_shared_level(id, *level);
+                    }
+                    let tone = match ev {
+                        rdp::MultipartyEvent::ControlChanged(rdp::Control::Interact) => {
+                            Tone::Accent
+                        }
+                        rdp::MultipartyEvent::Paused(true) => Tone::Warning,
+                        _ => Tone::Muted,
+                    };
+                    self.message(crate::shadow::event_text(ev), tone);
+                }
+            }
             session::Event::Frame if self.sessions.get(&id).is_some_and(|s| s.rail.is_some()) => {
                 self.render_rail(id);
             }

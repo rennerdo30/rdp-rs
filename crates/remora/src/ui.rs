@@ -255,6 +255,8 @@ pub enum Hit {
     PinBar,
     /// Start or stop recording the session to a video.
     Record(u64),
+    /// A shared desktop: ask for control, or give it back (RDP-77).
+    ShareControl(u64),
     /// Bring a session from its monitors back into the window.
     Unspan(u64),
     /// Quit confirmation: quit, stay, and the dimmed rest of the window.
@@ -520,6 +522,9 @@ pub struct Tab {
     pub live: Live,
     /// The server helper, its questions and transfers.
     pub helper: HelperView,
+    /// A shared desktop (Desktop Sharing, a shadowed session): this
+    /// participant's control level; None for a normal session (RDP-77).
+    pub shared: Option<rdp::Control>,
 }
 
 /// A server certificate to trust or refuse.
@@ -589,6 +594,8 @@ pub enum Action {
     AddDrive(u64, String),
     RemoveDrive(u64, usize),
     CtrlAltDel(u64),
+    /// A shared desktop: ask for control, or give it back (MS-RDPEMC).
+    ShareControl(u64),
     WinMinimize,
     WinClose,
     /// Derive the key off the UI thread, then open the vault.
@@ -1076,6 +1083,7 @@ impl Ui {
             stats: None,
             live: Live::default(),
             helper: HelperView::default(),
+            shared: None,
         });
         self.active = Some(id);
         self.session_focus = false;
@@ -2137,6 +2145,7 @@ impl Ui {
             }
             Hit::FullScreen => return Some(Action::SetFullscreen(!self.fullscreen)),
             Hit::Record(id) => return Some(Action::ToggleRecording(id)),
+            Hit::ShareControl(id) => return Some(Action::ShareControl(id)),
             Hit::Unspan(id) => return Some(Action::Unspan(id)),
             Hit::PinBar => {
                 self.bar_pinned = !self.bar_pinned;

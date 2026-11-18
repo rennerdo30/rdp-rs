@@ -149,6 +149,13 @@ pub struct Config {
     /// refused with [`security::LEGACY_REFUSED`]. TLS is still preferred
     /// when it is on; it is never chosen on its own.
     pub legacy_security: bool,
+    /// Join a shared desktop from an invitation (Desktop Sharing, a shadow
+    /// session; MS-RA 2.2.7.2): TLS without NLA, the invitation's fields in
+    /// the Client Info and, if set, a Preconnection PDU first (MS-RDPEPS).
+    /// `host`/`port` are a listener of the invitation; `username` is the
+    /// name the sharer shows. Open the `encomsp` channel
+    /// ([`crate::multiparty`]) to see and change the control level.
+    pub assistance: Option<crate::AssistanceLogon>,
 }
 
 impl Config {
@@ -186,6 +193,7 @@ impl Config {
             bitmap_cache_dir: None,
             progress: None,
             legacy_security: false,
+            assistance: None,
         }
     }
 }
@@ -789,13 +797,18 @@ impl Client {
         let redirection = cfg.redirection.as_ref();
 
         let progress = cfg.progress.as_ref();
+        let assistance = cfg.assistance.as_ref();
 
         // 1. X.224 negotiation; a routing token replaces the cookie (3.2.5.3.1).
         // A server that allows only Standard RDP Security refuses TLS
         // (SSL_NOT_ALLOWED_BY_SERVER, 2.2.1.2.2); when this connection
         // allows legacy security, a new connection asks for PROTOCOL_RDP.
         let cookie: String = user.chars().take(9).collect();
-        let mut requested = x224::PROTOCOL_SSL | x224::PROTOCOL_HYBRID | x224::PROTOCOL_HYBRID_EX;
+        // A sharer authenticates the invitation, not the user: no NLA.
+        let mut requested = match assistance {
+            Some(_) => x224::PROTOCOL_SSL,
+            None => x224::PROTOCOL_SSL | x224::PROTOCOL_HYBRID | x224::PROTOCOL_HYBRID_EX,
+        };
         let rdstls = redirection.filter(|r| !r.no_redirect() && r.wants_rdstls());
         if rdstls.is_some() {
             requested |= x224::PROTOCOL_RDSTLS;
@@ -804,6 +817,10 @@ impl Client {
             let (mut f, gateway_sha256, host) = open(cfg, deadline)?;
             f.set_read_timeout(Duration::from_millis(100))?;
             report(progress, ConnectStep::Tls);
+            // MS-RDPEPS: the sharer's session id goes before X.224.
+            if let Some(id) = assistance.and_then(|a| a.preconnection_id) {
+                f.write(&crate::preconnection::pdu_v1(id))?;
+            }
             match redirection.and_then(Redirection::routing_token) {
                 Some(token) => f.write(&x224::connection_request_routed(&token, requested)?)?,
                 None => f.write(&x224::connection_request(&cookie, requested))?,
@@ -852,7 +869,12 @@ impl Client {
                 "the redirection target's certificate differs from the one the broker named".into(),
             ));
         }
-        if let Some(check) = cfg.verify_certificate.as_ref().filter(|_| !legacy) {
+        // A sharer whose key the invitation names needs no prompt.
+        let pinned_by_invitation =
+            !legacy && assistance.is_some_and(|a| a.certificate_matches(&cert));
+        if pinned_by_invitation {
+            trace!("the shared desktop's certificate carries the invitation's key");
+        } else if let Some(check) = cfg.verify_certificate.as_ref().filter(|_| !legacy) {
             let server = ServerCertificate {
                 host: host.clone(),
                 port: cfg.port,
@@ -1001,15 +1023,17 @@ impl Client {
         };
         // A redirection's password blob goes to the target unchanged; after
         // an RDSTLS logon the Client Info carries no password.
-        let info_pdu = match redirection.and_then(Redirection::client_info_password) {
-            Some(blob) => pdu::client_info_redirected(&info, blob),
-            None if rdstls.is_some() && protocol == x224::PROTOCOL_RDSTLS => {
+        let blob = redirection.and_then(Redirection::client_info_password);
+        let info_pdu = match (assistance, blob) {
+            (Some(a), _) => pdu::client_info_assistance(&info, &a.auth_id, a.password.as_deref()),
+            (None, Some(blob)) => pdu::client_info_redirected(&info, blob),
+            (None, None) if rdstls.is_some() && protocol == x224::PROTOCOL_RDSTLS => {
                 pdu::client_info(&pdu::ClientInfo {
                     password: "",
                     ..info
                 })
             }
-            None => pdu::client_info(&info),
+            (None, None) => pdu::client_info(&info),
         };
         trace!(
             "experience: {:?}, {} bpp, {:?} (performance flags {:#x})",

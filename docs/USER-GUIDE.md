@@ -531,6 +531,58 @@ while it runs; press the button again to stop and save. Videos go to
 `Videos\Remora`, named after the connection with the date and time. Sound is
 not recorded.
 
+## Shadowing and shared desktops
+
+Remora can watch or control another user's session on a Windows server, as
+`mstsc /shadow` does. It can also join a Windows Desktop Sharing invitation.
+Both start from the command line:
+
+```text
+remora server01 --list-sessions
+remora server01 --shadow 3                      watch session 3
+remora server01 --shadow 3 --control            ask to control it
+remora server01 --shadow 3 --no-consent-prompt  without asking its user
+remora --invitation invite.xml                  join a Desktop Sharing invitation
+```
+
+- `--list-sessions` prints the server's sessions: the ID to shadow, the
+  session name, its state and the signed-in user.
+- `--shadow` asks the server for a shadow invitation, then connects to it.
+  Remora asks as the Windows user you are signed in as on this PC. That user
+  must be an administrator on the server.
+- The session's user sees a "Remote Monitoring Request" with **Yes** and
+  **No**. It closes by itself after about 30 seconds without an answer.
+  `--no-consent-prompt` works only where the server's policy allows shadowing
+  without permission.
+- The shared desktop opens like any session. The status line tells you
+  whether you only watch it or also control it. In the command palette, the
+  same entry is marked **View only** or **In control**. Without control,
+  mouse and keyboard do nothing there.
+- To ask for control later, open the command palette (**Ctrl+K**) and run
+  **Request control**. **Stop controlling** gives control back.
+- The status line also reports when another viewer joins or leaves. It shows
+  when the picture pauses, for example while the user's screen is locked or a
+  UAC prompt is up.
+
+What the server needs:
+
+- Windows Server 2012 R2 or Windows 8.1, or later. A plain Server 2012 cannot
+  be shadowed.
+- File and Printer Sharing (SMB, TCP 445) reachable from this PC. Remora
+  requests the invitation over it.
+- The firewall rule **Remote Desktop - Shadow (TCP-In)** enabled. The shadow
+  connection uses a new port each time.
+- The group policy **Set rules for remote control of Remote Desktop Services
+  user sessions** decides what is allowed. It sets control or view only, and
+  with or without the user's permission. Without the policy, both are allowed,
+  with the user's permission.
+
+Invitation files: Remora reads the connection string that Windows Desktop
+Sharing or a shadow request produces (`<E><A .../><C>...</C></E>`), as UTF-8
+or UTF-16 text. Remote Assistance `.msrcIncident` files hold an encrypted
+ticket and need the Remote Assistance channel, which Remora does not support
+yet.
+
 ## Keyboard
 
 Click into the remote picture to send your keyboard to the session;
@@ -709,7 +761,8 @@ Portable copies do not check for updates; new versions are on the
 ## The command line
 
 `remora.exe` also connects from the command line, takes headless screenshots
-and recordings, and prints a protocol trace. `--legacy-security` allows the
-weak legacy RDP security for that connection, as the Advanced switch does.
-See the
+and recordings, shadows sessions
+([Shadowing and shared desktops](#shadowing-and-shared-desktops)), and prints a
+protocol trace. `--legacy-security` allows the weak legacy RDP security for
+that connection, as the Advanced switch does. See the
 [README](../README.md#build-and-run).
