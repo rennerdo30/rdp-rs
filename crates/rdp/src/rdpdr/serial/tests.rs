@@ -784,6 +784,55 @@ fn ioctl_codes_outside_the_table_never_reach_the_driver() {
     );
 }
 
+/// Every serial IOCTL is CTL_CODE(FILE_DEVICE_SERIAL_PORT, function,
+/// METHOD_BUFFERED, FILE_ANY_ACCESS) with its ntddser.h function number;
+/// GET_CHARS (22) and SET_CHARS (23) were swapped once (RDP-82).
+#[test]
+fn serial_ioctl_codes_follow_the_ntddser_function_numbers() {
+    let ctl = |function: u32| (0x1B << 16) | (function << 2);
+    for (code, function) in [
+        (IOCTL_SERIAL_SET_BAUD_RATE, 1),
+        (IOCTL_SERIAL_SET_QUEUE_SIZE, 2),
+        (IOCTL_SERIAL_SET_LINE_CONTROL, 3),
+        (IOCTL_SERIAL_SET_BREAK_ON, 4),
+        (IOCTL_SERIAL_SET_BREAK_OFF, 5),
+        (IOCTL_SERIAL_IMMEDIATE_CHAR, 6),
+        (IOCTL_SERIAL_SET_TIMEOUTS, 7),
+        (IOCTL_SERIAL_GET_TIMEOUTS, 8),
+        (IOCTL_SERIAL_SET_DTR, 9),
+        (IOCTL_SERIAL_CLR_DTR, 10),
+        (IOCTL_SERIAL_RESET_DEVICE, 11),
+        (IOCTL_SERIAL_SET_RTS, 12),
+        (IOCTL_SERIAL_CLR_RTS, 13),
+        (IOCTL_SERIAL_SET_XOFF, 14),
+        (IOCTL_SERIAL_SET_XON, 15),
+        (IOCTL_SERIAL_GET_WAIT_MASK, 16),
+        (IOCTL_SERIAL_SET_WAIT_MASK, 17),
+        (IOCTL_SERIAL_WAIT_ON_MASK, 18),
+        (IOCTL_SERIAL_PURGE, 19),
+        (IOCTL_SERIAL_GET_BAUD_RATE, 20),
+        (IOCTL_SERIAL_GET_LINE_CONTROL, 21),
+        (IOCTL_SERIAL_GET_CHARS, 22),
+        (IOCTL_SERIAL_SET_CHARS, 23),
+        (IOCTL_SERIAL_GET_HANDFLOW, 24),
+        (IOCTL_SERIAL_SET_HANDFLOW, 25),
+        (IOCTL_SERIAL_GET_MODEMSTATUS, 26),
+        (IOCTL_SERIAL_GET_COMMSTATUS, 27),
+        (IOCTL_SERIAL_XOFF_COUNTER, 28),
+        (IOCTL_SERIAL_GET_PROPERTIES, 29),
+        (IOCTL_SERIAL_GET_DTRRTS, 30),
+        (IOCTL_SERIAL_LSRMST_INSERT, 31),
+        (IOCTL_SERIAL_CONFIG_SIZE, 32),
+        (IOCTL_SERIAL_GET_STATS, 35),
+        (IOCTL_SERIAL_CLEAR_STATS, 36),
+        (IOCTL_SERIAL_GET_MODEM_CONTROL, 37),
+        (IOCTL_SERIAL_SET_MODEM_CONTROL, 38),
+        (IOCTL_SERIAL_SET_FIFO_CONTROL, 39),
+    ] {
+        assert_eq!(code, ctl(function), "function {function}: {code:#010x}");
+    }
+}
+
 #[test]
 fn ioctl_output_too_small_is_refused() {
     let s = PortKind::Serial;
