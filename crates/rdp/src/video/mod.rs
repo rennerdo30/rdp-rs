@@ -646,6 +646,10 @@ impl VideoState {
             self.desktop = (fb.width, fb.height);
             self.presentations.iter_mut().for_each(|p| p.repaint = true);
         }
+        // Called on every session poll: nothing to do, nothing allocated.
+        if self.presentations.is_empty() {
+            return;
+        }
         let painted_by_gfx: Vec<Area> = damage[from.min(damage.len())..]
             .iter()
             .map(|d| Area {
@@ -671,6 +675,9 @@ impl VideoState {
                 }
                 p.repaint = true;
                 self.stats.presented += 1;
+            }
+            if !p.repaint && painted_by_gfx.is_empty() {
+                continue;
             }
             let (Some(frame), Some(g)) = (&p.current, self.geometries.get(&p.mapping_id)) else {
                 continue;
