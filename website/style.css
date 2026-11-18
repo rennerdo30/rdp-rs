@@ -255,8 +255,8 @@ h3 { font-size: 1.1rem; margin: 0 0 8px; }
 .coverage-num strong { display: block; font-size: 3.4rem; line-height: 1; letter-spacing: -0.03em; color: var(--accent); margin-bottom: 6px; }
 .meter { display: flex; height: 12px; border-radius: 999px; background: var(--bg-2); border: 1px solid var(--line); overflow: hidden; margin: 18px 0 10px; }
 /* 29 done and 1 partly of 38. */
-.meter-done { width: 76.3%; background: var(--accent); }
-.meter-part { width: 2.6%; background: repeating-linear-gradient(135deg, var(--accent) 0 3px, transparent 3px 6px); }
+.meter-done { width: 84.2%; background: var(--accent); }
+.meter-part { width: 10.5%; background: repeating-linear-gradient(135deg, var(--accent) 0 3px, transparent 3px 6px); }
 .coverage-legend { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; font-size: 0.9rem; color: var(--muted) !important; }
 .key { width: 12px; height: 12px; border-radius: 3px; display: inline-block; }
 .key-done { background: var(--accent); }
