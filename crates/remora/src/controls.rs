@@ -30,6 +30,9 @@ pub struct Controls {
     microphone: AudioInputHandle,
     /// Capture device for the microphone; read when capture starts.
     mic_device: DeviceChoice,
+    /// This PC's cameras over `RDCamera_*` dynamic channels (MS-RDPECAM);
+    /// None when the PC had no camera when the session started.
+    cameras: Option<rdp::CameraHandle>,
     /// Device ids of the printers currently shared.
     printers: Mutex<Vec<u32>>,
     /// Device id of the shared smart card subsystem, while shared.
@@ -76,6 +79,22 @@ impl Controls {
             Box::new(StaticOverDvc::new("AUDIO_PLAYBACK_DVC", audio_dvc_channel)),
             Box::new(audin),
         ];
+        // Every camera present now gets its channel (listed, not opened);
+        // each is announced to the server only once it is shared.
+        let local_cameras = crate::camera::list();
+        let cameras = (!local_cameras.is_empty()).then(|| {
+            let devices = local_cameras
+                .iter()
+                .map(|c| {
+                    let backend: Box<dyn rdp::CameraBackend> =
+                        Box::new(crate::camera::MfCamera::new(&c.link));
+                    (c.name.clone(), backend)
+                })
+                .collect();
+            let (channels, handle) = rdp::cameras(devices);
+            dynamic.extend(channels);
+            handle
+        });
         let touch = crate::touch::digitizer_present().then(|| {
             let (channel, handle) = rdp::touch_input(rdp::TouchOptions {
                 show_touch_visuals: false,
@@ -102,6 +121,7 @@ impl Controls {
             speaker,
             microphone,
             mic_device,
+            cameras,
             printers: Mutex::new(Vec::new()),
             smart_card: Mutex::new(None),
             touch,
@@ -110,6 +130,9 @@ impl Controls {
         if let Some(&device) = CLI_MICROPHONE.get() {
             controls.set_microphone_device(device);
             let _ = controls.set_microphone(true);
+        }
+        if let Some(name) = CLI_CAMERA.get() {
+            let _ = controls.set_camera(true, name.as_deref());
         }
         (channels, controls)
     }
@@ -148,6 +171,29 @@ impl Controls {
     /// being switched on).
     pub fn set_microphone_device(&self, device: Option<u32>) {
         *self.mic_device.lock().unwrap_or_else(|p| p.into_inner()) = device;
+    }
+
+    /// Shares this PC's cameras with the session: every camera for `name`
+    /// None, else the one with that name; off stops sharing them all. A
+    /// shared camera is announced to the server and opened only while an
+    /// application in the session captures from it; off closes it at once.
+    pub fn set_camera(&self, on: bool, name: Option<&str>) -> Result<(), String> {
+        let Some(handle) = &self.cameras else {
+            return if on {
+                Err("No camera found on this PC.".into())
+            } else {
+                Ok(())
+            };
+        };
+        let names = handle.names();
+        let chosen = crate::camera::chosen(&names, on, name);
+        for i in 0..names.len() {
+            handle.set_enabled(i, chosen.contains(&i));
+        }
+        match name {
+            Some(n) if on && chosen.is_empty() => Err(format!("{n} is not connected.")),
+            _ => Ok(()),
+        }
     }
 
     /// Shares every local printer (Easy Print: the server needs no drivers).
@@ -226,4 +272,12 @@ static CLI_MICROPHONE: OnceLock<Option<u32>> = OnceLock::new();
 
 pub fn enable_microphone_for_all(device: Option<u32>) {
     let _ = CLI_MICROPHONE.set(device);
+}
+
+/// `--camera [NAME]` from the command line: every session shares that
+/// camera (None: all of them) from the start (manual testing).
+static CLI_CAMERA: OnceLock<Option<String>> = OnceLock::new();
+
+pub fn enable_camera_for_all(name: Option<String>) {
+    let _ = CLI_CAMERA.set(name);
 }

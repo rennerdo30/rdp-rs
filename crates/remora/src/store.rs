@@ -273,6 +273,12 @@ pub struct SessionOptions {
     pub microphone: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mic: Option<String>,
+    /// This PC's cameras in the session (MS-RDPECAM), and which one by
+    /// name; None: every camera. Missing in older files: off.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub camera: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cam: Option<String>,
     /// Picture quality and desktop experience (part of Display for inheritance).
     pub quality: Quality,
     /// Where Windows key combinations go (part of Display for inheritance).
@@ -1530,6 +1536,49 @@ mod tests {
             ..Default::default()
         }));
         assert_eq!(display.options.helper, own.helper, "display keeps its own");
+    }
+
+    #[test]
+    fn camera_is_off_by_default_round_trips_and_inherits_with_sharing() {
+        // Saved before cameras existed: off, and nothing written for it.
+        let o: SessionOptions = serde_json::from_str(r#"{"microphone":true}"#).unwrap();
+        assert!(!o.camera && o.cam.is_none());
+        let json = serde_json::to_string(&o).unwrap();
+        assert!(
+            !json.contains("camera") && !json.contains("cam\""),
+            "{json}"
+        );
+        let on = SessionOptions {
+            camera: true,
+            cam: Some("USB Webcam".into()),
+            ..Default::default()
+        };
+        let back: SessionOptions =
+            serde_json::from_str(&serde_json::to_string(&on).unwrap()).unwrap();
+        assert_eq!(back, on);
+        // A member inherits the group's camera choice with Sharing only.
+        let g = Group {
+            path: "W".into(),
+            options: on.clone(),
+            ..Default::default()
+        };
+        let conn = |inherit| Connection {
+            group: "W".into(),
+            inherit,
+            ..Default::default()
+        };
+        let s = store_with(vec![g], vec![]);
+        let shared = s.resolve(&conn(Inherit {
+            sharing: true,
+            ..Default::default()
+        }));
+        assert!(shared.options.camera);
+        assert_eq!(shared.options.cam.as_deref(), Some("USB Webcam"));
+        let own = s.resolve(&conn(Inherit {
+            display: true,
+            ..Default::default()
+        }));
+        assert!(!own.options.camera);
     }
 
     #[test]

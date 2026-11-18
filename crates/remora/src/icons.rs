@@ -32,6 +32,8 @@ pub enum Icon {
     Clipboard,
     Speaker,
     Mic,
+    /// Video camera (camera redirection).
+    Camera,
     Printer,
     SmartCard,
     Lock,
@@ -90,7 +92,7 @@ pub enum Icon {
 }
 
 impl Icon {
-    pub const ALL: [Icon; 59] = [
+    pub const ALL: [Icon; 60] = [
         Icon::Plus,
         Icon::Search,
         Icon::Gear,
@@ -110,6 +112,7 @@ impl Icon {
         Icon::Clipboard,
         Icon::Speaker,
         Icon::Mic,
+        Icon::Camera,
         Icon::Printer,
         Icon::SmartCard,
         Icon::Lock,
@@ -395,6 +398,10 @@ pub fn draw(cv: &mut Canvas, icon: Icon, x: f32, y: f32, size: f32, color: u32) 
             p.arc((8.0, 7.0), 4.4, 0.0, 180.0);
             p.line(&[(8.0, 11.4), (8.0, 14.0)]);
             p.line(&[(5.6, 14.0), (10.4, 14.0)]);
+        }
+        Icon::Camera => {
+            p.rrect(1.6, 4.4, 9.0, 7.2, 1.6);
+            p.shape(&[(10.6, 7.0), (14.4, 4.8), (14.4, 11.2), (10.6, 9.0)]);
         }
         Icon::Printer => {
             p.line(&[(4.6, 5.8), (4.6, 2.2), (11.4, 2.2), (11.4, 5.8)]);

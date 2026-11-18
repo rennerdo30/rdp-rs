@@ -598,6 +598,7 @@ impl App {
         let printers = opts.printers && on(c.set_printers(true), "Printers");
         let smart_cards = opts.smart_cards && on(c.set_smart_cards(true), "Smart cards");
         let microphone = opts.microphone && on(c.set_microphone(true), "Microphone");
+        let camera = opts.camera && on(c.set_camera(true, opts.cam.as_deref()), "Camera");
         // The server helper may do what the connection allows (taken at
         // its next HelloAck).
         c.helper()
@@ -627,6 +628,8 @@ impl App {
             t.speaker = opts.speaker.clone();
             t.microphone = microphone;
             t.mic = opts.mic.clone();
+            t.camera = camera;
+            t.cam = opts.cam.clone();
             t.scale = opts.scale;
             t.clipboard = clipboard;
             t.sound = sound;
@@ -663,6 +666,8 @@ impl App {
             speaker: t.speaker.clone(),
             microphone: t.microphone,
             mic: t.mic.clone(),
+            camera: t.camera,
+            cam: t.cam.clone(),
             // A reconnect keeps the session's monitors in its config.
             monitors: Vec::new(),
             helper: t.helper.opts.clone(),
@@ -867,6 +872,16 @@ impl App {
                     .map(|s| s.controls.set_microphone(on));
                 if let Some(Err(e)) = r {
                     self.message(format!("Microphone: {e}"), Tone::Danger);
+                }
+                self.dirty();
+            }
+            Action::SetCamera(id, on, name) => {
+                let r = self
+                    .sessions
+                    .get(&id)
+                    .map(|s| s.controls.set_camera(on, name.as_deref()));
+                if let Some(Err(e)) = r {
+                    self.message(format!("Camera: {e}"), Tone::Warning);
                 }
                 self.dirty();
             }
@@ -2148,6 +2163,8 @@ impl ApplicationHandler<UserEvent> for App {
                             remembered_unlock(&mut ui);
                             ui.speakers = crate::audio::output_devices();
                             ui.mics = crate::mic::input_devices();
+                            // Names only; no camera is opened.
+                            ui.cams = crate::camera::names();
                             ui.local_monitors = crate::monitors::list();
                             // Loads the folder picker's shell components early.
                             crate::picker::prewarm();

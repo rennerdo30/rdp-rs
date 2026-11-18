@@ -18,6 +18,7 @@
 mod app;
 mod audio;
 mod audio_mf;
+mod camera;
 mod clipboard;
 mod controls;
 mod failure;
@@ -89,6 +90,9 @@ struct Args {
     /// `--microphone [index]`: Some(None) is the default device.
     microphone: Option<Option<u32>>,
     list_microphones: bool,
+    /// `--camera [NAME]`: Some(None) shares every camera.
+    camera: Option<Option<String>>,
+    list_cameras: bool,
     gfx: bool,
     /// `--surface-commands`, `--drawing-orders`: the experimental picture
     /// paths (RemoteFX/NSCodec surface bits, MS-RDPEGDI orders), off by default.
@@ -118,6 +122,7 @@ fn usage() -> ! {
          \x20      remora <host> -u <user> --screenshot out.png [--wait SECONDS]\n\
          \x20      remora <host> -u <user> --record out.mp4 [--wait SECONDS]\n\
          \x20      remora ... --microphone [INDEX]   (microphone on; see --list-microphones)\n\
+         \x20      remora ... --camera [NAME]   (cameras shared; see --list-cameras)\n\
          \x20      remora --snapshot-ui out.png [--scale 1.5] [--only TEXT]\n\
          \x20      remora --icon-png out.png [--icon-size N]\n\
          \x20      remora --version\n\
@@ -180,6 +185,10 @@ fn parse_args() -> Args {
                 a.microphone = Some(index.and_then(|v| v.parse().ok()));
             }
             "--list-microphones" => a.list_microphones = true,
+            "--camera" => {
+                a.camera = Some(it.next_if(|v| !v.starts_with('-')));
+            }
+            "--list-cameras" => a.list_cameras = true,
             "--gfx" => a.gfx = true,
             "--surface-commands" => a.surface_commands = true,
             "--drawing-orders" => a.drawing_orders = true,
@@ -267,8 +276,18 @@ fn main() {
         }
         return;
     }
+    if args.list_cameras {
+        // Lists the devices only; no camera is opened.
+        for cam in camera::list() {
+            println!("{}", cam.name);
+        }
+        return;
+    }
     if let Some(device) = args.microphone {
         controls::enable_microphone_for_all(device);
+    }
+    if let Some(name) = args.camera.clone() {
+        controls::enable_camera_for_all(name);
     }
     if args.host.is_empty() {
         #[cfg(windows)]

@@ -219,6 +219,11 @@ pub enum Hit {
     TabMic(u64, usize),
     /// Microphone on/off in the panel (live).
     Microphone(u64),
+    /// Camera choice: index into `cams` + 1 (0 = every camera); form and panel.
+    FormCam(usize),
+    TabCam(u64, usize),
+    /// Camera sharing on/off in the panel (live).
+    Camera(u64),
     /// Quick panel: page, and the session's quality (applies on reconnect).
     DrawerPage(u8),
     TabPreset(u64, usize),
@@ -461,6 +466,9 @@ pub struct Tab {
     /// Microphone on, and the device it records from (None: default).
     pub microphone: bool,
     pub mic: Option<String>,
+    /// This PC's cameras shared, and which one (None: every camera).
+    pub camera: bool,
+    pub cam: Option<String>,
     /// The session's picture is being recorded to a video file.
     pub recording: bool,
     /// Shown on chosen monitors in their own windows, not in this tab.
@@ -516,6 +524,8 @@ struct TabView {
     speaker: Option<String>,
     microphone: bool,
     mic: Option<String>,
+    camera: bool,
+    cam: Option<String>,
     redirected_to: Option<String>,
     network: Option<String>,
 }
@@ -603,6 +613,8 @@ pub enum Action {
     /// A session's microphone on or off, and its device (None: default).
     SetMicrophone(u64, bool),
     SetMic(u64, Option<String>),
+    /// A session's cameras shared or not, and which one (None: every camera).
+    SetCamera(u64, bool, Option<String>),
     /// Put this text on the clipboard (error details).
     CopyText(String),
     /// The sidebar folded or unfolded, or a divider was dragged: keep the
@@ -731,6 +743,8 @@ pub struct Ui {
     pub speakers: Vec<String>,
     /// Local microphones (the app fills it in).
     pub mics: Vec<String>,
+    /// Local cameras, by name (the app fills it in).
+    pub cams: Vec<String>,
     /// This PC's monitors (the app fills it in).
     pub local_monitors: Vec<crate::monitors::LocalMonitor>,
     /// Connection editor page.
@@ -871,6 +885,7 @@ impl Ui {
             session_clip: None,
             speakers: Vec::new(),
             mics: Vec::new(),
+            cams: Vec::new(),
             local_monitors: Vec::new(),
             form_page: 0,
             settings_open: false,
@@ -1007,6 +1022,8 @@ impl Ui {
             speaker: None,
             microphone: false,
             mic: None,
+            camera: false,
+            cam: None,
             recording: false,
             spanned: false,
             remote_app: None,
@@ -2054,6 +2071,20 @@ impl Ui {
                 t.microphone = !t.microphone;
                 return Some(Action::SetMicrophone(id, t.microphone));
             }
+            Hit::FormCam(i) => {
+                self.opts.cam = i.checked_sub(1).and_then(|i| self.cams.get(i).cloned());
+            }
+            Hit::TabCam(id, i) => {
+                let name = i.checked_sub(1).and_then(|i| self.cams.get(i).cloned());
+                let t = self.tab_mut(id)?;
+                t.cam = name.clone();
+                return Some(Action::SetCamera(id, t.camera, name));
+            }
+            Hit::Camera(id) => {
+                let t = self.tab_mut(id)?;
+                t.camera = !t.camera;
+                return Some(Action::SetCamera(id, t.camera, t.cam.clone()));
+            }
             Hit::DrawerPage(i) => {
                 self.drawer_page = i;
                 self.drawer_scroll = 0;
@@ -2247,7 +2278,8 @@ impl Ui {
                     1 => &mut o.sound,
                     2 => &mut o.printers,
                     3 => &mut o.smart_cards,
-                    _ => &mut o.microphone,
+                    4 => &mut o.microphone,
+                    _ => &mut o.camera,
                 };
                 *flag = !*flag;
             }
@@ -5513,6 +5545,13 @@ impl Ui {
                 o.microphone,
             ),
             (
+                5,
+                Icon::Camera,
+                "Camera",
+                "This PC's cameras in the session",
+                o.camera,
+            ),
+            (
                 2,
                 Icon::Printer,
                 "Printers",
@@ -5529,11 +5568,11 @@ impl Ui {
         ];
         self.caption(cv, te, f, x, y, w, "Devices");
         y += p(26.0);
-        let cells = self.card(cv, x, y, w, &[p(58.0); 5]);
+        let cells = self.card(cv, x, y, w, &[p(58.0); 6]);
         for (r, (i, icon, label, sub, on)) in cells.iter().zip(rows) {
             self.card_switch_i(cv, te, f, *r, Some(icon), label, sub, on, Hit::FormShare(i));
         }
-        y += 5 * p(58.0) + p(24.0);
+        y += 6 * p(58.0) + p(24.0);
 
         if o.sound {
             y = self.device_card(
@@ -5563,6 +5602,21 @@ impl Ui {
                 &self.mics.clone(),
                 o.mic.as_deref(),
                 Hit::FormMic,
+            );
+        }
+        if o.camera {
+            y = self.device_card(
+                cv,
+                te,
+                f,
+                x,
+                y,
+                w,
+                "Share camera",
+                "All cameras",
+                &self.cams.clone(),
+                o.cam.as_deref(),
+                Hit::FormCam,
             );
         }
 
@@ -6279,6 +6333,8 @@ impl Ui {
             speaker: tab.speaker.clone(),
             microphone: tab.microphone,
             mic: tab.mic.clone(),
+            camera: tab.camera,
+            cam: tab.cam.clone(),
             redirected_to: tab.redirected_to.clone(),
             network: tab.network.clone(),
         };
@@ -6386,6 +6442,13 @@ impl Ui {
                 Hit::Microphone(id),
             ),
             (
+                Icon::Camera,
+                "Camera",
+                "This PC's cameras",
+                t.camera,
+                Hit::Camera(id),
+            ),
+            (
                 Icon::Printer,
                 "Printers",
                 "Local printers in the session",
@@ -6400,11 +6463,11 @@ impl Ui {
                 Hit::SmartCards(id),
             ),
         ];
-        let cells = self.card(cv, x, y, w, &[p(56.0); 5]);
+        let cells = self.card(cv, x, y, w, &[p(56.0); 6]);
         for (r, (icon, label, sub, on, hit)) in cells.iter().zip(rows) {
             self.card_switch_i(cv, te, f, *r, Some(icon), label, sub, on, hit);
         }
-        y += 5 * p(56.0) + p(24.0);
+        y += 6 * p(56.0) + p(24.0);
         if t.microphone {
             let mics = self.mics.clone();
             y = self.device_card_tab(
@@ -6420,6 +6483,23 @@ impl Ui {
                 t.mic.as_deref(),
                 id,
                 Hit::TabMic,
+            );
+        }
+        if t.camera {
+            let cams = self.cams.clone();
+            y = self.device_card_tab(
+                cv,
+                te,
+                f,
+                x,
+                y,
+                w,
+                "Share camera",
+                "All cameras",
+                &cams,
+                t.cam.as_deref(),
+                id,
+                Hit::TabCam,
             );
         }
         if t.sound {
@@ -7492,6 +7572,7 @@ pub fn sample_form(page: u8) -> Ui {
         "Headset (USB Audio)".into(),
     ];
     m.mics = vec!["Headset microphone (USB Audio)".into()];
+    m.cams = vec!["Integrated Camera".into(), "USB Webcam".into()];
     let mon =
         |name: &str, left: i32, w: u32, h: u32, primary: bool| crate::monitors::LocalMonitor {
             name: name.into(),
@@ -7505,6 +7586,9 @@ pub fn sample_form(page: u8) -> Ui {
     m.opts.monitors = vec![r"\.\DISPLAY1".into(), r"\.\DISPLAY3".into()];
     m.opts.sound = true;
     m.opts.microphone = true;
+    // The Sharing page shows the camera choice; the other pages keep
+    // their summary as before.
+    m.opts.camera = page == 3;
     m.opts.clipboard = true;
     m.opts.drives = vec![r"C:\Share".into()];
     m
@@ -7531,6 +7615,7 @@ pub fn sample_cert(changed: bool) -> Ui {
 /// change waiting for a reconnect. `fullscreen` lays it out full screen.
 pub fn sample_panel(page: u8, fullscreen: bool) -> Ui {
     let mut m = sample(true);
+    m.cams = vec!["Integrated Camera".into(), "USB Webcam".into()];
     m.drawer_page = page;
     m.fullscreen = fullscreen;
     m.speakers = vec![
@@ -7541,6 +7626,8 @@ pub fn sample_panel(page: u8, fullscreen: bool) -> Ui {
         t.clipboard = true;
         t.sound = true;
         t.speaker = Some("Headset (USB Audio)".into());
+        t.camera = true;
+        t.cam = Some("USB Webcam".into());
         if page == 2 {
             t.quality.wallpaper = false;
         }
