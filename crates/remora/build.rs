@@ -1,4 +1,4 @@
-//! Embeds the app icon (`assets/remora.ico`) in the Windows executable,
+//! Embeds the app icon (`crates/remora/assets/remora.ico`) in the Windows executable,
 //! so Explorer, pinned taskbar buttons and shortcuts show the Remora logo.
 //!
 //! Writes a compiled resource file (`.res`) directly and hands it to the
@@ -9,7 +9,7 @@ use std::path::PathBuf;
 
 fn main() {
     let ico = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap_or_default())
-        .join("../../assets/remora.ico");
+        .join("assets/remora.ico");
     println!("cargo:rerun-if-changed={}", ico.display());
     println!("cargo:rerun-if-changed=build.rs");
     let windows = std::env::var("CARGO_CFG_TARGET_OS").is_ok_and(|v| v == "windows");

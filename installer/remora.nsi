@@ -69,8 +69,8 @@ VIAddVersionKey "FileVersion" "${VERSION}"
 VIAddVersionKey "FileDescription" "Remora ${VERSION} setup"
 VIAddVersionKey "LegalCopyright" "MIT OR Apache-2.0"
 
-!define MUI_ICON "..\assets\remora.ico"
-!define MUI_UNICON "..\assets\remora.ico"
+!define MUI_ICON "..\crates\remora\assets\remora.ico"
+!define MUI_UNICON "..\crates\remora\assets\remora.ico"
 !define MUI_ABORTWARNING
 !define MUI_FINISHPAGE_RUN "$INSTDIR\remora.exe"
 !define MUI_FINISHPAGE_RUN_TEXT "Start Remora"

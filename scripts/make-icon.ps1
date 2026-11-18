@@ -1,4 +1,4 @@
-# Writes assets/remora.ico (16, 24, 32, 48, 64 and 256 px, PNG entries) from
+# Writes crates/remora/assets/remora.ico (16, 24, 32, 48, 64 and 256 px, PNG entries) from
 # the icon Remora draws itself (`remora --icon-png <file> --icon-size <n>`), so
 # the exe and installer icon always match the window icon and assets/logo.svg.
 # Rerun it after changing crates/remora/src/icon.rs and commit the .ico.
@@ -6,7 +6,7 @@
 # Without -Exe it builds and runs remora through cargo.
 [CmdletBinding()]
 param(
-    [string]$Output = (Join-Path (Split-Path -Parent $PSScriptRoot) 'assets/remora.ico'),
+    [string]$Output = (Join-Path (Split-Path -Parent $PSScriptRoot) 'crates/remora/assets/remora.ico'),
     [string]$Exe
 )
 $ErrorActionPreference = 'Stop'
@@ -20,7 +20,7 @@ try {
         if ($Exe) {
             & $Exe --icon-png $png --icon-size $size
         } else {
-            & cargo run --release --quiet -j 8 -p remora --manifest-path (Join-Path $root 'Cargo.toml') -- --icon-png $png --icon-size $size
+            & cargo run --release --quiet -j 8 -p remora-client --manifest-path (Join-Path $root 'Cargo.toml') -- --icon-png $png --icon-size $size
         }
         if ($LASTEXITCODE -or !(Test-Path -LiteralPath $png)) { throw "remora --icon-png failed for $size px" }
         , [IO.File]::ReadAllBytes($png)

@@ -34,7 +34,7 @@ param(
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 $meta = cargo metadata --format-version 1 --no-deps --manifest-path "$root/Cargo.toml" | ConvertFrom-Json
-cargo build --release -p remora --manifest-path "$root/Cargo.toml" --message-format=short
+cargo build --release -p remora-client --manifest-path "$root/Cargo.toml" --message-format=short
 if ($LASTEXITCODE -ne 0) { throw 'build failed' }
 $remora = Join-Path $meta.target_directory 'release/remora.exe'
 $work = New-Item -ItemType Directory -Force (Join-Path ([IO.Path]::GetTempPath()) "gw-rpc-$PID")

@@ -20,7 +20,7 @@ The command line modes work from the installed copy too, for example `"%LOCALAPP
 
 ## macOS and Linux
 
-There are no packages yet: Remora, the client, is a Windows program today. The `rdp` protocol library builds on macOS and Linux from source (`cargo build -p rdp`).
+There are no packages yet: Remora, the client, is a Windows program today. The `rdp` protocol library builds on macOS and Linux from source (`cargo build -p rdp-proto`).
 
 ## Verifying a download
 

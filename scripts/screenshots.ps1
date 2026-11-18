@@ -24,7 +24,7 @@ try {
     $meta = cargo metadata --format-version 1 --no-deps | ConvertFrom-Json
     if ($LASTEXITCODE) { throw 'cargo metadata failed' }
     if (-not $Exe) {
-        cargo build --release -p remora
+        cargo build --release -p remora-client
         if ($LASTEXITCODE) { throw 'build failed' }
         $Exe = Join-Path $meta.target_directory 'release/remora.exe'
     }
@@ -118,7 +118,7 @@ foreach ($k in $docShots.Keys) {
 # The site's icons come from the app's own: the logo, the .ico and PNGs
 # drawn by the app (`--icon-png`) for the web manifest.
 Copy-Item -LiteralPath (Join-Path $root 'assets/logo.svg') -Destination (Join-Path $root 'website/assets/logo.svg') -Force
-Copy-Item -LiteralPath (Join-Path $root 'assets/remora.ico') -Destination (Join-Path $root 'website/favicon.ico') -Force
+Copy-Item -LiteralPath (Join-Path $root 'crates/remora/assets/remora.ico') -Destination (Join-Path $root 'website/favicon.ico') -Force
 foreach ($n in 180, 512) {
     $png = Join-Path $raw "icon-$n.png"
     Run-App @('--icon-png', $png, '--icon-size', "$n")

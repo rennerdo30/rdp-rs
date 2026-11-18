@@ -17,5 +17,5 @@ targets = ["x86_64-pc-windows-msvc"]
 ignore-build-dependencies = true
 ignore-dev-dependencies = true
 # Unpublished crates are not skipped: ffwd-render (MIT, a git dependency
-# with `publish = false`) needs its notice. rdp-rs's own crates (rdp, remora,
-# remora-update) are listed too; LICENSE.txt covers them as well.
+# with `publish = false`) needs its notice. rdp-rs's own crates (rdp-proto,
+# remora-client, remora-link, remora-update) are listed too; LICENSE.txt covers them as well.

@@ -130,20 +130,20 @@ Requires the Rust toolchain pinned in `rust-toolchain.toml` (rustup installs it)
 
 ```
 # connection manager
-cargo run -p remora
+cargo run -p remora-client
 
 # one session straight from the command line (password from RDP_PASSWORD or a prompt)
-cargo run -p remora -- 192.168.1.20 -u DOMAIN\user
-cargo run -p remora -- 192.168.1.20:3390 -u user -d DOMAIN --size 1600x900
+cargo run -p remora-client -- 192.168.1.20 -u DOMAIN\user
+cargo run -p remora-client -- 192.168.1.20:3390 -u user -d DOMAIN --size 1600x900
 
 # headless: wait until the screen settles, save a PNG, disconnect
-cargo run -p remora -- 192.168.1.20 -u DOMAIN\user --screenshot desk.png --wait 15
+cargo run -p remora-client -- 192.168.1.20 -u DOMAIN\user --screenshot desk.png --wait 15
 
 # protocol trace to stderr (sent PDUs as hex; the Client Info PDU with the password is redacted)
-cargo run -p remora -- 192.168.1.20 -u DOMAIN\user -v
+cargo run -p remora-client -- 192.168.1.20 -u DOMAIN\user -v
 
 # render the UI offscreen with sample data
-cargo run -p remora -- --snapshot-ui ui.png --scale 1.5
+cargo run -p remora-client -- --snapshot-ui ui.png --scale 1.5
 
 # retake the website and user guide screenshots (needs ffmpeg)
 pwsh scripts/screenshots.ps1

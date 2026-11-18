@@ -54,7 +54,7 @@ jobs:
         with:
           tool: cargo-about@0.9.3
       - name: Release build
-        run: cargo build --release --locked -p remora -p remora-agent
+        run: cargo build --release --locked -p remora-client -p remora-agent
       - name: Package (pinned NSIS 3.13)
         shell: pwsh
         run: |

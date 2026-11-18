@@ -56,7 +56,7 @@ def main() -> int:
     meta = json.loads(subprocess.run(["cargo", "metadata", "--format-version", "1", "--no-deps"],
                                      cwd=ROOT, capture_output=True, text=True, check=True).stdout)
     target = Path(meta["target_directory"])
-    subprocess.run(["cargo", "build", "--release", "-p", "remora", "--message-format=short"],
+    subprocess.run(["cargo", "build", "--release", "-p", "remora-client", "--message-format=short"],
                    cwd=ROOT, check=True)
     remora = target / "release" / "remora.exe"
     work = Path(tempfile.mkdtemp(prefix="legacy-"))

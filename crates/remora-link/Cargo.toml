@@ -4,6 +4,13 @@ description = "Remora helper protocol: framing, Noise-encrypted sessions, pairin
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+readme = "README.md"
+keywords = ["remora", "rdp", "noise", "file-transfer"]
+categories = ["network-programming"]
+include = ["/src/**", "/Cargo.toml", "/README.md", "/LICENSE-MIT", "/LICENSE-APACHE"]
 
 [dependencies]
 # Noise handshake (Noise_XX_25519_ChaChaPoly_BLAKE2s), RustCrypto backends only.

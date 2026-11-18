@@ -51,7 +51,7 @@ ROOT = Path(__file__).resolve().parent.parent
 def build() -> Path:
     meta = json.loads(subprocess.run(["cargo", "metadata", "--format-version", "1", "--no-deps"],
                                      cwd=ROOT, capture_output=True, text=True, check=True).stdout)
-    subprocess.run(["cargo", "build", "--release", "-p", "remora", "--message-format=short"],
+    subprocess.run(["cargo", "build", "--release", "-p", "remora-client", "--message-format=short"],
                    cwd=ROOT, check=True)
     return Path(meta["target_directory"]) / "release" / "remora.exe"
 

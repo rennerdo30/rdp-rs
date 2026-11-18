@@ -714,7 +714,7 @@ mod tests {
 
     /// Encodes 2 s of 320x240 with Media Foundation and checks the file.
     /// Ignored by default: it needs Media Foundation and takes 2 s of real
-    /// time (`cargo test -p remora recorder -- --ignored`).
+    /// time (`cargo test -p remora-client recorder -- --ignored`).
     #[test]
     #[ignore]
     fn media_foundation_writes_a_valid_mp4() {

@@ -782,7 +782,7 @@ mod tests {
     /// Opens this PC's first camera, reads its formats and captures one
     /// sample in the first format. Never run automatically: it turns the
     /// owner's camera on. The owner runs it with
-    /// `cargo test -p remora live_camera -- --ignored --nocapture`.
+    /// `cargo test -p remora-client live_camera -- --ignored --nocapture`.
     #[test]
     #[ignore = "opens the real camera"]
     fn live_camera_first_device() {

@@ -7,7 +7,7 @@ license.workspace = true
 publish = false
 
 [dependencies]
-rdp = { path = "../rdp" }
+rdp.workspace = true
 # The host password: an Argon2id hash in the PHC string format (RustCrypto,
 # as Remora's vault).
 argon2 = "0.6"
