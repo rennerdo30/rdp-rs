@@ -277,6 +277,13 @@ impl Controls {
     }
 
     /// The server helper: pairing, session info, links and file transfer.
+    /// The device redirection handle, for live tests that share a stand-in
+    /// device (the serial loopback).
+    #[cfg(test)]
+    pub(crate) fn devices(&self) -> &rdp::RdpdrHandle {
+        &self.devices
+    }
+
     pub fn helper(&self) -> &crate::helper::HelperHandle {
         &self.helper
     }

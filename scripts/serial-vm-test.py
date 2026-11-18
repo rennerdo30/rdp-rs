@@ -122,6 +122,12 @@ def main() -> int:
         # Port redirection must be allowed on the server (policy off).
         ps(r"Remove-ItemProperty -ErrorAction SilentlyContinue 'HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services' fDisableCcm; 'ok'",
            elevated=True)
+        log("redirection policy: " + " ".join(ps(
+            r"$k = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services';"
+            r"$w = 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp';"
+            r"foreach ($p in $k, $w) { if (Test-Path $p) { (Get-ItemProperty $p).PSObject.Properties |"
+            r" Where-Object Name -like 'fDisable*' | ForEach-Object { $p + ' ' + $_.Name + '=' + $_.Value } } }"
+        ).split()))
         user = ps("$env:USERNAME").strip().splitlines()[-1]
 
         log("starting the live test")

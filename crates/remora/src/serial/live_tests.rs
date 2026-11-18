@@ -268,6 +268,8 @@ impl SerialPort for Open {
 #[ignore = "live: needs a lab clone with Remote Desktop (scripts/serial-vm-test.py)"]
 fn live_serial_port_loopback() {
     let dir = PathBuf::from(env("E2E_DIR"));
+    // E2E_VERBOSE=1: the protocol trace (rdpdr device list, IRPs) in the log.
+    rdp::set_verbose(std::env::var_os("E2E_VERBOSE").is_some());
     let password = std::fs::read_to_string(env("E2E_PASSWORD_FILE"))
         .unwrap()
         .trim()
@@ -275,8 +277,11 @@ fn live_serial_port_loopback() {
     let mut cfg = rdp::Config::new(&env("E2E_HOST"), &env("E2E_USER"), &password);
     cfg.port = env("E2E_PORT").parse().unwrap();
     cfg.client_name = "remora-e2e".into();
-    let (rdpdr, devices) = rdp::rdpdr(&cfg.client_name);
-    let channels: Vec<Box<dyn rdp::StaticChannel>> = vec![Box::new(rdpdr)];
+    // The app's own channel set (rdpdr, rdpsnd, cliprdr, drdynvc), as a
+    // session window opens it.
+    let helper = crate::helper::HelperHandle::new();
+    let (channels, controls) = crate::controls::Controls::build(&cfg.client_name, 0, &helper);
+    let devices = controls.devices().clone();
     let (tx, rx) = std::sync::mpsc::channel();
     let _worker = crate::session::spawn(cfg, channels, move |_, ev| {
         let _ = tx.send(ev);
