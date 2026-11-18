@@ -132,6 +132,13 @@ pub struct Config {
     /// Told each step of the connection sequence as it starts (for a
     /// progress display); None reports nothing.
     pub progress: Option<crate::progress::ConnectProgress>,
+    /// Join a shared desktop from an invitation (Desktop Sharing, a shadow
+    /// session; MS-RA 2.2.7.2): TLS without NLA, the invitation's fields in
+    /// the Client Info and, if set, a Preconnection PDU first (MS-RDPEPS).
+    /// `host`/`port` are a listener of the invitation; `username` is the
+    /// name the sharer shows. Open the `encomsp` channel
+    /// ([`crate::multiparty`]) to see and change the control level.
+    pub assistance: Option<crate::AssistanceLogon>,
 }
 
 impl Config {
@@ -167,6 +174,7 @@ impl Config {
             drawing_orders: false,
             bitmap_cache_dir: None,
             progress: None,
+            assistance: None,
         }
     }
 }
@@ -630,10 +638,18 @@ impl Client {
         f.set_read_timeout(Duration::from_millis(100))?;
         let progress = cfg.progress.as_ref();
         report(progress, ConnectStep::Tls);
+        let assistance = cfg.assistance.as_ref();
+        if let Some(id) = assistance.and_then(|a| a.preconnection_id) {
+            f.write(&crate::preconnection::pdu_v1(id))?;
+        }
 
         // 1. X.224 negotiation; a routing token replaces the cookie (3.2.5.3.1)
         let cookie: String = user.chars().take(9).collect();
-        let mut requested = x224::PROTOCOL_SSL | x224::PROTOCOL_HYBRID | x224::PROTOCOL_HYBRID_EX;
+        // A sharer authenticates the invitation, not the user: no NLA.
+        let mut requested = match assistance {
+            Some(_) => x224::PROTOCOL_SSL,
+            None => x224::PROTOCOL_SSL | x224::PROTOCOL_HYBRID | x224::PROTOCOL_HYBRID_EX,
+        };
         let rdstls = redirection.filter(|r| !r.no_redirect() && r.wants_rdstls());
         if rdstls.is_some() {
             requested |= x224::PROTOCOL_RDSTLS;
@@ -648,9 +664,13 @@ impl Client {
             x224::negotiation_flags(&confirm) & x224::EXTENDED_CLIENT_DATA_SUPPORTED != 0;
         trace!("negotiated protocol {protocol:#x}");
         if protocol & requested == 0 {
-            return Err(Error::Unsupported(
-                "server only offers legacy RDP security (no TLS)".into(),
-            ));
+            return Err(Error::Unsupported(if assistance.is_some() {
+                "the shared desktop only offers Standard RDP Security (no TLS), \
+                 which Remora does not implement"
+                    .into()
+            } else {
+                "server only offers legacy RDP security (no TLS)".into()
+            }));
         }
 
         // 2. TLS, then NLA
@@ -792,15 +812,17 @@ impl Client {
         };
         // A redirection's password blob goes to the target unchanged; after
         // an RDSTLS logon the Client Info carries no password.
-        let info_pdu = match redirection.and_then(Redirection::client_info_password) {
-            Some(blob) => pdu::client_info_redirected(&info, blob),
-            None if rdstls.is_some() && protocol == x224::PROTOCOL_RDSTLS => {
+        let blob = redirection.and_then(Redirection::client_info_password);
+        let info_pdu = match (assistance, blob) {
+            (Some(a), _) => pdu::client_info_assistance(&info, &a.auth_id, a.password.as_deref()),
+            (None, Some(blob)) => pdu::client_info_redirected(&info, blob),
+            (None, None) if rdstls.is_some() && protocol == x224::PROTOCOL_RDSTLS => {
                 pdu::client_info(&pdu::ClientInfo {
                     password: "",
                     ..info
                 })
             }
-            None => pdu::client_info(&info),
+            (None, None) => pdu::client_info(&info),
         };
         trace!(
             "experience: {:?}, {} bpp, {:?} (performance flags {:#x})",
