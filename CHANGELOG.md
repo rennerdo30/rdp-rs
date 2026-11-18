@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.1.0-beta.10
+
 - **Import connections from mRemoteNG and Remote Desktop Connection Manager.** **Import connections** (Settings, Backup, and the first start) now also reads mRemoteNG's `confCons.xml` and RDCMan's `.rdg` files, next to Remora backups; the format is told from the content. Groups, inherited settings, gateway, display size and sharing come over. mRemoteNG passwords are read with its default master password or the one you type (also fully encrypted files); RDCMan passwords only on the PC and Windows account that saved them. Passwords are kept only in the vault; the result says what could not be imported and why (RDP-80).
 - **Serial and parallel ports.** Share this PC's COM and LPT ports with the session, one switch per port, off by default, per connection or live from the side panel. Checked against Windows' own server: a program in the session opens the port, sets the baud rate, writes and reads back (RDP-74, RDP-82).
 - **Cameras.** Share this PC's cameras with the session, all or one, off by default and switchable live; a camera turns on only while an app in the session uses it. Checked against Windows' own server: an app in the session takes a photo from a shared camera (RDP-75, RDP-83).
