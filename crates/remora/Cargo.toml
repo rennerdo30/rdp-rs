@@ -37,9 +37,8 @@ rdp.workspace = true
 remora-link.workspace = true
 remora-update.workspace = true
 # CPU canvas and text from ffwd (https://github.com/rennerdo30/ffwd, its
-# decision 0001), pinned to a published commit. crates.io refuses Git
-# dependencies: switch to the published ffwd-render before publishing (RDP-86).
-ffwd-render = { git = "https://github.com/rennerdo30/ffwd", rev = "97fcd22ba06fc62bf7ab52cb50b7205887190083" }
+# decision 0001), from crates.io (the same code as ffwd rev 97fcd22).
+ffwd-render = "0.1.0"
 winit = "0.30.13"
 softbuffer = "0.4.8"
 png = "0.18.1"

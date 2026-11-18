@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+## 0.1.0-beta.11
+
+- **On crates.io.** `cargo install remora-client --version 0.1.0-beta.11` builds and installs `remora` (Windows). The protocol library is published as `rdp-proto` (RDP-86).
 - **FIPS level for legacy RDP security.** Old servers set to the FIPS encryption level (Standard RDP Security with Triple DES and HMAC-SHA-1, no TLS) can now be reached with **Allow legacy RDP security (weak)**; before, they were refused. Checked against Windows' own server at level 4 in a 90-second drawing session, and the RC4 levels again (RDP-84).
 - **Shadowing from the app.** A connection's **Advanced** page has **Sessions…** under **Other sessions** (also **Sessions on …** in the command palette): the server's signed-in sessions with **Watch** and **Control**, and **Ask the user first** on by default. **Join a shared desktop** in the command palette opens a Windows Desktop Sharing invitation file. The command line flags stay; not yet tried against a real server (RDP-85).
 - **Ready for crates.io.** The packages are now `rdp-proto` (the protocol library, still `rdp` in code) and `remora-client` (the app, still `remora.exe`), since `rdp` and `remora` on crates.io belong to other projects; `remora-link` and `remora-update` are published with them. A manual workflow uploads them after a stable release. Not published yet: `ffwd-render` has to be on crates.io first (RDP-86).

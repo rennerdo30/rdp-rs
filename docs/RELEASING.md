@@ -6,7 +6,7 @@ Every release needs the owner's yes. CI builds and tests the packages and prepar
 
 - **Remora for Windows (x64):** a per-user setup and a portable zip.
 - **The server helper (x64):** `remora-agent-<version>-windows-x64.exe`, to copy onto a server as `remora-agent.exe` (also in the zip; the setup installs Remora only). Listed in `SHA256SUMS.txt`; no updater reads it.
-- **crates.io (from 0.1.0):** `rdp-proto` (the protocol library), `remora-link`, `remora-update` and `remora-client` (the app; `cargo install remora-client` installs `remora`). A separate manual step; see [crates.io](#cratesio).
+- **crates.io:** `rdp-proto` (the protocol library), `remora-link`, `remora-update` and `remora-client` (the app; `cargo install remora-client` installs `remora`). A separate manual step; see [crates.io](#cratesio).
 - **Not packaged:** macOS and Linux. The `rdp` protocol library builds and is tested there in CI, but Remora, the client, is a Windows program today (window chrome, clipboard, printers, smart cards and sound use Windows APIs) and is neither built nor tested there, so the release has no archives for them.
 
 ## Versions
@@ -56,16 +56,25 @@ A taskbar button pinned to rdpc points at the removed `rdpc.exe`; the user pins 
 
 ## crates.io
 
-[`publish-crate.yml`](../.github/workflows/publish-crate.yml) uploads four crates in dependency order: `rdp-proto`, `remora-link`, `remora-update`, then `remora-client`. It is manual (Actions → publish-crate → Run workflow, with the tag); run it after the GitHub release for that tag is published. `remora-agent` and `remora-host` are not published.
+Four crates go out in dependency order: `rdp-proto`, `remora-link`, `remora-update`, then `remora-client`. `remora-agent` and `remora-host` are not published. Every upload needs the owner's yes; a crates.io version can never be overwritten, only yanked.
+
+**From the owner's PC (how 0.1.0-beta.11 went out).** The owner's `cargo login` credentials there (`%USERPROFILE%\.cargo\credentials.toml`) are used by cargo directly; nobody reads or copies them. From a clean checkout of the tag, outside the main checkout:
+```sh
+git worktree add <dir> vX.Y.Z
+cd <dir>
+cargo package --locked -p rdp-proto -p remora-link -p remora-update -p remora-client   # no token
+cargo publish --locked --no-verify -p rdp-proto -p remora-link -p remora-update -p remora-client
+```
+
+**From CI.** [`publish-crate.yml`](../.github/workflows/publish-crate.yml) does the same, manually (Actions → publish-crate → Run workflow, with the tag), and needs the one-time setup below.
 
 - **Names:** `rdp` and `remora` on crates.io belong to other projects. The packages are `rdp-proto` and `remora-client`; the library is still `rdp` in code and the program is still `remora.exe`.
 - **Versions:** the published crates depend on each other at exactly the workspace version, in `[workspace.dependencies]` of the root `Cargo.toml`. Change those three `version = "=…"` entries together with the workspace version; cargo refuses a mismatch.
-- **Stable versions only.** The workflow refuses a prerelease (a version with `-`): a plain `cargo install` skips prereleases, and a crates.io version can never be overwritten, only yanked.
+- **Prereleases:** a plain `cargo install remora-client` skips them; a beta needs `--version`.
 - **The workflow checks** that the tag matches the workspace version and is on `main`, and that each crate's `LICENSE-MIT` and `LICENSE-APACHE` match the repository's (crates cannot ship files from outside their folder, so each has a copy). Then `cargo package` builds every crate from its packaged sources without a token. Only the last step, `cargo publish --no-verify`, gets the token.
 - **What ships:** `include` in each crate's `Cargo.toml`: `src`, `Cargo.toml`, the crate's `README.md` and the two licence files; the app also ships `build.rs` and its icon. `cargo package --list -p <crate>` shows it.
-- **Blocked until `ffwd-render` is on crates.io.** `remora-client` takes `ffwd-render` from Git, which crates.io refuses; switch it to the published version first (RDP-86).
 
-One-time setup by the owner (agents never create secrets):
+One-time setup by the owner for the CI route (agents never create secrets):
 1. Create a crates.io API token scoped to publishing these four crates (crates.io, Account Settings, API Tokens). Until the first publish the names are not ours, so the first token has the publish-new scope.
 2. In the repository: Settings, Environments, New environment `crates-io`, with **Required reviewers** (the owner) so each upload needs an approval.
 3. Add the token as the environment secret `CARGO_REGISTRY_TOKEN`.

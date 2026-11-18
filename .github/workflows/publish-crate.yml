@@ -46,8 +46,6 @@ jobs:
           if ($toml -notmatch '(?m)^\[workspace\.package\][\s\S]*?^version\s*=\s*"([^"]+)"') { throw 'No workspace version' }
           $version = $Matches[1]
           if ($env:TAG -cne "v$version") { throw "Tag $env:TAG does not match the workspace version $version" }
-          # crates.io versions are permanent; publish stable releases only.
-          if ($version.Contains('-')) { throw "$version is a prerelease; publish stable versions only" }
           $sha = git rev-parse "refs/tags/$env:TAG^{commit}"
           if ($LASTEXITCODE) { throw "No tag $env:TAG" }
           git merge-base --is-ancestor $sha origin/main
