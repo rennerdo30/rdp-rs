@@ -1941,6 +1941,7 @@ dependencies = [
 name = "rdp"
 version = "0.1.0-beta.9"
 dependencies = [
+ "rcgen",
  "ring",
  "rustls",
  "zeroize",
