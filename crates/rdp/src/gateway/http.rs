@@ -1,5 +1,7 @@
-//! The HTTP/1.1 requests and responses of the RD Gateway transport setup
-//! (MS-TSGU 3.3.5.1, 3.3.5.3.1): a WebSocket Upgrade request (RFC 6455 4.1)
+//! The HTTP/1.1 requests and responses of the RD Gateway transport setup:
+//! for the HTTP transport (MS-TSGU 3.3.5.1, 3.3.5.3.1) a WebSocket Upgrade
+//! request (RFC 6455 4.1), for the RPC transport the RPC_IN_DATA and
+//! RPC_OUT_DATA channel requests (MS-RPCH 2.1.2.1.1, 2.1.2.1.2); both
 //! authenticated with `Authorization: NTLM` (RFC 4559 style).
 
 use crate::error::{Result, proto};
@@ -15,11 +17,7 @@ pub fn upgrade_request(
     connection_id: &str,
     authorization: &str,
 ) -> String {
-    let host = if port == 443 {
-        host.to_string()
-    } else {
-        format!("{host}:{port}")
-    };
+    let host = host_header(host, port);
     format!(
         "GET {PATH} HTTP/1.1\r\n\
          Host: {host}\r\n\
@@ -37,9 +35,51 @@ pub fn upgrade_request(
     )
 }
 
+/// The RPC over HTTP proxy path and the TsProxy endpoint behind it: the
+/// gateway's own RPC server on port 3388 (MS-RPCH 2.2.2, MS-TSGU 2.1.1).
+pub const RPC_PATH: &str = "/rpc/rpcproxy.dll?localhost:3388";
+
+/// The Host header value: the port only when it is not 443.
+fn host_header(host: &str, port: u16) -> String {
+    if port == 443 {
+        host.to_string()
+    } else {
+        format!("{host}:{port}")
+    }
+}
+
+/// An IN (`RPC_IN_DATA`) or OUT (`RPC_OUT_DATA`) channel request head
+/// (MS-RPCH 2.1.2.1.1, 2.1.2.1.2); the PDU stream follows as its body.
+/// `session_id` is a UUID without braces.
+pub fn rpc_channel_request(
+    method: &str,
+    host: &str,
+    port: u16,
+    content_length: u32,
+    session_id: &str,
+    authorization: &str,
+) -> String {
+    let host = host_header(host, port);
+    format!(
+        "{method} {RPC_PATH} HTTP/1.1\r\n\
+         Accept: application/rpc\r\n\
+         Cache-Control: no-cache\r\n\
+         Connection: Keep-Alive\r\n\
+         Content-Length: {content_length}\r\n\
+         User-Agent: MSRPC\r\n\
+         Host: {host}\r\n\
+         Pragma: No-cache, ResourceTypeUuid=44e265dd-7daf-42cd-8560-3cdb6e7a2729, SessionId={session_id}\r\n\
+         Authorization: {authorization}\r\n\
+         \r\n"
+    )
+}
+
 #[derive(Debug)]
 pub struct Response {
     pub status: u16,
+    /// The reason phrase; an RPC proxy puts "RPC Error: <hex>" here
+    /// (MS-RPCH 2.1.2.1.3).
+    pub reason: String,
     pub headers: Vec<(String, String)>,
     /// Length of the head including the empty line.
     pub head_len: usize,
@@ -72,6 +112,24 @@ impl Response {
                 .parse()
                 .or_else(|_| proto(format!("bad Content-Length {v:?}"))),
         }
+    }
+
+    /// The error code of an RPC proxy's "RPC Error: <hex>[, EEInfo: ...]"
+    /// reason phrase (MS-RPCH 2.1.2.1.3).
+    pub fn rpc_error(&self) -> Option<u32> {
+        let rest = self.reason.strip_prefix("RPC Error: ")?;
+        let hex = rest.split([',', ' ']).next()?;
+        u32::from_str_radix(hex, 16).ok()
+    }
+
+    /// Whether any WWW-Authenticate header offers `scheme`, with or without
+    /// a token.
+    pub fn offers(&self, scheme: &str) -> bool {
+        self.headers_named("WWW-Authenticate").any(|v| {
+            v.split(' ')
+                .next()
+                .is_some_and(|s| s.eq_ignore_ascii_case(scheme))
+        })
     }
 
     /// The token of `WWW-Authenticate: <scheme> <token>`, base64-decoded.
@@ -110,6 +168,7 @@ pub fn parse_response(buf: &[u8]) -> Result<Option<Response>> {
         .next()
         .and_then(|s| s.parse().ok())
         .ok_or_else(|| crate::Error::Protocol(format!("bad status line {status_line:?}")))?;
+    let reason = parts.next().unwrap_or_default().to_string();
     let mut headers = Vec::new();
     for line in lines {
         let Some((n, v)) = line.split_once(':') else {
@@ -119,6 +178,7 @@ pub fn parse_response(buf: &[u8]) -> Result<Option<Response>> {
     }
     Ok(Some(Response {
         status,
+        reason,
         headers,
         head_len: end + 4,
     }))
@@ -182,6 +242,47 @@ mod tests {
         assert!(parse_response(b"SSH-2.0-x\r\n\r\n").is_err());
         assert!(parse_response(b"HTTP/1.1 abc x\r\n\r\n").is_err());
         assert!(parse_response(b"HTTP/1.1 200 OK\r\nNoColon\r\n\r\n").is_err());
+    }
+
+    #[test]
+    fn rpc_channel_request_headers() {
+        let r = rpc_channel_request(
+            "RPC_IN_DATA",
+            "gw.example",
+            443,
+            1 << 30,
+            "sid",
+            "NTLM Zm9v",
+        );
+        assert!(r.starts_with(
+            "RPC_IN_DATA /rpc/rpcproxy.dll?localhost:3388 HTTP/1.1\r\nAccept: application/rpc\r\n"
+        ));
+        for h in [
+            "Cache-Control: no-cache\r\n",
+            "Connection: Keep-Alive\r\n",
+            "Content-Length: 1073741824\r\n",
+            "User-Agent: MSRPC\r\n",
+            "Host: gw.example\r\n",
+            "SessionId=sid\r\n",
+            "Authorization: NTLM Zm9v\r\n",
+        ] {
+            assert!(r.contains(h), "missing {h:?}");
+        }
+        assert!(r.ends_with("\r\n\r\n"));
+        let r = rpc_channel_request("RPC_OUT_DATA", "gw", 8443, 76, "s", "a");
+        assert!(r.contains("Host: gw:8443\r\n") && r.contains("Content-Length: 76\r\n"));
+    }
+
+    #[test]
+    fn rpc_proxy_error_reason() {
+        let raw = b"HTTP/1.0 503 RPC Error: 6BA, EEInfo: AAAA\r\nContent-Length: 0\r\n\r\n";
+        let r = parse_response(raw).unwrap().unwrap();
+        assert_eq!(r.status, 503);
+        assert_eq!(r.rpc_error(), Some(0x6BA));
+        let raw = b"HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Negotiate\r\n\r\n";
+        let r = parse_response(raw).unwrap().unwrap();
+        assert_eq!(r.rpc_error(), None);
+        assert!(r.offers("negotiate") && !r.offers("NTLM"));
     }
 
     #[test]
