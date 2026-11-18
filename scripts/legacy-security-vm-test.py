@@ -2,7 +2,7 @@
 """Live test of legacy RDP security (Standard RDP Security, MS-RDPBCGR 5.3;
 RDP-73) against Windows' own RDP server in a throwaway lab clone.
 
-    python scripts/legacy-security-vm-test.py [--seconds 60]
+    python scripts/legacy-security-vm-test.py [--seconds 60] [--levels 1,2,3]
 
 The clone's RDP-Tcp listener is set to the RDP Security Layer
 (SecurityLayer=0, no NLA) and each encryption level in turn
@@ -14,7 +14,7 @@ The clone's RDP-Tcp listener is set to the RDP Security Layer
 2. Without a console the unknown server key is refused and its fingerprint
    printed (the same trust check as a TLS certificate, RDP-54).
 3. With `--legacy-security --expect-fingerprint`, the client records the
-   desktop for `--seconds` while the capture probe keeps drawing: exit 0, no
+   desktop for `--seconds` while a test window repaints at 30 fps: exit 0, no
    protocol error or MAC mismatch, the trace names the RC4 strength and
    level, and at least one RC4 key update (after 4,096 packets, 5.3.7)
    happens in a run.
@@ -39,6 +39,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 h = import_module("helper-vm-test")  # wc, ps, log, G
+VIDEO_WINDOW = import_module("video-vm-test").VIDEO_WINDOW  # repaints at 30 fps
 ROOT = Path(__file__).resolve().parent.parent
 RDP_TCP = r"HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp"
 
@@ -46,18 +47,16 @@ RDP_TCP = r"HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\R
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--seconds", type=int, default=60)
+    ap.add_argument("--levels", default="1,2,3",
+                    help="encryption levels to test (a key update needs 4,096 packets: "
+                         "use one level and --seconds 900 to see one)")
     a = ap.parse_args()
     meta = json.loads(subprocess.run(["cargo", "metadata", "--format-version", "1", "--no-deps"],
                                      cwd=ROOT, capture_output=True, text=True, check=True).stdout)
     target = Path(meta["target_directory"])
-    static = Path(str(target) + "-static")
-    subprocess.run(["cargo", "build", "--release", "--locked", "-p", "remora-agent",
-                    "--target-dir", str(static), "--message-format=short"], cwd=ROOT,
-                   env=dict(os.environ, RUSTFLAGS="-C target-feature=+crt-static"), check=True)
     subprocess.run(["cargo", "build", "--release", "-p", "remora", "--message-format=short"],
                    cwd=ROOT, check=True)
     remora = target / "release" / "remora.exe"
-    agent = static / "release" / "remora-agent.exe"
     work = Path(tempfile.mkdtemp(prefix="legacy-"))
     results = []
     updates = 0
@@ -76,7 +75,9 @@ def main() -> int:
         h.ps(rf"$p = Get-Content -Raw '{h.G}\pw.txt'; Remove-Item '{h.G}\pw.txt'; net user $env:USERNAME $p.Trim() | Out-Null",
              elevated=True)
         user = h.ps("$env:USERNAME").strip().splitlines()[-1]
-        h.wc("push", str(agent), h.G + r"\remora-agent.exe")
+        win = work / "video-window.ps1"
+        win.write_text(VIDEO_WINDOW, encoding="utf-8-sig")
+        h.wc("push", str(win), h.G + r"\video-window.ps1")
         env = dict(os.environ, RDP_PASSWORD=pw)
         host = "127.0.0.1:13389"
 
@@ -86,7 +87,9 @@ def main() -> int:
                                errors="replace", timeout=timeout)
             return r.returncode, r.stdout + r.stderr
 
-        for level, name in [(1, "low"), (2, "client compatible"), (3, "high")]:
+        names = {1: "low", 2: "client compatible", 3: "high"}
+        for level in [int(v) for v in a.levels.split(",")]:
+            name = names[level]
             h.ps(f"Set-ItemProperty '{RDP_TCP}' SecurityLayer 0; "
                  f"Set-ItemProperty '{RDP_TCP}' UserAuthentication 0; "
                  f"Set-ItemProperty '{RDP_TCP}' MinEncryptionLevel {level}", elevated=True)
@@ -110,7 +113,10 @@ def main() -> int:
                 continue
 
             # 3. Allowed: a drawing session, encrypted both ways.
-            h.wc("exec-background", rf'"{h.G}\remora-agent.exe" capture-probe {a.seconds}')
+            # A window repainting at 30 fps: enough server packets for a key
+            # update (4,096 per direction) within a few minutes.
+            h.wc("exec-background",
+                 rf'powershell -NoProfile -ExecutionPolicy Bypass -File "{h.G}\video-window.ps1" -Seconds {a.seconds + 30}')
             h.wc("exec-background", r"explorer.exe C:\Windows\System32")
             log = work / f"level{level}.log"
             t = time.time()
