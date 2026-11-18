@@ -11,7 +11,15 @@
 //! `Cmd` in bits 4-7. Field sizes 0, 1, 2 mean 1, 2, 4 bytes.
 //!
 //! Not supported: compressed data (MS-RDPEDYC 2.2.3.3, 2.2.3.4) closes the
-//! channel it arrives on; Soft-Sync (2.2.5) is ignored.
+//! channel it arrives on.
+//!
+//! Multitransport (MS-RDPEDYC 1.3.1.2, 3.1.5.3): DVC PDUs may also travel in
+//! a UDP tunnel ([`crate::multitransport`]); [`Drdynvc::process_tunnel`]
+//! takes them, and what goes back on the tunnel is collected for
+//! [`Drdynvc::take_tunnel_out`]. A channel the server creates over the
+//! tunnel, or names in a Soft-Sync Request (2.2.5.1), sends on the tunnel
+//! from then on; every other channel keeps the static channel. Tunnel data
+//! that arrives before the Soft-Sync Request waits for it (3.2.5.3.1).
 //!
 //! Limits: a message is at most [`DynamicChannel::max_message_size`] bytes
 //! ([`DEFAULT_MAX_MESSAGE`] unless the channel says otherwise); a larger
@@ -47,6 +55,19 @@ pub const CMD_DATA_FIRST_COMPRESSED: u8 = 0x06;
 pub const CMD_DATA_COMPRESSED: u8 = 0x07;
 /// DYNVC_SOFT_SYNC_REQUEST (MS-RDPEDYC 2.2.5.1).
 pub const CMD_SOFT_SYNC_REQUEST: u8 = 0x08;
+/// DYNVC_SOFT_SYNC_RESPONSE (MS-RDPEDYC 2.2.5.2).
+pub const CMD_SOFT_SYNC_RESPONSE: u8 = 0x09;
+
+/// Soft-Sync Request Flags (MS-RDPEDYC 2.2.5.1).
+pub const SOFT_SYNC_TCP_FLUSHED: u16 = 0x01;
+pub const SOFT_SYNC_CHANNEL_LIST_PRESENT: u16 = 0x02;
+/// TunnelType values (MS-RDPEDYC 2.2.5.1.1, 2.2.5.2).
+pub const TUNNELTYPE_UDPFECR: u32 = 0x01;
+pub const TUNNELTYPE_UDPFECL: u32 = 0x03;
+
+/// Tunnel PDUs kept while waiting for the Soft-Sync Request; more means
+/// the server is not doing Soft-Sync, and they are dropped.
+const MAX_HELD: usize = 4096;
 
 /// CreationStatus for a channel name the client does not know (an NTSTATUS
 /// carried as HRESULT, MS-RDPEDYC 2.2.2.2).
@@ -152,6 +173,8 @@ struct Dvc {
     /// ChannelId while open.
     id: Option<u32>,
     reasm: Option<Reassembly>,
+    /// Sends on the UDP tunnel instead of the static channel.
+    udp: bool,
 }
 
 /// The `drdynvc` static channel: client side of MS-RDPEDYC.
@@ -161,6 +184,17 @@ pub struct Drdynvc {
     version: u16,
     /// Reused per call so an idle tick does not allocate.
     out: DvcOut,
+    /// A UDP tunnel is up and the server was told (Initiate Multitransport
+    /// Response, S_OK): a Soft-Sync Request may be answered.
+    tunnel_ready: bool,
+    /// The Soft-Sync Request arrived and was answered.
+    soft_synced: bool,
+    /// The PDU being handled came from the tunnel.
+    from_tunnel: bool,
+    /// PDUs for the tunnel.
+    tunnel_out: ChannelOut,
+    /// Tunnel PDUs that came before the Soft-Sync Request.
+    held: Vec<Vec<u8>>,
 }
 
 impl Drdynvc {
@@ -172,10 +206,16 @@ impl Drdynvc {
                     handler,
                     id: None,
                     reasm: None,
+                    udp: false,
                 })
                 .collect(),
             version: 0,
             out: DvcOut::default(),
+            tunnel_ready: false,
+            soft_synced: false,
+            from_tunnel: false,
+            tunnel_out: ChannelOut::default(),
+            held: Vec::new(),
         }
     }
 
@@ -185,7 +225,92 @@ impl Drdynvc {
             handler,
             id: None,
             reasm: None,
+            udp: false,
         });
+    }
+
+    /// The UDP tunnel is ready and the server knows it: Soft-Sync may move
+    /// channels onto it (MS-RDPEDYC 3.1.5.3).
+    pub fn set_tunnel_ready(&mut self) {
+        self.tunnel_ready = true;
+    }
+
+    /// Open channels that send on the UDP tunnel.
+    pub fn channels_on_tunnel(&self) -> usize {
+        self.channels
+            .iter()
+            .filter(|d| d.udp && d.id.is_some())
+            .count()
+    }
+
+    /// One DVC PDU from a Tunnel Data PDU (MS-RDPEMT 2.2.2.3). Replies for
+    /// the static channel go to `out`, those for the tunnel to
+    /// [`Self::take_tunnel_out`].
+    pub fn process_tunnel(&mut self, msg: &[u8], out: &mut ChannelOut) -> Result<()> {
+        if !self.soft_synced {
+            if self.held.len() < MAX_HELD {
+                self.held.push(msg.to_vec());
+            } else {
+                trace!("dvc tunnel data before Soft-Sync dropped");
+            }
+            return Ok(());
+        }
+        self.from_tunnel = true;
+        let r = self.handle(msg, out);
+        self.from_tunnel = false;
+        r
+    }
+
+    /// DVC PDUs to send in Tunnel Data PDUs, in order.
+    pub fn take_tunnel_out(&mut self) -> Vec<Vec<u8>> {
+        self.tunnel_out.take()
+    }
+
+    /// DYNVC_SOFT_SYNC_REQUEST (MS-RDPEDYC 2.2.5.1, 3.2.5.3): the listed
+    /// channels move to the tunnel, the response goes out on the static
+    /// channel (2.2.5.2), then held tunnel PDUs are handled.
+    fn soft_sync(&mut self, r: &mut Reader, out: &mut ChannelOut) -> Result<()> {
+        if self.from_tunnel {
+            trace!("dvc soft-sync request on the tunnel ignored");
+            return Ok(());
+        }
+        if !self.tunnel_ready {
+            // No response: all channel data stays on the static channel
+            // (3.2.5.3.1).
+            trace!("dvc soft-sync request without a UDP tunnel ignored");
+            return Ok(());
+        }
+        r.skip(1)?; // Pad
+        let _length = r.u32()?;
+        let flags = r.u16()?;
+        let tunnels = r.u16()?;
+        if flags & SOFT_SYNC_CHANNEL_LIST_PRESENT != 0 {
+            for _ in 0..tunnels {
+                let ty = r.u32()?;
+                let n = r.u16()?;
+                for _ in 0..n {
+                    let id = r.u32()?;
+                    if ty != TUNNELTYPE_UDPFECR {
+                        continue;
+                    }
+                    if let Some(i) = self.find_open(id) {
+                        trace!("dvc {} moves to UDP", self.channels[i].handler.name());
+                        self.channels[i].udp = true;
+                    }
+                }
+            }
+        }
+        self.soft_synced = true;
+        out.send(soft_sync_response(&[TUNNELTYPE_UDPFECR]));
+        for msg in std::mem::take(&mut self.held) {
+            self.from_tunnel = true;
+            let r = self.handle(&msg, out);
+            self.from_tunnel = false;
+            if let Err(e) = r {
+                trace!("dvc tunnel PDU: {e}");
+            }
+        }
+        Ok(())
     }
 
     /// Negotiated DVC version (0 before the capabilities request).
@@ -211,9 +336,15 @@ impl Drdynvc {
         let Some(id) = d.id.take() else { return };
         d.reasm = None;
         d.handler.closed();
+        let udp = std::mem::take(&mut d.udp);
         self.out.msgs.clear();
         if send {
-            out.send(close_pdu(id));
+            // On the transport the channel used (MS-RDPEDYC 1.3.3.1).
+            if udp {
+                self.tunnel_out.send(close_pdu(id));
+            } else {
+                out.send(close_pdu(id));
+            }
         }
     }
 
@@ -226,8 +357,13 @@ impl Drdynvc {
                     self.out.msgs.clear();
                     return;
                 };
+                let sink = if self.channels[i].udp {
+                    &mut self.tunnel_out
+                } else {
+                    &mut *out
+                };
                 for msg in self.out.msgs.drain(..) {
-                    if let Err(e) = encode_data(id, &msg, out) {
+                    if let Err(e) = encode_data(id, &msg, sink) {
                         trace!("dvc {id}: {e}");
                     }
                 }
@@ -240,8 +376,13 @@ impl Drdynvc {
                 // What the handler queued before failing (a last error or
                 // a rejection for the peer) goes out before the close.
                 if let Some(id) = self.channels[i].id {
+                    let sink = if self.channels[i].udp {
+                        &mut self.tunnel_out
+                    } else {
+                        &mut *out
+                    };
                     for msg in self.out.msgs.drain(..) {
-                        if let Err(e) = encode_data(id, &msg, out) {
+                        if let Err(e) = encode_data(id, &msg, sink) {
                             trace!("dvc {id}: {e}");
                         }
                     }
@@ -257,7 +398,10 @@ impl Drdynvc {
     }
 
     /// DYNVC_CREATE_REQ (MS-RDPEDYC 2.2.2.1): answer with DYNVC_CREATE_RSP.
+    /// The response goes back on the transport the request came on, and a
+    /// channel created over the tunnel sends on it (MS-RDPEDYC 1.3.3.1).
     fn create(&mut self, id: u32, name: &[u8], out: &mut ChannelOut) {
+        let udp = self.from_tunnel;
         let found = self
             .channels
             .iter()
@@ -267,7 +411,12 @@ impl Drdynvc {
                 "dvc create {:?} ({id}): not found",
                 String::from_utf8_lossy(name)
             );
-            out.send(create_response(id, STATUS_NOT_FOUND));
+            let rsp = create_response(id, STATUS_NOT_FOUND);
+            if udp {
+                self.tunnel_out.send(rsp);
+            } else {
+                out.send(rsp);
+            }
             return;
         };
         // A second create for a name that is already open: the channel
@@ -280,7 +429,12 @@ impl Drdynvc {
                 "dvc create {} ({id}): refused, already open as {open}",
                 self.channels[i].handler.name()
             );
-            out.send(create_response(id, STATUS_REFUSED));
+            let rsp = create_response(id, STATUS_REFUSED);
+            if udp {
+                self.tunnel_out.send(rsp);
+            } else {
+                out.send(rsp);
+            }
             return;
         }
         // A channel id reused by the server, or a second create for the same
@@ -289,9 +443,18 @@ impl Drdynvc {
             self.close(j, false, out);
         }
         self.close(i, false, out);
-        trace!("dvc create {} ({id})", self.channels[i].handler.name());
-        out.send(create_response(id, 0));
+        trace!(
+            "dvc create {} ({id}){}",
+            self.channels[i].handler.name(),
+            if udp { " over UDP" } else { "" }
+        );
+        if udp {
+            self.tunnel_out.send(create_response(id, 0));
+        } else {
+            out.send(create_response(id, 0));
+        }
         self.channels[i].id = Some(id);
+        self.channels[i].udp = udp;
         let res = self.channels[i].handler.opened(&mut self.out);
         self.finish(i, res, out);
     }
@@ -356,19 +519,10 @@ impl Drdynvc {
     }
 }
 
-impl StaticChannel for Drdynvc {
-    fn name(&self) -> &str {
-        DRDYNVC
-    }
-
-    fn options(&self) -> u32 {
-        // mstsc: 0xC0800000.
-        CHANNEL_OPTION_INITIALIZED
-            | CHANNEL_OPTION_ENCRYPT_RDP
-            | crate::channel::CHANNEL_OPTION_COMPRESS_RDP
-    }
-
-    fn process(&mut self, msg: &[u8], out: &mut ChannelOut) -> Result<()> {
+impl Drdynvc {
+    /// One DVC PDU, from the static channel or (with `from_tunnel` set) the
+    /// UDP tunnel.
+    fn handle(&mut self, msg: &[u8], out: &mut ChannelOut) -> Result<()> {
         let mut r = Reader::new(msg);
         let hdr = r.u8()?;
         let cb_id = hdr & 0x03;
@@ -422,10 +576,27 @@ impl StaticChannel for Drdynvc {
                     self.close_local(i, LocalClose::Compressed, out);
                 }
             }
-            CMD_SOFT_SYNC_REQUEST => trace!("dvc soft-sync request ignored"),
+            CMD_SOFT_SYNC_REQUEST => self.soft_sync(&mut r, out)?,
             _ => trace!("dvc command {cmd:#x} ignored"),
         }
         Ok(())
+    }
+}
+
+impl StaticChannel for Drdynvc {
+    fn name(&self) -> &str {
+        DRDYNVC
+    }
+
+    fn options(&self) -> u32 {
+        // mstsc: 0xC0800000.
+        CHANNEL_OPTION_INITIALIZED
+            | CHANNEL_OPTION_ENCRYPT_RDP
+            | crate::channel::CHANNEL_OPTION_COMPRESS_RDP
+    }
+
+    fn process(&mut self, msg: &[u8], out: &mut ChannelOut) -> Result<()> {
+        self.handle(msg, out)
     }
 
     fn tick(&mut self, out: &mut ChannelOut) -> Result<()> {
@@ -508,6 +679,44 @@ pub fn close_pdu(id: u32) -> Vec<u8> {
     let mut v = Vec::with_capacity(5);
     v.put_u8(header(CMD_CLOSE, 0, cb));
     put_var(&mut v, cb, id);
+    v
+}
+
+/// DYNVC_SOFT_SYNC_RESPONSE (MS-RDPEDYC 2.2.5.2): the tunnels the client
+/// will write DVC data on.
+pub fn soft_sync_response(tunnels: &[u32]) -> Vec<u8> {
+    let mut v = Vec::with_capacity(6 + 4 * tunnels.len());
+    v.put_u8(header(CMD_SOFT_SYNC_RESPONSE, 0, 0));
+    v.put_u8(0); // Pad
+    v.put_u32(tunnels.len() as u32);
+    for t in tunnels {
+        v.put_u32(*t);
+    }
+    v
+}
+
+/// DYNVC_SOFT_SYNC_REQUEST (MS-RDPEDYC 2.2.5.1) with channel lists; the
+/// server side, for tests.
+pub fn soft_sync_request(lists: &[(u32, &[u32])]) -> Vec<u8> {
+    let mut body = Vec::new();
+    let flags = SOFT_SYNC_TCP_FLUSHED
+        | if lists.is_empty() {
+            0
+        } else {
+            SOFT_SYNC_CHANNEL_LIST_PRESENT
+        };
+    body.put_u16(flags);
+    body.put_u16(lists.len() as u16);
+    for (ty, ids) in lists {
+        body.put_u32(*ty);
+        body.put_u16(ids.len() as u16);
+        for id in *ids {
+            body.put_u32(*id);
+        }
+    }
+    let mut v = vec![header(CMD_SOFT_SYNC_REQUEST, 0, 0), 0];
+    v.put_u32(4 + body.len() as u32); // Length counts itself
+    v.extend(body);
     v
 }
 
@@ -1067,5 +1276,113 @@ mod tests {
         assert!(d.process(&[0x28, 0x01], &mut out).is_err()); // truncated len
         assert!(d.process(&[0x90], &mut out).is_ok()); // soft-sync ignored
         assert!(d.process(&[0xF0], &mut out).is_ok());
+        // A truncated Soft-Sync Request with a tunnel up is an error.
+        d.set_tunnel_ready();
+        assert!(d.process(&[0x80, 0x00, 0x0A], &mut out).is_err());
+    }
+
+    fn tunnel(d: &mut Drdynvc, msg: &[u8]) -> (Vec<Vec<u8>>, Vec<Vec<u8>>) {
+        let mut out = ChannelOut::default();
+        d.process_tunnel(msg, &mut out).unwrap();
+        (out.take(), d.take_tunnel_out())
+    }
+
+    #[test]
+    fn soft_sync_pdus() {
+        // MS-RDPEDYC 2.2.5.2: Cmd 9, Pad, NumberOfTunnels, TunnelsToSwitch.
+        assert_eq!(
+            soft_sync_response(&[TUNNELTYPE_UDPFECR]),
+            vec![0x90, 0, 1, 0, 0, 0, 1, 0, 0, 0]
+        );
+        // 2.2.5.1: Cmd 8, Pad, Length, Flags (TCP_FLUSHED | LIST_PRESENT),
+        // NumberOfTunnels, then TunnelType, NumberOfDVCs, ids.
+        assert_eq!(
+            soft_sync_request(&[(TUNNELTYPE_UDPFECR, &[3])]),
+            vec![
+                0x80, 0, 18, 0, 0, 0, 3, 0, 1, 0, 1, 0, 0, 0, 1, 0, 3, 0, 0, 0
+            ]
+        );
+    }
+
+    #[test]
+    fn soft_sync_without_a_tunnel_is_not_answered() {
+        let (ch, _log) = echo("ECHO");
+        let mut d = Drdynvc::new(vec![ch]);
+        feed(&mut d, &create_req(3, "ECHO"));
+        assert!(feed(&mut d, &soft_sync_request(&[(TUNNELTYPE_UDPFECR, &[3])])).is_empty());
+        // Data stays on the static channel.
+        assert_eq!(feed(&mut d, &[0x30, 0x03, b'x']).len(), 1);
+        assert!(d.take_tunnel_out().is_empty());
+        assert_eq!(d.channels_on_tunnel(), 0);
+    }
+
+    #[test]
+    fn soft_sync_moves_the_listed_channels_to_the_tunnel() {
+        let (a, log_a) = echo("A");
+        let (b, _log_b) = echo("B");
+        let mut d = Drdynvc::new(vec![a, b]);
+        feed(&mut d, &create_req(3, "A"));
+        feed(&mut d, &create_req(4, "B"));
+        // Tunnel data before the Soft-Sync Request waits (3.2.5.3.1).
+        assert_eq!(tunnel(&mut d, &[0x30, 0x03, b'1']), (vec![], vec![]));
+        assert!(log_a.lock().unwrap().msgs.is_empty());
+        d.set_tunnel_ready();
+        // Channel 3 on the reliable tunnel; channel 4 on a lossy one,
+        // which this client never opened, stays on TCP.
+        let req = soft_sync_request(&[(TUNNELTYPE_UDPFECR, &[3]), (TUNNELTYPE_UDPFECL, &[4])]);
+        let out = feed(&mut d, &req);
+        // The response on the static channel, then the held PDU is handled:
+        // its reply goes to the tunnel.
+        assert_eq!(out, vec![soft_sync_response(&[TUNNELTYPE_UDPFECR])]);
+        assert_eq!(log_a.lock().unwrap().msgs, vec![b"1".to_vec()]);
+        assert_eq!(d.take_tunnel_out(), vec![b"\x30\x03re:1".to_vec()]);
+        assert_eq!(d.channels_on_tunnel(), 1);
+        // Data for channel 3 from either side is answered on the tunnel...
+        assert_eq!(
+            tunnel(&mut d, &[0x30, 0x03, b'2']),
+            (vec![], vec![b"\x30\x03re:2".to_vec()])
+        );
+        // ...channel 4 keeps the static channel.
+        assert_eq!(
+            feed(&mut d, &[0x30, 0x04, b'k']),
+            vec![b"\x30\x04re:k".to_vec()]
+        );
+        assert!(d.take_tunnel_out().is_empty());
+        // Closing channel 3 answers on the tunnel and ends its UDP binding.
+        assert_eq!(
+            tunnel(&mut d, &[0x40, 0x03]),
+            (vec![], vec![vec![0x40, 0x03]])
+        );
+        assert_eq!(d.channels_on_tunnel(), 0);
+        // Reopened over TCP it is a TCP channel again.
+        let out = feed(&mut d, &create_req(5, "A"));
+        assert_eq!(out[0], vec![0x10, 0x05, 0, 0, 0, 0]);
+        assert!(d.take_tunnel_out().is_empty());
+    }
+
+    #[test]
+    fn a_channel_created_over_the_tunnel_uses_it() {
+        let (ch, log) = echo("ECHO");
+        let mut d = Drdynvc::new(vec![ch]);
+        d.set_tunnel_ready();
+        feed(&mut d, &soft_sync_request(&[]));
+        let (stat, udp) = tunnel(&mut d, &create_req(9, "ECHO"));
+        assert!(stat.is_empty());
+        assert_eq!(
+            udp,
+            vec![vec![0x10, 0x09, 0, 0, 0, 0], vec![0x30, 0x09, b'h', b'i']]
+        );
+        // An unknown name over the tunnel is refused over the tunnel.
+        let (stat, udp) = tunnel(&mut d, &create_req(10, "NOPE"));
+        assert!(stat.is_empty());
+        assert_eq!(udp, vec![create_response(10, STATUS_NOT_FOUND)]);
+        // A large reply is fragmented as on the static channel.
+        let big = vec![b'z'; 5000];
+        let mut msg = vec![0x30, 0x09];
+        msg.extend_from_slice(&big);
+        let (_, udp) = tunnel(&mut d, &msg);
+        assert_eq!(udp.len(), 4);
+        assert_eq!(udp[0][0], 0x24);
+        assert_eq!(log.lock().unwrap().msgs, vec![big]);
     }
 }

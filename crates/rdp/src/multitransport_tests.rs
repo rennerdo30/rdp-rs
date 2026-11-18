@@ -11,7 +11,7 @@ fn hex(s: &str) -> Vec<u8> {
         .collect()
 }
 
-const COOKIE: [u8; 16] = [
+pub(crate) const COOKIE: [u8; 16] = [
     0xe2, 0xf0, 0xd1, 0x08, 0x56, 0x7f, 0xb4, 0x3a, 0xdc, 0xf4, 0xb3, 0xdc, 0x16, 0x92, 0x1e, 0x3a,
 ];
 
@@ -132,38 +132,49 @@ impl DatagramSocket for MemSock {
     }
 }
 
-fn identity(name: &str) -> (Vec<u8>, Vec<u8>) {
+pub(crate) fn identity(name: &str) -> (Vec<u8>, Vec<u8>) {
     let key = rcgen::KeyPair::generate().unwrap();
     let params = rcgen::CertificateParams::new(vec![name.to_string()]).unwrap();
     let cert = params.self_signed(&key).unwrap();
     (cert.der().to_vec(), key.serialize_der())
 }
 
-/// The server side: RDP-UDP-R, rustls and the tunnel PDUs. It echoes
-/// every Tunnel Data PDU back with "re:" in front.
-struct FakeServer {
+/// The server side: RDP-UDP-R, rustls and the tunnel PDUs. With `echo`
+/// it answers every Tunnel Data PDU with its payload after "re:".
+pub(crate) struct FakeServer {
     udp: Option<Endpoint>,
     tls: ServerConnection,
     plain: Vec<u8>,
     hr: u32,
-    create: Option<(u32, [u8; 16])>,
-    data: Vec<Vec<u8>>,
+    pub(crate) echo: bool,
+    pub(crate) create: Option<(u32, [u8; 16])>,
+    pub(crate) data: Vec<Vec<u8>>,
 }
 
 impl FakeServer {
-    fn new(cert: &[u8], key: &[u8], hr: u32) -> FakeServer {
+    pub(crate) fn new(cert: &[u8], key: &[u8], hr: u32) -> FakeServer {
         let config = crate::server::transport::tls_config(cert.to_vec(), key.to_vec()).unwrap();
         FakeServer {
             udp: None,
             tls: ServerConnection::new(config).unwrap(),
             plain: Vec::new(),
             hr,
+            echo: true,
             create: None,
             data: Vec::new(),
         }
     }
 
-    fn step(&mut self, incoming: Vec<Vec<u8>>, now: Instant) -> Vec<Vec<u8>> {
+    /// Sends one higher-layer PDU in a Tunnel Data PDU.
+    pub(crate) fn send(&mut self, data: &[u8]) {
+        self.tls
+            .writer()
+            .write_all(&tunnel_data(data).unwrap())
+            .unwrap();
+    }
+
+    /// Takes datagrams from the client; returns those for the client.
+    pub(crate) fn step(&mut self, incoming: Vec<Vec<u8>>, now: Instant) -> Vec<Vec<u8>> {
         for d in incoming {
             match &mut self.udp {
                 Some(u) => u.on_datagram(&d, now),
@@ -205,6 +216,10 @@ impl FakeServer {
                 }
                 ACTION_DATA => {
                     self.data.push(pdu.payload.to_vec());
+                    if !self.echo {
+                        self.plain.drain(..n);
+                        continue;
+                    }
                     let echo = [b"re:".as_slice(), pdu.payload].concat();
                     self.tls
                         .writer()
@@ -271,7 +286,7 @@ impl Rig {
             if !self.lost() {
                 // Reordered: every other datagram jumps the queue.
                 let mut w = self.wire.lock().unwrap();
-                if self.rng % 2 == 0 {
+                if self.rng.is_multiple_of(2) {
                     w.to_client.push_front(d);
                 } else {
                     w.to_client.push_back(d);

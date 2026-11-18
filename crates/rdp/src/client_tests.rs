@@ -52,6 +52,7 @@ fn session() -> (Client, TcpStream) {
         follow: false,
         surface: None,
         orders: None,
+        udp: Udp::off(),
     };
     (client, server)
 }
@@ -628,4 +629,244 @@ fn progress_reports_the_steps_reached() {
         *seen.lock().unwrap(),
         [ConnectStep::Resolving, ConnectStep::Tcp]
     );
+}
+
+/// Client Send Data Requests that are waiting, without blocking.
+fn requests(server: &mut TcpStream) -> Vec<(u16, Vec<u8>)> {
+    let mut v = Vec::new();
+    loop {
+        server.set_nonblocking(true).unwrap();
+        let ready = server.peek(&mut [0u8; 1]).is_ok();
+        server.set_nonblocking(false).unwrap();
+        if !ready {
+            return v;
+        }
+        v.push(read_request(server));
+    }
+}
+
+/// An Initiate Multitransport Request (MS-RDPBCGR 2.2.15.1) for `protocol`.
+fn initiate_request(protocol: u16) -> Vec<u8> {
+    let mut v = vec![0x02, 0x00, 0x00, 0x00];
+    v.extend(7u32.to_le_bytes());
+    v.extend(protocol.to_le_bytes());
+    v.extend([0, 0]);
+    v.extend(crate::multitransport::tests::COOKIE);
+    v
+}
+
+/// A DVC that answers each message with "re:" and the message.
+struct EchoDvc;
+
+impl crate::DynamicChannel for EchoDvc {
+    fn name(&self) -> &str {
+        "ECHO"
+    }
+    fn process(&mut self, msg: &[u8], out: &mut crate::DvcOut) -> Result<()> {
+        out.send([b"re:".as_slice(), msg].concat());
+        Ok(())
+    }
+}
+
+/// A session with the message channel 1004 and `drdynvc` on 1005 holding
+/// [`EchoDvc`], UDP offered to a server with the given multitransport flags.
+fn udp_session(server_flags: u32, certificate: Vec<u8>) -> (Client, TcpStream) {
+    let (mut client, server) = session();
+    client.message_channel = Some(1004);
+    client.channels.push(Slot {
+        id: 1005,
+        handler: Box::new(crate::Drdynvc::new(vec![Box::new(EchoDvc)])),
+        defrag: Default::default(),
+        failed: false,
+    });
+    client.udp = Udp {
+        offered: true,
+        server_flags,
+        state: UdpState::Offered,
+        certificate,
+        ..Udp::off()
+    };
+    (client, server)
+}
+
+/// Static `drdynvc` data from the server: one chunk.
+fn dvc_indication(pdu: &[u8]) -> Vec<u8> {
+    indication(1005, &channel::chunk(pdu, false).remove(0))
+}
+
+#[test]
+fn multitransport_requests_are_declined_unless_usable() {
+    use crate::multitransport::{
+        E_ABORT, PROTOCOL_UDPFECL, PROTOCOL_UDPFECR, SOFTSYNC_TCP_TO_UDP, TRANSPORTTYPE_UDPFECR,
+        initiate_response,
+    };
+    let declined = |client: &mut Client, server: &mut TcpStream, protocol| {
+        server
+            .write_all(&indication(1004, &initiate_request(protocol)))
+            .unwrap();
+        let mut got = Vec::new();
+        for _ in 0..50 {
+            assert!(
+                client
+                    .poll(Duration::from_millis(10))
+                    .unwrap()
+                    .closed
+                    .is_none()
+            );
+            got.extend(requests(server));
+            if !got.is_empty() {
+                break;
+            }
+        }
+        assert_eq!(got, vec![(1004, initiate_response(7, E_ABORT))]);
+    };
+    // The lossy transport needs DTLS.
+    let flags = TRANSPORTTYPE_UDPFECR | SOFTSYNC_TCP_TO_UDP;
+    let (mut client, mut server) = udp_session(flags, vec![1]);
+    declined(&mut client, &mut server, PROTOCOL_UDPFECL);
+    assert!(client.udp.tunnel.is_none());
+    // A server without Soft-Sync.
+    let (mut client, mut server) = udp_session(TRANSPORTTYPE_UDPFECR, vec![1]);
+    declined(&mut client, &mut server, PROTOCOL_UDPFECR);
+    // UDP not offered (the setting is off).
+    let (mut client, mut server) = session();
+    client.message_channel = Some(1004);
+    declined(&mut client, &mut server, PROTOCOL_UDPFECR);
+    assert_eq!(client.stats().udp.state, UdpState::Off);
+}
+
+#[test]
+fn a_udp_setup_failure_keeps_the_session_on_tcp() {
+    use crate::multitransport::{CLIENT_FLAGS, E_ABORT, PROTOCOL_UDPFECR, initiate_response};
+    // Nothing listens on the server's UDP port: the tunnel fails (port
+    // unreachable, or at the latest the setup timeout) and the request is
+    // declined; the session goes on.
+    let (mut client, mut server) = udp_session(CLIENT_FLAGS, vec![1]);
+    server
+        .write_all(&indication(1004, &initiate_request(PROTOCOL_UDPFECR)))
+        .unwrap();
+    let start = Instant::now();
+    let mut got = Vec::new();
+    while got.is_empty() && start.elapsed() < Duration::from_secs(15) {
+        assert!(
+            client
+                .poll(Duration::from_millis(20))
+                .unwrap()
+                .closed
+                .is_none()
+        );
+        got.extend(requests(&mut server));
+    }
+    assert_eq!(got, vec![(1004, initiate_response(7, E_ABORT))]);
+    assert_eq!(client.stats().udp.state, UdpState::Failed);
+    assert!(client.udp_failure().is_some());
+    // TCP still works: a DVC message is answered on the static channel.
+    server.write_all(&dvc_indication(&[0x50, 0, 1, 0])).unwrap();
+    let mut got = Vec::new();
+    for _ in 0..50 {
+        assert!(
+            client
+                .poll(Duration::from_millis(10))
+                .unwrap()
+                .closed
+                .is_none()
+        );
+        got.extend(requests(&mut server));
+        if !got.is_empty() {
+            break;
+        }
+    }
+    assert_eq!(got[0].0, 1005);
+}
+
+#[test]
+fn udp_tunnel_carries_the_dynamic_channels_after_soft_sync() {
+    use crate::dvc::{TUNNELTYPE_UDPFECR, soft_sync_request, soft_sync_response};
+    use crate::multitransport::tests::{COOKIE, FakeServer, identity};
+    use crate::multitransport::{CLIENT_FLAGS, PROTOCOL_UDPFECR, S_OK, initiate_response};
+    use std::net::UdpSocket;
+
+    let (cert, key) = identity("broker.example");
+    let (mut client, mut server) = udp_session(CLIENT_FLAGS, cert.clone());
+    // The fake server's UDP side on the TCP connection's port (3.1.3).
+    let udp = UdpSocket::bind(server.local_addr().unwrap()).unwrap();
+    udp.set_nonblocking(true).unwrap();
+    let mut fake = FakeServer::new(&cert, &key, S_OK);
+    fake.echo = false;
+    let mut peer = None;
+    let mut seen: Vec<(u16, Vec<u8>)> = Vec::new();
+    let mut pump = |client: &mut Client,
+                    server: &mut TcpStream,
+                    fake: &mut FakeServer,
+                    seen: &mut Vec<(u16, Vec<u8>)>| {
+        let out = client.poll(Duration::from_millis(2)).unwrap();
+        assert!(out.closed.is_none(), "{:?}", out.closed);
+        let mut buf = [0u8; 2048];
+        let mut incoming = Vec::new();
+        while let Ok((n, from)) = udp.recv_from(&mut buf) {
+            peer = Some(from);
+            incoming.push(buf[..n].to_vec());
+        }
+        for d in fake.step(incoming, Instant::now()) {
+            udp.send_to(&d, peer.unwrap()).unwrap();
+        }
+        seen.extend(requests(server));
+    };
+
+    // The DVC host opens ECHO as channel 3 over TCP.
+    server.write_all(&dvc_indication(&[0x50, 0, 1, 0])).unwrap();
+    server
+        .write_all(&dvc_indication(b"\x10\x03ECHO\0"))
+        .unwrap();
+    server
+        .write_all(&indication(1004, &initiate_request(PROTOCOL_UDPFECR)))
+        .unwrap();
+    for _ in 0..2_000 {
+        pump(&mut client, &mut server, &mut fake, &mut seen);
+        if client.stats().udp.state == UdpState::Active && !seen.is_empty() {
+            break;
+        }
+    }
+    assert_eq!(client.stats().udp.state, UdpState::Active);
+    // The tunnel carried the request's ID and cookie (MS-RDPEMT 2.2.2.1),
+    // and the server heard S_OK on the message channel (2.2.15.2).
+    assert_eq!(fake.create, Some((7, COOKIE)));
+    for _ in 0..50 {
+        pump(&mut client, &mut server, &mut fake, &mut seen);
+    }
+    assert!(seen.contains(&(1004, initiate_response(7, S_OK))));
+
+    // Soft-Sync moves channel 3 (2.2.5.1); the answer comes on TCP.
+    seen.clear();
+    server
+        .write_all(&dvc_indication(&soft_sync_request(&[(
+            TUNNELTYPE_UDPFECR,
+            &[3],
+        )])))
+        .unwrap();
+    for _ in 0..500 {
+        pump(&mut client, &mut server, &mut fake, &mut seen);
+        if !seen.is_empty() {
+            break;
+        }
+    }
+    let rsp = soft_sync_response(&[TUNNELTYPE_UDPFECR]);
+    assert_eq!(seen.len(), 1);
+    assert_eq!((seen[0].0, &seen[0].1[8..]), (1005, &rsp[..]));
+
+    // Channel data now flows over UDP both ways.
+    fake.send(b"\x30\x03ping");
+    for _ in 0..2_000 {
+        pump(&mut client, &mut server, &mut fake, &mut seen);
+        if !fake.data.is_empty() {
+            break;
+        }
+    }
+    assert_eq!(fake.data, vec![b"\x30\x03re:ping".to_vec()]);
+    let st = client.stats().udp;
+    assert_eq!((st.state, st.channels), (UdpState::Active, 1));
+    assert!(st.bytes_in > 0 && st.bytes_out > 0);
+    assert!(client.stats().bytes_in >= st.bytes_in);
+    // Nothing for the channel went over TCP after the switch.
+    assert_eq!(seen.len(), 1);
 }

@@ -232,6 +232,36 @@ pub fn udp_socket(server: SocketAddr) -> io::Result<UdpSocket> {
     Ok(s)
 }
 
+/// Where a session's UDP transport stands, for a statistics display.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum UdpState {
+    /// Not offered (the setting is off, a gateway, or the server cannot).
+    #[default]
+    Off,
+    /// Offered; the server has not asked for a tunnel (yet).
+    Offered,
+    /// The tunnel is being set up.
+    Connecting,
+    /// The tunnel is up; [`UdpStats::channels`] dynamic channels use it.
+    Active,
+    /// Setting it up failed; the session stays on TCP.
+    Failed,
+}
+
+/// The UDP transport's state and counters ([`crate::ClientStats::udp`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct UdpStats {
+    pub state: UdpState,
+    /// Dynamic channels sending on the tunnel.
+    pub channels: usize,
+    /// The RDP-UDP smoothed round-trip time.
+    pub rtt: Option<Duration>,
+    /// Datagram bytes, headers included.
+    pub bytes_in: u64,
+    pub bytes_out: u64,
+    pub retransmits: u64,
+}
+
 /// What the tunnel reports from [`Tunnel::poll`].
 #[derive(Debug, PartialEq, Eq)]
 pub enum TunnelEvent {
@@ -376,11 +406,12 @@ impl Tunnel {
                 }
             }
         }
-        if self.phase == Phase::Udp && self.udp.state() == State::Established {
-            if let Err(e) = self.start_tls() {
-                self.fail(format!("TLS setup failed: {e}"), &mut ev);
-                return ev;
-            }
+        if self.phase == Phase::Udp
+            && self.udp.state() == State::Established
+            && let Err(e) = self.start_tls()
+        {
+            self.fail(format!("TLS setup failed: {e}"), &mut ev);
+            return ev;
         }
         if self.tls.is_some()
             && let Err(e) = self.receive_tls(&mut ev)
@@ -507,4 +538,4 @@ fn split_records(mut buf: &[u8]) -> Vec<&[u8]> {
 
 #[cfg(test)]
 #[path = "multitransport_tests.rs"]
-mod tests;
+pub(crate) mod tests;

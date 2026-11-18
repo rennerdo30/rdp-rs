@@ -2329,6 +2329,12 @@ pub fn sample_stats() -> Ui {
             input_ms: Some((28.4, 41.0)),
             repaints_per_s: 58.0,
             screen_ms: Some((2.4, 7.0)),
+            udp: rdp::multitransport::UdpStats {
+                state: rdp::multitransport::UdpState::Active,
+                channels: 4,
+                rtt: Some(std::time::Duration::from_millis(12)),
+                ..Default::default()
+            },
         });
     }
     m

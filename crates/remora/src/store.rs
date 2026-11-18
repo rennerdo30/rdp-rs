@@ -419,6 +419,10 @@ pub struct Quality {
     /// Touch and pen go to the session as touch and pen (MS-RDPEI) when the
     /// server offers it; off, they act as the mouse. Applies live.
     pub touch: bool,
+    /// Dynamic channels (graphics, sound, input) over UDP when the server
+    /// offers it (MS-RDPEMT); TCP whenever UDP fails. Off by default until
+    /// proven against servers; missing in older files: off.
+    pub udp: bool,
 }
 
 /// Bulk compression setting, saved by name.
@@ -493,6 +497,7 @@ impl Quality {
             compression: Comp::Off,
             gfx: true,
             touch: true,
+            udp: false,
         }
     }
 
@@ -501,6 +506,7 @@ impl Quality {
         cfg.connection_type = ct;
         cfg.color_depth = rdp::experience::valid_color_depth(self.color_depth);
         cfg.compression = self.compression.library();
+        cfg.multitransport = self.udp;
         if self.gfx {
             cfg.graphics = rdp::Graphics::Gfx;
             #[cfg(windows)]
@@ -1546,6 +1552,26 @@ mod tests {
         };
         let back: Quality = serde_json::from_str(&serde_json::to_string(&off).unwrap()).unwrap();
         assert!(!back.touch);
+    }
+
+    #[test]
+    fn udp_is_off_unless_switched_on() {
+        assert!(!Quality::default().udp);
+        // Saved before the setting existed.
+        let o: SessionOptions =
+            serde_json::from_str(r#"{"quality":{"connection":1,"color_depth":16}}"#).unwrap();
+        assert!(!o.quality.udp);
+        let mut cfg = rdp::Config::new("h", "u", "p");
+        o.quality.apply(&mut cfg);
+        assert!(!cfg.multitransport);
+        let on = Quality {
+            udp: true,
+            ..Quality::default()
+        };
+        let back: Quality = serde_json::from_str(&serde_json::to_string(&on).unwrap()).unwrap();
+        assert!(back.udp);
+        back.apply(&mut cfg);
+        assert!(cfg.multitransport);
     }
 
     #[test]

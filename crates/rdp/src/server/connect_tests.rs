@@ -100,6 +100,7 @@ fn client_settings<'a>(
         monitors: None,
         redirected_session_id: None,
         redirected_smartcard: false,
+        multitransport: 0,
     }
 }
 

@@ -51,6 +51,7 @@ fn up_to_logon(s: &mut ServerSession) -> Credentials {
         monitors: None,
         redirected_session_id: None,
         redirected_smartcard: false,
+        multitransport: 0,
     };
     let initial = mcs::connect_initial(&crate::gcc::conference_create_request(&settings));
     assert!(s.handle(&x224::data(&initial)).unwrap().is_empty());
@@ -245,6 +246,7 @@ fn out_of_order_pdus_are_errors() {
         monitors: None,
         redirected_session_id: None,
         redirected_smartcard: false,
+        multitransport: 0,
     };
     let initial = mcs::connect_initial(&crate::gcc::conference_create_request(&settings));
     assert!(s.handle(&x224::data(&initial)).is_err());

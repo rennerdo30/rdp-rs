@@ -712,16 +712,16 @@ impl Endpoint {
                 );
             }
             // Our ACK was lost and the SYN+ACK came again.
-            State::Established if self.client && flags & FLAG_ACK != 0 => {
-                if sd.initial_seq == self.peer_isn {
-                    self.ack_due = true;
-                }
+            State::Established
+                if self.client && flags & FLAG_ACK != 0 && sd.initial_seq == self.peer_isn =>
+            {
+                self.ack_due = true;
             }
             // The SYN+ACK was lost and the SYN came again.
-            State::SynReceived | State::Established if !self.client => {
-                if sd.initial_seq == self.peer_isn {
-                    self.syn_at = None;
-                }
+            State::SynReceived | State::Established
+                if !self.client && sd.initial_seq == self.peer_isn =>
+            {
+                self.syn_at = None;
             }
             _ => {}
         }

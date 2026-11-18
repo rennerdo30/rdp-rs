@@ -2548,7 +2548,19 @@ impl ApplicationHandler<UserEvent> for App {
                 self.dropped(id, why, None)
             }
             session::Event::Failed { why, failure } => self.failed(id, why, failure),
-            session::Event::Dropped { why, cookie } => self.dropped(id, why, cookie),
+            session::Event::Dropped {
+                why,
+                cookie,
+                udp_failed,
+            } => {
+                if udp_failed && let Some(s) = self.sessions.get_mut(&id) {
+                    // UDP failed (blocked, lost or refused): this tab's
+                    // reconnects stay on TCP.
+                    rdp::trace!("ui: session {id}: UDP failed; reconnects use TCP only");
+                    s.cfg.multitransport = false;
+                }
+                self.dropped(id, why, cookie)
+            }
             session::Event::Redirected { cfg, to } => self.redirected(id, *cfg, to),
             session::Event::Stats(mut st) => {
                 let Some(m) = &mut self.win else { return };

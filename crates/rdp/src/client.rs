@@ -17,6 +17,7 @@ use crate::gateway;
 use crate::gcc;
 use crate::input::{InputEvent, fastpath_input};
 use crate::mcs::{self, DomainPdu};
+use crate::multitransport::{self, InitiateRequest, Tunnel, TunnelEvent, UdpState, UdpStats};
 use crate::pdu::{self, AutoReconnectCookie, DemandActive, SaveSessionInfo};
 use crate::pointer::{PointerCache, PointerUpdate};
 use crate::progress::{ConnectStep, report};
@@ -132,6 +133,12 @@ pub struct Config {
     /// Told each step of the connection sequence as it starts (for a
     /// progress display); None reports nothing.
     pub progress: Option<crate::progress::ConnectProgress>,
+    /// Offer a UDP transport for the dynamic channels (MS-RDPBCGR 2.2.15,
+    /// MS-RDPEMT, MS-RDPEUDP). Only on a direct connection to a server
+    /// that takes extended client data and does Soft-Sync; any failure
+    /// while setting it up keeps the session on TCP. Off by default, until
+    /// proven against servers.
+    pub multitransport: bool,
 }
 
 impl Config {
@@ -167,6 +174,7 @@ impl Config {
             drawing_orders: false,
             bitmap_cache_dir: None,
             progress: None,
+            multitransport: false,
         }
     }
 }
@@ -218,11 +226,14 @@ pub struct PollOutcome {
 /// What [`Client::stats`] reports.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct ClientStats {
-    /// Bytes received and sent on the connection (TLS records included).
+    /// Bytes received and sent on the connection (TLS records included),
+    /// the UDP transport's datagrams included.
     pub bytes_in: u64,
     pub bytes_out: u64,
     /// The graphics pipeline's statistics, in [`crate::Graphics::Gfx`] mode.
     pub gfx: Option<crate::gfx::GfxStats>,
+    /// The UDP transport (MS-RDPEMT): whether the session uses it.
+    pub udp: UdpStats,
 }
 
 /// Why a session ended, and whether an auto-reconnect (MS-RDPBCGR 5.5) fits.
@@ -330,6 +341,39 @@ pub struct Client {
     surface: Option<crate::surfcmd::SurfaceCommands>,
     /// Drawing orders and their caches, when [`Config::drawing_orders`] is set.
     orders: Option<Box<crate::orders::Orders>>,
+    /// The UDP side channel and its bookkeeping (MS-RDPEMT).
+    udp: Udp,
+}
+
+/// The session's multitransport state.
+struct Udp {
+    /// Client Multitransport Channel Data was sent.
+    offered: bool,
+    /// The server's Multitransport Channel Data flags (2.2.1.4.6).
+    server_flags: u32,
+    state: UdpState,
+    /// Dynamic channels on the tunnel, as of the last poll.
+    channels: usize,
+    tunnel: Option<Tunnel>,
+    /// Why setting it up failed.
+    failure: Option<String>,
+    /// The main connection's certificate: the tunnel's TLS must present it.
+    certificate: Vec<u8>,
+}
+
+impl Udp {
+    /// Not offered.
+    fn off() -> Udp {
+        Udp {
+            offered: false,
+            server_flags: 0,
+            state: UdpState::Off,
+            channels: 0,
+            tunnel: None,
+            failure: None,
+            certificate: Vec::new(),
+        }
+    }
 }
 
 /// Connection-sequence traffic that is not the I/O channel PDU being waited
@@ -340,12 +384,26 @@ struct EarlyIo {
     user_id: u16,
     message_channel: Option<u16>,
     autodetect: AutoDetect,
+    /// Initiate Multitransport Requests (2.2.15.1), started once the
+    /// session exists.
+    multitransport: Vec<InitiateRequest>,
 }
 
 impl EarlyIo {
     /// Handles one PDU that is not for the I/O channel.
     fn take(&mut self, f: &mut Framer, channel: u16, data: &[u8]) -> Result<()> {
         if Some(channel) == self.message_channel {
+            match multitransport::parse_initiate_request(data) {
+                Ok(Some(req)) => {
+                    self.multitransport.push(req);
+                    return Ok(());
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    trace!("multitransport request ignored: {e}");
+                    return Ok(());
+                }
+            }
             if let Some(rsp) = self.autodetect.on_pdu(data, Instant::now()) {
                 send_io(f, self.user_id, channel, &rsp)?;
             }
@@ -731,6 +789,15 @@ impl Client {
         let (width, height) = desktop.as_ref().map_or((cfg.width, cfg.height), |d| {
             (d.width as u16, d.height as u16)
         });
+        // UDP (MS-RDPEMT 1.5): a direct connection, the DRDYNVC channel,
+        // and a server that takes extended client data (2.2.1.3.8).
+        let offer_udp = cfg.multitransport
+            && cfg.gateway.is_none()
+            && extended_data
+            && handlers.iter().any(|h| h.name() == crate::dvc::DRDYNVC);
+        if cfg.multitransport && !offer_udp {
+            trace!("UDP transport not offered (gateway, no extended data or no drdynvc)");
+        }
         let settings = gcc::ClientSettings {
             width,
             height,
@@ -745,6 +812,11 @@ impl Client {
             monitors: desktop.as_ref().filter(|_| extended_data),
             redirected_session_id: redirection.map(|r| r.session_id),
             redirected_smartcard: redirection.is_some_and(Redirection::smartcard_logon),
+            multitransport: if offer_udp {
+                multitransport::CLIENT_FLAGS
+            } else {
+                0
+            },
         };
         f.write(&x224::data(&mcs::connect_initial(
             &gcc::conference_create_request(&settings),
@@ -775,6 +847,7 @@ impl Client {
             user_id,
             message_channel: server.message_channel,
             autodetect: AutoDetect::default(),
+            multitransport: Vec::new(),
         };
         let info = pdu::ClientInfo {
             domain: &domain,
@@ -931,12 +1004,26 @@ impl Client {
             orders: cfg
                 .drawing_orders
                 .then(|| Box::new(crate::orders::Orders::new(cfg.bitmap_cache_dir.as_deref()))),
+            udp: Udp {
+                offered: offer_udp,
+                server_flags: server.multitransport,
+                state: if offer_udp && server.multitransport != 0 {
+                    UdpState::Offered
+                } else {
+                    UdpState::Off
+                },
+                certificate: cert,
+                ..Udp::off()
+            },
         };
         // 7. Finalization; the Font Map reply is handled by the session loop.
         report(progress, ConnectStep::FirstPicture);
         client.activate(&demand)?;
         for (channel, data) in early.queued {
             client.channel_data(channel, &data)?;
+        }
+        for req in early.multitransport {
+            client.multitransport_request(req)?;
         }
         client.f.set_read_timeout(Duration::from_millis(2))?;
         Ok(Hop::Done(Box::new(client)))
@@ -1022,15 +1109,175 @@ impl Client {
         &self.info
     }
 
-    /// Traffic so far and the graphics pipeline's decoding statistics, for
-    /// a statistics display; rates come from comparing two readings.
+    /// Traffic so far, the graphics pipeline's decoding statistics and the
+    /// UDP transport, for a statistics display; rates come from comparing
+    /// two readings.
     pub fn stats(&self) -> ClientStats {
         let (bytes_in, bytes_out) = self.f.traffic();
+        let udp = self.udp_stats();
         ClientStats {
-            bytes_in,
-            bytes_out,
+            bytes_in: bytes_in + udp.bytes_in,
+            bytes_out: bytes_out + udp.bytes_out,
             gfx: self.gfx.as_ref().map(|g| g.stats()),
+            udp,
         }
+    }
+
+    fn udp_stats(&self) -> UdpStats {
+        let mut s = UdpStats {
+            state: self.udp.state,
+            channels: self.udp.channels,
+            ..UdpStats::default()
+        };
+        if let Some(t) = &self.udp.tunnel {
+            let e = t.stats();
+            s.rtt = t.rtt();
+            s.bytes_in = e.bytes_in;
+            s.bytes_out = e.bytes_out;
+            s.retransmits = e.retransmits;
+        }
+        s
+    }
+
+    /// Why the UDP transport could not be set up, if it failed.
+    pub fn udp_failure(&self) -> Option<&str> {
+        self.udp.failure.as_deref()
+    }
+
+    /// An Initiate Multitransport Request (MS-RDPBCGR 2.2.15.1): starts the
+    /// UDP tunnel, or declines with E_ABORT (2.2.15.2) and stays on TCP.
+    fn multitransport_request(&mut self, req: InitiateRequest) -> Result<()> {
+        trace!("multitransport request {req:?}");
+        let decline = if !self.udp.offered {
+            Some("UDP not offered")
+        } else if req.protocol != multitransport::PROTOCOL_UDPFECR {
+            Some("lossy UDP needs DTLS, not supported")
+        } else if self.udp.server_flags & multitransport::SOFTSYNC_TCP_TO_UDP == 0 {
+            // Without Soft-Sync the channels cannot move over in order.
+            Some("the server does not do Soft-Sync")
+        } else if self.udp.tunnel.is_some() {
+            Some("a UDP tunnel was already tried")
+        } else {
+            None
+        };
+        if let Some(why) = decline {
+            trace!("multitransport request {} declined: {why}", req.request_id);
+            return self.multitransport_response(req.request_id, multitransport::E_ABORT);
+        }
+        let sock = self
+            .f
+            .tcp()
+            .and_then(|t| t.peer_addr().ok())
+            .ok_or_else(|| std::io::Error::other("no server address"))
+            .and_then(multitransport::udp_socket);
+        match sock {
+            Ok(sock) => {
+                trace!("UDP tunnel to {:?}", sock.peer_addr().ok());
+                self.udp.tunnel = Some(Tunnel::start(
+                    Box::new(sock),
+                    req,
+                    &self.host,
+                    self.udp.certificate.clone(),
+                    Instant::now(),
+                ));
+                self.udp.state = UdpState::Connecting;
+                Ok(())
+            }
+            Err(e) => {
+                self.udp.state = UdpState::Failed;
+                self.udp.failure = Some(format!("cannot open a UDP socket: {e}"));
+                trace!("multitransport: cannot open a UDP socket: {e}");
+                self.multitransport_response(req.request_id, multitransport::E_ABORT)
+            }
+        }
+    }
+
+    /// Initiate Multitransport Response PDU on the message channel (2.2.15.2).
+    fn multitransport_response(&mut self, request_id: u32, hr: u32) -> Result<()> {
+        let Some(ch) = self.message_channel else {
+            return Ok(());
+        };
+        let pdu = multitransport::initiate_response(request_id, hr);
+        send_io(&mut self.f, self.user_id, ch, &pdu)
+    }
+
+    /// Runs the UDP tunnel: its setup, incoming DVC PDUs and outgoing ones.
+    /// A failure before the tunnel is ready declines and stays on TCP; one
+    /// after the server was told S_OK ends the session as a network drop,
+    /// because channel data already in flight on UDP is lost (reconnect
+    /// with [`Config::multitransport`] off, see [`Self::udp_failure`]).
+    fn poll_tunnel(&mut self, out: &mut PollOutcome) -> Result<()> {
+        let Some(t) = self.udp.tunnel.as_mut() else {
+            return Ok(());
+        };
+        if t.phase() == multitransport::Phase::Failed {
+            return Ok(());
+        }
+        let id = t.request_id();
+        let events = t.poll(Instant::now());
+        let dvc = self
+            .channels
+            .iter()
+            .position(|s| s.handler.name() == crate::dvc::DRDYNVC);
+        for e in events {
+            match e {
+                TunnelEvent::Ready => {
+                    self.multitransport_response(id, multitransport::S_OK)?;
+                    self.udp.state = UdpState::Active;
+                    if let Some(d) = dvc.and_then(|i| self.channels[i].handler.as_drdynvc()) {
+                        d.set_tunnel_ready();
+                    }
+                }
+                TunnelEvent::Data(pdu) => {
+                    let Some(i) = dvc.filter(|&i| !self.channels[i].failed) else {
+                        continue;
+                    };
+                    let mut o = ChannelOut::default();
+                    let d = self.channels[i].handler.as_drdynvc().expect("drdynvc");
+                    if let Err(e) = d.process_tunnel(&pdu, &mut o) {
+                        trace!("channel drdynvc (UDP): {e}; channel disabled");
+                        self.channels[i].failed = true;
+                    }
+                    self.flush_channel(i, o)?;
+                }
+                TunnelEvent::Failed(why) => {
+                    let was_active = self.udp.state == UdpState::Active;
+                    self.udp.state = UdpState::Failed;
+                    self.udp.failure = Some(why.clone());
+                    if was_active {
+                        let text = format!("the UDP transport failed: {why}");
+                        out.closed = Some(close_reason(CloseCause::Transport(&text), 0));
+                    } else {
+                        self.multitransport_response(id, multitransport::E_ABORT)?;
+                    }
+                    return Ok(());
+                }
+            }
+        }
+        self.flush_tunnel()
+    }
+
+    /// Sends what the dynamic channels queued for the tunnel.
+    fn flush_tunnel(&mut self) -> Result<()> {
+        if self.udp.state != UdpState::Active {
+            return Ok(());
+        }
+        let Some(d) = self
+            .channels
+            .iter_mut()
+            .find_map(|s| s.handler.as_drdynvc())
+        else {
+            return Ok(());
+        };
+        let pdus = d.take_tunnel_out();
+        self.udp.channels = d.channels_on_tunnel();
+        let Some(t) = self.udp.tunnel.as_mut() else {
+            return Ok(());
+        };
+        for pdu in pdus {
+            t.send(&pdu)?;
+        }
+        Ok(())
     }
 
     /// The TCP connection of a direct session (None through a gateway),
@@ -1099,6 +1346,7 @@ impl Client {
             if self.active {
                 self.tick_channels()?;
             }
+            self.poll_tunnel(&mut out)?;
             if out.closed.is_some() || Instant::now() >= end {
                 return Ok(out);
             }
@@ -1197,6 +1445,14 @@ impl Client {
             }
             self.heartbeat = Some(hb);
             return Ok(());
+        }
+        match multitransport::parse_initiate_request(data) {
+            Ok(Some(req)) => return self.multitransport_request(req),
+            Ok(None) => {}
+            Err(e) => {
+                trace!("multitransport request ignored: {e}");
+                return Ok(());
+            }
         }
         if let Some(rsp) = self.autodetect.on_pdu(data, Instant::now()) {
             send_io(&mut self.f, self.user_id, channel, &rsp)?;
