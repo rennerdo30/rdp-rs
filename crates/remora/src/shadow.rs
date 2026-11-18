@@ -73,6 +73,48 @@ pub fn pick_target(inv: &rdp::Invitation, server: &[IpAddr]) -> Option<(String, 
         .map(|(l, sid)| (l.host.clone(), l.port, *sid))
 }
 
+/// The configuration for an invitation's text: its listener (see
+/// [`pick_target`]; `server` is the host the user named when shadowing)
+/// and the Remote Assistance logon (MS-RA 2.2.7.2). `user` is the name the
+/// sharer shows for this participant (empty: the Windows user name);
+/// `preconnection` sends the transport's SID in a Preconnection PDU.
+/// The caller sets the certificate check: the sharer's certificate is
+/// self-signed and its port changes with every invitation.
+pub fn invitation_config(
+    text: &str,
+    server: Option<&str>,
+    user: &str,
+    preconnection: bool,
+) -> Result<rdp::Config, String> {
+    let inv = rdp::Invitation::parse(text).map_err(|e| e.to_string())?;
+    let addrs: Vec<IpAddr> = server
+        .and_then(|h| std::net::ToSocketAddrs::to_socket_addrs(&(h, 0)).ok())
+        .map(|a| a.map(|s| s.ip()).collect())
+        .unwrap_or_default();
+    let (host, port, sid) = pick_target(&inv, &addrs).ok_or("the invitation lists no listener")?;
+    let viewer = Some(user.to_string())
+        .filter(|u| !u.is_empty())
+        .or_else(|| std::env::var("USERNAME").ok())
+        .unwrap_or_else(|| "Remora".into());
+    let mut cfg = rdp::Config::new(&host, &viewer, "");
+    cfg.port = port;
+    cfg.assistance = Some(rdp::AssistanceLogon::from_invitation(
+        &inv,
+        preconnection.then_some(sid),
+    ));
+    Ok(cfg)
+}
+
+/// The tab or window name of a shared desktop: "server session 2
+/// (shadow)" when shadowing (`shadowed`: the server named and the
+/// session), else "Shared desktop <listener>".
+pub fn window_name(cfg: &rdp::Config, shadowed: Option<(&str, u32)>) -> String {
+    match shadowed {
+        Some((server, id)) => format!("{server} session {id} (shadow)"),
+        None => format!("Shared desktop {}", cfg.host),
+    }
+}
+
 /// The text of an invitation file: UTF-16 with a byte order mark (as
 /// Windows saves `.msrcIncident` files) or UTF-8.
 pub fn invitation_text(bytes: &[u8]) -> String {

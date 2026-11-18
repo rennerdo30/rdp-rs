@@ -825,10 +825,10 @@ fn legacy_server(listener: TcpListener, cert: Vec<u8>) -> [u8; 32] {
     s.write_all(&connection_confirm(x224::PROTOCOL_RDP, 0))
         .unwrap();
     let gcc = parse_connect_initial(x224::data_payload(&read_tpkt(&mut s)).unwrap()).unwrap();
-    // Client Security Data: 40, 56 and 128 bits (2.2.1.3.3).
+    // Client Security Data: 40, 56 and 128-bit RC4 and FIPS (2.2.1.3.3).
     assert!(
         gcc.windows(8)
-            .any(|w| w == [0x02, 0xC0, 12, 0, 0x0B, 0, 0, 0])
+            .any(|w| w == [0x02, 0xC0, 12, 0, 0x1B, 0, 0, 0])
     );
     let server_random = [0x5A; 32];
     let mut blocks = vec![0x01, 0x0C, 12, 0, 0x04, 0, 0x08, 0, 0, 0, 0, 0];

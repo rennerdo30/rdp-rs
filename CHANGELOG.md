@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- **FIPS level for legacy RDP security.** Old servers set to the FIPS encryption level (Standard RDP Security with Triple DES and HMAC-SHA-1, no TLS) can now be reached with **Allow legacy RDP security (weak)**; before, they were refused. Checked against Windows' own server at level 4 in a 90-second drawing session, and the RC4 levels again (RDP-84).
+- **Shadowing from the app.** A connection's **Advanced** page has **Sessions…** under **Other sessions** (also **Sessions on …** in the command palette): the server's signed-in sessions with **Watch** and **Control**, and **Ask the user first** on by default. **Join a shared desktop** in the command palette opens a Windows Desktop Sharing invitation file. The command line flags stay; not yet tried against a real server (RDP-85).
+
 ## 0.1.0-beta.10
 
 - **Import connections from mRemoteNG and Remote Desktop Connection Manager.** **Import connections** (Settings, Backup, and the first start) now also reads mRemoteNG's `confCons.xml` and RDCMan's `.rdg` files, next to Remora backups; the format is told from the content. Groups, inherited settings, gateway, display size and sharing come over. mRemoteNG passwords are read with its default master password or the one you type (also fully encrypted files); RDCMan passwords only on the PC and Windows account that saved them. Passwords are kept only in the vault; the result says what could not be imported and why (RDP-80).

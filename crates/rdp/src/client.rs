@@ -734,12 +734,12 @@ struct Legacy {
 }
 
 /// Sets up Standard RDP Security (5.3.2 to 5.3.5) from the Server Security
-/// Data: the method and level (no encryption and FIPS are refused), the
+/// Data: the method and level (no encryption is refused), the
 /// proprietary certificate's signature, then the caller's trust in the
 /// certificate, as for a TLS one, before anything secret is sent. The
 /// encrypted client random goes in the Security Exchange PDU.
 fn standard_security(cfg: &Config, host: &str, server: &gcc::ServerData) -> Result<Legacy> {
-    security::KeyStrength::from_method(server.encryption_method)?;
+    security::check_method(server.encryption_method)?;
     let server_random = server
         .server_random
         .ok_or_else(|| Error::Protocol("Standard RDP Security without a server random".into()))?;

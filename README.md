@@ -40,9 +40,9 @@ No account and no telemetry.
 [Troubleshooting](docs/TROUBLESHOOTING.md) · [Security and privacy](docs/SECURITY.md) ·
 [Install](docs/INSTALL.md)
 
-## RDP coverage: about 89 %
+## RDP coverage: about 91 %
 
-Of the 38 features a full RDP client offers (below), 32 are done and 4 partly (89 %, counting a partial one as half). That covers the everyday desktop: logon with NLA, the picture, keyboard and mouse, clipboard, drives, printers, smart cards, ports, cameras and sound. USB and plug and play devices are missing: they need a driver on this PC to take a device away from Windows.
+Of the 38 features a full RDP client offers (below), 33 are done and 3 partly (91 %, counting a partial one as half). That covers the everyday desktop: logon with NLA, the picture, keyboard and mouse, clipboard, drives, printers, smart cards, ports, cameras and sound. USB and plug and play devices are missing: they need a driver on this PC to take a device away from Windows.
 
 <details>
 <summary>Feature list</summary>
@@ -52,7 +52,7 @@ Of the 38 features a full RDP client offers (below), 32 are done and 4 partly (8
 | Connection and security | Connection sequence (X.224, MCS, GCC, capabilities, finalization) | ✅ | MS-RDPBCGR |
 |  | TLS and NLA (CredSSP with NTLMv2) | ✅ | MS-CSSP, MS-NLMP |
 |  | Kerberos authentication | ✅ | MS-KILE via Windows SSPI Negotiate; single sign-on |
-|  | Legacy RDP security (RC4, no TLS) | ✅ | MS-RDPBCGR 5.3: opt-in per connection; 40/56/128-bit, salted MAC, key updates; no FIPS |
+|  | Legacy RDP security (RC4, no TLS) | ✅ | MS-RDPBCGR 5.3: opt-in per connection; 40/56/128-bit RC4, salted MAC, key updates; FIPS level (Triple DES, HMAC-SHA-1) |
 |  | Licensing | ✅ | MS-RDPELE: 'valid client', new and upgraded licenses with platform challenge; licenses kept in `%LOCALAPPDATA%\rdp-rs\licenses` |
 |  | Auto-reconnect and heartbeat | ✅ | MS-RDPBCGR 5.5, 2.2.16 |
 |  | Server certificate check | ✅ | trust on first use |
@@ -86,7 +86,7 @@ Of the 38 features a full RDP client offers (below), 32 are done and 4 partly (8
 |  | Microphone | ✅ | MS-RDPEAI |
 |  | Video redirection | ◐ | MS-RDPEVOR with MS-RDPEGT: opt-in; no MS-RDPEV (TSMF) |
 | Remote apps and collaboration | RemoteApp (seamless windows) | ✅ | MS-RDPERP: apps per connection, one window each, taskbar |
-|  | Multiparty and shadowing | ◐ | MS-TSTS RpcShadow2, MS-RA, MS-RDPEMC, MS-RDPEPS: `--shadow`, `--invitation`, control requests; command line only |
+|  | Multiparty and shadowing | ✅ | MS-TSTS RpcShadow2, MS-RA, MS-RDPEMC, MS-RDPEPS: the Sessions dialog and `--shadow`, invitation files, control requests |
 
 </details>
 
@@ -108,8 +108,7 @@ Windows: download the setup or the portable zip from
 
 ## Not yet
 
-USB and plug and play devices, lossy UDP, FIPS-level legacy security and
-MS-RDPEV video. Everything listed as done above is built and unit tested; most
+USB and plug and play devices, lossy UDP and MS-RDPEV video. Everything listed as done above is built and unit tested; most
 of it has not yet been tried against every kind of Windows server.
 
 Built but not yet tried against a real server: RD Gateway over RPC, shadowing,

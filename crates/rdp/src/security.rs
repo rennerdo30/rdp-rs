@@ -14,8 +14,12 @@
 //!   set, 5.3.6.1.1) and each RC4 key is replaced after 4,096 packets
 //!   (5.3.7.1).
 //!
-//! FIPS (5.3.5.2: Triple DES and HMAC-SHA-1) is not implemented; a server
-//! that requires it is refused with a clear error.
+//! At the FIPS level (5.3.5.2) the same exchange gives Triple DES keys
+//! instead: one EDE3 CBC stream per direction, chained across packets,
+//! data padded to whole blocks, and an HMAC-SHA-1 over the plaintext and
+//! the packet count as the MAC (5.3.6.2). There are no key updates; the
+//! security headers carry a version and the pad length (2.2.8.1.1.2.3,
+//! fipsInformation in fast-path PDUs).
 //!
 //! None of this resists an active attacker the way TLS does: the server's
 //! identity rests on trust on first use of its key, RC4 is broken, and
@@ -23,6 +27,7 @@
 
 use crate::crypto::{Rc4, md5, rc4_once, rsa_encrypt_le, sha1};
 use crate::cursor::{Put, Reader};
+use crate::des::TripleDesCbc;
 use crate::error::{Error, Result, proto};
 use crate::license::{self, PublicKey, salted_hash};
 
@@ -32,9 +37,11 @@ pub const ENCRYPTION_METHOD_128BIT: u32 = 0x02;
 pub const ENCRYPTION_METHOD_56BIT: u32 = 0x08;
 pub const ENCRYPTION_METHOD_FIPS: u32 = 0x10;
 /// What the client offers in its Client Security Data (2.2.1.3.3) under
-/// Standard RDP Security: 40, 56 and 128 bits, not FIPS.
-pub const CLIENT_ENCRYPTION_METHODS: u32 =
-    ENCRYPTION_METHOD_40BIT | ENCRYPTION_METHOD_56BIT | ENCRYPTION_METHOD_128BIT;
+/// Standard RDP Security: 40, 56 and 128-bit RC4 and FIPS.
+pub const CLIENT_ENCRYPTION_METHODS: u32 = ENCRYPTION_METHOD_40BIT
+    | ENCRYPTION_METHOD_56BIT
+    | ENCRYPTION_METHOD_128BIT
+    | ENCRYPTION_METHOD_FIPS;
 
 /// Encryption levels (2.2.1.4.3, 5.3.1).
 pub const ENCRYPTION_LEVEL_LOW: u32 = 1;
@@ -62,6 +69,13 @@ const FASTPATH_ENCRYPTED: u8 = 0x2;
 
 /// Packets per RC4 key before it is updated (5.3.7.1).
 const KEY_UPDATE_INTERVAL: u32 = 4096;
+
+/// The FIPS level's 3DES CBC initialization vector (5.3.5.2).
+const FIPS_IV: [u8; 8] = [0x12, 0x34, 0x56, 0x78, 0x90, 0xAB, 0xCD, 0xEF];
+/// TS_SECURITY_HEADER2 (2.2.8.1.1.2.3) and fipsInformation: the header
+/// length and TSFIPS_VERSION1.
+const FIPS_HEADER_LENGTH: u16 = 0x10;
+const TSFIPS_VERSION1: u8 = 1;
 
 /// The Terminal Services signing key (5.3.3.1.1): modulus, little-endian.
 const TS_SIGNING_MODULUS: [u8; 64] = [
@@ -97,19 +111,15 @@ pub enum KeyStrength {
 }
 
 impl KeyStrength {
-    /// The strength of a server-selected encryptionMethod (2.2.1.4.3).
-    /// None and FIPS are refused: no encryption at all is never accepted,
-    /// and FIPS is not implemented.
+    /// The RC4 strength of a server-selected encryptionMethod (2.2.1.4.3).
+    /// No encryption at all is never accepted; FIPS has no RC4 strength
+    /// (see [`check_method`]).
     pub fn from_method(method: u32) -> Result<KeyStrength> {
         match method {
             ENCRYPTION_METHOD_40BIT => Ok(KeyStrength::Bits40),
             ENCRYPTION_METHOD_56BIT => Ok(KeyStrength::Bits56),
             ENCRYPTION_METHOD_128BIT => Ok(KeyStrength::Bits128),
-            ENCRYPTION_METHOD_FIPS => Err(Error::Unsupported(
-                "the server requires FIPS encryption (Standard RDP Security with \
-                 Triple DES), which Remora does not implement"
-                    .into(),
-            )),
+            ENCRYPTION_METHOD_FIPS => proto("FIPS encryption uses Triple DES, not RC4"),
             0 => Err(Error::Unsupported(
                 "the server offers no encryption at all; refused".into(),
             )),
@@ -212,6 +222,88 @@ pub fn update_key(initial: &[u8], current: &[u8], strength: KeyStrength) -> Vec<
     }
 }
 
+/// A server-selected encryptionMethod Remora can use: 40, 56 or 128-bit
+/// RC4, or FIPS (2.2.1.4.3).
+pub fn check_method(method: u32) -> Result<()> {
+    if method == ENCRYPTION_METHOD_FIPS {
+        return Ok(());
+    }
+    KeyStrength::from_method(method).map(|_| ())
+}
+
+/// The client's FIPS keys (5.3.5.2). `Debug` is not derived: these are secrets.
+pub struct FipsKeys {
+    pub hmac: [u8; 20],
+    pub encrypt: [u8; 24],
+    pub decrypt: [u8; 24],
+}
+
+impl Drop for FipsKeys {
+    fn drop(&mut self) {
+        self.hmac.fill(0);
+        self.encrypt.fill(0);
+        self.decrypt.fill(0);
+        std::hint::black_box((&self.hmac, &self.encrypt, &self.decrypt));
+    }
+}
+
+/// A 168-bit 3DES key (the SHA-1 hash and its first byte again) spread
+/// to 24 bytes with odd parity, as Windows does it (5.3.5.2): seven bits
+/// per byte, the bits of each byte taken least significant first.
+fn fips_expand(key: &[u8; 21]) -> [u8; 24] {
+    let bits: Vec<u8> = key
+        .iter()
+        .flat_map(|b| (0..8).map(move |i| (b >> i) & 1))
+        .collect();
+    std::array::from_fn(|i| {
+        // Bits 0 to 6 of byte i are stream bits 7i..7i+6; bit 7 is zero.
+        let b = (0..7).fold(0u8, |acc, j| acc | (bits[7 * i + j] << j));
+        // Then the least significant bit makes the parity odd. DES never
+        // reads that bit, so overwriting stream bit 7i is harmless here
+        // and matches what the server derives.
+        let high = b & 0xFE;
+        high | u8::from(high.count_ones().is_multiple_of(2))
+    })
+}
+
+/// The client's FIPS keys from the two randoms (5.3.5.2):
+/// ClientEncryptKeyT = SHA1(Last128Bits(ClientRandom) +
+/// Last128Bits(ServerRandom)), ClientDecryptKeyT from the first 128
+/// bits, HMACKey = SHA1(ClientDecryptKeyT + ClientEncryptKeyT).
+pub fn fips_keys(client: &[u8; 32], server: &[u8; 32]) -> FipsKeys {
+    let mut encrypt_t = sha1(&[&client[16..], &server[16..]].concat());
+    let mut decrypt_t = sha1(&[&client[..16], &server[..16]].concat());
+    let hmac = sha1(&[&decrypt_t[..], &encrypt_t[..]].concat());
+    let widen = |t: &[u8; 20]| -> [u8; 24] {
+        let mut k = [0u8; 21];
+        k[..20].copy_from_slice(t);
+        k[20] = t[0];
+        let out = fips_expand(&k);
+        k.fill(0);
+        std::hint::black_box(&k);
+        out
+    };
+    let keys = FipsKeys {
+        hmac,
+        encrypt: widen(&encrypt_t),
+        decrypt: widen(&decrypt_t),
+    };
+    encrypt_t.fill(0);
+    decrypt_t.fill(0);
+    std::hint::black_box((&encrypt_t, &decrypt_t));
+    keys
+}
+
+/// The FIPS MAC (5.3.6.2): the first 8 bytes of HMAC-SHA-1(HMACKey,
+/// Data + EncryptionCount).
+pub fn fips_mac(key: &[u8; 20], data: &[u8], count: u32) -> [u8; 8] {
+    let k = ring::hmac::Key::new(ring::hmac::HMAC_SHA1_FOR_LEGACY_USE_ONLY, key);
+    let mut ctx = ring::hmac::Context::with_key(&k);
+    ctx.update(data);
+    ctx.update(&count.to_le_bytes());
+    ctx.sign().as_ref()[..8].try_into().expect("8 bytes")
+}
+
 /// One direction's RC4 stream with its key updates.
 struct Cipher {
     strength: KeyStrength,
@@ -262,38 +354,86 @@ impl Drop for Cipher {
     }
 }
 
+/// The ciphers and MAC key of one connection: RC4 at 40, 56 or 128 bits,
+/// or the FIPS level's Triple DES.
+enum Keys {
+    Rc4 {
+        strength: KeyStrength,
+        mac_key: Vec<u8>,
+        encrypt: Cipher,
+        decrypt: Cipher,
+    },
+    Fips {
+        hmac: [u8; 20],
+        encrypt: TripleDesCbc,
+        decrypt: TripleDesCbc,
+        /// Packets sent and received: the MAC's EncryptionCount (5.3.6.2).
+        sent: u32,
+        received: u32,
+    },
+}
+
+impl Drop for Keys {
+    fn drop(&mut self) {
+        match self {
+            Keys::Rc4 { mac_key, .. } => {
+                mac_key.fill(0);
+                std::hint::black_box(mac_key);
+            }
+            Keys::Fips { hmac, .. } => {
+                hmac.fill(0);
+                std::hint::black_box(hmac);
+            }
+        }
+    }
+}
+
 /// The negotiated Standard RDP Security state of one connection.
 pub struct StandardSecurity {
-    strength: KeyStrength,
+    keys: Keys,
     level: u32,
-    mac_key: Vec<u8>,
-    encrypt: Cipher,
-    decrypt: Cipher,
     /// Sign outgoing PDUs with the salted MAC: both General Capability
-    /// Sets carry ENC_SALTED_CHECKSUM (5.3.6.1.1).
+    /// Sets carry ENC_SALTED_CHECKSUM (5.3.6.1.1). RC4 only.
     salted: bool,
     /// The server takes encrypted licensing PDUs (SEC_LICENSE_ENCRYPT_CS).
     pub(crate) license_encrypt: bool,
 }
 
-impl Drop for StandardSecurity {
-    fn drop(&mut self) {
-        self.mac_key.fill(0);
-        std::hint::black_box(&self.mac_key);
+/// The FIPS fields of a security header or fast-path PDU: the length
+/// 0x10, TSFIPS_VERSION1 and the pad length (2.2.8.1.1.2.3).
+fn fips_information(pad: u8) -> [u8; 4] {
+    let [lo, hi] = FIPS_HEADER_LENGTH.to_le_bytes();
+    [lo, hi, TSFIPS_VERSION1, pad]
+}
+
+/// Reads [`fips_information`] and returns the pad length.
+fn read_fips_information(r: &mut Reader) -> Result<u8> {
+    let length = r.u16()?;
+    let version = r.u8()?;
+    let pad = r.u8()?;
+    if length != FIPS_HEADER_LENGTH || version != TSFIPS_VERSION1 {
+        return proto(format!(
+            "FIPS security header of length {length:#x}, version {version}"
+        ));
     }
+    Ok(pad)
 }
 
 impl StandardSecurity {
     /// The state for the server's encryptionMethod and encryptionLevel
-    /// (2.2.1.4.3) and the two randoms. Level 0 or FIPS is refused.
+    /// (2.2.1.4.3) and the two randoms. Level 0 is refused.
     pub fn new(
         method: u32,
         level: u32,
         client_random: &[u8; 32],
         server_random: &[u8; 32],
     ) -> Result<StandardSecurity> {
-        if level == ENCRYPTION_LEVEL_FIPS {
-            KeyStrength::from_method(ENCRYPTION_METHOD_FIPS)?;
+        if method == ENCRYPTION_METHOD_FIPS {
+            if !(ENCRYPTION_LEVEL_LOW..=ENCRYPTION_LEVEL_FIPS).contains(&level) {
+                return proto(format!("encryption level {level} with FIPS encryption"));
+            }
+            let keys = fips_keys(client_random, server_random);
+            return Ok(StandardSecurity::from_fips_keys(level, &keys));
         }
         let strength = KeyStrength::from_method(method)?;
         if !(ENCRYPTION_LEVEL_LOW..=ENCRYPTION_LEVEL_HIGH).contains(&level) {
@@ -305,49 +445,135 @@ impl StandardSecurity {
         Ok(StandardSecurity::from_keys(strength, level, &keys))
     }
 
-    /// The state from given keys; a test plays the server by swapping
+    /// The RC4 state from given keys; a test plays the server by swapping
     /// the encryption and decryption keys.
     pub(crate) fn from_keys(strength: KeyStrength, level: u32, k: &SessionKeys) -> Self {
         StandardSecurity {
-            strength,
+            keys: Keys::Rc4 {
+                strength,
+                mac_key: k.mac.clone(),
+                encrypt: Cipher::new(&k.encrypt, strength),
+                decrypt: Cipher::new(&k.decrypt, strength),
+            },
             level,
-            mac_key: k.mac.clone(),
-            encrypt: Cipher::new(&k.encrypt, strength),
-            decrypt: Cipher::new(&k.decrypt, strength),
             salted: false,
             license_encrypt: false,
         }
     }
 
+    /// The FIPS state from given keys; a test plays the server by swapping
+    /// the encryption and decryption keys.
+    pub(crate) fn from_fips_keys(level: u32, k: &FipsKeys) -> Self {
+        StandardSecurity {
+            keys: Keys::Fips {
+                hmac: k.hmac,
+                encrypt: TripleDesCbc::new(&k.encrypt, FIPS_IV, false),
+                decrypt: TripleDesCbc::new(&k.decrypt, FIPS_IV, true),
+                sent: 0,
+                received: 0,
+            },
+            level,
+            salted: false,
+            license_encrypt: false,
+        }
+    }
+
+    fn fips(&self) -> bool {
+        matches!(self.keys, Keys::Fips { .. })
+    }
+
     /// For traces: "128-bit RC4, encryption level 2".
     pub fn describe(&self) -> String {
-        format!(
-            "{}-bit RC4, encryption level {}",
-            self.strength.bits(),
-            self.level
-        )
+        match &self.keys {
+            Keys::Rc4 { strength, .. } => format!(
+                "{}-bit RC4, encryption level {}",
+                strength.bits(),
+                self.level
+            ),
+            Keys::Fips { .. } => format!("FIPS Triple DES, encryption level {}", self.level),
+        }
     }
 
     /// Sign outgoing PDUs with the salted MAC (5.3.6.1.1), once the
-    /// server's General Capability Set carries ENC_SALTED_CHECKSUM.
+    /// server's General Capability Set carries ENC_SALTED_CHECKSUM. The
+    /// FIPS MAC always includes the packet count.
     pub fn set_salted_mac(&mut self, on: bool) {
-        self.salted = on;
+        self.salted = on && !self.fips();
     }
 
-    /// Signs and encrypts `data` in place; returns its MAC.
-    fn seal(&mut self, data: &mut [u8]) -> [u8; 8] {
-        let count = self.salted.then_some(self.encrypt.count);
-        let sig = mac_signature(&self.mac_key, data, count);
-        self.encrypt.apply(data);
-        sig
+    /// Signs and encrypts `data` in place; returns its MAC and, at the
+    /// FIPS level, the pad length (the data is padded to whole blocks).
+    fn seal(&mut self, data: &mut Vec<u8>) -> ([u8; 8], Option<u8>) {
+        match &mut self.keys {
+            Keys::Rc4 {
+                mac_key, encrypt, ..
+            } => {
+                let count = self.salted.then_some(encrypt.count);
+                let sig = mac_signature(mac_key, data, count);
+                encrypt.apply(data);
+                (sig, None)
+            }
+            Keys::Fips {
+                hmac,
+                encrypt,
+                sent,
+                ..
+            } => {
+                let sig = fips_mac(hmac, data, *sent);
+                let pad = (8 - data.len() % 8) % 8;
+                data.resize(data.len() + pad, 0);
+                encrypt.process(data);
+                *sent = sent.wrapping_add(1);
+                (sig, Some(pad as u8))
+            }
+        }
     }
 
-    /// Decrypts `data` in place and checks its MAC (5.3.6.1): a mismatch
-    /// ends the connection.
-    fn open(&mut self, data: &mut [u8], sig: &[u8; 8], salted: bool) -> Result<()> {
-        let count = self.decrypt.count;
-        self.decrypt.apply(data);
-        if mac_signature(&self.mac_key, data, salted.then_some(count)) != *sig {
+    /// Decrypts `data` in place and checks its MAC (5.3.6.1, 5.3.6.2): a
+    /// mismatch ends the connection. `pad` is the FIPS pad length.
+    fn open(
+        &mut self,
+        data: &mut Vec<u8>,
+        sig: &[u8; 8],
+        salted: bool,
+        pad: Option<u8>,
+    ) -> Result<()> {
+        let ok = match (&mut self.keys, pad) {
+            (
+                Keys::Rc4 {
+                    mac_key, decrypt, ..
+                },
+                None,
+            ) => {
+                let count = decrypt.count;
+                decrypt.apply(data);
+                mac_signature(mac_key, data, salted.then_some(count)) == *sig
+            }
+            (
+                Keys::Fips {
+                    hmac,
+                    decrypt,
+                    received,
+                    ..
+                },
+                Some(pad),
+            ) => {
+                // Windows pads whole blocks with 8 bytes, never more.
+                if !data.len().is_multiple_of(8) || pad > 8 || pad as usize > data.len() {
+                    return proto(format!(
+                        "FIPS data of {} bytes with {pad} bytes of padding",
+                        data.len()
+                    ));
+                }
+                decrypt.process(data);
+                data.truncate(data.len() - pad as usize);
+                let count = *received;
+                *received = received.wrapping_add(1);
+                fips_mac(hmac, data, count) == *sig
+            }
+            _ => return proto("Standard RDP Security: security header of the wrong kind"),
+        };
+        if !ok {
             return proto(
                 "Standard RDP Security: MAC mismatch (data altered, or keys out of step)",
             );
@@ -364,7 +590,7 @@ impl StandardSecurity {
     pub fn wrap(&mut self, flags: u16, body: &[u8]) -> Vec<u8> {
         let plain = flags & SEC_EXCHANGE_PKT != 0
             || (flags & SEC_LICENSE_PKT != 0 && !self.license_encrypt);
-        let mut out = Vec::with_capacity(body.len() + 12);
+        let mut out = Vec::with_capacity(body.len() + 24);
         if plain {
             out.put_u16(flags);
             out.put_u16(0);
@@ -373,9 +599,13 @@ impl StandardSecurity {
         }
         let checksum = if self.salted { SEC_SECURE_CHECKSUM } else { 0 };
         let mut data = body.to_vec();
-        let sig = self.seal(&mut data);
+        let (sig, pad) = self.seal(&mut data);
         out.put_u16(flags | SEC_ENCRYPT | checksum);
         out.put_u16(0);
+        if let Some(pad) = pad {
+            // TS_SECURITY_HEADER2 (2.2.8.1.1.2.3).
+            out.put_bytes(&fips_information(pad));
+        }
         out.put_bytes(&sig);
         out.put_bytes(&data);
         out
@@ -398,9 +628,14 @@ impl StandardSecurity {
         let encrypted = flags & (SEC_ENCRYPT | SEC_REDIRECTION_PKT) != 0;
         let mut body;
         if encrypted {
+            let pad = if self.fips() {
+                Some(read_fips_information(&mut r)?)
+            } else {
+                None
+            };
             let sig = r.array::<8>()?;
             body = r.rest().to_vec();
-            self.open(&mut body, &sig, flags & SEC_SECURE_CHECKSUM != 0)?;
+            self.open(&mut body, &sig, flags & SEC_SECURE_CHECKSUM != 0, pad)?;
         } else {
             body = r.rest().to_vec();
         }
@@ -428,13 +663,15 @@ impl StandardSecurity {
     }
 
     /// An incoming fast-path output PDU (2.2.9.1.2), decrypted and checked,
-    /// without its security flags and dataSignature: what
+    /// without its security flags, fipsInformation and dataSignature: what
     /// [`crate::fastpath::Reassembler`] reads.
     pub fn fastpath_output(&mut self, frame: &[u8]) -> Result<Vec<u8>> {
-        let (header, mut data, sig) = split_fastpath(frame)?;
+        let (header, mut data, sig) = split_fastpath(frame, self.fips())?;
         let flags = header >> 6;
         match sig {
-            Some(sig) => self.open(&mut data, &sig, flags & FASTPATH_SECURE_CHECKSUM != 0)?,
+            Some((sig, pad)) => {
+                self.open(&mut data, &sig, flags & FASTPATH_SECURE_CHECKSUM != 0, pad)?
+            }
             None if self.level > ENCRYPTION_LEVEL_LOW => {
                 return proto(
                     "Standard RDP Security: unencrypted fast-path update from the server",
@@ -448,21 +685,31 @@ impl StandardSecurity {
     /// An outgoing fast-path input PDU (2.2.8.1.2) from
     /// [`crate::input::fastpath_input`], signed and encrypted.
     pub fn fastpath_input(&mut self, pdu: &[u8]) -> Vec<u8> {
-        let (header, mut data, _) = split_fastpath(pdu).expect("our own fast-path input PDU");
+        let (header, mut data, _) =
+            split_fastpath(pdu, false).expect("our own fast-path input PDU");
         let checksum = if self.salted {
             FASTPATH_SECURE_CHECKSUM
         } else {
             0
         };
-        let sig = self.seal(&mut data);
+        let (sig, pad) = self.seal(&mut data);
         let header = header & 0x3F | (FASTPATH_ENCRYPTED | checksum) << 6;
-        fastpath_frame(header, &sig, &data)
+        let prefix = match pad {
+            Some(pad) => [&fips_information(pad)[..], &sig[..]].concat(),
+            None => sig.to_vec(),
+        };
+        fastpath_frame(header, &prefix, &data)
     }
 }
 
-/// A fast-path PDU's header byte, its data, and its dataSignature when
-/// the encrypted flag is set (2.2.8.1.2, 2.2.9.1.2; no FIPS information).
-fn split_fastpath(frame: &[u8]) -> Result<(u8, Vec<u8>, Option<[u8; 8]>)> {
+/// A fast-path PDU's header byte, its data, and, when the encrypted flag
+/// is set, its dataSignature with the pad length from its fipsInformation
+/// when `fips` (2.2.8.1.2, 2.2.9.1.2).
+#[allow(clippy::type_complexity)]
+fn split_fastpath(
+    frame: &[u8],
+    fips: bool,
+) -> Result<(u8, Vec<u8>, Option<([u8; 8], Option<u8>)>)> {
     let mut r = Reader::new(frame);
     let header = r.u8()?;
     let len1 = r.u8()?;
@@ -475,23 +722,29 @@ fn split_fastpath(frame: &[u8]) -> Result<(u8, Vec<u8>, Option<[u8; 8]>)> {
         return proto(format!("fast-path length {len}, frame of {}", frame.len()));
     }
     let sig = if (header >> 6) & FASTPATH_ENCRYPTED != 0 {
-        Some(r.array::<8>()?)
+        let pad = if fips {
+            Some(read_fips_information(&mut r)?)
+        } else {
+            None
+        };
+        Some((r.array::<8>()?, pad))
     } else {
         None
     };
     Ok((header, r.rest().to_vec(), sig))
 }
 
-/// A fast-path PDU: header, length (one byte when it fits), `sig`, `data`.
-fn fastpath_frame(header: u8, sig: &[u8], data: &[u8]) -> Vec<u8> {
-    let short = 2 + sig.len() + data.len();
+/// A fast-path PDU: header, length (one byte when it fits), `prefix`
+/// (fipsInformation and dataSignature), `data`.
+fn fastpath_frame(header: u8, prefix: &[u8], data: &[u8]) -> Vec<u8> {
+    let short = 2 + prefix.len() + data.len();
     let mut out = vec![header];
     if short < 0x80 {
         out.put_u8(short as u8);
     } else {
         out.put_u16_be(0x8000 | (short + 1) as u16);
     }
-    out.put_bytes(sig);
+    out.put_bytes(prefix);
     out.put_bytes(data);
     out
 }

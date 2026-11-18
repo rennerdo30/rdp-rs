@@ -131,6 +131,10 @@ pub enum Command {
     CheckUpdates,
     InstallUpdate,
     OpenLogFolder,
+    /// Shadow a session on the selected connection's server (RDP-85).
+    Sessions,
+    /// Join a shared desktop from an invitation file.
+    OpenInvitation,
     Quit,
 }
 
@@ -189,6 +193,8 @@ impl Command {
             Command::CheckUpdates => Hit::CheckNow,
             Command::InstallUpdate => Hit::Update,
             Command::OpenLogFolder => Hit::OpenLogFolder,
+            Command::Sessions => Hit::ShadowOpen,
+            Command::OpenInvitation => Hit::OpenInvitation,
             Command::Quit => Hit::WinClose,
         }
     }
@@ -1050,6 +1056,34 @@ impl Ui {
             "Open log folder".into(),
             "Diagnostic logs for bug reports".into(),
             "logs diagnostics debug files",
+            Lead::Icon(Icon::FolderOpen, Tone::Neutral),
+            Chip::None,
+            "Open",
+        );
+        if let Some(i) = self
+            .selected
+            .filter(|_| self.group_edit.is_none() && !self.settings_open)
+        {
+            let name = self.store.connections.get(i).map(|c| c.name.clone());
+            if let Some(name) = name {
+                push(
+                    Command::Sessions,
+                    Section::Actions,
+                    format!("Sessions on {name}"),
+                    "Watch or control a signed-in user's session (shadowing)".into(),
+                    "shadow watch control remote assistance users sessions",
+                    Lead::Icon(Icon::Monitors, Tone::Neutral),
+                    Chip::None,
+                    "Open",
+                );
+            }
+        }
+        push(
+            Command::OpenInvitation,
+            Section::Actions,
+            "Join a shared desktop".into(),
+            "Open a Windows Desktop Sharing invitation file".into(),
+            "invitation shadow remote assistance msrcincident share",
             Lead::Icon(Icon::FolderOpen, Tone::Neutral),
             Chip::None,
             "Open",

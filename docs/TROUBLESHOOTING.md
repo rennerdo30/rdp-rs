@@ -109,8 +109,8 @@ The server has no TLS: it is set to the old "RDP Security Layer" (Standard
 RDP Security, RC4). The best fix is on the server: let it use TLS (on
 Windows, the Remote Desktop security layer "Negotiate" or "SSL"). If you
 cannot change it and trust the network, edit the connection and turn on
-**Allow legacy RDP security (weak)** under **Advanced**. A server that
-requires FIPS encryption cannot be reached with legacy security either. See
+**Allow legacy RDP security (weak)** under **Advanced**; this also covers
+servers set to the FIPS encryption level. See
 [SECURITY.md](SECURITY.md#legacy-rdp-security).
 
 ## RD Gateway
