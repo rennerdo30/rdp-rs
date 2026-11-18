@@ -144,6 +144,17 @@ explained in [Server helper](#server-helper).
   default: smoother video and less traffic), or **Bitmaps**, classic bitmap
   updates, for a server or setup where GFX misbehaves. When a server's
   graphics fail, Remora reconnects the tab once with bitmaps on its own.
+- **UDP transport** (off by default): when the server offers it, the
+  session's dynamic channels (the GFX picture, sound, touch, display changes)
+  travel over UDP next to the TCP connection, as with Windows' own client.
+  On a link with loss or a long round trip, UDP keeps the picture moving
+  where TCP would stall to resend. Remora uses the reliable UDP mode with TLS
+  (the server must show the same certificate as on TCP), only on direct
+  connections (not through an RD Gateway). If UDP cannot be set up (a
+  firewall blocks UDP 3389, no answer, a TLS error), the session simply
+  stays on TCP. If UDP breaks while the session uses it, Remora reconnects
+  the tab (resuming the same Windows session) and keeps it on TCP. The statistics box shows which transport is
+  in use. Applies on the next connect.
 - **Windows keys (Win, Alt+Tab, …)**: **On this PC**, **On the remote** (the
   default), or **Remote in full screen**.
 - **Compression**: **Off** is fastest on a LAN; RDP 6.1, 6.0 or 5.0 send less
@@ -246,6 +257,10 @@ is on. It shows:
   answer pings shows Windows' TCP estimate instead, marked "no ping reply":
   it includes the server's delayed acknowledgements, so it reads well above
   the network's real round trip. A session through an RD Gateway has none.
+- **Transport:** **TCP**, or **UDP** with the number of channels on it and
+  its own round trip once the UDP transport is up. With UDP switched on, it
+  also says when UDP is still connecting, was offered but not used, or
+  failed (the session then runs on TCP).
 - **Server measured:** what the server's network detection found, when it
   sends one (connection type Automatic).
 - **Input → picture:** from a key or mouse button press to the next change of

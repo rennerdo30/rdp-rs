@@ -98,6 +98,8 @@ struct Args {
     multimon: bool,
     /// `--kerberos`: NLA through Windows SSPI Negotiate (Kerberos, NTLM fallback).
     kerberos: bool,
+    /// `--udp`: offer the UDP transport (MS-RDPEMT) for the dynamic channels.
+    udp: bool,
     /// `--expect-fingerprint`: the server certificate's SHA-256 (hex, any
     /// separators); any other certificate is refused.
     expect_fingerprint: Option<String>,
@@ -113,6 +115,7 @@ fn usage() -> ! {
          \x20           [--surface-commands] [--drawing-orders]   (experimental picture paths)\n\
          \x20           [--expect-fingerprint SHA256]   (accept only this server certificate)\n\
          \x20           [--multimon]   (all local monitors, MS-RDPBCGR 2.2.1.3.6)\n\
+         \x20           [--udp]   (dynamic channels over UDP when the server offers it)\n\
          \x20           [--kerberos]   (Windows Negotiate: Kerberos, NTLM fallback;\n\
          \x20                           without -u: single sign-on as the logged-on user)\n\
          \x20      remora <host> -u <user> --screenshot out.png [--wait SECONDS]\n\
@@ -185,6 +188,7 @@ fn parse_args() -> Args {
             "--drawing-orders" => a.drawing_orders = true,
             "--multimon" => a.multimon = true,
             "--kerberos" => a.kerberos = true,
+            "--udp" => a.udp = true,
             "-h" | "--help" => usage(),
             s if s.starts_with('-') => usage(),
             s => {
@@ -321,6 +325,7 @@ fn main() {
     }
     cfg.surface_commands = args.surface_commands;
     cfg.drawing_orders = args.drawing_orders;
+    cfg.multitransport = args.udp;
     if let Some(expected) = &args.expect_fingerprint {
         let want = normalize_fingerprint(expected);
         if want.len() != 64 {
@@ -494,6 +499,20 @@ fn screenshot(
             g.codec.unwrap_or("none")
         );
     }
+    // Which transport carried the session (RDP-79).
+    let udp = client.stats().udp;
+    eprintln!(
+        "transport: {:?}, {} dynamic channels on UDP, {} datagram bytes in, {} out, {} retransmits{}",
+        udp.state,
+        udp.channels,
+        udp.bytes_in,
+        udp.bytes_out,
+        udp.retransmits,
+        client
+            .udp_failure()
+            .map(|f| format!(" (UDP failed: {f})"))
+            .unwrap_or_default()
+    );
     if let Some(r) = recorder {
         let i = r.finish()?;
         eprintln!(
