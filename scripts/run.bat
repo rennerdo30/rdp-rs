@@ -26,8 +26,8 @@ if defined PULL (
     git pull --ff-only origin main || (echo Pull failed. Fix the checkout first. & exit /b 1)
 )
 echo Building Remora %RELEASE%...
-cargo build %RELEASE% -j %JOBS% --quiet -p remora || (echo Build failed. & pause & exit /b 1)
-cargo run %RELEASE% -j %JOBS% --quiet -p remora -- !ARGS!
+cargo build %RELEASE% -j %JOBS% --quiet -p remora-client || (echo Build failed. & pause & exit /b 1)
+cargo run %RELEASE% -j %JOBS% --quiet -p remora-client -- !ARGS!
 if errorlevel 1 (
     echo Remora exited with an error. See the messages above.
     pause

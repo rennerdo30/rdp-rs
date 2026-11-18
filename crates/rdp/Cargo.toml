@@ -1,9 +1,20 @@
 [package]
-name = "rdp"
+name = "rdp-proto"
 description = "RDP client protocol implementation written from the Microsoft Open Specifications"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+readme = "README.md"
+keywords = ["rdp", "remote-desktop", "protocol", "client", "server"]
+categories = ["network-programming"]
+include = ["/src/**", "/Cargo.toml", "/README.md", "/LICENSE-MIT", "/LICENSE-APACHE"]
+
+# `rdp` on crates.io is another project; the library keeps its name.
+[lib]
+name = "rdp"
 
 [dependencies]
 # TLS transport only; every RDP layer above it is implemented in this crate.

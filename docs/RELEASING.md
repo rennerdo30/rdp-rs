@@ -6,6 +6,7 @@ Every release needs the owner's yes. CI builds and tests the packages and prepar
 
 - **Remora for Windows (x64):** a per-user setup and a portable zip.
 - **The server helper (x64):** `remora-agent-<version>-windows-x64.exe`, to copy onto a server as `remora-agent.exe` (also in the zip; the setup installs Remora only). Listed in `SHA256SUMS.txt`; no updater reads it.
+- **crates.io (from 0.1.0):** `rdp-proto` (the protocol library), `remora-link`, `remora-update` and `remora-client` (the app; `cargo install remora-client` installs `remora`). A separate manual step; see [crates.io](#cratesio).
 - **Not packaged:** macOS and Linux. The `rdp` protocol library builds and is tested there in CI, but Remora, the client, is a Windows program today (window chrome, clipboard, printers, smart cards and sound use Windows APIs) and is neither built nor tested there, so the release has no archives for them.
 
 ## Versions
@@ -53,6 +54,22 @@ What happens on an rdpc install:
 
 A taskbar button pinned to rdpc points at the removed `rdpc.exe`; the user pins Remora again.
 
+## crates.io
+
+[`publish-crate.yml`](../.github/workflows/publish-crate.yml) uploads four crates in dependency order: `rdp-proto`, `remora-link`, `remora-update`, then `remora-client`. It is manual (Actions → publish-crate → Run workflow, with the tag); run it after the GitHub release for that tag is published. `remora-agent` and `remora-host` are not published.
+
+- **Names:** `rdp` and `remora` on crates.io belong to other projects. The packages are `rdp-proto` and `remora-client`; the library is still `rdp` in code and the program is still `remora.exe`.
+- **Versions:** the published crates depend on each other at exactly the workspace version, in `[workspace.dependencies]` of the root `Cargo.toml`. Change those three `version = "=…"` entries together with the workspace version; cargo refuses a mismatch.
+- **Stable versions only.** The workflow refuses a prerelease (a version with `-`): a plain `cargo install` skips prereleases, and a crates.io version can never be overwritten, only yanked.
+- **The workflow checks** that the tag matches the workspace version and is on `main`, and that each crate's `LICENSE-MIT` and `LICENSE-APACHE` match the repository's (crates cannot ship files from outside their folder, so each has a copy). Then `cargo package` builds every crate from its packaged sources without a token. Only the last step, `cargo publish --no-verify`, gets the token.
+- **What ships:** `include` in each crate's `Cargo.toml`: `src`, `Cargo.toml`, the crate's `README.md` and the two licence files; the app also ships `build.rs` and its icon. `cargo package --list -p <crate>` shows it.
+- **Blocked until `ffwd-render` is on crates.io.** `remora-client` takes `ffwd-render` from Git, which crates.io refuses; switch it to the published version first (RDP-86).
+
+One-time setup by the owner (agents never create secrets):
+1. Create a crates.io API token scoped to publishing these four crates (crates.io, Account Settings, API Tokens). Until the first publish the names are not ours, so the first token has the publish-new scope.
+2. In the repository: Settings, Environments, New environment `crates-io`, with **Required reviewers** (the owner) so each upload needs an approval.
+3. Add the token as the environment secret `CARGO_REGISTRY_TOKEN`.
+
 ## Updates in the app
 
 Updates need two things: a **published** release (drafts are invisible) and a copy **installed by the setup** (`%LOCALAPPDATA%\Programs\Remora`). Portable copies and development builds only name the release page.
@@ -81,5 +98,5 @@ Updates need two things: a **published** release (drafts are invisible) and a co
 `scripts\package.bat` builds the release binary, the setup, its legacy copy, the zip and `SHA256SUMS.txt` into `artifacts\installer`. It never installs or starts anything.
 - **NSIS:** it uses the portable NSIS 3.13 at `E:/Development/_cache/tools/nsis-3.13/` (or `-MakeNsis`, or the `REMORA_MAKENSIS` environment variable); `scripts/fetch-nsis.ps1` downloads the pinned ZIP elsewhere.
 - **Notices:** without cargo-about it writes a placeholder notice. Release builds always generate the real one in CI.
-- **Icon:** `assets/remora.ico` is generated from the icon Remora draws (`scripts/make-icon.ps1`) and embedded into `remora.exe` by `crates/remora/build.rs`; rerun the script after changing `crates/remora/src/icon.rs`. `assets/logo.svg` draws the same geometry.
+- **Icon:** `crates/remora/assets/remora.ico` is generated from the icon Remora draws (`scripts/make-icon.ps1`) and embedded into `remora.exe` by `crates/remora/build.rs`; rerun the script after changing `crates/remora/src/icon.rs`. `assets/logo.svg` draws the same geometry.
 - **Never run `scripts/test-installer.ps1` on a real PC.** It installs and uninstalls for the current user (Remora and the published rdpc 0.1.0-beta.1), and refuses to run outside GitHub Actions.

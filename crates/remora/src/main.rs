@@ -388,7 +388,7 @@ fn main() {
     }
     if let Some(path) = &args.icon_png {
         // The app icon as a PNG with transparency (packaging, README);
-        // scripts/make-icon.ps1 builds assets/remora.ico from several sizes.
+        // scripts/make-icon.ps1 builds crates/remora/assets/remora.ico from several sizes.
         let size = args.icon_size;
         let write = || -> Result<(), Box<dyn std::error::Error>> {
             let file = std::io::BufWriter::new(std::fs::File::create(path)?);

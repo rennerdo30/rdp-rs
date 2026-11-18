@@ -43,7 +43,7 @@ def main() -> int:
     subprocess.run(["cargo", "build", "--release", "--locked", "-p", "remora-agent",
                     "--target-dir", str(static), "--message-format=short"], cwd=ROOT,
                    env=dict(os.environ, RUSTFLAGS="-C target-feature=+crt-static"), check=True)
-    subprocess.run(["cargo", "build", "--release", "-p", "remora", "--message-format=short"],
+    subprocess.run(["cargo", "build", "--release", "-p", "remora-client", "--message-format=short"],
                    cwd=ROOT, check=True)
     remora = target / "release" / "remora.exe"
     agent = static / "release" / "remora-agent.exe"

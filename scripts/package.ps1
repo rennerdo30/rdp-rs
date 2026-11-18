@@ -62,7 +62,7 @@ $cargo = (Get-Command cargo -ErrorAction Stop).Source
 # vcruntime140.dll. For this process and its cargo only.
 $env:RUSTFLAGS = '-C target-feature=+crt-static'
 if (!$BinDir) {
-    Invoke-Bounded $cargo @('build', '--release', '--locked', '-j', '8', '-p', 'remora', '-p', 'remora-agent') 3600 | Out-Null
+    Invoke-Bounded $cargo @('build', '--release', '--locked', '-j', '8', '-p', 'remora-client', '-p', 'remora-agent') 3600 | Out-Null
     $meta = Invoke-Bounded $cargo @('metadata', '--format-version', '1', '--no-deps') 120 | ConvertFrom-Json
     $BinDir = Join-Path $meta.target_directory 'release'
 }

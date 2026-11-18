@@ -96,7 +96,7 @@ try {
         $meta = cargo metadata --format-version 1 --no-deps | ConvertFrom-Json
         $target = "$($meta.target_directory)-static"
         $env:RUSTFLAGS = '-C target-feature=+crt-static'
-        cargo build --release --locked -p remora -p remora-host --target-dir $target
+        cargo build --release --locked -p remora-client -p remora-host --target-dir $target
         if ($LASTEXITCODE) { throw 'build failed' }
         $BinDir = Join-Path $target 'release'
     }

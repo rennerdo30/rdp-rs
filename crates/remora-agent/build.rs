@@ -11,7 +11,7 @@ use std::path::PathBuf;
 
 fn main() {
     let dir = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap_or_default());
-    let ico = dir.join("../../assets/remora.ico");
+    let ico = dir.join("../remora/assets/remora.ico");
     println!("cargo:rerun-if-changed={}", ico.display());
     println!("cargo:rerun-if-changed=build.rs");
     let windows = std::env::var("CARGO_CFG_TARGET_OS").is_ok_and(|v| v == "windows");

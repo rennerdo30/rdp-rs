@@ -480,7 +480,7 @@ mod tests {
 
     /// Decodes generated MP3 and AAC frames with the Windows decoders; no
     /// audio device is opened. Ignored by default: it needs Media
-    /// Foundation (`cargo test -p remora -- --ignored media_foundation_audio`).
+    /// Foundation (`cargo test -p remora-client -- --ignored media_foundation_audio`).
     #[cfg(windows)]
     #[test]
     #[ignore]

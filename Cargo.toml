@@ -6,6 +6,19 @@ members = ["crates/rdp", "crates/remora", "crates/remora-agent", "crates/remora-
 version = "0.1.0-beta.10"
 edition = "2024"
 license = "MIT OR Apache-2.0"
+repository = "https://github.com/rennerdo30/rdp-rs"
+homepage = "https://remora.renner.dev"
+rust-version = "1.100"
+
+# The crates published to crates.io (docs/RELEASING.md) depend on each other
+# at exactly the workspace version: change these with `version` above (cargo
+# refuses a mismatch). On crates.io, `rdp` and `remora` belong to other
+# projects, so the library is `rdp-proto` and the app `remora-client`; the
+# library and the program keep their names (`use rdp::...`, `remora.exe`).
+[workspace.dependencies]
+rdp = { package = "rdp-proto", path = "crates/rdp", version = "=0.1.0-beta.10" }
+remora-link = { path = "crates/remora-link", version = "=0.1.0-beta.10" }
+remora-update = { path = "crates/remora-update", version = "=0.1.0-beta.10" }
 
 [profile.dev]
 debug = "line-tables-only"
@@ -16,7 +29,7 @@ opt-level = 2
 debug = false
 
 # Bitmap decoding runs per pixel; keep the protocol crate fast in dev builds too.
-[profile.dev.package.rdp]
+[profile.dev.package.rdp-proto]
 opt-level = 2
 
 [profile.release]

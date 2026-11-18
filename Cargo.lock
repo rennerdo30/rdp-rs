@@ -2011,7 +2011,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "rdp"
+name = "rdp-proto"
 version = "0.1.0-beta.10"
 dependencies = [
  "rcgen",
@@ -2048,7 +2048,16 @@ dependencies = [
 ]
 
 [[package]]
-name = "remora"
+name = "remora-agent"
+version = "0.1.0-beta.10"
+dependencies = [
+ "remora-link",
+ "windows",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "remora-client"
 version = "0.1.0-beta.10"
 dependencies = [
  "aes-gcm",
@@ -2057,7 +2066,7 @@ dependencies = [
  "ffwd-render",
  "png",
  "quick-xml 0.42.0",
- "rdp",
+ "rdp-proto",
  "remora-link",
  "remora-update",
  "rfd",
@@ -2075,21 +2084,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "remora-agent"
-version = "0.1.0-beta.10"
-dependencies = [
- "remora-link",
- "windows",
- "windows-sys 0.61.2",
-]
-
-[[package]]
 name = "remora-host"
 version = "0.1.0-beta.10"
 dependencies = [
  "argon2",
  "rcgen",
- "rdp",
+ "rdp-proto",
  "rpassword",
  "windows",
  "windows-sys 0.61.2",

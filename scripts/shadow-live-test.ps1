@@ -53,7 +53,7 @@ if ($own -contains $Server -or ($target | Where-Object { $own -contains $_ })) {
 
 if (-not $BinDir) {
     Push-Location $root
-    try { cargo build -p remora; if ($LASTEXITCODE) { throw 'build failed' } } finally { Pop-Location }
+    try { cargo build -p remora-client; if ($LASTEXITCODE) { throw 'build failed' } } finally { Pop-Location }
     $meta = cargo metadata --format-version 1 --no-deps --manifest-path (Join-Path $root 'Cargo.toml') | ConvertFrom-Json
     $BinDir = Join-Path $meta.target_directory 'debug'
 }

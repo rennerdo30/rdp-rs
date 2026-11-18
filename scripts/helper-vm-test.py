@@ -138,7 +138,7 @@ def main() -> int:
                     "--target-dir", str(static), "--message-format=short"], cwd=ROOT, env=env, check=True)
     agent = static / "release" / "remora-agent.exe"
     log("building the live test")
-    subprocess.run(["cargo", "test", "-p", "remora", "--no-run", "--message-format=short"],
+    subprocess.run(["cargo", "test", "-p", "remora-client", "--no-run", "--message-format=short"],
                    cwd=ROOT, check=True)
 
     work = Path(tempfile.mkdtemp(prefix="helper-e2e-"))
@@ -194,7 +194,7 @@ fsutil file createnew "$s\big.bin" {a.big_mib * 1048576} | Out-Null
             tenv["E2E_STREAM"] = "1"
         delays = [int(d) for d in a.delays.split(",") if d] or [a.decode_delay_ms]
         tenv["REMORA_DEBUG_DECODE_DELAY_MS"] = str(delays[0])
-        proc = subprocess.Popen(["cargo", "test", "-p", "remora", "live_helper", "--",
+        proc = subprocess.Popen(["cargo", "test", "-p", "remora-client", "live_helper", "--",
                                  "--ignored", "--nocapture", "--test-threads=1"],
                                 cwd=ROOT, env=tenv, stdout=trace, stderr=subprocess.STDOUT)
         client_fp = wait(work, "client.fp", 300, proc).strip()
@@ -237,7 +237,7 @@ fsutil file createnew "$s\big.bin" {a.big_mib * 1048576} | Out-Null
                 tenv["REMORA_DEBUG_DECODE_DELAY_MS"] = str(delays[i])
                 for n in ("client.fp", "trusted", "connected", "latency", "paired", "layout"):
                     (work / n).unlink(missing_ok=True)
-                proc = subprocess.Popen(["cargo", "test", "-p", "remora", "live_helper", "--",
+                proc = subprocess.Popen(["cargo", "test", "-p", "remora-client", "live_helper", "--",
                                          "--ignored", "--nocapture", "--test-threads=1"],
                                         cwd=ROOT, env=tenv, stdout=trace, stderr=subprocess.STDOUT)
                 fp2 = wait(work, "client.fp", 300, proc).strip()

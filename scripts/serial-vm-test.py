@@ -105,7 +105,7 @@ def main() -> int:
         log(f"{'PASS' if ok else 'FAIL'} {name} {detail}")
 
     log("building the live test")
-    subprocess.run(["cargo", "test", "-p", "remora", "--no-run", "--message-format=short"],
+    subprocess.run(["cargo", "test", "-p", "remora-client", "--no-run", "--message-format=short"],
                    cwd=ROOT, check=True)
     work = Path(tempfile.mkdtemp(prefix="serial-e2e-"))
     pw = work / "pw.txt"
@@ -134,7 +134,7 @@ def main() -> int:
         trace = open(work / "test.log", "w", encoding="utf-8")
         tenv = dict(os.environ, E2E_HOST="127.0.0.1", E2E_PORT="13389", E2E_USER=user,
                     E2E_PASSWORD_FILE=str(pw), E2E_DIR=str(work))
-        proc = subprocess.Popen(["cargo", "test", "-p", "remora", "live_serial", "--",
+        proc = subprocess.Popen(["cargo", "test", "-p", "remora-client", "live_serial", "--",
                                  "--ignored", "--nocapture", "--test-threads=1"],
                                 cwd=ROOT, env=tenv, stdout=trace, stderr=subprocess.STDOUT)
         wait(work, "connected", 180, proc)

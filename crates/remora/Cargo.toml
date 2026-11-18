@@ -1,17 +1,44 @@
 [package]
-name = "remora"
-description = "Prototype RDP client: connection manager and session windows on the rdp crate"
+name = "remora-client"
+description = "Remora, a remote desktop (RDP) client for Windows: connection manager, tabs and session windows"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+readme = "README.md"
+keywords = ["rdp", "remote-desktop", "windows", "client"]
+categories = ["network-programming", "gui"]
+include = [
+    "/src/**",
+    "/build.rs",
+    "/assets/remora.ico",
+    "/Cargo.toml",
+    "/README.md",
+    "/LICENSE-MIT",
+    "/LICENSE-APACHE",
+]
+
+# `remora` on crates.io is another project; the program keeps the name
+# (`cargo install remora-client` installs `remora`).
+[[bin]]
+name = "remora"
+path = "src/main.rs"
+
+# Remora is a Windows program today (docs/RELEASING.md).
+[package.metadata.docs.rs]
+default-target = "x86_64-pc-windows-msvc"
+targets = ["x86_64-pc-windows-msvc"]
 
 [dependencies]
-rdp = { path = "../rdp" }
+rdp.workspace = true
 # The server helper protocol (Remora::Ctl / Remora::Bulk).
-remora-link = { path = "../remora-link" }
-remora-update = { path = "../remora-update" }
+remora-link.workspace = true
+remora-update.workspace = true
 # CPU canvas and text from ffwd (https://github.com/rennerdo30/ffwd, its
-# decision 0001), pinned to a published commit.
+# decision 0001), pinned to a published commit. crates.io refuses Git
+# dependencies: switch to the published ffwd-render before publishing (RDP-86).
 ffwd-render = { git = "https://github.com/rennerdo30/ffwd", rev = "97fcd22ba06fc62bf7ab52cb50b7205887190083" }
 winit = "0.30.13"
 softbuffer = "0.4.8"

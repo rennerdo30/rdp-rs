@@ -9,7 +9,7 @@
 //! 48 px, the eye sits on a pixel centre, and the disc's ridges and the glass
 //! highlight appear only where they have enough pixels to read.
 //!
-//! The same mark is the window and taskbar icon, `assets/remora.ico` and the
+//! The same mark is the window and taskbar icon, `crates/remora/assets/remora.ico` and the
 //! sidebar logo ([`crate::kit::Kit::logo`]), in every theme.
 
 /// The dark theme's accent (`theme::dark::ACCENT`), the ink on it
