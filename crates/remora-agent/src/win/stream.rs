@@ -312,9 +312,16 @@ fn pump(
                         && pending.len() <= TILE_RECTS
                         && by_time.is_empty()
                         && !held_waiting;
-                    if let Some(tex) = res.and_then(|r| r.cast::<ID3D11Texture2D>().ok())
-                        && same_size(&tex, size)
-                    {
+                    if let Some(tex) = res.and_then(|r| r.cast::<ID3D11Texture2D>().ok()) {
+                        if !same_size(&tex, size) {
+                            // The encoder keeps its size: end the stream, and
+                            // Remora returns to the RDP picture.
+                            // SAFETY: the frame acquired above.
+                            let _ = unsafe { d.dupl.ReleaseFrame() };
+                            return Err("the session's resolution changed; \
+                                 start the helper picture again"
+                                .into());
+                        }
                         if small {
                             let data = read_tiles(d, &tex, &pending, &mut staging)?;
                             seq = seq.wrapping_add(1);
@@ -446,7 +453,7 @@ fn read_tiles(
 }
 
 /// Whether a captured frame still has the encoder's size (a resolution
-/// change ends the stream in a later version; until then it is skipped).
+/// change ends the stream).
 fn same_size(tex: &ID3D11Texture2D, size: (u32, u32)) -> bool {
     let mut d = D3D11_TEXTURE2D_DESC::default();
     // SAFETY: a plain getter.
