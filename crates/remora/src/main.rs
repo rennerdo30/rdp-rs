@@ -112,6 +112,8 @@ struct Args {
     /// `--legacy-security`: allow Standard RDP Security (RC4, no TLS) when
     /// the server offers nothing better (MS-RDPBCGR 5.3). Weak.
     legacy_security: bool,
+    /// `--udp`: offer the UDP transport (MS-RDPEMT) for the dynamic channels.
+    udp: bool,
     /// `--expect-fingerprint`: the server certificate's SHA-256 (hex, any
     /// separators); any other certificate is refused.
     expect_fingerprint: Option<String>,
@@ -142,6 +144,7 @@ fn usage() -> ! {
          \x20           [--expect-fingerprint SHA256]   (accept only this server certificate)\n\
          \x20           [--legacy-security]   (allow weak RC4 security for servers without TLS)\n\
          \x20           [--multimon]   (all local monitors, MS-RDPBCGR 2.2.1.3.6)\n\
+         \x20           [--udp]   (dynamic channels over UDP when the server offers it)\n\
          \x20           [--kerberos]   (Windows Negotiate: Kerberos, NTLM fallback;\n\
          \x20                           without -u: single sign-on as the logged-on user)\n\
          \x20      remora <host> --list-sessions   (the server's sessions, as the logged-on user)\n\
@@ -232,6 +235,7 @@ fn parse_args() -> Args {
             "--no-consent-prompt" => a.no_consent = true,
             "--invitation" => a.invitation = Some(val()),
             "--preconnection" => a.preconnection = true,
+            "--udp" => a.udp = true,
             "-h" | "--help" => usage(),
             s if s.starts_with('-') => usage(),
             s => {
@@ -505,6 +509,7 @@ fn main() {
     cfg.surface_commands = args.surface_commands;
     cfg.drawing_orders = args.drawing_orders;
     cfg.legacy_security = args.legacy_security;
+    cfg.multitransport = args.udp;
     if let Some(expected) = &args.expect_fingerprint {
         let want = normalize_fingerprint(expected);
         if want.len() != 64 {
@@ -702,6 +707,20 @@ fn screenshot(
             v.decode.as_secs_f64() * 1000.0 / v.decoded.max(1) as f64
         );
     }
+    // Which transport carried the session (RDP-79).
+    let udp = client.stats().udp;
+    eprintln!(
+        "transport: {:?}, {} dynamic channels on UDP, {} datagram bytes in, {} out, {} retransmits{}",
+        udp.state,
+        udp.channels,
+        udp.bytes_in,
+        udp.bytes_out,
+        udp.retransmits,
+        client
+            .udp_failure()
+            .map(|f| format!(" (UDP failed: {f})"))
+            .unwrap_or_default()
+    );
     if let Some(r) = recorder {
         let i = r.finish()?;
         eprintln!(

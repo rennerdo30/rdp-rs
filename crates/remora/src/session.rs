@@ -29,6 +29,8 @@ pub enum Event {
     Dropped {
         why: String,
         cookie: Option<rdp::AutoReconnectCookie>,
+        /// The UDP transport failed in this session: reconnect over TCP.
+        udp_failed: bool,
     },
     /// The remote cursor changed shape (or was hidden / reset).
     Pointer(rdp::PointerUpdate),
@@ -286,6 +288,7 @@ fn run(
                 return emit(Event::Dropped {
                     why: e.to_string(),
                     cookie: client.auto_reconnect_cookie(),
+                    udp_failed: client.udp_failure().is_some(),
                 });
             }
             Err(e) => return emit(failed(&e, None)),
@@ -367,6 +370,7 @@ fn run(
                 return emit(Event::Dropped {
                     why: reason.text,
                     cookie: client.auto_reconnect_cookie(),
+                    udp_failed: client.udp_failure().is_some(),
                 });
             }
             return emit(Event::Closed {

@@ -122,6 +122,7 @@ fn video_hint(gfx: bool) -> &'static str {
         "Needs GFX (H.264)"
     }
 }
+const UDP_HINT: &str = "Graphics and sound over UDP when the server offers it; TCP if UDP fails";
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Field {
@@ -251,6 +252,8 @@ pub enum Hit {
     /// Compression: index into COMPRESSION (panel and form).
     TabCompression(u64, usize),
     FormCompression(usize),
+    /// UDP transport on/off (form, applies on the next connect).
+    FormUdp,
     /// Enter or leave full screen.
     FullScreen,
     /// Full screen: keep the bar, or let it hide.
@@ -2221,10 +2224,11 @@ impl Ui {
             Hit::CertRefuse(id) => return Some(Action::CertAnswer(id, false)),
             Hit::TabPreset(id, i) => {
                 let t = self.tab_mut(id)?;
-                let (touch, video) = (t.quality.touch, t.quality.video);
+                let q = t.quality;
                 t.quality = Quality::preset(PRESETS[i].0, t.quality.color_depth);
-                t.quality.touch = touch;
-                t.quality.video = video;
+                t.quality.touch = q.touch;
+                t.quality.video = q.video;
+                t.quality.udp = q.udp;
                 return Some(Action::SetQuality(id, t.quality));
             }
             Hit::TabDepth(id, i) => {
@@ -2253,6 +2257,7 @@ impl Ui {
                 return Some(Action::SetQuality(id, t.quality));
             }
             Hit::FormCompression(i) => self.opts.quality.compression = COMPRESSION[i].0,
+            Hit::FormUdp => self.opts.quality.udp = !self.opts.quality.udp,
             Hit::TabGraphics(id, i) => {
                 let t = self.tab_mut(id)?;
                 match i {
@@ -2272,6 +2277,7 @@ impl Ui {
                 self.opts.quality.touch = q.touch;
                 self.opts.quality.gfx = q.gfx;
                 self.opts.quality.video = q.video;
+                self.opts.quality.udp = q.udp;
             }
             Hit::FormDepth(i) => self.opts.quality.color_depth = DEPTHS[i],
             Hit::FormExperience(i) => {
@@ -6034,6 +6040,22 @@ impl Ui {
         );
         y += p(50.0) + p(20.0);
 
+        self.caption(cv, te, f, x, y, w, "NETWORK");
+        y += p(24.0);
+        let cells = self.card(cv, x, y, w, &[p(60.0)]);
+        self.card_switch_i(
+            cv,
+            te,
+            f,
+            cells[0],
+            Some(Icon::Network),
+            "UDP transport",
+            UDP_HINT,
+            q.udp,
+            Hit::FormUdp,
+        );
+        y += p(60.0) + p(20.0);
+
         self.caption(cv, te, f, x, y, w, "WINDOWS KEYS (WIN, ALT+TAB, …)");
         y += p(24.0);
         let items: Vec<(String, bool, Hit)> = WinKeys::ALL
@@ -8491,6 +8513,18 @@ mod tests {
         );
         m.activate(Hit::FormGraphics(VIDEO_SWITCH));
         assert!(!m.opts.quality.video);
+    }
+
+    #[test]
+    fn udp_switch_toggles_and_survives_a_speed_preset() {
+        let mut m = sample(false);
+        assert!(!m.opts.quality.udp, "off by default");
+        m.activate(Hit::FormUdp);
+        assert!(m.opts.quality.udp);
+        m.activate(Hit::FormPreset(0));
+        assert!(m.opts.quality.udp, "a speed preset keeps the choice");
+        m.activate(Hit::FormUdp);
+        assert!(!m.opts.quality.udp);
     }
 
     #[test]

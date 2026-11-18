@@ -250,6 +250,25 @@ A session that ends without an error shows why and how long it ran, with
   sends the video inside the desktop picture again. The diagnostic log shows
   the video presentations (`video N: start ...`) and their geometry
   (`geometry ...`); please attach it to the report.
+- **The statistics say "TCP · UDP failed" or "UDP offered, not used".** The
+  UDP transport (editor's Advanced page) could not be used; the session runs
+  normally over TCP. Common causes:
+  - A firewall drops **UDP port 3389** (or the connection's port) on the way
+    to the server or on the server itself. Windows' rule is "Remote Desktop -
+    User Mode (UDP-In)"; it must be allowed for the profile of the server's
+    network. TCP 3389 being open is not enough.
+  - The server has UDP switched off: the policy "Select RDP transport
+    protocols" (Computer Configuration, Administrative Templates, Windows
+    Components, Remote Desktop Services, Remote Desktop Session Host,
+    Connections) set to **Use only TCP**.
+  - A port forwarding or NAT that forwards only TCP. Forward UDP to the
+    same port too.
+  - The server presented a different certificate on UDP than on TCP; Remora
+    then refuses UDP on purpose.
+
+  The diagnostic log names the reason in its "UDP tunnel failed" line. When
+  UDP breaks during a session that already uses it, Remora reconnects that
+  tab (resuming the same Windows session) and keeps it on TCP.
 - **Windows warns when starting the setup.** The setup is not code-signed yet.
   Choose **More info**, then **Run anyway**.
 
