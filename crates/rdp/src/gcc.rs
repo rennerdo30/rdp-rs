@@ -11,12 +11,16 @@ const CS_NET: u16 = 0xC003;
 const CS_CLUSTER: u16 = 0xC004;
 /// Client Message Channel Data (2.2.1.3.7).
 const CS_MCS_MSGCHANNEL: u16 = 0xC006;
+/// Client Multitransport Channel Data (2.2.1.3.8).
+const CS_MULTITRANSPORT: u16 = 0xC00A;
 
 const SC_CORE: u16 = 0x0C01;
 const SC_SECURITY: u16 = 0x0C02;
 const SC_NET: u16 = 0x0C03;
 /// Server Message Channel Data (2.2.1.4.5).
 const SC_MCS_MSGCHANNEL: u16 = 0x0C04;
+/// Server Multitransport Channel Data (2.2.1.4.6).
+const SC_MULTITRANSPORT: u16 = 0x0C08;
 
 const RNS_UD_COLOR_8BPP: u16 = 0xCA01;
 const RNS_UD_SAS_DEL: u16 = 0xAA03;
@@ -62,6 +66,12 @@ pub struct ClientSettings<'a> {
     pub redirected_session_id: Option<u32>,
     /// REDIRECTED_SMARTCARD: the redirection said LB_SMARTCARD_LOGON.
     pub redirected_smartcard: bool,
+    /// Client Multitransport Channel Data flags (2.2.1.3.8), for example
+    /// [`crate::multitransport::CLIENT_FLAGS`]; 0 sends no such block. With
+    /// flags the message channel is asked for too: the Initiate
+    /// Multitransport Request travels on it (2.2.1.3.7). Only for a server
+    /// that set EXTENDED_CLIENT_DATA_SUPPORTED (an Extended Client Data Block).
+    pub multitransport: u32,
 }
 
 fn block(out: &mut Vec<u8>, ty: u16, body: &[u8]) {
@@ -148,7 +158,13 @@ pub fn client_data_blocks(s: &ClientSettings) -> Vec<u8> {
     block(&mut out, CS_CORE, &core);
 
     let mut sec = Vec::new();
-    sec.put_u32(0); // encryptionMethods: none, TLS/CredSSP protect the session
+    // encryptionMethods: none when TLS/CredSSP protect the session; 40, 56
+    // and 128-bit RC4 for Standard RDP Security (2.2.1.3.3, 5.3.2).
+    sec.put_u32(if s.selected_protocol == crate::x224::PROTOCOL_RDP {
+        crate::security::CLIENT_ENCRYPTION_METHODS
+    } else {
+        0
+    });
     sec.put_u32(0); // extEncryptionMethods
     block(&mut out, CS_SECURITY, &sec);
 
@@ -162,10 +178,14 @@ pub fn client_data_blocks(s: &ClientSettings) -> Vec<u8> {
     }
     block(&mut out, CS_NET, &net);
 
-    // Auto-detect PDUs travel on the message channel (2.2.14.3); asking for
-    // it is the Client Message Channel Data, flags unused and zero (2.2.1.3.7).
-    if autodetect(s) {
+    // Auto-detect PDUs travel on the message channel (2.2.14.3), and so do
+    // multitransport requests (2.2.15.1); asking for it is the Client
+    // Message Channel Data, flags unused and zero (2.2.1.3.7).
+    if autodetect(s) || s.multitransport != 0 {
         block(&mut out, CS_MCS_MSGCHANNEL, &[0; 4]);
+    }
+    if s.multitransport != 0 {
+        block(&mut out, CS_MULTITRANSPORT, &s.multitransport.to_le_bytes());
     }
 
     block(&mut out, CS_CLUSTER, &cluster_data(s));
@@ -223,9 +243,17 @@ pub struct ServerData {
     pub channel_ids: Vec<u16>,
     pub encryption_method: u32,
     pub encryption_level: u32,
+    /// serverRandom (2.2.1.4.3): sent with a nonzero method or level,
+    /// that is under Standard RDP Security only.
+    pub server_random: Option<[u8; 32]>,
+    /// serverCertificate (2.2.1.4.3.1): a proprietary certificate or an
+    /// X.509 chain; empty under Enhanced RDP Security.
+    pub server_certificate: Vec<u8>,
     /// The MCS message channel (2.2.1.4.5); None when the server sent none
     /// or sent zero (then it is not joined).
     pub message_channel: Option<u16>,
+    /// Server Multitransport Channel Data flags (2.2.1.4.6); 0 when absent.
+    pub multitransport: u32,
 }
 
 /// Parses the GCC Conference Create Response user data.
@@ -254,6 +282,15 @@ pub fn parse_conference_create_response(data: &[u8]) -> Result<ServerData> {
             SC_SECURITY => {
                 sd.encryption_method = b.u32()?;
                 sd.encryption_level = b.u32()?;
+                if (sd.encryption_method != 0 || sd.encryption_level != 0) && b.remaining() > 0 {
+                    let random_len = b.u32()? as usize;
+                    let cert_len = b.u32()? as usize;
+                    if random_len != 32 {
+                        return proto(format!("server random of {random_len} bytes"));
+                    }
+                    sd.server_random = Some(b.array()?);
+                    sd.server_certificate = b.bytes(cert_len)?.to_vec();
+                }
             }
             SC_NET => {
                 sd.io_channel = b.u16()?;
@@ -263,6 +300,7 @@ pub fn parse_conference_create_response(data: &[u8]) -> Result<ServerData> {
                 }
             }
             SC_MCS_MSGCHANNEL => sd.message_channel = Some(b.u16()?).filter(|&c| c != 0),
+            SC_MULTITRANSPORT => sd.multitransport = b.u32()?,
             _ => {}
         }
     }
@@ -292,10 +330,19 @@ mod tests {
             monitors: None,
             redirected_session_id: None,
             redirected_smartcard: false,
+            multitransport: 0,
         };
         let b = client_data_blocks(&s);
         assert_eq!(u16::from_le_bytes([b[0], b[1]]), CS_CORE);
         assert_eq!(u16::from_le_bytes([b[2], b[3]]), 234);
+        // Client Security Data (2.2.1.3.3): no methods under TLS, 40, 56
+        // and 128 bits under Standard RDP Security.
+        assert_eq!(&b[234..242], &[0x02, 0xC0, 12, 0, 0, 0, 0, 0]);
+        let rdp = client_data_blocks(&ClientSettings {
+            selected_protocol: 0,
+            ..s
+        });
+        assert_eq!(&rdp[234..242], &[0x02, 0xC0, 12, 0, 0x0B, 0, 0, 0]);
         // Scale fields at the end of the core block: desktop 150, device 140.
         assert_eq!(&b[226..234], &[150, 0, 0, 0, 140, 0, 0, 0]);
         // earlyCapabilityFlags (offset 144): ERRINFO | WANT_32BPP |
@@ -368,6 +415,7 @@ mod tests {
             monitors: None,
             redirected_session_id: None,
             redirected_smartcard: false,
+            multitransport: 0,
         };
         let b = client_data_blocks(&s);
         let u32_at = |o: usize| u32::from_le_bytes(b[o..o + 4].try_into().unwrap());
@@ -403,5 +451,49 @@ mod tests {
         let mut bad = server_data(0x03EC);
         bad.truncate(bad.len() - 1);
         assert!(parse_conference_create_response(&bad).is_err());
+    }
+
+    #[test]
+    fn multitransport_blocks() {
+        let kb = crate::KeyboardInfo::default();
+        let s = ClientSettings {
+            width: 1024,
+            height: 768,
+            keyboard: &kb,
+            client_name: "TEST",
+            selected_protocol: 3,
+            scale: 100,
+            color_depth: 32,
+            connection_type: crate::ConnectionType::Lan,
+            channels: &[],
+            gfx: false,
+            monitors: None,
+            redirected_session_id: None,
+            redirected_smartcard: false,
+            multitransport: 0,
+        };
+        let off = client_data_blocks(&s);
+        let on = client_data_blocks(&ClientSettings {
+            multitransport: crate::multitransport::CLIENT_FLAGS,
+            ..s
+        });
+        // Message channel (2.2.1.3.7), then TS_UD_CS_MULTITRANSPORT
+        // (2.2.1.3.8): CS_MULTITRANSPORT, length 8, UDPFECR | SOFTSYNC.
+        let blocks = [
+            0x06, 0xC0, 8, 0, 0, 0, 0, 0, 0x0A, 0xC0, 8, 0, 0x01, 0x02, 0, 0,
+        ];
+        assert_eq!(on.len(), off.len() + 16);
+        assert_eq!(&on[on.len() - 28..on.len() - 12], &blocks);
+        assert!(!off.windows(2).any(|w| w == [0x0A, 0xC0]));
+
+        // TS_UD_SC_MULTITRANSPORT (2.2.1.4.6) after the other blocks.
+        let mut d = server_data(0x03EC);
+        let n = d.len();
+        d.extend([0x08, 0x0C, 8, 0, 0x01, 0x03, 0, 0]);
+        d[4] = (n - 5 + 8) as u8; // the PER length after "McDn"
+        let sd = parse_conference_create_response(&d).unwrap();
+        assert_eq!(sd.multitransport, 0x0301);
+        let sd = parse_conference_create_response(&server_data(0x03EC)).unwrap();
+        assert_eq!(sd.multitransport, 0);
     }
 }

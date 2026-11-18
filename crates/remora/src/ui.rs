@@ -110,6 +110,19 @@ const FIELD_TEXT: f32 = 13.0;
 const DEPTHS: [u16; 4] = [32, 24, 16, 15];
 /// Sub-label of the "Touch and pen" switch.
 const TOUCH_HINT: &str = "Off: they act as the mouse";
+/// `TabGraphics` / `FormGraphics` index of the video redirection switch
+/// (0 and 1 choose bitmaps or GFX).
+const VIDEO_SWITCH: usize = 2;
+
+/// Sub-label of the "Video redirection" switch.
+fn video_hint(gfx: bool) -> &'static str {
+    if gfx {
+        "Video the server detects plays as H.264 here"
+    } else {
+        "Needs GFX (H.264)"
+    }
+}
+const UDP_HINT: &str = "Graphics and sound over UDP when the server offers it; TCP if UDP fails";
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Field {
@@ -189,6 +202,10 @@ pub enum Hit {
     FormPage(u8),
     /// Sign in with Windows (Kerberos) on or off.
     FormKerberos,
+    /// Allow legacy RDP security (no TLS) for this connection.
+    FormLegacySecurity,
+    /// Reach the gateway over RPC over HTTP only, on or off.
+    FormGatewayRpc,
     /// Group form: colour swatch (index into GROUP_COLORS; past the end: automatic).
     FormColor(usize),
     /// Settings page and its controls.
@@ -219,6 +236,11 @@ pub enum Hit {
     TabMic(u64, usize),
     /// Microphone on/off in the panel (live).
     Microphone(u64),
+    /// Camera choice: index into `cams` + 1 (0 = every camera); form and panel.
+    FormCam(usize),
+    TabCam(u64, usize),
+    /// Camera sharing on/off in the panel (live).
+    Camera(u64),
     /// Quick panel: page, and the session's quality (applies on reconnect).
     DrawerPage(u8),
     TabPreset(u64, usize),
@@ -230,12 +252,16 @@ pub enum Hit {
     /// Compression: index into COMPRESSION (panel and form).
     TabCompression(u64, usize),
     FormCompression(usize),
+    /// UDP transport on/off (form, applies on the next connect).
+    FormUdp,
     /// Enter or leave full screen.
     FullScreen,
     /// Full screen: keep the bar, or let it hide.
     PinBar,
     /// Start or stop recording the session to a video.
     Record(u64),
+    /// A shared desktop: ask for control, or give it back (RDP-77).
+    ShareControl(u64),
     /// Bring a session from its monitors back into the window.
     Unspan(u64),
     /// Quit confirmation: quit, stay, and the dimmed rest of the window.
@@ -280,12 +306,16 @@ pub enum Hit {
     Printers(u64),
     Sound(u64),
     SmartCards(u64),
+    /// A port row of the panel: index into `port_rows`.
+    Port(u64, usize),
     Fit(u64),
     /// Scale choice: 0 = Auto, else an index into SCALES + 1.
     Scale(u64, usize),
     /// Connection form: scale choice, sharing chip, folder remove/add.
     FormScale(usize),
     FormShare(u8),
+    /// A port row of the editor: index into `port_rows`.
+    FormPort(usize),
     FormRemoveDrive(usize),
     FormAddDrive,
     /// Vault: save-password chip, unlock, remember, create, cancel, lock.
@@ -428,6 +458,14 @@ pub struct SharedDrive {
     pub path: String,
 }
 
+/// The port rows of the editor and the panel: this PC's ports, then the
+/// chosen ones it does not have now (a USB adapter unplugged).
+pub fn port_rows(local: &[String], chosen: &[String]) -> Vec<String> {
+    let mut rows = local.to_vec();
+    rows.extend(chosen.iter().filter(|c| !local.contains(c)).cloned());
+    rows
+}
+
 /// One session tab and its live settings.
 pub struct Tab {
     pub id: u64,
@@ -442,6 +480,8 @@ pub struct Tab {
     /// Remote desktop scale in percent; None follows this PC's scaling.
     pub scale: Option<u32>,
     pub drives: Vec<SharedDrive>,
+    /// Serial and parallel ports shared now ("COM3").
+    pub ports: Vec<String>,
     /// Quality chosen in the panel, and the one the session logged on with.
     pub quality: Quality,
     pub quality_live: Quality,
@@ -461,6 +501,9 @@ pub struct Tab {
     /// Microphone on, and the device it records from (None: default).
     pub microphone: bool,
     pub mic: Option<String>,
+    /// This PC's cameras shared, and which one (None: every camera).
+    pub camera: bool,
+    pub cam: Option<String>,
     /// The session's picture is being recorded to a video file.
     pub recording: bool,
     /// Shown on chosen monitors in their own windows, not in this tab.
@@ -484,6 +527,9 @@ pub struct Tab {
     pub live: Live,
     /// The server helper, its questions and transfers.
     pub helper: HelperView,
+    /// A shared desktop (Desktop Sharing, a shadowed session): this
+    /// participant's control level; None for a normal session (RDP-77).
+    pub shared: Option<rdp::Control>,
 }
 
 /// A server certificate to trust or refuse.
@@ -506,6 +552,7 @@ struct TabView {
     fit: bool,
     scale: Option<u32>,
     drives: Vec<SharedDrive>,
+    ports: Vec<String>,
     quality: Quality,
     quality_live: Quality,
     state: TabState,
@@ -516,6 +563,8 @@ struct TabView {
     speaker: Option<String>,
     microphone: bool,
     mic: Option<String>,
+    camera: bool,
+    cam: Option<String>,
     redirected_to: Option<String>,
     network: Option<String>,
 }
@@ -543,11 +592,15 @@ pub enum Action {
     SetPrinters(u64, bool),
     SetSound(u64, bool),
     SetSmartCards(u64, bool),
+    /// Share a serial or parallel port ("COM3") or stop sharing it.
+    SetPort(u64, String, bool),
     SetFit(u64, bool),
     SetScale(u64, Option<u32>),
     AddDrive(u64, String),
     RemoveDrive(u64, usize),
     CtrlAltDel(u64),
+    /// A shared desktop: ask for control, or give it back (MS-RDPEMC).
+    ShareControl(u64),
     WinMinimize,
     WinClose,
     /// Derive the key off the UI thread, then open the vault.
@@ -603,6 +656,8 @@ pub enum Action {
     /// A session's microphone on or off, and its device (None: default).
     SetMicrophone(u64, bool),
     SetMic(u64, Option<String>),
+    /// A session's cameras shared or not, and which one (None: every camera).
+    SetCamera(u64, bool, Option<String>),
     /// Put this text on the clipboard (error details).
     CopyText(String),
     /// The sidebar folded or unfolded, or a divider was dragged: keep the
@@ -689,6 +744,10 @@ pub struct Ui {
     inherit: Inherit,
     /// The edited connection or group signs in with Windows (Kerberos).
     kerberos: bool,
+    /// The edited connection allows legacy RDP security (never a group's).
+    legacy_security: bool,
+    /// The edited connection or group reaches its gateway over RPC over HTTP.
+    gateway_rpc: bool,
     /// The edited group's chosen colour (None: automatic).
     group_color: Option<u8>,
     /// Collapsed group paths in the sidebar.
@@ -731,6 +790,10 @@ pub struct Ui {
     pub speakers: Vec<String>,
     /// Local microphones (the app fills it in).
     pub mics: Vec<String>,
+    /// This PC's serial and parallel ports, "COM3" (the app fills it in).
+    pub local_ports: Vec<String>,
+    /// Local cameras, by name (the app fills it in).
+    pub cams: Vec<String>,
     /// This PC's monitors (the app fills it in).
     pub local_monitors: Vec<crate::monitors::LocalMonitor>,
     /// Connection editor page.
@@ -745,9 +808,11 @@ pub struct Ui {
     pub update_channel: String,
     /// Colour theme choice (the app applies the palette).
     pub theme: ThemeChoice,
-    /// Settings: the change-master form is open; a backup waits for its password.
+    /// Settings: the change-master form is open; a picked file waits for
+    /// Import (and its password, when it has one).
     change_master: bool,
     pub import_file: Option<std::path::PathBuf>,
+    pub import_probe: Option<crate::import::Probe>,
     pub settings_note: Option<(String, Tone)>,
     /// Asking whether to quit while this many sessions are open.
     pub confirm_exit: Option<usize>,
@@ -845,6 +910,8 @@ impl Ui {
             group_edit: None,
             inherit: Inherit::default(),
             kerberos: false,
+            legacy_security: false,
+            gateway_rpc: false,
             group_color: None,
             collapsed: Default::default(),
             opts: SessionOptions::default(),
@@ -871,6 +938,8 @@ impl Ui {
             session_clip: None,
             speakers: Vec::new(),
             mics: Vec::new(),
+            local_ports: Vec::new(),
+            cams: Vec::new(),
             local_monitors: Vec::new(),
             form_page: 0,
             settings_open: false,
@@ -882,6 +951,7 @@ impl Ui {
             theme: ThemeChoice::Dark,
             change_master: false,
             import_file: None,
+            import_probe: None,
             settings_note: None,
             confirm_exit: None,
             session_focus: false,
@@ -997,6 +1067,7 @@ impl Ui {
             fit,
             scale: None,
             drives: Vec::new(),
+            ports: Vec::new(),
             quality: Quality::default(),
             quality_live: Quality::default(),
             cert: None,
@@ -1007,6 +1078,8 @@ impl Ui {
             speaker: None,
             microphone: false,
             mic: None,
+            camera: false,
+            cam: None,
             recording: false,
             spanned: false,
             remote_app: None,
@@ -1018,6 +1091,7 @@ impl Ui {
             stats: None,
             live: Live::default(),
             helper: HelperView::default(),
+            shared: None,
         });
         self.active = Some(id);
         self.session_focus = false;
@@ -1056,6 +1130,8 @@ impl Ui {
         self.field_mut(Field::HelperFingerprint)
             .set(c.options.helper.fingerprint.as_deref().unwrap_or(""));
         self.kerberos = c.kerberos;
+        self.legacy_security = c.legacy_security;
+        self.gateway_rpc = c.gateway_rpc;
         self.size = size_index(c.width, c.height);
         self.opts = c.options.clone();
         self.opens = c.opens;
@@ -1088,6 +1164,7 @@ impl Ui {
         self.field_mut(Field::User).set(&g.user);
         self.field_mut(Field::Gateway).set(&g.gateway);
         self.kerberos = g.kerberos;
+        self.gateway_rpc = g.gateway_rpc;
         self.group_color = g.color;
         self.size = size_index(g.width, g.height);
         self.opts = g.options.clone();
@@ -1120,6 +1197,7 @@ impl Ui {
         }
         self.field_mut(Field::Port).set("3389");
         self.field_mut(Field::GroupPath).set(group);
+        self.legacy_security = false;
         self.size = 0;
         self.opts = SessionOptions::default();
         self.opens = Opens::Desktop;
@@ -1259,7 +1337,9 @@ impl Ui {
             password: self.form_password(inherit.credentials),
             group: normalize_path(&self.field(Field::GroupPath).text),
             gateway: self.field(Field::Gateway).text.trim().to_string(),
+            gateway_rpc: self.gateway_rpc,
             kerberos: self.kerberos,
+            legacy_security: self.legacy_security,
             inherit,
             opens: self.opens,
             apps: self.apps.clone(),
@@ -1431,6 +1511,7 @@ impl Ui {
             user: self.field(Field::User).text.trim().to_string(),
             password: self.form_password(inherit.credentials),
             gateway: self.field(Field::Gateway).text.trim().to_string(),
+            gateway_rpc: self.gateway_rpc,
             kerberos: self.kerberos,
             width,
             height,
@@ -2016,6 +2097,7 @@ impl Ui {
             Hit::ImportOk => return self.import_action(),
             Hit::ImportCancel => {
                 self.import_file = None;
+                self.import_probe = None;
                 self.field_mut(Field::ImportPass).set("");
             }
             Hit::SetupVault => {
@@ -2024,6 +2106,8 @@ impl Ui {
                 self.focus = Some(Field::Master);
             }
             Hit::FormKerberos => self.kerberos = !self.kerberos,
+            Hit::FormLegacySecurity => self.legacy_security = !self.legacy_security,
+            Hit::FormGatewayRpc => self.gateway_rpc = !self.gateway_rpc,
             Hit::FormPage(i) => {
                 self.form_page = i;
                 self.home_scroll = 0;
@@ -2054,12 +2138,27 @@ impl Ui {
                 t.microphone = !t.microphone;
                 return Some(Action::SetMicrophone(id, t.microphone));
             }
+            Hit::FormCam(i) => {
+                self.opts.cam = i.checked_sub(1).and_then(|i| self.cams.get(i).cloned());
+            }
+            Hit::TabCam(id, i) => {
+                let name = i.checked_sub(1).and_then(|i| self.cams.get(i).cloned());
+                let t = self.tab_mut(id)?;
+                t.cam = name.clone();
+                return Some(Action::SetCamera(id, t.camera, name));
+            }
+            Hit::Camera(id) => {
+                let t = self.tab_mut(id)?;
+                t.camera = !t.camera;
+                return Some(Action::SetCamera(id, t.camera, t.cam.clone()));
+            }
             Hit::DrawerPage(i) => {
                 self.drawer_page = i;
                 self.drawer_scroll = 0;
             }
             Hit::FullScreen => return Some(Action::SetFullscreen(!self.fullscreen)),
             Hit::Record(id) => return Some(Action::ToggleRecording(id)),
+            Hit::ShareControl(id) => return Some(Action::ShareControl(id)),
             Hit::Unspan(id) => return Some(Action::Unspan(id)),
             Hit::PinBar => {
                 self.bar_pinned = !self.bar_pinned;
@@ -2125,9 +2224,11 @@ impl Ui {
             Hit::CertRefuse(id) => return Some(Action::CertAnswer(id, false)),
             Hit::TabPreset(id, i) => {
                 let t = self.tab_mut(id)?;
-                let touch = t.quality.touch;
+                let q = t.quality;
                 t.quality = Quality::preset(PRESETS[i].0, t.quality.color_depth);
-                t.quality.touch = touch;
+                t.quality.touch = q.touch;
+                t.quality.video = q.video;
+                t.quality.udp = q.udp;
                 return Some(Action::SetQuality(id, t.quality));
             }
             Hit::TabDepth(id, i) => {
@@ -2156,18 +2257,27 @@ impl Ui {
                 return Some(Action::SetQuality(id, t.quality));
             }
             Hit::FormCompression(i) => self.opts.quality.compression = COMPRESSION[i].0,
+            Hit::FormUdp => self.opts.quality.udp = !self.opts.quality.udp,
             Hit::TabGraphics(id, i) => {
                 let t = self.tab_mut(id)?;
-                t.quality.gfx = i == 1;
+                match i {
+                    VIDEO_SWITCH => t.quality.video = !t.quality.video,
+                    _ => t.quality.gfx = i == 1,
+                }
                 return Some(Action::SetQuality(id, t.quality));
+            }
+            Hit::FormGraphics(VIDEO_SWITCH) => {
+                self.opts.quality.video = !self.opts.quality.video;
             }
             Hit::FormGraphics(i) => self.opts.quality.gfx = i == 1,
             Hit::FormPreset(i) => {
                 let depth = self.opts.quality.color_depth;
-                let (touch, gfx) = (self.opts.quality.touch, self.opts.quality.gfx);
+                let q = self.opts.quality;
                 self.opts.quality = Quality::preset(PRESETS[i].0, depth);
-                self.opts.quality.touch = touch;
-                self.opts.quality.gfx = gfx;
+                self.opts.quality.touch = q.touch;
+                self.opts.quality.gfx = q.gfx;
+                self.opts.quality.video = q.video;
+                self.opts.quality.udp = q.udp;
             }
             Hit::FormDepth(i) => self.opts.quality.color_depth = DEPTHS[i],
             Hit::FormExperience(i) => {
@@ -2232,6 +2342,18 @@ impl Ui {
                 t.smart_cards = !t.smart_cards;
                 return Some(Action::SetSmartCards(id, t.smart_cards));
             }
+            Hit::Port(id, i) => {
+                let local = self.local_ports.clone();
+                let t = self.tab_mut(id)?;
+                let name = port_rows(&local, &t.ports).into_iter().nth(i)?;
+                let on = !t.ports.contains(&name);
+                if on {
+                    t.ports.push(name.clone());
+                } else {
+                    t.ports.retain(|p| *p != name);
+                }
+                return Some(Action::SetPort(id, name, on));
+            }
             Hit::Clipboard(id) => {
                 let t = self.tab_mut(id)?;
                 t.clipboard = !t.clipboard;
@@ -2247,9 +2369,22 @@ impl Ui {
                     1 => &mut o.sound,
                     2 => &mut o.printers,
                     3 => &mut o.smart_cards,
-                    _ => &mut o.microphone,
+                    4 => &mut o.microphone,
+                    _ => &mut o.camera,
                 };
                 *flag = !*flag;
+            }
+            Hit::FormPort(i) => {
+                if let Some(name) = port_rows(&self.local_ports, &self.opts.ports)
+                    .into_iter()
+                    .nth(i)
+                {
+                    if self.opts.ports.contains(&name) {
+                        self.opts.ports.retain(|p| *p != name);
+                    } else {
+                        self.opts.ports.push(name);
+                    }
+                }
             }
             Hit::FormRemoveDrive(i) => {
                 if i < self.opts.drives.len() {
@@ -3820,14 +3955,19 @@ impl Ui {
 
     fn import_action(&mut self) -> Option<Action> {
         let path = self.import_file.clone()?;
+        let probe = self.import_probe?;
         let password = zeroize::Zeroizing::new(self.field(Field::ImportPass).text.clone());
-        if password.is_empty() {
-            self.settings_note = Some(("Enter the backup's master password.".into(), Tone::Danger));
+        if probe.needs_password && password.is_empty() {
+            let ask = match probe.format {
+                crate::import::Format::MRemoteNg => "Enter the mRemoteNG master password.",
+                _ => "Enter the backup's master password.",
+            };
+            self.settings_note = Some((ask.into(), Tone::Danger));
             return None;
         }
         self.field_mut(Field::ImportPass).set("");
         self.unlocking = true;
-        self.settings_note = Some(("Opening the backup…".into(), Tone::Muted));
+        self.settings_note = Some(("Reading the file…".into(), Tone::Muted));
         Some(Action::Import { path, password })
     }
 
@@ -3837,6 +3977,7 @@ impl Ui {
         if ok {
             self.change_master = false;
             self.import_file = None;
+            self.import_probe = None;
         }
         self.settings_note = Some((text, if ok { Tone::Success } else { Tone::Danger }));
     }
@@ -4090,17 +4231,31 @@ impl Ui {
             cells[1],
             Icon::FolderOpen,
             "Import connections",
-            "Adds the connections and groups of a backup",
+            "From a Remora backup, mRemoteNG or RDCMan",
             "Import…",
             Hit::Import,
         );
         y += 2 * row + p(16.0);
         if let Some(path) = self.import_file.clone() {
+            use crate::import::Format;
             let name = path
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default();
-            let cells = self.card(cv, x, y, w, &[p(46.0), p(52.0), p(60.0)]);
+            let format = self.import_probe.map(|p| p.format);
+            let source = match format {
+                Some(Format::MRemoteNg) => "mRemoteNG",
+                Some(Format::RdcMan) => "Remote Desktop Connection Manager",
+                _ => "Remora backup",
+            };
+            // The password row only when the file needs one.
+            let needs = self.import_probe.is_some_and(|p| p.needs_password);
+            let rows = if needs {
+                vec![p(46.0), p(52.0), p(60.0)]
+            } else {
+                vec![p(46.0), p(60.0)]
+            };
+            let cells = self.card(cv, x, y, w, &rows);
             {
                 let mut k = Kit::new(cv, te, f, s);
                 let r = cells[0];
@@ -4115,21 +4270,27 @@ impl Ui {
                     Font::Regular,
                     12.5,
                     Rect::new(r.x + p(46.0), r.y, r.w - p(62.0), r.h),
-                    &format!("Import from {name}"),
+                    &format!("Import from {name} ({source})"),
                     c.text_secondary,
                 );
             }
-            self.field_row_i(
-                cv,
-                te,
-                f,
-                cells[1],
-                "Password",
-                Some(Icon::Key),
-                Field::ImportPass,
-                "Master password of the backup",
-            );
-            let r = cells[2];
+            if needs {
+                self.field_row_i(
+                    cv,
+                    te,
+                    f,
+                    cells[1],
+                    "Password",
+                    Some(Icon::Key),
+                    Field::ImportPass,
+                    if format == Some(Format::MRemoteNg) {
+                        "mRemoteNG master password"
+                    } else {
+                        "Master password of the backup"
+                    },
+                );
+            }
+            let r = cells[rows.len() - 1];
             let label = if self.unlocking {
                 "Working…"
             } else {
@@ -4138,11 +4299,13 @@ impl Ui {
             let ok = Button::primary(label).icon(Icon::Check);
             let ow = self.btn_w(te, f, &ok);
             let by = r.y + (r.h - p(34.0)) / 2;
+            // Under the password field, or under the file name.
+            let bx = r.x + if needs { p(132.0) } else { p(30.0) };
             self.btn(
                 cv,
                 te,
                 f,
-                Rect::new(r.x + p(132.0), by, ow, p(34.0)),
+                Rect::new(bx, by, ow, p(34.0)),
                 &ok,
                 Hit::ImportOk,
             );
@@ -4152,11 +4315,11 @@ impl Ui {
                 cv,
                 te,
                 f,
-                Rect::new(r.x + p(140.0) + ow, by, cw, p(34.0)),
+                Rect::new(bx + p(8.0) + ow, by, cw, p(34.0)),
                 &cancel,
                 Hit::ImportCancel,
             );
-            y += p(158.0) + p(16.0);
+            y += rows.iter().sum::<i32>() + p(16.0);
         }
         y += p(12.0);
 
@@ -4353,6 +4516,9 @@ impl Ui {
             }
             if conn.kerberos {
                 pills.push(("Windows sign-in", Tone::Neutral, Lead::Icon(Icon::Shield)));
+            }
+            if conn.legacy_security {
+                pills.push(("Legacy security", Tone::Warning, Lead::Icon(Icon::Warning)));
             }
             self.store.connection_color(&self.store.connections[i])
         } else {
@@ -4805,7 +4971,10 @@ impl Ui {
             return y + rh;
         }
         let saved = self.save_password && self.own_password().is_some();
-        let cells = self.card(cv, x, y, w, &[rh, rh, p(60.0), p(60.0), rh]);
+        // The transport switch only once a gateway is entered.
+        let has_gateway = !self.field(Field::Gateway).text.trim().is_empty();
+        let rows = [rh, rh, p(60.0), p(60.0), rh, p(60.0)];
+        let cells = self.card(cv, x, y, w, &rows[..if has_gateway { 6 } else { 5 }]);
         self.field_row_i(
             cv,
             te,
@@ -4871,7 +5040,22 @@ impl Ui {
             Field::Gateway,
             "None (direct), or rdg.example.com",
         );
-        y + 3 * rh + 2 * p(60.0)
+        if !has_gateway {
+            return y + 3 * rh + 2 * p(60.0);
+        }
+        let gateway_rpc = self.gateway_rpc;
+        self.card_switch_i(
+            cv,
+            te,
+            f,
+            cells[5],
+            Some(Icon::Globe),
+            "Gateway over RPC",
+            "Always RPC over HTTP; off: only when the gateway lacks HTTP",
+            gateway_rpc,
+            Hit::FormGatewayRpc,
+        );
+        y + 3 * rh + 3 * p(60.0)
     }
 
     /// The group's colour: eight swatches and Auto.
@@ -5513,6 +5697,13 @@ impl Ui {
                 o.microphone,
             ),
             (
+                5,
+                Icon::Camera,
+                "Camera",
+                "This PC's cameras in the session",
+                o.camera,
+            ),
+            (
                 2,
                 Icon::Printer,
                 "Printers",
@@ -5529,11 +5720,12 @@ impl Ui {
         ];
         self.caption(cv, te, f, x, y, w, "Devices");
         y += p(26.0);
-        let cells = self.card(cv, x, y, w, &[p(58.0); 5]);
+        let cells = self.card(cv, x, y, w, &[p(58.0); 6]);
         for (r, (i, icon, label, sub, on)) in cells.iter().zip(rows) {
             self.card_switch_i(cv, te, f, *r, Some(icon), label, sub, on, Hit::FormShare(i));
         }
-        y += 5 * p(58.0) + p(24.0);
+        y += 6 * p(58.0) + p(24.0);
+        y = self.ports_card(cv, te, f, (x, y, w), &o.ports, 58.0, Hit::FormPort);
 
         if o.sound {
             y = self.device_card(
@@ -5563,6 +5755,21 @@ impl Ui {
                 &self.mics.clone(),
                 o.mic.as_deref(),
                 Hit::FormMic,
+            );
+        }
+        if o.camera {
+            y = self.device_card(
+                cv,
+                te,
+                f,
+                x,
+                y,
+                w,
+                "Share camera",
+                "All cameras",
+                &self.cams.clone(),
+                o.cam.as_deref(),
+                Hit::FormCam,
             );
         }
 
@@ -5647,6 +5854,40 @@ impl Ui {
         self.form_helper(cv, te, f, x, y, w)
     }
 
+    /// The Ports card (RDP-74): a switch per serial or parallel port; none
+    /// at all on a PC without ports. Returns the y below it.
+    #[allow(clippy::too_many_arguments)]
+    fn ports_card(
+        &mut self,
+        cv: &mut Canvas,
+        te: &mut TextEngine,
+        f: &Fonts,
+        (x, mut y, w): (i32, i32, i32),
+        chosen: &[String],
+        row_h: f32,
+        hit: impl Fn(usize) -> Hit,
+    ) -> i32 {
+        let rows = port_rows(&self.local_ports, chosen);
+        if rows.is_empty() {
+            return y;
+        }
+        let s = self.scale;
+        let p = |v: f32| (v * s).round() as i32;
+        self.caption(cv, te, f, x, y, w, "Ports");
+        y += p(26.0);
+        let cells = self.card(cv, x, y, w, &vec![p(row_h); rows.len()]);
+        for (i, (r, name)) in cells.iter().zip(&rows).enumerate() {
+            let sub = match (self.local_ports.contains(name), name.starts_with("LPT")) {
+                (false, _) => "Not on this PC now",
+                (true, false) => "Serial port of this PC",
+                (true, true) => "Parallel port of this PC",
+            };
+            let on = chosen.contains(name);
+            self.card_switch_i(cv, te, f, *r, Some(Icon::SerialPort), name, sub, on, hit(i));
+        }
+        y + rows.len() as i32 * p(row_h) + p(24.0)
+    }
+
     /// The panel's device card (hits carry the session id).
     #[allow(clippy::too_many_arguments)]
     fn device_card_tab(
@@ -5728,6 +5969,25 @@ impl Ui {
     ) -> i32 {
         let s = self.scale;
         let p = |v: f32| (v * s).round() as i32;
+        // Per connection and never inherited, so above the inherited part.
+        if self.group_edit.is_none() {
+            self.caption(cv, te, f, x, y, w, "SECURITY");
+            y += p(24.0);
+            let cells = self.card(cv, x, y, w, &[p(60.0)]);
+            let on = self.legacy_security;
+            self.card_switch_i(
+                cv,
+                te,
+                f,
+                cells[0],
+                Some(Icon::Warning),
+                "Allow legacy RDP security (weak)",
+                "Only for old servers without TLS: RC4, easy to intercept",
+                on,
+                Hit::FormLegacySecurity,
+            );
+            y += p(60.0) + p(20.0);
+        }
         if self.inherit_card(
             cv,
             te,
@@ -5766,7 +6026,35 @@ impl Ui {
                 Hit::FormGraphics(i),
             );
         }
-        y += 2 * p(50.0) + p(20.0);
+        y += 2 * p(50.0) + p(8.0);
+        let cells = self.card(cv, x, y, w, &[p(50.0)]);
+        self.card_switch(
+            cv,
+            te,
+            f,
+            cells[0],
+            "Video redirection",
+            video_hint(q.gfx),
+            q.video,
+            Hit::FormGraphics(VIDEO_SWITCH),
+        );
+        y += p(50.0) + p(20.0);
+
+        self.caption(cv, te, f, x, y, w, "NETWORK");
+        y += p(24.0);
+        let cells = self.card(cv, x, y, w, &[p(60.0)]);
+        self.card_switch_i(
+            cv,
+            te,
+            f,
+            cells[0],
+            Some(Icon::Network),
+            "UDP transport",
+            UDP_HINT,
+            q.udp,
+            Hit::FormUdp,
+        );
+        y += p(60.0) + p(20.0);
 
         self.caption(cv, te, f, x, y, w, "WINDOWS KEYS (WIN, ALT+TAB, …)");
         y += p(24.0);
@@ -6269,6 +6557,7 @@ impl Ui {
             fit: tab.fit,
             scale: tab.scale,
             drives: tab.drives.clone(),
+            ports: tab.ports.clone(),
             quality: tab.quality,
             quality_live: tab.quality_live,
             state: tab.state.clone(),
@@ -6279,6 +6568,8 @@ impl Ui {
             speaker: tab.speaker.clone(),
             microphone: tab.microphone,
             mic: tab.mic.clone(),
+            camera: tab.camera,
+            cam: tab.cam.clone(),
             redirected_to: tab.redirected_to.clone(),
             network: tab.network.clone(),
         };
@@ -6386,6 +6677,13 @@ impl Ui {
                 Hit::Microphone(id),
             ),
             (
+                Icon::Camera,
+                "Camera",
+                "This PC's cameras",
+                t.camera,
+                Hit::Camera(id),
+            ),
+            (
                 Icon::Printer,
                 "Printers",
                 "Local printers in the session",
@@ -6400,11 +6698,12 @@ impl Ui {
                 Hit::SmartCards(id),
             ),
         ];
-        let cells = self.card(cv, x, y, w, &[p(56.0); 5]);
+        let cells = self.card(cv, x, y, w, &[p(56.0); 6]);
         for (r, (icon, label, sub, on, hit)) in cells.iter().zip(rows) {
             self.card_switch_i(cv, te, f, *r, Some(icon), label, sub, on, hit);
         }
-        y += 5 * p(56.0) + p(24.0);
+        y += 6 * p(56.0) + p(24.0);
+        y = self.ports_card(cv, te, f, (x, y, w), &t.ports, 56.0, |i| Hit::Port(id, i));
         if t.microphone {
             let mics = self.mics.clone();
             y = self.device_card_tab(
@@ -6420,6 +6719,23 @@ impl Ui {
                 t.mic.as_deref(),
                 id,
                 Hit::TabMic,
+            );
+        }
+        if t.camera {
+            let cams = self.cams.clone();
+            y = self.device_card_tab(
+                cv,
+                te,
+                f,
+                x,
+                y,
+                w,
+                "Share camera",
+                "All cameras",
+                &cams,
+                t.cam.as_deref(),
+                id,
+                Hit::TabCam,
             );
         }
         if t.sound {
@@ -6726,7 +7042,19 @@ impl Ui {
             .map(|(i, n)| (n.to_string(), q.gfx == (i == 1), Hit::TabGraphics(id, i)))
             .collect();
         self.segmented(cv, te, f, Rect::new(x, y, w, p(34.0)), &items);
-        y += p(34.0) + p(24.0);
+        y += p(34.0) + p(8.0);
+        let cells = self.card(cv, x, y, w, &[p(58.0)]);
+        self.card_switch(
+            cv,
+            te,
+            f,
+            cells[0],
+            "Video redirection",
+            video_hint(q.gfx),
+            q.video,
+            Hit::TabGraphics(id, VIDEO_SWITCH),
+        );
+        y += p(58.0) + p(24.0);
 
         self.caption(cv, te, f, x, y, w, "Compression");
         y += p(26.0);
@@ -7430,6 +7758,8 @@ fn session_action(r: &Connection, password: &str, app: Option<&AppEntry>) -> Act
     cfg.remote_app = app.map(AppEntry::remote_app);
     cfg.license_store = crate::settings::license_dir();
     cfg.bitmap_cache_dir = crate::settings::bitmap_cache_dir(&r.host, r.port);
+    // Opt-in per connection; never inherited from a group.
+    cfg.legacy_security = r.legacy_security;
     #[cfg(windows)]
     if r.kerberos {
         cfg.auth = Some(crate::sspi::factory());
@@ -7438,6 +7768,9 @@ fn session_action(r: &Connection, password: &str, app: Option<&AppEntry>) -> Act
         // The gateway login uses the connection's credentials.
         let mut g = rdp::GatewayConfig::new(&gw.0, &r.user, password);
         g.port = gw.1;
+        if r.gateway_rpc {
+            g.transport = rdp::gateway::GatewayTransport::Rpc;
+        }
         cfg.gateway = Some(g);
     }
     let fit = r.width == 0 && app.is_none();
@@ -7470,6 +7803,25 @@ pub fn sample_settings(vault: bool) -> Ui {
     m
 }
 
+/// Settings with a picked import file waiting: an mRemoteNG file with a
+/// custom master password (`password`), or an RDCMan file (no password row).
+pub fn sample_settings_import(password: bool) -> Ui {
+    use crate::import::{Format, Probe};
+    let mut m = sample_settings(false);
+    let (file, format) = if password {
+        ("confCons.xml", Format::MRemoteNg)
+    } else {
+        ("servers.rdg", Format::RdcMan)
+    };
+    m.import_file = Some(file.into());
+    m.import_probe = Some(Probe {
+        format,
+        needs_password: password,
+    });
+    m.home_scroll = 380;
+    m
+}
+
 /// The connection editor on `page` for a top-level connection.
 /// The Experience page scrolled to the keyboard, with a server layout
 /// named (RDP-68).
@@ -7492,6 +7844,7 @@ pub fn sample_form(page: u8) -> Ui {
         "Headset (USB Audio)".into(),
     ];
     m.mics = vec!["Headset microphone (USB Audio)".into()];
+    m.cams = vec!["Integrated Camera".into(), "USB Webcam".into()];
     let mon =
         |name: &str, left: i32, w: u32, h: u32, primary: bool| crate::monitors::LocalMonitor {
             name: name.into(),
@@ -7505,8 +7858,43 @@ pub fn sample_form(page: u8) -> Ui {
     m.opts.monitors = vec![r"\.\DISPLAY1".into(), r"\.\DISPLAY3".into()];
     m.opts.sound = true;
     m.opts.microphone = true;
+    // The Sharing page shows the camera choice; the other pages keep
+    // their summary as before.
+    m.opts.camera = page == 3;
     m.opts.clipboard = true;
     m.opts.drives = vec![r"C:\Share".into()];
+    m
+}
+
+/// The Ports card: this PC has COM3, COM4 and LPT1; COM3 is shared and the
+/// connection also names COM7, which is unplugged. `panel`: the session's
+/// Sharing page, else the editor's.
+pub fn sample_ports(panel: bool) -> Ui {
+    let local: Vec<String> = ["COM3", "COM4", "LPT1"].map(String::from).to_vec();
+    let mut m = if panel {
+        let mut m = sample_panel(0, false);
+        if let Some(t) = m.tab_mut(1) {
+            t.ports = vec!["COM3".into()];
+        }
+        m
+    } else {
+        let mut m = sample_form(3);
+        m.opts.ports = vec!["COM3".into(), "COM7".into()];
+        m
+    };
+    m.local_ports = local;
+    m
+}
+
+/// The editor's sign-in with a gateway: the "Gateway over RPC" switch on.
+pub fn sample_form_gateway_rpc() -> Ui {
+    let mut m = sample(false);
+    m.store.connections[2].gateway = "rdg.corp.example".into();
+    m.store.connections[2].gateway_rpc = true;
+    m.select(2);
+    m.focus = None;
+    m.form_page = 0;
+    m.home_scroll = 480;
     m
 }
 
@@ -7531,6 +7919,7 @@ pub fn sample_cert(changed: bool) -> Ui {
 /// change waiting for a reconnect. `fullscreen` lays it out full screen.
 pub fn sample_panel(page: u8, fullscreen: bool) -> Ui {
     let mut m = sample(true);
+    m.cams = vec!["Integrated Camera".into(), "USB Webcam".into()];
     m.drawer_page = page;
     m.fullscreen = fullscreen;
     m.speakers = vec![
@@ -7541,6 +7930,8 @@ pub fn sample_panel(page: u8, fullscreen: bool) -> Ui {
         t.clipboard = true;
         t.sound = true;
         t.speaker = Some("Headset (USB Audio)".into());
+        t.camera = true;
+        t.cam = Some("USB Webcam".into());
         if page == 2 {
             t.quality.wallpaper = false;
         }
@@ -7885,6 +8276,57 @@ mod tests {
     }
 
     #[test]
+    fn port_switches_follow_the_rows_and_go_live_in_a_session() {
+        let local: Vec<String> = ["COM3", "LPT1"].map(String::from).to_vec();
+        assert_eq!(
+            port_rows(&local, &["COM7".into(), "COM3".into()]),
+            ["COM3", "LPT1", "COM7"]
+        );
+        // Editor: rows are this PC's ports, then chosen ones it lacks.
+        let mut m = sample_ports(false); // local COM3 COM4 LPT1; chosen COM3 COM7
+        m.activate(Hit::FormPort(2)); // LPT1 on
+        m.activate(Hit::FormPort(0)); // COM3 off
+        m.activate(Hit::FormPort(3)); // COM7 (unplugged) off
+        assert_eq!(m.opts.ports, ["LPT1"]);
+        // Panel: a switch is a live change for that session.
+        let mut m = sample_ports(true); // COM3 shared
+        match m.activate(Hit::Port(1, 1)) {
+            Some(Action::SetPort(1, name, true)) => assert_eq!(name, "COM4"),
+            _ => panic!("expected SetPort on"),
+        }
+        match m.activate(Hit::Port(1, 0)) {
+            Some(Action::SetPort(1, name, false)) => assert_eq!(name, "COM3"),
+            _ => panic!("expected SetPort off"),
+        }
+        assert_eq!(m.tab_mut(1).unwrap().ports, ["COM4"]);
+        assert!(m.activate(Hit::Port(1, 9)).is_none(), "no such row");
+    }
+
+    #[test]
+    fn the_ports_card_shows_only_when_there_are_ports() {
+        let mut te = TextEngine::new();
+        let Some(fonts) = load_fonts(&mut te) else {
+            return; // no UI font on this machine (headless CI)
+        };
+        let painted = |m: &mut Ui, te: &mut TextEngine| {
+            let (w, h) = (1320usize, 2400usize);
+            let mut px = vec![0u32; w * h];
+            m.paint(&mut Canvas::new(&mut px, w, h), te, &fonts);
+            m.hits
+                .iter()
+                .filter(|(_, h)| matches!(h, Hit::FormPort(_) | Hit::Port(..)))
+                .count()
+        };
+        assert_eq!(
+            painted(&mut sample_form(3), &mut te),
+            0,
+            "no ports: no card"
+        );
+        assert_eq!(painted(&mut sample_ports(false), &mut te), 4);
+        assert_eq!(painted(&mut sample_ports(true), &mut te), 3);
+    }
+
+    #[test]
     fn tab_skips_hidden_fields_of_a_group_form() {
         let mut m = sample_group();
         m.focus = Some(Field::Name);
@@ -8056,6 +8498,36 @@ mod tests {
     }
 
     #[test]
+    fn video_switch_toggles_and_survives_a_speed_preset() {
+        let mut m = sample(false);
+        assert!(!m.opts.quality.video, "off by default");
+        m.activate(Hit::FormGraphics(VIDEO_SWITCH));
+        assert!(m.opts.quality.video);
+        assert!(m.opts.quality.gfx, "GFX stays chosen");
+        m.activate(Hit::FormPreset(PRESETS.len() - 1)); // Modem
+        assert!(m.opts.quality.video, "a speed preset keeps the choice");
+        m.activate(Hit::FormGraphics(0));
+        assert!(
+            !m.opts.quality.gfx && m.opts.quality.video,
+            "bitmaps keep it"
+        );
+        m.activate(Hit::FormGraphics(VIDEO_SWITCH));
+        assert!(!m.opts.quality.video);
+    }
+
+    #[test]
+    fn udp_switch_toggles_and_survives_a_speed_preset() {
+        let mut m = sample(false);
+        assert!(!m.opts.quality.udp, "off by default");
+        m.activate(Hit::FormUdp);
+        assert!(m.opts.quality.udp);
+        m.activate(Hit::FormPreset(0));
+        assert!(m.opts.quality.udp, "a speed preset keeps the choice");
+        m.activate(Hit::FormUdp);
+        assert!(!m.opts.quality.udp);
+    }
+
+    #[test]
     fn touch_needs_no_reconnect() {
         let mut te = TextEngine::new();
         let Some(fonts) = load_fonts(&mut te) else {
@@ -8091,6 +8563,40 @@ mod tests {
         m.mouse_move(x, y);
         m.mouse_down(x, y, te, fonts);
         m.mouse_up(x, y)
+    }
+
+    /// RDP-73: the Advanced page's legacy security switch is off by
+    /// default, saved per connection and passed to the session; a group's
+    /// editor has none.
+    #[test]
+    fn legacy_security_switch_is_per_connection() {
+        let mut te = TextEngine::new();
+        let Some(fonts) = load_fonts(&mut te) else {
+            return; // no UI font on this machine (headless CI)
+        };
+        let mut m = sample(false);
+        let name = m.store.connections[0].name.clone();
+        click(&mut m, &mut te, &fonts, Hit::Row(0));
+        click(&mut m, &mut te, &fonts, Hit::FormPage(4));
+        assert!(!m.legacy_security);
+        click(&mut m, &mut te, &fonts, Hit::FormLegacySecurity);
+        click(&mut m, &mut te, &fonts, Hit::Save);
+        let c = m
+            .store
+            .connections
+            .iter()
+            .find(|c| c.name == name)
+            .unwrap()
+            .clone();
+        assert!(c.legacy_security);
+        let Action::Connect { cfg, .. } = session_action(&m.store.resolve(&c), "pw", None) else {
+            panic!("expected Connect");
+        };
+        assert!(cfg.legacy_security);
+        m.select_group(0);
+        let mut px = vec![0u32; 1320 * 860];
+        m.paint(&mut Canvas::new(&mut px, 1320, 860), &mut te, &fonts);
+        assert!(m.hits.iter().all(|(_, h)| *h != Hit::FormLegacySecurity));
     }
 
     #[test]

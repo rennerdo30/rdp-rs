@@ -85,8 +85,26 @@ pub fn client_info_redirected(ci: &ClientInfo, password_blob: &[u8]) -> Vec<u8> 
     client_info_with(ci, &password)
 }
 
+/// Client Info PDU of a Remote Assistance, Desktop Sharing or shadow
+/// connection (MS-RA 2.2.7.2): Password "*", AlternateShell the invitation
+/// password or "*", WorkingDir the invitation's authorization string
+/// (`<A ID>`). `ci.password` is ignored; `ci.user` is the viewer's name.
+pub fn client_info_assistance(ci: &ClientInfo, auth_id: &str, password: Option<&str>) -> Vec<u8> {
+    client_info_fields(
+        ci,
+        &utf16le_z("*"),
+        &utf16le_z(password.unwrap_or("*")),
+        &utf16le_z(auth_id),
+    )
+}
+
 /// `password`: UTF-16LE with its null terminator.
 fn client_info_with(ci: &ClientInfo, password: &[u8]) -> Vec<u8> {
+    client_info_fields(ci, password, &utf16le_z(""), &utf16le_z(""))
+}
+
+/// `password`, `shell`, `dir`: UTF-16LE with their null terminators.
+fn client_info_fields(ci: &ClientInfo, password: &[u8], shell: &[u8], dir: &[u8]) -> Vec<u8> {
     const INFO_MOUSE: u32 = 0x0001;
     const INFO_DISABLECTRLALTDEL: u32 = 0x0002;
     const INFO_AUTOLOGON: u32 = 0x0008;
@@ -129,8 +147,8 @@ fn client_info_with(ci: &ClientInfo, password: &[u8]) -> Vec<u8> {
         utf16le_z(ci.domain),
         utf16le_z(ci.user),
         password.to_vec(),
-        utf16le_z(""),
-        utf16le_z(""),
+        shell.to_vec(),
+        dir.to_vec(),
     ];
     for f in &fields {
         out.put_u16(f.len().saturating_sub(2) as u16); // without the terminator
@@ -169,8 +187,8 @@ const AUTO_RECONNECT_VERSION_1: u32 = 1;
 
 /// The client random that MS-RDPBCGR 5.5 step 4 prescribes under Enhanced RDP
 /// Security (TLS, CredSSP): no client random is generated (5.3.2), so the
-/// verifier is computed over "an array of 32 zero bytes". This crate only
-/// speaks Enhanced RDP Security, so this is the only client random it uses.
+/// verifier is computed over "an array of 32 zero bytes". Under Standard
+/// RDP Security (5.3) the real client random of the Security Exchange is used.
 pub const ENHANCED_SECURITY_CLIENT_RANDOM: [u8; 32] = [0; 32];
 
 /// The server's auto-reconnect cookie (ARC_SC_PRIVATE_PACKET, MS-RDPBCGR
@@ -423,6 +441,9 @@ pub struct DemandActive {
     /// inputFlags of the server's Input Capability Set (2.2.7.1.6), if it
     /// sent one.
     pub input_flags: Option<u16>,
+    /// ENC_SALTED_CHECKSUM in the server's General Capability Set extraFlags
+    /// (2.2.7.1.1): it takes salted MACs under Standard RDP Security (5.3.6.1.1).
+    pub salted_checksum: bool,
 }
 
 /// Window List Capability Set fields (MS-RDPERP 2.2.1.1.2).
@@ -468,6 +489,7 @@ pub fn parse_demand_active(body: &[u8]) -> Result<DemandActive> {
         frame_ack: false,
         bitmap_cache_host: false,
         input_flags: None,
+        salted_checksum: false,
     };
     for _ in 0..count {
         let ty = r.u16()?;
@@ -486,6 +508,10 @@ pub fn parse_demand_active(body: &[u8]) -> Result<DemandActive> {
         }
         if ty == crate::orders::CAPSTYPE_BITMAPCACHE_HOSTSUPPORT {
             da.bitmap_cache_host = true;
+        }
+        if ty == CAPSTYPE_GENERAL {
+            const ENC_SALTED_CHECKSUM: u16 = 0x0010;
+            da.salted_checksum = le16(cap, 10).is_some_and(|f| f & ENC_SALTED_CHECKSUM != 0);
         }
         if ty == CAPSTYPE_INPUT {
             da.input_flags = le16(cap, 0);
@@ -859,6 +885,43 @@ mod tests {
     }
 
     #[test]
+    fn assistance_client_info_carries_the_invitation_fields() {
+        // MS-RA 2.2.7.2: Password "*", AlternateShell the invitation password
+        // or "*", WorkingDir the <A ID> string; the real password never goes out.
+        let ci = ClientInfo {
+            domain: "",
+            user: "viewer",
+            password: "not sent",
+            auto_reconnect: None,
+            performance_flags: 0,
+            compression: None,
+            rail: false,
+        };
+        let fields = |pdu: &[u8]| -> Vec<String> {
+            let mut at = 22; // security header, CodePage, flags, 5 lengths
+            (0..5)
+                .map(|i| {
+                    let cb = u16::from_le_bytes([pdu[12 + 2 * i], pdu[13 + 2 * i]]) as usize;
+                    let units: Vec<u16> = pdu[at..at + cb]
+                        .chunks(2)
+                        .map(|c| u16::from_le_bytes([c[0], c[1]]))
+                        .collect();
+                    at += cb + 2;
+                    String::from_utf16(&units).unwrap()
+                })
+                .collect()
+        };
+        let pdu = client_info_assistance(&ci, "8rYm30/x+", None);
+        assert_eq!(fields(&pdu), ["", "viewer", "*", "*", "8rYm30/x+"]);
+        let pdu = client_info_assistance(&ci, "id", Some("pw"));
+        assert_eq!(fields(&pdu), ["", "viewer", "*", "pw", "id"]);
+        assert_eq!(
+            fields(&client_info(&ci)),
+            ["", "viewer", "not sent", "", ""]
+        );
+    }
+
+    #[test]
     fn compression_is_advertised() {
         let info = |compression| {
             client_info(&ClientInfo {
@@ -942,6 +1005,17 @@ mod tests {
         let mut input = vec![13, 0, 88, 0, 0x35, 0x00];
         input.resize(88, 0);
         assert_eq!(demand(&input, 2).input_flags, Some(0x0035));
+        // General capability set (2.2.7.1.1), extraFlags at offset 10 of
+        // the body: ENC_SALTED_CHECKSUM (5.3.6.1.1).
+        assert!(!demand(&[], 1).salted_checksum);
+        let general = |extra: u16| {
+            let mut g = vec![1, 0, 24, 0, 1, 0, 3, 0, 0, 2, 0, 0, 0, 0];
+            g.extend(extra.to_le_bytes());
+            g.resize(24, 0);
+            demand(&g, 2).salted_checksum
+        };
+        assert!(general(0x041D));
+        assert!(!general(0x040D));
     }
 
     #[test]

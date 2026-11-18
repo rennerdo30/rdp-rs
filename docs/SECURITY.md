@@ -10,8 +10,8 @@ and what it never does.
 - Passwords are saved only in an encrypted vault, and only after you set a
   master password. Without one, no password is ever written to disk.
 - A server's certificate is checked before your password is sent.
-- Sharing (clipboard, folders, printers, smart cards, sound, microphone) is off
-  until you switch it on.
+- Sharing (clipboard, folders, printers, smart cards, sound, microphone,
+  camera) is off until you switch it on.
 - Logs never contain passwords.
 
 ## What is stored where
@@ -100,8 +100,35 @@ starts a session for you.
   Windows' own Negotiate: Kerberos on a domain, NTLM as a fallback. With no
   user name, it signs in as you, with your Windows session (single sign-on);
   Remora never sees a password then.
-- TLS comes from [rustls](https://github.com/rustls/rustls). Remora does not
-  offer the old RDP security without TLS.
+- TLS comes from [rustls](https://github.com/rustls/rustls). The old RDP
+  security without TLS is used only for a connection that allows it (see
+  below).
+
+## Legacy RDP security
+
+Some old or misconfigured servers offer only Standard RDP Security: RC4
+encryption without TLS (MS-RDPBCGR 5.3). Remora refuses them unless the
+connection's **Allow legacy RDP security (weak)** switch (or
+`--legacy-security`) is on. Even then it asks for TLS first; the legacy
+security is used only when the server refuses TLS.
+
+What you give up:
+
+- **No real server authentication.** The server proves nothing beyond the
+  RSA key it sends. A proprietary certificate is signed with a key Microsoft
+  published, so anyone can make one. Remora checks that signature and then
+  treats the key like a certificate: trust on first use, and a warning when
+  it changes.
+- **Weak encryption.** RC4, 40, 56 or 128 bits as the server chooses, and
+  an RSA key of often only 512 bits. Your password travels in the encrypted
+  Client Info PDU, not through NLA, so anyone who breaks or intercepts the
+  connection gets it.
+- **No NLA.** The server starts a session before you sign in.
+
+Use it only on a network you trust, and prefer turning on TLS on the server.
+Remora never chooses legacy security on its own, refuses servers that offer
+no encryption at all, and does not support FIPS-level (Triple DES)
+encryption. Session keys are never logged.
 
 ## Sharing
 
@@ -115,6 +142,13 @@ that session.
 - **Clipboard** sharing works both ways, for text and files, while it is on.
 - **Printers, smart cards, sound and the microphone** reach the session only
   while their switch is on.
+- **Cameras** are only named to the server while **Camera** is on, and only
+  the cameras you chose. A camera is opened for capture only while an app
+  in the session records from it, and is closed at once when the app stops,
+  when you switch **Camera** off or when the session ends. To offer the
+  camera's formats, Remora reads them from the device when the server first
+  asks, without capturing. Pictures are sent as the camera makes them and
+  are never written to disk or the log.
 
 ## Logs and what is never logged
 

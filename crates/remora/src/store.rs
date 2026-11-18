@@ -36,10 +36,19 @@ pub struct Connection {
     /// RD Gateway as host[:port]; empty: direct. Part of Credentials.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub gateway: String,
+    /// Reach the gateway over RPC over HTTP only; off: the HTTP transport,
+    /// and RPC over HTTP when the gateway lacks it. Part of Credentials.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub gateway_rpc: bool,
     /// Sign in with Windows (Kerberos, NTLM fallback) instead of Remora's own
     /// NTLM. Part of Credentials.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub kerberos: bool,
+    /// Allow legacy RDP security (Standard RDP Security: RC4, no TLS) when
+    /// the server offers nothing better. Weak; off by default, per
+    /// connection, never inherited from a group.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub legacy_security: bool,
     /// Sections taken from the group instead of this connection.
     #[serde(default)]
     pub inherit: Inherit,
@@ -127,7 +136,7 @@ pub struct Inherit {
     pub credentials: bool,
     /// Size and scale.
     pub display: bool,
-    /// Clipboard, sound, printers, smart cards and shared folders.
+    /// Clipboard, sound, printers, smart cards, ports and shared folders.
     pub sharing: bool,
 }
 
@@ -151,6 +160,9 @@ pub struct Group {
     /// RD Gateway as host[:port]; empty: direct.
     #[serde(skip_serializing_if = "String::is_empty")]
     pub gateway: String,
+    /// Reach the gateway over RPC over HTTP only.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub gateway_rpc: bool,
     /// Sign in with Windows (Kerberos).
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub kerberos: bool,
@@ -266,6 +278,10 @@ pub struct SessionOptions {
     pub smart_cards: bool,
     /// Local folders shared as drives.
     pub drives: Vec<String>,
+    /// Local serial and parallel ports shared with the session ("COM3",
+    /// "LPT1"); none by default (RDP-74).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub ports: Vec<String>,
     /// Output device for the session's sound, by name; None: the default.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub speaker: Option<String>,
@@ -273,6 +289,12 @@ pub struct SessionOptions {
     pub microphone: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mic: Option<String>,
+    /// This PC's cameras in the session (MS-RDPECAM), and which one by
+    /// name; None: every camera. Missing in older files: off.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub camera: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cam: Option<String>,
     /// Picture quality and desktop experience (part of Display for inheritance).
     pub quality: Quality,
     /// Where Windows key combinations go (part of Display for inheritance).
@@ -419,6 +441,14 @@ pub struct Quality {
     /// Touch and pen go to the session as touch and pen (MS-RDPEI) when the
     /// server offers it; off, they act as the mouse. Applies live.
     pub touch: bool,
+    /// Video redirection (MS-RDPEVOR, MS-RDPEGT): video the server detects
+    /// comes as an H.264 stream decoded here. Needs `gfx`; off by default
+    /// until checked against live servers (RDP-76).
+    pub video: bool,
+    /// Dynamic channels (graphics, sound, input) over UDP when the server
+    /// offers it (MS-RDPEMT); TCP whenever UDP fails. Off by default until
+    /// proven against servers; missing in older files: off.
+    pub udp: bool,
 }
 
 /// Bulk compression setting, saved by name.
@@ -493,6 +523,8 @@ impl Quality {
             compression: Comp::Off,
             gfx: true,
             touch: true,
+            video: false,
+            udp: false,
         }
     }
 
@@ -501,6 +533,7 @@ impl Quality {
         cfg.connection_type = ct;
         cfg.color_depth = rdp::experience::valid_color_depth(self.color_depth);
         cfg.compression = self.compression.library();
+        cfg.multitransport = self.udp;
         if self.gfx {
             cfg.graphics = rdp::Graphics::Gfx;
             #[cfg(windows)]
@@ -511,6 +544,7 @@ impl Quality {
             cfg.graphics = rdp::Graphics::Bitmap;
             cfg.h264 = None;
         }
+        cfg.video = self.gfx && self.video;
         cfg.experience = rdp::Experience {
             wallpaper: self.wallpaper,
             font_smoothing: self.font_smoothing,
@@ -970,6 +1004,7 @@ impl Store {
             out.user = g.user.clone();
             out.password = g.password.clone();
             out.gateway = g.gateway.clone();
+            out.gateway_rpc = g.gateway_rpc;
             out.kerberos = g.kerberos;
         }
         if let Some(g) = self.source_of(&c.group, &c.inherit, |i| i.display) {
@@ -1070,6 +1105,65 @@ mod tests {
             !plain.contains("opens") && !plain.contains("apps"),
             "{plain}"
         );
+    }
+
+    /// RDP-73: legacy RDP security is off unless the connection says so,
+    /// stays the connection's own when everything else is inherited, and
+    /// older files without the field read as off.
+    #[test]
+    fn legacy_security_is_per_connection_and_off_by_default() {
+        let c = Connection::default();
+        assert!(!c.legacy_security);
+        assert!(!serde_json::to_string(&c).unwrap().contains("legacy"));
+        let on = Connection {
+            legacy_security: true,
+            group: "Work".into(),
+            inherit: Inherit::ALL,
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&on).unwrap();
+        assert!(json.contains(r#""legacy_security":true"#), "{json}");
+        let mut s = store_with(vec![], vec![on.clone()]);
+        s.ensure_group("Work");
+        assert!(s.resolve(&s.connections[0]).legacy_security);
+        let off = Connection {
+            legacy_security: false,
+            ..on
+        };
+        assert!(!s.resolve(&off).legacy_security);
+    }
+
+    #[test]
+    fn gateway_rpc_round_trips_and_comes_with_the_sign_in() {
+        // Off is not written, so older files and older Remora versions agree.
+        let plain = serde_json::to_string(&Connection::default()).unwrap();
+        assert!(!plain.contains("gateway_rpc"), "{plain}");
+        let c = Connection {
+            name: "old gateway".into(),
+            gateway: "rdg.example".into(),
+            gateway_rpc: true,
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&c).unwrap();
+        assert!(json.contains(r#""gateway_rpc":true"#), "{json}");
+        assert_eq!(serde_json::from_str::<Connection>(&json).unwrap(), c);
+        // A member inheriting the sign-in takes the group's gateway and
+        // its transport.
+        let work = Group {
+            path: "Work".into(),
+            gateway: "rdg.corp".into(),
+            gateway_rpc: true,
+            ..Default::default()
+        };
+        let member = Connection {
+            group: "Work".into(),
+            gateway: "own".into(),
+            inherit: Inherit::ALL,
+            ..Default::default()
+        };
+        let s = store_with(vec![work], vec![member.clone()]);
+        let r = s.resolve(&member);
+        assert_eq!((r.gateway.as_str(), r.gateway_rpc), ("rdg.corp", true));
     }
 
     #[test]
@@ -1533,6 +1627,87 @@ mod tests {
     }
 
     #[test]
+    fn serial_ports_default_off_round_trip_and_inherit_with_sharing() {
+        // Saved before ports existed: none shared, nothing written.
+        let o: SessionOptions = serde_json::from_str(r#"{"clipboard":true}"#).unwrap();
+        assert!(o.ports.is_empty());
+        assert!(!serde_json::to_string(&o).unwrap().contains("ports"));
+        let o = SessionOptions {
+            ports: vec!["COM3".into(), "LPT1".into()],
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&o).unwrap();
+        assert!(json.contains(r#""ports":["COM3","LPT1"]"#), "{json}");
+        let back: SessionOptions = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.ports, o.ports);
+        // A group's ports come with Sharing, not with Display.
+        let g = Group {
+            path: "Lab".into(),
+            options: o.clone(),
+            ..Default::default()
+        };
+        let s = store_with(vec![g], vec![]);
+        let conn = |inherit| Connection {
+            group: "Lab".into(),
+            inherit,
+            ..Default::default()
+        };
+        let sharing = s.resolve(&conn(Inherit {
+            sharing: true,
+            ..Default::default()
+        }));
+        assert_eq!(sharing.options.ports, o.ports);
+        let display = s.resolve(&conn(Inherit {
+            display: true,
+            ..Default::default()
+        }));
+        assert!(display.options.ports.is_empty());
+    }
+
+    #[test]
+    fn camera_is_off_by_default_round_trips_and_inherits_with_sharing() {
+        // Saved before cameras existed: off, and nothing written for it.
+        let o: SessionOptions = serde_json::from_str(r#"{"microphone":true}"#).unwrap();
+        assert!(!o.camera && o.cam.is_none());
+        let json = serde_json::to_string(&o).unwrap();
+        assert!(
+            !json.contains("camera") && !json.contains("cam\""),
+            "{json}"
+        );
+        let on = SessionOptions {
+            camera: true,
+            cam: Some("USB Webcam".into()),
+            ..Default::default()
+        };
+        let back: SessionOptions =
+            serde_json::from_str(&serde_json::to_string(&on).unwrap()).unwrap();
+        assert_eq!(back, on);
+        // A member inherits the group's camera choice with Sharing only.
+        let g = Group {
+            path: "W".into(),
+            options: on.clone(),
+            ..Default::default()
+        };
+        let conn = |inherit| Connection {
+            group: "W".into(),
+            inherit,
+            ..Default::default()
+        };
+        let s = store_with(vec![g], vec![]);
+        let shared = s.resolve(&conn(Inherit {
+            sharing: true,
+            ..Default::default()
+        }));
+        assert!(shared.options.camera);
+        assert_eq!(shared.options.cam.as_deref(), Some("USB Webcam"));
+        let own = s.resolve(&conn(Inherit {
+            display: true,
+            ..Default::default()
+        }));
+        assert!(!own.options.camera);
+    }
+
+    #[test]
     fn touch_is_on_unless_saved_off() {
         assert!(Quality::default().touch);
         assert!(Quality::preset(1, 16).touch);
@@ -1546,6 +1721,47 @@ mod tests {
         };
         let back: Quality = serde_json::from_str(&serde_json::to_string(&off).unwrap()).unwrap();
         assert!(!back.touch);
+    }
+
+    #[test]
+    fn video_redirection_is_off_unless_chosen_and_needs_gfx() {
+        assert!(!Quality::default().video);
+        // Saved before the setting existed.
+        let o: SessionOptions =
+            serde_json::from_str(r#"{"quality":{"connection":6,"gfx":true}}"#).unwrap();
+        assert!(!o.quality.video);
+        let mut cfg = rdp::Config::new("h", "u", "p");
+        let on = Quality {
+            video: true,
+            ..Quality::default()
+        };
+        on.apply(&mut cfg);
+        assert!(cfg.video);
+        let back: Quality = serde_json::from_str(&serde_json::to_string(&on).unwrap()).unwrap();
+        assert!(back.video);
+        // Without the graphics pipeline there is no video redirection.
+        Quality { gfx: false, ..on }.apply(&mut cfg);
+        assert!(!cfg.video);
+    }
+
+    #[test]
+    fn udp_is_off_unless_switched_on() {
+        assert!(!Quality::default().udp);
+        // Saved before the setting existed.
+        let o: SessionOptions =
+            serde_json::from_str(r#"{"quality":{"connection":1,"color_depth":16}}"#).unwrap();
+        assert!(!o.quality.udp);
+        let mut cfg = rdp::Config::new("h", "u", "p");
+        o.quality.apply(&mut cfg);
+        assert!(!cfg.multitransport);
+        let on = Quality {
+            udp: true,
+            ..Quality::default()
+        };
+        let back: Quality = serde_json::from_str(&serde_json::to_string(&on).unwrap()).unwrap();
+        assert!(back.udp);
+        back.apply(&mut cfg);
+        assert!(cfg.multitransport);
     }
 
     #[test]

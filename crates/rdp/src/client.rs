@@ -17,21 +17,28 @@ use crate::gateway;
 use crate::gcc;
 use crate::input::{InputEvent, fastpath_input};
 use crate::mcs::{self, DomainPdu};
+use crate::multitransport::{self, InitiateRequest, Tunnel, TunnelEvent, UdpState, UdpStats};
 use crate::pdu::{self, AutoReconnectCookie, DemandActive, SaveSessionInfo};
 use crate::pointer::{PointerCache, PointerUpdate};
 use crate::progress::{ConnectStep, report};
 use crate::redirect::{self, Redirection};
+use crate::security::{self, StandardSecurity};
 use crate::trace;
 use crate::transport::{Frame, Framer};
 use crate::x224;
 
 /// The RDP server's TLS certificate, shown to the caller before any
-/// credentials are sent (CredSSP runs only after the check passes).
+/// credentials are sent (CredSSP runs only after the check passes). Under
+/// Standard RDP Security (no TLS) it is the certificate of the Server
+/// Security Data instead (MS-RDPBCGR 2.2.1.4.3.1), checked before the
+/// Client Info PDU carries the credentials.
 #[derive(Debug, Clone)]
 pub struct ServerCertificate {
     pub host: String,
     pub port: u16,
-    /// The end-entity certificate, DER.
+    /// The end-entity certificate, DER; under Standard RDP Security the
+    /// SERVER_CERTIFICATE structure (a proprietary certificate or an X.509
+    /// chain).
     pub der: Vec<u8>,
     pub sha256: [u8; 32],
 }
@@ -92,6 +99,11 @@ pub struct Config {
     /// H.264 decoder for AVC420 with [`crate::Graphics::Gfx`]; without one
     /// (or if it returns `None`) the client advertises AVC as disabled.
     pub h264: Option<crate::H264Factory>,
+    /// Video redirection: offer Video Optimized Remoting (MS-RDPEVOR) and
+    /// geometry tracking (MS-RDPEGT), so the server can send video it
+    /// detects as an H.264 stream placed over the picture. Offered only with
+    /// [`crate::Graphics::Gfx`] and a working H.264 decoder (MS-RDPEVOR 1.5).
+    pub video: bool,
     /// Several monitors (MS-RDPBCGR 2.2.1.3.6); empty is one monitor of
     /// `width` x `height`. When set, the desktop is their bounding box and
     /// `width`/`height` are not used.
@@ -132,6 +144,25 @@ pub struct Config {
     /// Told each step of the connection sequence as it starts (for a
     /// progress display); None reports nothing.
     pub progress: Option<crate::progress::ConnectProgress>,
+    /// Allow Standard RDP Security (MS-RDPBCGR 5.3: RC4, no TLS, no server
+    /// authentication beyond trust on first use of its key) when the
+    /// server offers nothing better. Off by default: such a server is
+    /// refused with [`security::LEGACY_REFUSED`]. TLS is still preferred
+    /// when it is on; it is never chosen on its own.
+    pub legacy_security: bool,
+    /// Join a shared desktop from an invitation (Desktop Sharing, a shadow
+    /// session; MS-RA 2.2.7.2): TLS without NLA, the invitation's fields in
+    /// the Client Info and, if set, a Preconnection PDU first (MS-RDPEPS).
+    /// `host`/`port` are a listener of the invitation; `username` is the
+    /// name the sharer shows. Open the `encomsp` channel
+    /// ([`crate::multiparty`]) to see and change the control level.
+    pub assistance: Option<crate::AssistanceLogon>,
+    /// Offer a UDP transport for the dynamic channels (MS-RDPBCGR 2.2.15,
+    /// MS-RDPEMT, MS-RDPEUDP). Only on a direct connection to a server
+    /// that takes extended client data and does Soft-Sync; any failure
+    /// while setting it up keeps the session on TCP. Off by default, until
+    /// proven against servers.
+    pub multitransport: bool,
 }
 
 impl Config {
@@ -157,6 +188,7 @@ impl Config {
             compression: Compression::Off,
             graphics: crate::Graphics::Bitmap,
             h264: None,
+            video: false,
             monitors: Vec::new(),
             auth: None,
             redirection: None,
@@ -167,14 +199,25 @@ impl Config {
             drawing_orders: false,
             bitmap_cache_dir: None,
             progress: None,
+            legacy_security: false,
+            assistance: None,
+            multitransport: false,
         }
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct ConnectionInfo {
+    /// The negotiated protocol (2.2.1.2.1); `x224::PROTOCOL_RDP` (0) is
+    /// Standard RDP Security.
     pub protocol: u32,
+    /// SHA-256 of the TLS certificate, or of the Server Security Data
+    /// certificate under Standard RDP Security.
     pub certificate_sha256: [u8; 32],
+    /// The server's encryptionMethod and encryptionLevel under Standard RDP
+    /// Security (2.2.1.4.3); 0 with TLS.
+    pub encryption_method: u32,
+    pub encryption_level: u32,
     /// SHA-256 of the RD Gateway's TLS certificate, when connected through one.
     pub gateway_certificate_sha256: Option<[u8; 32]>,
     pub server_rdp_version: u32,
@@ -218,11 +261,14 @@ pub struct PollOutcome {
 /// What [`Client::stats`] reports.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct ClientStats {
-    /// Bytes received and sent on the connection (TLS records included).
+    /// Bytes received and sent on the connection (TLS records included),
+    /// the UDP transport's datagrams included.
     pub bytes_in: u64,
     pub bytes_out: u64,
     /// The graphics pipeline's statistics, in [`crate::Graphics::Gfx`] mode.
     pub gfx: Option<crate::gfx::GfxStats>,
+    /// The UDP transport (MS-RDPEMT): whether the session uses it.
+    pub udp: UdpStats,
 }
 
 /// Why a session ended, and whether an auto-reconnect (MS-RDPBCGR 5.5) fits.
@@ -330,7 +376,47 @@ pub struct Client {
     surface: Option<crate::surfcmd::SurfaceCommands>,
     /// Drawing orders and their caches, when [`Config::drawing_orders`] is set.
     orders: Option<Box<crate::orders::Orders>>,
+    /// Standard RDP Security, when [`Config::legacy_security`] let the
+    /// connection use it.
+    sec: Sec,
+    /// The UDP side channel and its bookkeeping (MS-RDPEMT).
+    udp: Udp,
 }
+
+/// The session's multitransport state.
+struct Udp {
+    /// Client Multitransport Channel Data was sent.
+    offered: bool,
+    /// The server's Multitransport Channel Data flags (2.2.1.4.6).
+    server_flags: u32,
+    state: UdpState,
+    /// Dynamic channels on the tunnel, as of the last poll.
+    channels: usize,
+    tunnel: Option<Tunnel>,
+    /// Why setting it up failed.
+    failure: Option<String>,
+    /// The main connection's certificate: the tunnel's TLS must present it.
+    certificate: Vec<u8>,
+}
+
+impl Udp {
+    /// Not offered.
+    fn off() -> Udp {
+        Udp {
+            offered: false,
+            server_flags: 0,
+            state: UdpState::Off,
+            channels: 0,
+            tunnel: None,
+            failure: None,
+            certificate: Vec::new(),
+        }
+    }
+}
+
+/// The Standard RDP Security state of a connection that runs it (5.3);
+/// None under TLS.
+type Sec = Option<Box<StandardSecurity>>;
 
 /// Connection-sequence traffic that is not the I/O channel PDU being waited
 /// for: virtual channel data kept for the session, and message channel PDUs
@@ -340,14 +426,29 @@ struct EarlyIo {
     user_id: u16,
     message_channel: Option<u16>,
     autodetect: AutoDetect,
+    sec: Sec,
+    /// Initiate Multitransport Requests (2.2.15.1), started once the
+    /// session exists.
+    multitransport: Vec<InitiateRequest>,
 }
 
 impl EarlyIo {
     /// Handles one PDU that is not for the I/O channel.
     fn take(&mut self, f: &mut Framer, channel: u16, data: &[u8]) -> Result<()> {
         if Some(channel) == self.message_channel {
+            match multitransport::parse_initiate_request(data) {
+                Ok(Some(req)) => {
+                    self.multitransport.push(req);
+                    return Ok(());
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    trace!("multitransport request ignored: {e}");
+                    return Ok(());
+                }
+            }
             if let Some(rsp) = self.autodetect.on_pdu(data, Instant::now()) {
-                send_io(f, self.user_id, channel, &rsp)?;
+                send_io_headed(f, &mut self.sec, self.user_id, channel, &rsp)?;
             }
             return Ok(());
         }
@@ -433,27 +534,98 @@ fn add_gfx_channel(
             "not available"
         }
     );
-    let (channel, handle) = crate::gfx::graphics(decoder);
-    let mut channel: Option<Box<dyn crate::DynamicChannel>> = Some(Box::new(channel));
-    if let Some(host) = handlers.iter_mut().find_map(|h| h.as_drdynvc()) {
-        host.add(channel.take().expect("not yet added"));
+    // Video redirection needs the graphics pipeline and a decoder that
+    // works here (MS-RDPEVOR 1.5): the graphics channel's decoder says so.
+    let video = cfg.video && decoder.is_some();
+    let (channel, mut handle) = crate::gfx::graphics(decoder);
+    let mut channels: Vec<Box<dyn crate::DynamicChannel>> = vec![Box::new(channel)];
+    if let (true, Some(factory)) = (video, cfg.h264.clone()) {
+        trace!("video redirection offered (MS-RDPEVOR, MS-RDPEGT)");
+        let (video_channels, video) = crate::video::video(factory);
+        channels.extend(video_channels);
+        handle = handle.with_video(video);
+    } else if cfg.video {
+        trace!("video redirection not offered: no H.264 decoder");
     }
-    if let Some(channel) = channel {
-        handlers.push(Box::new(crate::Drdynvc::new(vec![channel])));
+    if let Some(host) = handlers.iter_mut().find_map(|h| h.as_drdynvc()) {
+        for c in channels.drain(..) {
+            host.add(c);
+        }
+    }
+    if !channels.is_empty() {
+        handlers.push(Box::new(crate::Drdynvc::new(channels)));
     }
     handle
 }
 
 /// Sends one complete virtual channel message, chunked.
-fn send_channel(f: &mut Framer, user_id: u16, slot: &Slot, msg: &[u8]) -> Result<()> {
+fn send_channel(
+    f: &mut Framer,
+    sec: &mut Sec,
+    user_id: u16,
+    slot: &Slot,
+    msg: &[u8],
+) -> Result<()> {
     let show = slot.handler.options() & channel::CHANNEL_OPTION_SHOW_PROTOCOL != 0;
     for c in channel::chunk(msg, show) {
+        let c = seal(sec, &c, false);
         f.write(&x224::data(&mcs::send_data_request(user_id, slot.id, &c)))?;
     }
     Ok(())
 }
 
-fn send_io(f: &mut Framer, user_id: u16, io: u16, data: &[u8]) -> Result<()> {
+/// MCS user data as it goes on the wire: under Standard RDP Security with
+/// a security header, signed and encrypted (5.3.8). A `headed` PDU (Client
+/// Info, licensing, auto-detect) starts with its basic security header
+/// already; share control and channel data have none.
+fn seal<'a>(sec: &mut Sec, data: &'a [u8], headed: bool) -> std::borrow::Cow<'a, [u8]> {
+    match sec {
+        None => std::borrow::Cow::Borrowed(data),
+        Some(s) if headed => {
+            let flags = crate::cursor::le16(data, 0).unwrap_or(0);
+            std::borrow::Cow::Owned(s.wrap(flags, data.get(4..).unwrap_or_default()))
+        }
+        Some(s) => std::borrow::Cow::Owned(s.wrap(0, data)),
+    }
+}
+
+/// Incoming MCS user data in the form Enhanced RDP Security delivers it
+/// (decrypted and checked under Standard RDP Security).
+fn unseal(sec: &mut Sec, data: &[u8]) -> Result<Vec<u8>> {
+    match sec {
+        Some(s) => s.unwrap(data),
+        None => Ok(data.to_vec()),
+    }
+}
+
+/// A Standard Security Server Redirection PDU (2.2.13.2.1) as
+/// [`StandardSecurity::unwrap`] delivers it: a basic header of exactly
+/// SEC_REDIRECTION_PKT, then the redirection packet. Share control PDUs
+/// never start so (their pduType word is nonzero).
+fn standard_redirection(sec: &Sec, data: &[u8]) -> Option<Result<Redirection>> {
+    let header = (crate::cursor::le16(data, 0), crate::cursor::le16(data, 2));
+    (sec.is_some() && header == (Some(security::SEC_REDIRECTION_PKT), Some(0)))
+        .then(|| Redirection::parse(&data[4..]))
+}
+
+/// Share control or channel data on an MCS channel.
+fn send_io(f: &mut Framer, sec: &mut Sec, user_id: u16, io: u16, data: &[u8]) -> Result<()> {
+    send_user_data(f, sec, user_id, io, data, false)
+}
+
+/// A PDU with a basic security header (Client Info, licensing, auto-detect).
+fn send_io_headed(f: &mut Framer, sec: &mut Sec, user_id: u16, io: u16, data: &[u8]) -> Result<()> {
+    send_user_data(f, sec, user_id, io, data, true)
+}
+
+fn send_user_data(
+    f: &mut Framer,
+    sec: &mut Sec,
+    user_id: u16,
+    io: u16,
+    data: &[u8],
+    headed: bool,
+) -> Result<()> {
     if crate::log::verbose() {
         // The Client Info PDU (SEC_INFO_PKT) carries the password: never dump it.
         if data.starts_with(&[0x40, 0x00]) {
@@ -473,7 +645,8 @@ fn send_io(f: &mut Framer, user_id: u16, io: u16, data: &[u8]) -> Result<()> {
             trace!("send {} bytes on channel {io}: {hex}", data.len());
         }
     }
-    f.write(&x224::data(&mcs::send_data_request(user_id, io, data)))
+    let data = seal(sec, data, headed);
+    f.write(&x224::data(&mcs::send_data_request(user_id, io, &data)))
 }
 
 fn read_x224(f: &mut Framer, deadline: Instant) -> Result<Vec<u8>> {
@@ -499,11 +672,12 @@ fn read_io(f: &mut Framer, io: u16, deadline: Instant, early: &mut EarlyIo) -> R
     loop {
         let payload = read_mcs(f, deadline)?;
         match mcs::parse_domain_pdu(&payload)? {
-            DomainPdu::SendDataIndication { channel, data } if channel == io => {
-                return Ok(data.to_vec());
-            }
             DomainPdu::SendDataIndication { channel, data } => {
-                let data = data.to_vec();
+                // Every channel's data is in the one decryption stream.
+                let data = unseal(&mut early.sec, data)?;
+                if channel == io {
+                    return Ok(data);
+                }
                 early.take(f, channel, &data)?;
             }
             DomainPdu::DisconnectProviderUltimatum { reason } => {
@@ -548,6 +722,60 @@ fn split_user(cfg: &Config) -> (String, String) {
         domain = r.domain.clone().unwrap_or(domain);
     }
     (user, domain)
+}
+
+/// Standard RDP Security set up from the Server Security Data.
+struct Legacy {
+    sec: Box<StandardSecurity>,
+    client_random: [u8; 32],
+    /// The Security Exchange PDU to send (2.2.1.10).
+    exchange: Vec<u8>,
+    certificate_sha256: [u8; 32],
+}
+
+/// Sets up Standard RDP Security (5.3.2 to 5.3.5) from the Server Security
+/// Data: the method and level (no encryption and FIPS are refused), the
+/// proprietary certificate's signature, then the caller's trust in the
+/// certificate, as for a TLS one, before anything secret is sent. The
+/// encrypted client random goes in the Security Exchange PDU.
+fn standard_security(cfg: &Config, host: &str, server: &gcc::ServerData) -> Result<Legacy> {
+    security::KeyStrength::from_method(server.encryption_method)?;
+    let server_random = server
+        .server_random
+        .ok_or_else(|| Error::Protocol("Standard RDP Security without a server random".into()))?;
+    let cert = &server.server_certificate;
+    let key = security::server_key(cert)?;
+    let certificate_sha256 = sha256(cert);
+    if let Some(check) = &cfg.verify_certificate {
+        let c = ServerCertificate {
+            host: host.into(),
+            port: cfg.port,
+            der: cert.clone(),
+            sha256: certificate_sha256,
+        };
+        if !(check.0)(&c) {
+            return Err(Error::Auth("the server certificate was not trusted".into()));
+        }
+    }
+    let client_random = crate::crypto::random::<32>();
+    let encrypted = security::encrypt_client_random(&key, &client_random)?;
+    let sec = StandardSecurity::new(
+        server.encryption_method,
+        server.encryption_level,
+        &client_random,
+        &server_random,
+    )?;
+    trace!(
+        "legacy RDP security (no TLS): {}, {}-bit server key",
+        sec.describe(),
+        key.modulus.len() * 8
+    );
+    Ok(Legacy {
+        sec: Box::new(sec),
+        client_random,
+        exchange: security::security_exchange_pdu(&encrypted),
+        certificate_sha256,
+    })
 }
 
 impl Client {
@@ -626,36 +854,72 @@ impl Client {
         let (user, domain) = split_user(cfg);
         let redirection = cfg.redirection.as_ref();
 
-        let (mut f, gateway_certificate_sha256, host) = open(cfg, deadline)?;
-        f.set_read_timeout(Duration::from_millis(100))?;
         let progress = cfg.progress.as_ref();
-        report(progress, ConnectStep::Tls);
+        let assistance = cfg.assistance.as_ref();
 
-        // 1. X.224 negotiation; a routing token replaces the cookie (3.2.5.3.1)
+        // 1. X.224 negotiation; a routing token replaces the cookie (3.2.5.3.1).
+        // A server that allows only Standard RDP Security refuses TLS
+        // (SSL_NOT_ALLOWED_BY_SERVER, 2.2.1.2.2); when this connection
+        // allows legacy security, a new connection asks for PROTOCOL_RDP.
         let cookie: String = user.chars().take(9).collect();
-        let mut requested = x224::PROTOCOL_SSL | x224::PROTOCOL_HYBRID | x224::PROTOCOL_HYBRID_EX;
+        // A sharer authenticates the invitation, not the user: no NLA.
+        let mut requested = match assistance {
+            Some(_) => x224::PROTOCOL_SSL,
+            None => x224::PROTOCOL_SSL | x224::PROTOCOL_HYBRID | x224::PROTOCOL_HYBRID_EX,
+        };
         let rdstls = redirection.filter(|r| !r.no_redirect() && r.wants_rdstls());
         if rdstls.is_some() {
             requested |= x224::PROTOCOL_RDSTLS;
         }
-        match redirection.and_then(Redirection::routing_token) {
-            Some(token) => f.write(&x224::connection_request_routed(&token, requested)?)?,
-            None => f.write(&x224::connection_request(&cookie, requested))?,
-        }
-        let confirm = read_x224(&mut f, deadline)?;
+        let (mut f, gateway_certificate_sha256, host, confirm) = loop {
+            let (mut f, gateway_sha256, host) = open(cfg, deadline)?;
+            f.set_read_timeout(Duration::from_millis(100))?;
+            report(progress, ConnectStep::Tls);
+            // MS-RDPEPS: the sharer's session id goes before X.224.
+            if let Some(id) = assistance.and_then(|a| a.preconnection_id) {
+                f.write(&crate::preconnection::pdu_v1(id))?;
+            }
+            match redirection.and_then(Redirection::routing_token) {
+                Some(token) => f.write(&x224::connection_request_routed(&token, requested)?)?,
+                None => f.write(&x224::connection_request(&cookie, requested))?,
+            }
+            let confirm = read_x224(&mut f, deadline)?;
+            let tls_refused =
+                x224::negotiation_failure(&confirm) == Some(x224::SSL_NOT_ALLOWED_BY_SERVER);
+            if tls_refused && requested != x224::PROTOCOL_RDP {
+                if !cfg.legacy_security {
+                    return Err(security::legacy_refused());
+                }
+                trace!(
+                    "the server refuses TLS; connecting again with legacy RDP security (allowed for this connection)"
+                );
+                requested = x224::PROTOCOL_RDP;
+                continue;
+            }
+            break (f, gateway_sha256, host, confirm);
+        };
         let protocol = x224::parse_connection_confirm(&confirm)?;
         let extended_data =
             x224::negotiation_flags(&confirm) & x224::EXTENDED_CLIENT_DATA_SUPPORTED != 0;
         trace!("negotiated protocol {protocol:#x}");
-        if protocol & requested == 0 {
-            return Err(Error::Unsupported(
-                "server only offers legacy RDP security (no TLS)".into(),
+        let legacy = protocol == x224::PROTOCOL_RDP;
+        if legacy && !cfg.legacy_security {
+            return Err(security::legacy_refused());
+        }
+        if !legacy && protocol & requested == 0 {
+            return proto(format!(
+                "the server chose protocol {protocol:#x}, which was not offered"
             ));
         }
 
-        // 2. TLS, then NLA
-        let cert = f.upgrade_tls(&host, deadline)?;
-        let certificate_sha256 = sha256(&cert);
+        // 2. TLS, then NLA (Enhanced RDP Security, 5.4); neither under
+        // Standard RDP Security, whose keys come with the MCS connect.
+        let cert = if legacy {
+            Vec::new()
+        } else {
+            f.upgrade_tls(&host, deadline)?
+        };
+        let mut certificate_sha256 = sha256(&cert);
         // The target must present the certificate the redirector named (5.4.5.3.1).
         let pinned = redirection.and_then(|r| r.target_certificate.as_ref());
         if pinned.is_some_and(|p| *p != cert) {
@@ -663,7 +927,12 @@ impl Client {
                 "the redirection target's certificate differs from the one the broker named".into(),
             ));
         }
-        if let Some(check) = &cfg.verify_certificate {
+        // A sharer whose key the invitation names needs no prompt.
+        let pinned_by_invitation =
+            !legacy && assistance.is_some_and(|a| a.certificate_matches(&cert));
+        if pinned_by_invitation {
+            trace!("the shared desktop's certificate carries the invitation's key");
+        } else if let Some(check) = cfg.verify_certificate.as_ref().filter(|_| !legacy) {
             let server = ServerCertificate {
                 host: host.clone(),
                 port: cfg.port,
@@ -731,6 +1000,19 @@ impl Client {
         let (width, height) = desktop.as_ref().map_or((cfg.width, cfg.height), |d| {
             (d.width as u16, d.height as u16)
         });
+        // UDP (MS-RDPEMT 1.5): a direct connection, the DRDYNVC channel,
+        // and a server that takes extended client data (2.2.1.3.8). Not
+        // under Standard RDP Security: the tunnel needs TLS.
+        let offer_udp = cfg.multitransport
+            && !legacy
+            && cfg.gateway.is_none()
+            && extended_data
+            && handlers.iter().any(|h| h.name() == crate::dvc::DRDYNVC);
+        if cfg.multitransport && !offer_udp {
+            trace!(
+                "UDP transport not offered (gateway, legacy security, no extended data or no drdynvc)"
+            );
+        }
         let settings = gcc::ClientSettings {
             width,
             height,
@@ -745,6 +1027,11 @@ impl Client {
             monitors: desktop.as_ref().filter(|_| extended_data),
             redirected_session_id: redirection.map(|r| r.session_id),
             redirected_smartcard: redirection.is_some_and(Redirection::smartcard_logon),
+            multitransport: if offer_udp {
+                multitransport::CLIENT_FLAGS
+            } else {
+                0
+            },
         };
         f.write(&x224::data(&mcs::connect_initial(
             &gcc::conference_create_request(&settings),
@@ -753,6 +1040,15 @@ impl Client {
             &read_mcs(&mut f, deadline)?,
         )?)?;
         trace!("server data: {server:?}");
+        let legacy = if legacy {
+            let l = standard_security(cfg, &host, &server)?;
+            certificate_sha256 = l.certificate_sha256;
+            // The check may have waited for the user.
+            deadline = Instant::now() + cfg.timeout;
+            Some(l)
+        } else {
+            None
+        };
 
         // 4. Domain, user and channels
         f.write(&x224::data(&mcs::erect_domain_request()))?;
@@ -769,38 +1065,52 @@ impl Client {
         }
         let io = server.io_channel;
 
+        // RDP Security Commencement (1.3.1.1): the Security Exchange PDU,
+        // in the clear; everything after it is encrypted (5.3.8).
+        let mut sec: Sec = None;
+        let mut client_random = pdu::ENHANCED_SECURITY_CLIENT_RANDOM;
+        if let Some(l) = legacy {
+            send_io(&mut f, &mut None, user_id, io, &l.exchange)?;
+            client_random = l.client_random;
+            sec = Some(l.sec);
+        }
+
         // 5. Client info and licensing
         let mut early = EarlyIo {
             queued: Vec::new(),
             user_id,
             message_channel: server.message_channel,
             autodetect: AutoDetect::default(),
+            sec,
+            multitransport: Vec::new(),
         };
         let info = pdu::ClientInfo {
             domain: &domain,
             user: &user,
             password: &cfg.password,
-            // Enhanced RDP Security only (legacy security is refused above),
-            // so the verifier uses the all-zero client random of 5.5 step 4.
+            // The verifier is over the client random: all zeros under
+            // Enhanced RDP Security, the exchanged one under Standard (5.5).
             auto_reconnect: cfg
                 .auto_reconnect
                 .as_ref()
-                .map(|c| c.client_packet(&pdu::ENHANCED_SECURITY_CLIENT_RANDOM)),
+                .map(|c| c.client_packet(&client_random)),
             performance_flags: cfg.experience.performance_flags(),
             compression: cfg.compression.type_code(),
             rail: rail.is_some(),
         };
         // A redirection's password blob goes to the target unchanged; after
         // an RDSTLS logon the Client Info carries no password.
-        let info_pdu = match redirection.and_then(Redirection::client_info_password) {
-            Some(blob) => pdu::client_info_redirected(&info, blob),
-            None if rdstls.is_some() && protocol == x224::PROTOCOL_RDSTLS => {
+        let blob = redirection.and_then(Redirection::client_info_password);
+        let info_pdu = match (assistance, blob) {
+            (Some(a), _) => pdu::client_info_assistance(&info, &a.auth_id, a.password.as_deref()),
+            (None, Some(blob)) => pdu::client_info_redirected(&info, blob),
+            (None, None) if rdstls.is_some() && protocol == x224::PROTOCOL_RDSTLS => {
                 pdu::client_info(&pdu::ClientInfo {
                     password: "",
                     ..info
                 })
             }
-            None => pdu::client_info(&info),
+            (None, None) => pdu::client_info(&info),
         };
         trace!(
             "experience: {:?}, {} bpp, {:?} (performance flags {:#x})",
@@ -812,11 +1122,14 @@ impl Client {
         if cfg.auto_reconnect.is_some() {
             trace!("client info carries an auto-reconnect cookie");
         }
-        send_io(&mut f, user_id, io, &info_pdu)?;
+        send_io_headed(&mut f, &mut early.sec, user_id, io, &info_pdu)?;
         // With TLS the server answers with one "valid client" licensing PDU.
         let mut pending = None;
         let data = read_io(&mut f, io, deadline, &mut early)?;
-        if pdu::looks_like_share_control(&data) || redirect::is_enhanced(&data) {
+        if pdu::looks_like_share_control(&data)
+            || redirect::is_enhanced(&data)
+            || standard_redirection(&early.sec, &data).is_some()
+        {
             pending = Some(data); // server skipped licensing
         } else if redirect::is_standard_security(&data) {
             return Err(Error::Unsupported(
@@ -826,12 +1139,13 @@ impl Client {
             // Licensing (MS-RDPELE): usually one "valid client" alert, else
             // the full exchange.
             let store = cfg.license_store.as_deref();
-            let mut lic = crate::license::Licensing::new(store, &user, &cfg.client_name);
+            let mut lic = crate::license::Licensing::new(store, &user, &cfg.client_name)
+                .with_server_certificate(&server.server_certificate);
             let mut data = data;
             loop {
                 let (send, step) = lic.process(&data);
                 for msg in send {
-                    send_io(&mut f, user_id, io, &msg)?;
+                    send_io_headed(&mut f, &mut early.sec, user_id, io, &msg)?;
                 }
                 if step? == crate::license::Step::Done {
                     break;
@@ -848,6 +1162,15 @@ impl Client {
                 Some(d) => d,
                 None => read_io(&mut f, io, deadline, &mut early)?,
             };
+            if let Some(to) = standard_redirection(&early.sec, &data) {
+                let to = to?;
+                if !to.no_redirect() {
+                    return Ok(Hop::Redirect(Box::new(to), host, handlers));
+                }
+                trace!("server redirection info (LB_NOREDIRECT), kept for a reconnect");
+                informational = Some(to);
+                continue;
+            }
             let parts = pdu::split_share_control(&data)?;
             if let Some((_, body)) = parts
                 .iter()
@@ -901,6 +1224,8 @@ impl Client {
             info: ConnectionInfo {
                 protocol,
                 certificate_sha256,
+                encryption_method: server.encryption_method,
+                encryption_level: server.encryption_level,
                 gateway_certificate_sha256,
                 server_rdp_version: server.version,
                 width: demand.width,
@@ -931,12 +1256,27 @@ impl Client {
             orders: cfg
                 .drawing_orders
                 .then(|| Box::new(crate::orders::Orders::new(cfg.bitmap_cache_dir.as_deref()))),
+            sec: early.sec.take(),
+            udp: Udp {
+                offered: offer_udp,
+                server_flags: server.multitransport,
+                state: if offer_udp && server.multitransport != 0 {
+                    UdpState::Offered
+                } else {
+                    UdpState::Off
+                },
+                certificate: cert,
+                ..Udp::off()
+            },
         };
         // 7. Finalization; the Font Map reply is handled by the session loop.
         report(progress, ConnectStep::FirstPicture);
         client.activate(&demand)?;
         for (channel, data) in early.queued {
             client.channel_data(channel, &data)?;
+        }
+        for req in early.multitransport {
+            client.multitransport_request(req)?;
         }
         client.f.set_read_timeout(Duration::from_millis(2))?;
         Ok(Hop::Done(Box::new(client)))
@@ -952,11 +1292,22 @@ impl Client {
 
     fn send_data(&mut self, pdu_type2: u8, body: &[u8]) -> Result<()> {
         let pdu = pdu::share_data(self.share_id, self.user_id, pdu_type2, body);
-        send_io(&mut self.f, self.user_id, self.io_channel, &pdu)
+        send_io(
+            &mut self.f,
+            &mut self.sec,
+            self.user_id,
+            self.io_channel,
+            &pdu,
+        )
     }
 
     fn activate(&mut self, demand: &DemandActive) -> Result<()> {
         self.share_id = demand.share_id;
+        // Salted MACs once both General Capability Sets say so (5.3.6.1.1;
+        // the client's always does).
+        if let Some(s) = &mut self.sec {
+            s.set_salted_mac(demand.salted_checksum);
+        }
         let rail_caps = self
             .rail
             .as_ref()
@@ -989,7 +1340,13 @@ impl Client {
             }
             None => confirm,
         };
-        send_io(&mut self.f, self.user_id, self.io_channel, &confirm)?;
+        send_io(
+            &mut self.f,
+            &mut self.sec,
+            self.user_id,
+            self.io_channel,
+            &confirm,
+        )?;
         self.send_data(pdu::PDUTYPE2_SYNCHRONIZE, &pdu::synchronize())?;
         self.send_data(
             pdu::PDUTYPE2_CONTROL,
@@ -1022,19 +1379,185 @@ impl Client {
         &self.info
     }
 
-    /// Traffic so far and the graphics pipeline's decoding statistics, for
-    /// a statistics display; rates come from comparing two readings.
+    /// Traffic so far, the graphics pipeline's decoding statistics and the
+    /// UDP transport, for a statistics display; rates come from comparing
+    /// two readings.
     pub fn stats(&self) -> ClientStats {
         let (bytes_in, bytes_out) = self.f.traffic();
+        let udp = self.udp_stats();
         ClientStats {
-            bytes_in,
-            bytes_out,
+            bytes_in: bytes_in + udp.bytes_in,
+            bytes_out: bytes_out + udp.bytes_out,
             gfx: self.gfx.as_ref().map(|g| g.stats()),
+            udp,
         }
+    }
+
+    fn udp_stats(&self) -> UdpStats {
+        let mut s = UdpStats {
+            state: self.udp.state,
+            channels: self.udp.channels,
+            ..UdpStats::default()
+        };
+        if let Some(t) = &self.udp.tunnel {
+            let e = t.stats();
+            s.rtt = t.rtt();
+            s.bytes_in = e.bytes_in;
+            s.bytes_out = e.bytes_out;
+            s.retransmits = e.retransmits;
+        }
+        s
+    }
+
+    /// Why the UDP transport could not be set up, if it failed.
+    pub fn udp_failure(&self) -> Option<&str> {
+        self.udp.failure.as_deref()
+    }
+
+    /// An Initiate Multitransport Request (MS-RDPBCGR 2.2.15.1): starts the
+    /// UDP tunnel, or declines with E_ABORT (2.2.15.2) and stays on TCP.
+    fn multitransport_request(&mut self, req: InitiateRequest) -> Result<()> {
+        trace!("multitransport request {req:?}");
+        let decline = if !self.udp.offered {
+            Some("UDP not offered")
+        } else if req.protocol != multitransport::PROTOCOL_UDPFECR {
+            Some("lossy UDP needs DTLS, not supported")
+        } else if self.udp.server_flags & multitransport::SOFTSYNC_TCP_TO_UDP == 0 {
+            // Without Soft-Sync the channels cannot move over in order.
+            Some("the server does not do Soft-Sync")
+        } else if self.udp.tunnel.is_some() {
+            Some("a UDP tunnel was already tried")
+        } else {
+            None
+        };
+        if let Some(why) = decline {
+            trace!("multitransport request {} declined: {why}", req.request_id);
+            return self.multitransport_response(req.request_id, multitransport::E_ABORT);
+        }
+        let sock = self
+            .f
+            .tcp()
+            .and_then(|t| t.peer_addr().ok())
+            .ok_or_else(|| std::io::Error::other("no server address"))
+            .and_then(multitransport::udp_socket);
+        match sock {
+            Ok(sock) => {
+                trace!("UDP tunnel to {:?}", sock.peer_addr().ok());
+                self.udp.tunnel = Some(Tunnel::start(
+                    Box::new(sock),
+                    req,
+                    &self.host,
+                    self.udp.certificate.clone(),
+                    Instant::now(),
+                ));
+                self.udp.state = UdpState::Connecting;
+                Ok(())
+            }
+            Err(e) => {
+                self.udp.state = UdpState::Failed;
+                self.udp.failure = Some(format!("cannot open a UDP socket: {e}"));
+                trace!("multitransport: cannot open a UDP socket: {e}");
+                self.multitransport_response(req.request_id, multitransport::E_ABORT)
+            }
+        }
+    }
+
+    /// Initiate Multitransport Response PDU on the message channel (2.2.15.2).
+    fn multitransport_response(&mut self, request_id: u32, hr: u32) -> Result<()> {
+        let Some(ch) = self.message_channel else {
+            return Ok(());
+        };
+        let pdu = multitransport::initiate_response(request_id, hr);
+        // It carries its own basic security header, like auto-detect PDUs.
+        send_io_headed(&mut self.f, &mut self.sec, self.user_id, ch, &pdu)
+    }
+
+    /// Runs the UDP tunnel: its setup, incoming DVC PDUs and outgoing ones.
+    /// A failure before the tunnel is ready declines and stays on TCP; one
+    /// after the server was told S_OK ends the session as a network drop,
+    /// because channel data already in flight on UDP is lost (reconnect
+    /// with [`Config::multitransport`] off, see [`Self::udp_failure`]).
+    fn poll_tunnel(&mut self, out: &mut PollOutcome) -> Result<()> {
+        let Some(t) = self.udp.tunnel.as_mut() else {
+            return Ok(());
+        };
+        if t.phase() == multitransport::Phase::Failed {
+            return Ok(());
+        }
+        let id = t.request_id();
+        let events = t.poll(Instant::now());
+        let dvc = self
+            .channels
+            .iter()
+            .position(|s| s.handler.name() == crate::dvc::DRDYNVC);
+        for e in events {
+            match e {
+                TunnelEvent::Ready => {
+                    self.multitransport_response(id, multitransport::S_OK)?;
+                    self.udp.state = UdpState::Active;
+                    if let Some(d) = dvc.and_then(|i| self.channels[i].handler.as_drdynvc()) {
+                        d.set_tunnel_ready();
+                    }
+                }
+                TunnelEvent::Data(pdu) => {
+                    let Some(i) = dvc.filter(|&i| !self.channels[i].failed) else {
+                        continue;
+                    };
+                    let mut o = ChannelOut::default();
+                    let d = self.channels[i].handler.as_drdynvc().expect("drdynvc");
+                    if let Err(e) = d.process_tunnel(&pdu, &mut o) {
+                        trace!("channel drdynvc (UDP): {e}; channel disabled");
+                        self.channels[i].failed = true;
+                    }
+                    self.flush_channel(i, o)?;
+                }
+                TunnelEvent::Failed(why) => {
+                    let was_active = self.udp.state == UdpState::Active;
+                    self.udp.state = UdpState::Failed;
+                    self.udp.failure = Some(why.clone());
+                    if was_active {
+                        let text = format!("the UDP transport failed: {why}");
+                        out.closed = Some(close_reason(CloseCause::Transport(&text), 0));
+                    } else {
+                        self.multitransport_response(id, multitransport::E_ABORT)?;
+                    }
+                    return Ok(());
+                }
+            }
+        }
+        self.flush_tunnel()
+    }
+
+    /// Sends what the dynamic channels queued for the tunnel.
+    fn flush_tunnel(&mut self) -> Result<()> {
+        if self.udp.state != UdpState::Active {
+            return Ok(());
+        }
+        let Some(d) = self
+            .channels
+            .iter_mut()
+            .find_map(|s| s.handler.as_drdynvc())
+        else {
+            return Ok(());
+        };
+        let pdus = d.take_tunnel_out();
+        self.udp.channels = d.channels_on_tunnel();
+        let Some(t) = self.udp.tunnel.as_mut() else {
+            return Ok(());
+        };
+        for pdu in pdus {
+            t.send(&pdu)?;
+        }
+        Ok(())
     }
 
     /// The TCP connection of a direct session (None through a gateway),
     /// for socket-level measurements such as the round-trip time.
+    /// Video redirection statistics, when [`Config::video`] was offered.
+    pub fn video_stats(&self) -> Option<crate::video::VideoStats> {
+        self.gfx.as_ref().and_then(|g| g.video_stats())
+    }
+
     pub fn tcp_stream(&self) -> Option<&std::net::TcpStream> {
         self.f.tcp()
     }
@@ -1099,6 +1622,7 @@ impl Client {
             if self.active {
                 self.tick_channels()?;
             }
+            self.poll_tunnel(&mut out)?;
             if out.closed.is_some() || Instant::now() >= end {
                 return Ok(out);
             }
@@ -1149,26 +1673,11 @@ impl Client {
     fn handle_x224(&mut self, frame: &[u8], out: &mut PollOutcome) -> Result<()> {
         let payload = x224::data_payload(frame)?;
         match mcs::parse_domain_pdu(payload)? {
-            DomainPdu::SendDataIndication { channel, data } if channel == self.io_channel => {
-                if let Some(hb) = pdu::parse_heartbeat(data) {
-                    if self.heartbeat != Some(hb) {
-                        trace!("server heartbeat: {hb:?}");
-                    }
-                    self.heartbeat = Some(hb);
-                    return Ok(());
-                }
-                let data = data.to_vec();
-                self.handle_share(&data, out)
-            }
-            DomainPdu::SendDataIndication { channel, data }
-                if Some(channel) == self.message_channel =>
-            {
-                let data = data.to_vec();
-                self.message_channel_pdu(channel, &data, out)
-            }
             DomainPdu::SendDataIndication { channel, data } => {
-                let data = data.to_vec();
-                self.channel_data(channel, &data)
+                // One decryption stream for all channels: a bad MAC (or
+                // tampering) ends the session, whatever the channel.
+                let data = unseal(&mut self.sec, data)?;
+                self.indication(channel, &data, out)
             }
             DomainPdu::DisconnectProviderUltimatum { reason } => {
                 let text = format!("server disconnected (MCS reason {reason})");
@@ -1179,6 +1688,48 @@ impl Client {
                 Ok(())
             }
             DomainPdu::Other(_) => Ok(()),
+        }
+    }
+
+    /// Data on an MCS channel after activation, decrypted.
+    fn indication(&mut self, channel: u16, data: &[u8], out: &mut PollOutcome) -> Result<()> {
+        if channel == self.io_channel {
+            if let Some(hb) = pdu::parse_heartbeat(data) {
+                if self.heartbeat != Some(hb) {
+                    trace!("server heartbeat: {hb:?}");
+                }
+                self.heartbeat = Some(hb);
+                return Ok(());
+            }
+            if let Some(to) = standard_redirection(&self.sec, data) {
+                self.redirected(to, out);
+                return Ok(());
+            }
+            self.handle_share(data, out)
+        } else if Some(channel) == self.message_channel {
+            self.message_channel_pdu(channel, data, out)
+        } else {
+            self.channel_data(channel, data)
+        }
+    }
+
+    /// A Server Redirection PDU after activation (3.2.5.13): kept, and
+    /// unless it is informational (LB_NOREDIRECT) the session ends to
+    /// follow it. A malformed one is traced and dropped.
+    fn redirected(&mut self, to: Result<Redirection>, out: &mut PollOutcome) {
+        match to {
+            Ok(to) => {
+                let follow = !to.no_redirect();
+                trace!("{}", to.hop_trace(1));
+                self.redirection = Some(to);
+                self.follow = follow;
+                if follow {
+                    let text = "the server redirected the session to another server";
+                    let cause = CloseCause::Ultimatum(text);
+                    out.closed = Some(close_reason(cause, self.last_error_info));
+                }
+            }
+            Err(e) => trace!("server redirection PDU ignored: {e}"),
         }
     }
 
@@ -1198,8 +1749,16 @@ impl Client {
             self.heartbeat = Some(hb);
             return Ok(());
         }
+        match multitransport::parse_initiate_request(data) {
+            Ok(Some(req)) => return self.multitransport_request(req),
+            Ok(None) => {}
+            Err(e) => {
+                trace!("multitransport request ignored: {e}");
+                return Ok(());
+            }
+        }
         if let Some(rsp) = self.autodetect.on_pdu(data, Instant::now()) {
-            send_io(&mut self.f, self.user_id, channel, &rsp)?;
+            send_io_headed(&mut self.f, &mut self.sec, self.user_id, channel, &rsp)?;
         }
         if let Some(n) = self.autodetect.take_update() {
             out.network = Some(n);
@@ -1238,20 +1797,9 @@ impl Client {
                     self.active = false;
                 }
                 pdu::PDUTYPE_DATA => self.handle_data(body, out)?,
-                redirect::PDUTYPE_SERVER_REDIR_PKT => match Redirection::parse_enhanced(body) {
-                    Ok(to) => {
-                        let follow = !to.no_redirect();
-                        trace!("{}", to.hop_trace(1));
-                        self.redirection = Some(to);
-                        self.follow = follow;
-                        if follow {
-                            let text = "the server redirected the session to another server";
-                            let cause = CloseCause::Ultimatum(text);
-                            out.closed = Some(close_reason(cause, self.last_error_info));
-                        }
-                    }
-                    Err(e) => trace!("server redirection PDU ignored: {e}"),
-                },
+                redirect::PDUTYPE_SERVER_REDIR_PKT => {
+                    self.redirected(Redirection::parse_enhanced(body), out)
+                }
                 _ => {}
             }
         }
@@ -1316,6 +1864,14 @@ impl Client {
     }
 
     fn handle_fastpath(&mut self, frame: &[u8], out: &mut PollOutcome) -> Result<()> {
+        let plain;
+        let frame = match &mut self.sec {
+            Some(s) => {
+                plain = s.fastpath_output(frame)?;
+                &plain[..]
+            }
+            None => frame,
+        };
         for (code, data) in self.fastpath.feed(frame, &mut self.bulk)? {
             match code {
                 fastpath::UPDATETYPE_BITMAP => {
@@ -1437,7 +1993,13 @@ impl Client {
 
     fn flush_channel(&mut self, i: usize, mut out: ChannelOut) -> Result<()> {
         for msg in out.take() {
-            send_channel(&mut self.f, self.user_id, &self.channels[i], &msg)?;
+            send_channel(
+                &mut self.f,
+                &mut self.sec,
+                self.user_id,
+                &self.channels[i],
+                &msg,
+            )?;
         }
         Ok(())
     }
@@ -1457,7 +2019,11 @@ impl Client {
             return Ok(());
         }
         for chunk in events.chunks(15) {
-            self.f.write(&fastpath_input(chunk))?;
+            let pdu = fastpath_input(chunk);
+            match &mut self.sec {
+                Some(s) => self.f.write(&s.fastpath_input(&pdu))?,
+                None => self.f.write(&pdu)?,
+            }
         }
         Ok(())
     }

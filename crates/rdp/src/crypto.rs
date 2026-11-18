@@ -40,6 +40,25 @@ pub fn rsa_encrypt_le(data: &[u8], modulus: &[u8], exponent: u32) -> Option<Vec<
     Some(out)
 }
 
+/// `data ^ exponent mod modulus` with any exponent, all little-endian;
+/// the result has the modulus length. The private-key side, for tests:
+/// signing a proprietary certificate with the published Terminal Services
+/// key (MS-RDPBCGR 5.3.3.1.2), decrypting a client random (5.3.4.2).
+#[cfg(test)]
+pub(crate) fn rsa_modpow_le(data: &[u8], modulus: &[u8], exponent: &[u8]) -> Vec<u8> {
+    let n = Big::from_le(modulus);
+    let m = Big::from_le(data).rem(&n);
+    let e = Big::from_le(exponent);
+    let mut r = Big::from_le(&[1]);
+    for i in (0..e.bits()).rev() {
+        r = r.mul(&r).rem(&n);
+        if e.bit(i) {
+            r = r.mul(&m).rem(&n);
+        }
+    }
+    r.to_le(n.bits().div_ceil(8))
+}
+
 /// Unsigned big integer, 32-bit limbs, least significant first. Only what
 /// public-key RSA needs; the operands are public, so nothing here has to
 /// run in constant time.

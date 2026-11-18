@@ -50,6 +50,7 @@ impl Ui {
         c.gateway = text(Field::Gateway);
         c.group = normalize_path(&text(Field::GroupPath));
         c.kerberos = self.kerberos;
+        c.gateway_rpc = self.gateway_rpc;
         c.inherit = self.form_inherit();
         (c.width, c.height) = if self.size == 0 {
             (0, 0)
@@ -150,7 +151,9 @@ impl Ui {
             detail: format!(
                 "{}-bit colour · {}",
                 q.color_depth,
-                if q.gfx {
+                if q.gfx && q.video {
+                    "GFX graphics pipeline with video redirection"
+                } else if q.gfx {
                     "GFX graphics pipeline"
                 } else {
                     "bitmap graphics"
@@ -166,6 +169,7 @@ impl Ui {
             (o.clipboard, "clipboard"),
             (o.sound, "sound"),
             (o.microphone, "microphone"),
+            (o.camera, "camera"),
             (o.printers, "printers"),
             (o.smart_cards, "smart cards"),
         ] {
@@ -177,6 +181,14 @@ impl Ui {
         let folder_text = plural(folders, "folder", "folders");
         if folders > 0 {
             shared.push(&folder_text);
+        }
+        // One port by its name ("COM3"), several as a count.
+        let port_text = match o.ports.as_slice() {
+            [one] => one.clone(),
+            many => plural(many.len(), "port", "ports"),
+        };
+        if !o.ports.is_empty() {
+            shared.push(&port_text);
         }
         out.push(Line {
             icon: if shared.is_empty() {
@@ -265,6 +277,8 @@ impl Ui {
                         format!(" on port {}", r.port)
                     }
                 )
+            } else if r.gateway_rpc {
+                "RD Gateway over RPC over HTTPS, with the same sign-in".into()
             } else {
                 "RD Gateway over HTTPS, with the same sign-in".into()
             },

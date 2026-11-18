@@ -102,6 +102,11 @@ The editor has five pages.
     servers, NTLM as a fallback. With no user name, it signs in as you.
   - **Gateway**: an RD Gateway as `host` or `host:port`, or empty for a
     direct connection. The gateway gets the same user name and password.
+    Remora uses the gateway's HTTP transport, and RPC over HTTP when the
+    gateway does not offer HTTP (older gateways, or HTTP turned off).
+  - **Gateway over RPC** (shown once a gateway is entered) skips the HTTP
+    attempt and uses RPC over HTTP only. On the command line:
+    `--gateway-rpc`.
 
 ### Display
 
@@ -144,10 +149,42 @@ explained in [Server helper](#server-helper).
   default: smoother video and less traffic), or **Bitmaps**, classic bitmap
   updates, for a server or setup where GFX misbehaves. When a server's
   graphics fail, Remora reconnects the tab once with bitmaps on its own.
+- **Video redirection** (off by default; needs GFX): Remora offers Windows'
+  Video Optimized Remoting. When the server decides that part of the screen
+  is a playing video, it can send that part as its own H.264 stream instead
+  of painting it into the desktop picture; Remora decodes it on this PC and
+  shows it in the video's place, clipped where windows cover it and at the
+  pace of the video's own timestamps. Nothing changes unless the server
+  chooses to redirect a video; which servers and settings do so is still
+  being checked, so the switch is off until then. Applies on the next
+  connect, like the other quality settings.
+- **UDP transport** (off by default): when the server offers it, the
+  session's dynamic channels (the GFX picture, sound, touch, display changes)
+  travel over UDP next to the TCP connection, as with Windows' own client.
+  On a link with loss or a long round trip, UDP keeps the picture moving
+  where TCP would stall to resend. Remora uses the reliable UDP mode with TLS
+  (the server must show the same certificate as on TCP), only on direct
+  connections (not through an RD Gateway). If UDP cannot be set up (a
+  firewall blocks UDP 3389, no answer, a TLS error), the session simply
+  stays on TCP. If UDP breaks while the session uses it, Remora reconnects
+  the tab (resuming the same Windows session) and keeps it on TCP. The statistics box shows which transport is
+  in use. Applies on the next connect.
 - **Windows keys (Win, Alt+Tab, …)**: **On this PC**, **On the remote** (the
   default), or **Remote in full screen**.
 - **Compression**: **Off** is fastest on a LAN; RDP 6.1, 6.0 or 5.0 send less
   data on slow links for a little more CPU.
+- **Security: Allow legacy RDP security (weak)**, off by default. Only for
+  old servers that have no TLS (Windows' "RDP Security Layer", or servers
+  set to it): Remora then connects with Standard RDP Security, RC4
+  encryption without TLS. It is weak: anyone on the network path can
+  intercept the session, and the server's identity rests only on the key it
+  showed the first time (Remora asks you to trust it, like a certificate).
+  TLS is still used whenever the server offers it; Remora never picks the
+  legacy security on its own. The switch belongs to the connection, not to
+  its group, and the connection shows a **Legacy security** label. A server
+  that offers only legacy security and a connection without the switch end
+  with "This server only offers legacy, weak security". Servers that
+  require FIPS encryption are not supported.
 
 ## Groups
 
@@ -193,15 +230,15 @@ or hold **Alt** to bring it back. Its buttons, from the left:
 
 **The side panel** has four pages:
 
-- **Sharing**: switch clipboard, sound, microphone, printers and smart cards,
-  and share folders, live.
+- **Sharing**: switch clipboard, sound, microphone, camera, printers, smart
+  cards and ports, and share folders, live.
 - **Display**: full screen, **Fit to window** and the scale, which apply
   live.
 
   ![The side panel's Display page](images/panel-display.webp)
 
-- **Quality**: connection speed, colours and what to show. These apply at
-  logon, so the page offers **Reconnect now**.
+- **Quality**: connection speed, colours, what to show, graphics and video
+  redirection. These apply at logon, so the page offers **Reconnect now**.
 
   ![The side panel's Quality page, with Reconnect now](images/panel-quality.webp)
 
@@ -246,6 +283,10 @@ is on. It shows:
   answer pings shows Windows' TCP estimate instead, marked "no ping reply":
   it includes the server's delayed acknowledgements, so it reads well above
   the network's real round trip. A session through an RD Gateway has none.
+- **Transport:** **TCP**, or **UDP** with the number of channels on it and
+  its own round trip once the UDP transport is up. With UDP switched on, it
+  also says when UDP is still connecting, was offered but not used, or
+  failed (the session then runs on TCP).
 - **Server measured:** what the server's network detection found, when it
   sends one (connection type Automatic).
 - **Input → picture:** from a key or mouse button press to the next change of
@@ -282,10 +323,29 @@ need a reconnect.
   under **Play sound on**.
 - **Microphone**: this PC's microphone in the session, from the device you
   choose under **Record from**.
+- **Camera**: this PC's cameras in the session, for video calls and other
+  camera apps there. Choose **All cameras** or one camera under **Share
+  camera**. A shared camera appears in the session's apps under its own
+  name; it turns on only while an app in the session uses it, and it turns
+  off at once when the app stops, when you switch **Camera** off, or when
+  the session ends. The session gets the picture in a format the camera
+  makes itself (MJPG, YUY2, NV12 and the like, or H.264 where the camera
+  offers it). It needs a server running Windows 10 version 1803, Windows
+  Server 2019 or later, with video capture redirection allowed. Cameras
+  plugged in during a session appear after a reconnect.
 - **Printers**: this PC's printers in the session, through Easy Print, so the
   server needs no printer drivers.
 - **Smart cards**: this PC's card readers and cards, for example to sign in
   inside the session.
+- **Ports**: this PC's serial (COM) and parallel (LPT) ports, one switch
+  each, for devices such as barcode scanners, scales, modems or label
+  printers. A shared port appears in the session under the same name
+  (COM3 stays COM3), and programs there open it as if it were plugged into
+  the server. The card shows only when this PC has ports; a port the
+  connection names but this PC lacks now (an unplugged USB adapter) shows as
+  **Not on this PC now** and is skipped. While the session uses a port,
+  programs on this PC cannot open it, and the other way round. Ports
+  plugged in later appear the next time you connect or switch a port.
 - **Shared folders**: a folder of this PC appears as a drive in the session's
   Explorer. **Browse for a folder…**, or type a path and click **Add**. The
   server can reach only what is inside that folder.
@@ -491,6 +551,58 @@ while it runs; press the button again to stop and save. Videos go to
 `Videos\Remora`, named after the connection with the date and time. Sound is
 not recorded.
 
+## Shadowing and shared desktops
+
+Remora can watch or control another user's session on a Windows server, as
+`mstsc /shadow` does. It can also join a Windows Desktop Sharing invitation.
+Both start from the command line:
+
+```text
+remora server01 --list-sessions
+remora server01 --shadow 3                      watch session 3
+remora server01 --shadow 3 --control            ask to control it
+remora server01 --shadow 3 --no-consent-prompt  without asking its user
+remora --invitation invite.xml                  join a Desktop Sharing invitation
+```
+
+- `--list-sessions` prints the server's sessions: the ID to shadow, the
+  session name, its state and the signed-in user.
+- `--shadow` asks the server for a shadow invitation, then connects to it.
+  Remora asks as the Windows user you are signed in as on this PC. That user
+  must be an administrator on the server.
+- The session's user sees a "Remote Monitoring Request" with **Yes** and
+  **No**. It closes by itself after about 30 seconds without an answer.
+  `--no-consent-prompt` works only where the server's policy allows shadowing
+  without permission.
+- The shared desktop opens like any session. The status line tells you
+  whether you only watch it or also control it. In the command palette, the
+  same entry is marked **View only** or **In control**. Without control,
+  mouse and keyboard do nothing there.
+- To ask for control later, open the command palette (**Ctrl+K**) and run
+  **Request control**. **Stop controlling** gives control back.
+- The status line also reports when another viewer joins or leaves. It shows
+  when the picture pauses, for example while the user's screen is locked or a
+  UAC prompt is up.
+
+What the server needs:
+
+- Windows Server 2012 R2 or Windows 8.1, or later. A plain Server 2012 cannot
+  be shadowed.
+- File and Printer Sharing (SMB, TCP 445) reachable from this PC. Remora
+  requests the invitation over it.
+- The firewall rule **Remote Desktop - Shadow (TCP-In)** enabled. The shadow
+  connection uses a new port each time.
+- The group policy **Set rules for remote control of Remote Desktop Services
+  user sessions** decides what is allowed. It sets control or view only, and
+  with or without the user's permission. Without the policy, both are allowed,
+  with the user's permission.
+
+Invitation files: Remora reads the connection string that Windows Desktop
+Sharing or a shadow request produces (`<E><A .../><C>...</C></E>`), as UTF-8
+or UTF-16 text. Remote Assistance `.msrcIncident` files hold an encrypted
+ticket and need the Remote Assistance channel, which Remora does not support
+yet.
+
 ## Keyboard
 
 Click into the remote picture to send your keyboard to the session;
@@ -581,11 +693,73 @@ How the vault is encrypted, and what is stored where, is in
 - **Export…** writes all connections and groups, with their saved passwords,
   to one `.rdpbackup` file encrypted with your master password. It needs a
   master password; set one up first under **Security**.
-- **Import…** reads such a file. Type the master password it was made with;
-  its connections and groups are added to yours. Connections you already
-  have (same name, host and group) are skipped.
+- **Import…** reads such a file, or the connections of
+  [mRemoteNG](#from-mremoteng) and of
+  [Remote Desktop Connection Manager](#from-remote-desktop-connection-manager-rdcman).
+  Remora tells the kind of file from its content, not its name. The
+  connections and groups are added to yours. Connections you already have
+  (same name, host and group) are skipped.
 
 The first start also offers **Import connections**.
+
+After an import, a line says how many connections came over, and what did
+not: connections that aren't RDP, ones you already had, and passwords that
+could not be read, with the reason.
+
+**Passwords come over only into the vault.** Without a master password,
+Remora imports the connections without their passwords and says so: set up a
+master password under **Security**, then import again. Connections you
+already have are skipped, so a second import only adds what is missing; to
+get passwords for those, delete them first.
+
+### From a Remora backup
+
+Type the master password the backup was made with. Everything comes over,
+saved passwords included.
+
+### From mRemoteNG
+
+Pick `confCons.xml` (mRemoteNG keeps it in `%APPDATA%\mRemoteNG`). Files in
+mRemoteNG's current formats (2.6 to 2.9) are read.
+
+- **What comes over:** folders become groups; each RDP connection keeps its
+  name, host, port, user and domain (as `DOMAIN\user`), password, RD Gateway
+  (when set to Always or Detect), resolution (a fixed size, or fit to the tab
+  for Fit to window, Smart size and Full screen), and clipboard, sound
+  ("bring to this computer"), printers, smart cards and microphone.
+  Inherited settings are resolved to the values the connection really uses.
+  A connection that inherits its user and password from its folder inherits
+  them from the group in Remora too.
+- **What doesn't:** SSH, VNC, Telnet, HTTP and other non-RDP connections are
+  skipped and counted.
+- **Passwords:** mRemoteNG encrypts them with AES-GCM and its master
+  password. Remora tries mRemoteNG's built-in default first; only when the
+  file is protected with your own master password does Import ask for it
+  (**mRemoteNG master password**). A wrong password imports nothing.
+  Files that also encrypt the whole file are read the same way.
+  Passwords in files using another cipher (Serpent, Twofish, CCM or EAX), or
+  in files older than format 2.6, cannot be read: those connections come over
+  without them. Files from mRemoteNG's Windows protection (DPAPI) are read
+  for the Windows user who saved them.
+
+### From Remote Desktop Connection Manager (RDCMan)
+
+Pick the `.rdg` file. Files from RDCMan 2.2 and from 2.7 to 2.93 are read.
+
+- **What comes over:** the file becomes a group named after it, its groups
+  become groups below it, and each server keeps its display name, host and
+  port, logon credentials, gateway, remote desktop size (or fit to the tab
+  for "same size as client area" and full screen), and clipboard, sound,
+  printers, smart cards and microphone. Settings a server inherits from its
+  group are resolved; a server that inherits its logon credentials inherits
+  them from the group in Remora too. Credential profiles stored in the file
+  are used. Smart groups and server references are skipped.
+- **Passwords:** RDCMan encrypts them with Windows for the user who saved
+  them. Import them on the same PC, signed in as the same Windows user;
+  elsewhere they cannot be read and are counted. Passwords encrypted with a
+  certificate, and credential profiles kept in RDCMan's own settings rather
+  than in the file, cannot be read either: those connections come over with
+  the rest of their settings.
 
 ## Updates
 
@@ -607,5 +781,8 @@ Portable copies do not check for updates; new versions are on the
 ## The command line
 
 `remora.exe` also connects from the command line, takes headless screenshots
-and recordings, and prints a protocol trace. See the
+and recordings, shadows sessions
+([Shadowing and shared desktops](#shadowing-and-shared-desktops)), and prints a
+protocol trace. `--legacy-security` allows the weak legacy RDP security for
+that connection, as the Advanced switch does. See the
 [README](../README.md#build-and-run).

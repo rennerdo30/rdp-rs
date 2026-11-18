@@ -23,6 +23,12 @@ serde_json = "1"
 argon2 = "0.6"
 chacha20poly1305 = "0.11"
 zeroize = "1.9"
+# Import from mRemoteNG and RDCMan: XML without DTD entity expansion, and
+# mRemoteNG's password scheme (PBKDF2-HMAC-SHA1 from ring, AES-256-GCM with a
+# 16-byte nonce).
+quick-xml = "0.42"
+aes-gcm = { version = "0.11.1", default-features = false, features = ["aes", "alloc", "zeroize"] }
+ring = "0.17"
 # WHATWG URL parsing for the helper's link requests (re-serialized, ASCII
 # host) before anything reaches the shell.
 url = "2.5.8"
@@ -31,6 +37,7 @@ url = "2.5.8"
 # The system folder picker (IFileOpenDialog) for shared folders.
 rfd = { version = "0.18.0", default-features = false }
 windows-sys = { version = "0.61.2", features = [
+    "Win32_Devices_Communication",
     "Win32_Foundation",
     "Win32_Globalization",
     "Win32_Graphics_Gdi",
@@ -51,6 +58,8 @@ windows-sys = { version = "0.61.2", features = [
     "Win32_System_LibraryLoader",
     "Win32_System_Memory",
     "Win32_System_Registry",
+    # Listing a server's sessions for shadowing (WTSEnumerateSessionsW).
+    "Win32_System_RemoteDesktop",
     "Win32_System_Rpc",
     "Win32_System_SystemInformation",
     "Win32_System_Threading",

@@ -21,14 +21,20 @@
 //! - [`redirect`]: server redirection (session broker, load balancing) and RDSTLS
 //! - [`rdpsnd`]: audio output on the `rdpsnd` channel (MS-RDPEA)
 //! - [`audin`]: microphone redirection on the `AUDIO_INPUT` dynamic channel (MS-RDPEAI)
+//! - [`camera`]: camera redirection on the `RDCamera_*` dynamic channels (MS-RDPECAM)
 //! - [`rail`]: RemoteApp, the `rail` channel and window orders (MS-RDPERP)
 //! - [`rdpei`]: touch and pen input on the `Microsoft::Windows::RDS::Input` dynamic channel (MS-RDPEI)
 //! - [`server`]: the server side for Remora Host: TLS, the connection sequence,
 //!   bitmap updates and input (MS-RDPBCGR)
-//! - [`rdpdr`]: device redirection (MS-RDPEFS) with shared drives, printers (MS-RDPEPC) and smart cards (MS-RDPESC)
+//! - [`video`]: video redirection, Video Optimized Remoting (MS-RDPEVOR) with geometry tracking (MS-RDPEGT)
+//! - [`rdpdr`]: device redirection (MS-RDPEFS) with shared drives, printers (MS-RDPEPC), smart cards (MS-RDPESC) and serial/parallel ports (MS-RDPESP)
+//! - [`assistance`] + [`encomsp`] + [`preconnection`]: joining a shared desktop
+//!   (Desktop Sharing, shadowing) from an invitation (MS-RAI, MS-RA, MS-RDPEMC, MS-RDPEPS)
 
+pub mod assistance;
 pub mod audin;
 pub mod autodetect;
+pub mod camera;
 pub mod channel;
 pub mod client;
 pub mod cliprdr;
@@ -40,6 +46,7 @@ pub mod cursor;
 pub mod der;
 pub mod disp;
 pub mod dvc;
+pub mod encomsp;
 pub mod error;
 pub mod experience;
 pub mod fastpath;
@@ -52,23 +59,30 @@ pub mod license;
 pub mod log;
 pub mod mcs;
 pub mod monitor;
+pub mod multitransport;
 pub mod ntlm;
 pub mod orders;
 pub mod pdu;
 pub mod pointer;
+pub mod preconnection;
 pub mod progress;
 pub mod rail;
 pub mod rdpdr;
 pub mod rdpei;
+pub mod rdpeudp;
 pub mod rdpsnd;
 pub mod redirect;
+pub mod security;
 pub mod server;
 pub mod surfcmd;
 pub mod transport;
+pub mod video;
 pub mod x224;
 
+pub use assistance::{AssistanceLogon, Invitation};
 pub use audin::{AudioInput, AudioInputHandle, CaptureBackend, audin};
 pub use autodetect::NetworkCharacteristics;
+pub use camera::{CameraBackend, CameraHandle, cameras};
 pub use channel::{ChannelOut, StaticChannel};
 pub use client::{
     CertificateCheck, Client, ClientStats, CloseReason, Config, ConnectionInfo, PollOutcome,
@@ -79,6 +93,7 @@ pub use compress::Compression;
 pub use credssp::{AuthFactory, AuthPackage, AuthParams, Step};
 pub use disp::{DisplayControl, DisplayHandle, display_control};
 pub use dvc::{Drdynvc, DvcOut, DynamicChannel, LocalClose, StaticOverDvc};
+pub use encomsp::{Control, MultipartyEvent, MultipartyHandle, MultipartyState, multiparty};
 pub use error::{Error, Result};
 pub use experience::{ConnectionType, Experience};
 pub use framebuffer::{Damage, Framebuffer};
@@ -96,6 +111,7 @@ pub use rdpdr::{
     Device, Drive, IoCompletion, IoRequest, PrintBackend, PrintFormat, Printer, PrinterInfo, Rdpdr,
     RdpdrHandle, SmartCardBackend, rdpdr, share_printers, smart_card_device,
 };
+pub use rdpdr::{PortInfo, PortKind, SerialBackend, SerialPort, port_device};
 pub use rdpei::{
     PenContact, PenFrame, TouchContact, TouchFrame, TouchHandle, TouchInput, TouchOptions,
     touch_input,

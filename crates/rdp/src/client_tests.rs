@@ -28,6 +28,8 @@ fn session() -> (Client, TcpStream) {
         info: ConnectionInfo {
             protocol: x224::PROTOCOL_HYBRID,
             certificate_sha256: [0; 32],
+            encryption_method: 0,
+            encryption_level: 0,
             gateway_certificate_sha256: None,
             server_rdp_version: 0x0008_0004,
             width: 4,
@@ -52,6 +54,8 @@ fn session() -> (Client, TcpStream) {
         follow: false,
         surface: None,
         orders: None,
+        sec: None,
+        udp: Udp::off(),
     };
     (client, server)
 }
@@ -245,6 +249,60 @@ fn gfx_channel_joins_drdynvc_or_brings_its_own() {
 }
 
 #[test]
+fn video_channels_are_offered_only_with_video_gfx_and_a_decoder() {
+    struct NoPicture;
+    impl crate::H264Decoder for NoPicture {
+        fn decode(&mut self, _: &[u8]) -> Result<Option<crate::Yuv420Frame>> {
+            Ok(None)
+        }
+    }
+    let accepted = |cfg: &Config, name: &str| {
+        let mut handlers: Vec<Box<dyn StaticChannel>> = Vec::new();
+        let handle = add_gfx_channel(cfg, &mut handlers);
+        let mut create = vec![0x10, 0x07];
+        create.extend_from_slice(name.as_bytes());
+        create.push(0);
+        let mut out = ChannelOut::default();
+        handlers[0].process(&create, &mut out).unwrap();
+        let ok = out.take()[0] == [0x10, 0x07, 0, 0, 0, 0];
+        (ok, handle.video_stats().is_some())
+    };
+    let decoder: crate::H264Factory =
+        std::sync::Arc::new(|| Some(Box::new(NoPicture) as Box<dyn crate::H264Decoder>));
+    let mut cfg = Config::new("h", "u", "p");
+    cfg.graphics = crate::Graphics::Gfx;
+    cfg.h264 = Some(decoder);
+    for name in [
+        crate::video::CONTROL_CHANNEL,
+        crate::video::DATA_CHANNEL,
+        crate::video::geometry::CHANNEL_NAME,
+    ] {
+        assert_eq!(
+            accepted(&cfg, name),
+            (false, false),
+            "{name}: not asked for"
+        );
+        cfg.video = true;
+        assert_eq!(accepted(&cfg, name), (true, true), "{name}: offered");
+        cfg.video = false;
+    }
+    // No decoder on this machine: not offered.
+    cfg.video = true;
+    cfg.h264 = Some(std::sync::Arc::new(|| None));
+    assert_eq!(
+        accepted(&cfg, crate::video::CONTROL_CHANNEL),
+        (false, false)
+    );
+    cfg.h264 = None;
+    assert_eq!(
+        accepted(&cfg, crate::video::CONTROL_CHANNEL),
+        (false, false)
+    );
+    // The graphics channel itself is still there.
+    assert_eq!(accepted(&cfg, crate::gfx::CHANNEL_NAME), (true, false));
+}
+
+#[test]
 fn gfx_reset_resizes_the_session_framebuffer() {
     let (mut client, _server) = session();
     let (mut channel, handle) = crate::gfx::graphics(None);
@@ -327,6 +385,29 @@ fn negotiation_flags_from_connection_confirm() {
     cc[12] = 0x01;
     assert_eq!(x224::negotiation_flags(&cc), 0);
     assert_eq!(x224::negotiation_flags(&cc[..11]), 0);
+}
+
+#[test]
+fn negotiation_failure_from_connection_confirm() {
+    // RDP_NEG_FAILURE (2.2.1.2.2): SSL_NOT_ALLOWED_BY_SERVER, the answer of
+    // a server that allows only Standard RDP Security.
+    let mut cc = vec![0x03, 0x00, 0x00, 0x13, 0x0e, 0xd0, 0, 0, 0x12, 0x34, 0];
+    cc.extend([0x03, 0x00, 0x08, 0x00, 0x02, 0x00, 0x00, 0x00]);
+    assert_eq!(
+        x224::negotiation_failure(&cc),
+        Some(x224::SSL_NOT_ALLOWED_BY_SERVER)
+    );
+    assert!(x224::parse_connection_confirm(&cc).is_err());
+    // A response, or no negotiation data, is no failure.
+    assert_eq!(x224::negotiation_failure(&cc[..11]), None);
+    cc[11] = 0x02;
+    assert_eq!(x224::negotiation_failure(&cc), None);
+    // The refusal names the setting that allows it.
+    let e = security::legacy_refused().to_string();
+    assert!(
+        e.contains(security::LEGACY_REFUSED) && e.contains("legacy_security"),
+        "{e}"
+    );
 }
 
 /// Enhanced Security Server Redirection PDU (2.2.13.3.1) with only RedirFlags set.
@@ -628,4 +709,469 @@ fn progress_reports_the_steps_reached() {
         *seen.lock().unwrap(),
         [ConnectStep::Resolving, ConnectStep::Tcp]
     );
+}
+
+/// Standard RDP Security (MS-RDPBCGR 5.3) in the session loop: the test
+/// plays the server with the client's keys, encryption and decryption
+/// swapped (5.3.5.1).
+#[test]
+fn legacy_security_encrypts_and_checks_every_pdu() {
+    use crate::security::{KeyStrength, SessionKeys, session_keys};
+    let k = session_keys(&[1; 32], &[2; 32], KeyStrength::Bits128);
+    let swapped = SessionKeys {
+        mac: k.mac.clone(),
+        encrypt: k.decrypt.clone(),
+        decrypt: k.encrypt.clone(),
+    };
+    let level = crate::security::ENCRYPTION_LEVEL_HIGH;
+    let mut srv = StandardSecurity::from_keys(KeyStrength::Bits128, level, &swapped);
+    let (mut client, mut server) = session();
+    client.sec = Some(Box::new(StandardSecurity::from_keys(
+        KeyStrength::Bits128,
+        level,
+        &k,
+    )));
+
+    // An encrypted Save Session Info PDU reaches the session.
+    let pdu = srv.wrap(0, &save_session_info_pdu(5));
+    server.write_all(&indication(1003, &pdu)).unwrap();
+    for _ in 0..100 {
+        client.poll(Duration::from_millis(20)).unwrap();
+        if client.arc_cookie.is_some() {
+            break;
+        }
+    }
+    assert_eq!(client.arc_cookie.as_ref().map(|c| c.logon_id), Some(5));
+
+    // Slow-path output is encrypted: the server decrypts a Refresh Rect.
+    client.request_refresh().unwrap();
+    let (channel, data) = read_request(&mut server);
+    assert_eq!(channel, 1003);
+    assert_eq!(&data[..2], &[0x08, 0x00], "SEC_ENCRYPT");
+    let plain = srv.unwrap(&data).unwrap();
+    assert_eq!(plain[14], pdu::PDUTYPE2_REFRESH_RECT);
+
+    // Fast-path input too.
+    use std::io::Read;
+    let event = InputEvent::mouse_move(10, 20);
+    client.send_input(std::slice::from_ref(&event)).unwrap();
+    let mut head = [0u8; 2];
+    server.read_exact(&mut head).unwrap();
+    let mut frame = head.to_vec();
+    frame.resize(head[1] as usize, 0);
+    server.read_exact(&mut frame[2..]).unwrap();
+    assert_eq!(frame[0] >> 6, 0x2, "FASTPATH_INPUT_ENCRYPTED");
+    assert_eq!(
+        srv.fastpath_output(&frame).unwrap(),
+        fastpath_input(&[event])
+    );
+
+    // A changed byte fails the MAC and ends the session with an error.
+    let mut bad = srv.wrap(0, &save_session_info_pdu(6));
+    *bad.last_mut().unwrap() ^= 0x40;
+    server.write_all(&indication(1003, &bad)).unwrap();
+    let mut failed = None;
+    for _ in 0..100 {
+        if let Err(e) = client.poll(Duration::from_millis(20)) {
+            failed = Some(e);
+            break;
+        }
+    }
+    assert!(failed.is_some_and(|e| e.to_string().contains("MAC mismatch")));
+}
+
+/// One TPKT frame from the client.
+fn read_tpkt(s: &mut TcpStream) -> Vec<u8> {
+    use std::io::Read;
+    s.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    let mut frame = vec![0u8; 4];
+    s.read_exact(&mut frame).unwrap();
+    frame.resize(u16::from_be_bytes([frame[2], frame[3]]) as usize, 0);
+    s.read_exact(&mut frame[4..]).unwrap();
+    frame
+}
+
+/// The client's next Send Data Request on `channel`.
+fn read_send_data(s: &mut TcpStream, channel: u16) -> Vec<u8> {
+    use crate::server::connect::{ClientDomainPdu, parse_client_domain_pdu};
+    let frame = read_tpkt(s);
+    match parse_client_domain_pdu(x224::data_payload(&frame).unwrap()).unwrap() {
+        ClientDomainPdu::SendData {
+            channel: c, data, ..
+        } if c == channel => data.to_vec(),
+        other => panic!("expected data on channel {channel}, got {other:?}"),
+    }
+}
+
+/// A server that allows only Standard RDP Security (MS-RDPBCGR 5.3) with
+/// the 4.8 sample key in a proprietary certificate signed by the Terminal
+/// Services key: it refuses TLS (SSL_NOT_ALLOWED_BY_SERVER), then runs the
+/// connection sequence up to the Confirm Active, checking what the client
+/// encrypts. Returns the client random it decrypted.
+fn legacy_server(listener: TcpListener, cert: Vec<u8>) -> [u8; 32] {
+    use crate::security::tests::{SAMPLE_MODULUS, SAMPLE_PRIVATE_EXPONENT};
+    use crate::security::{KeyStrength, SessionKeys, session_keys};
+    use crate::server::connect::*;
+    let (mut s, _) = listener.accept().unwrap();
+    let cr = parse_connection_request(&read_tpkt(&mut s)).unwrap();
+    assert_ne!(cr.requested_protocols.unwrap() & x224::PROTOCOL_SSL, 0);
+    s.write_all(&negotiation_failure(x224::SSL_NOT_ALLOWED_BY_SERVER))
+        .unwrap();
+    drop(s);
+
+    let (mut s, _) = listener.accept().unwrap();
+    let cr = parse_connection_request(&read_tpkt(&mut s)).unwrap();
+    assert_eq!(cr.requested_protocols, Some(x224::PROTOCOL_RDP));
+    s.write_all(&connection_confirm(x224::PROTOCOL_RDP, 0))
+        .unwrap();
+    let gcc = parse_connect_initial(x224::data_payload(&read_tpkt(&mut s)).unwrap()).unwrap();
+    // Client Security Data: 40, 56 and 128 bits (2.2.1.3.3).
+    assert!(
+        gcc.windows(8)
+            .any(|w| w == [0x02, 0xC0, 12, 0, 0x0B, 0, 0, 0])
+    );
+    let server_random = [0x5A; 32];
+    let mut blocks = vec![0x01, 0x0C, 12, 0, 0x04, 0, 0x08, 0, 0, 0, 0, 0];
+    let mut sec = Vec::new();
+    for v in [2u32, 2, 32, cert.len() as u32] {
+        sec.extend(v.to_le_bytes());
+    }
+    sec.extend(server_random);
+    sec.extend(&cert);
+    blocks.extend(0x0C02u16.to_le_bytes());
+    blocks.extend(((sec.len() + 4) as u16).to_le_bytes());
+    blocks.extend(sec);
+    blocks.extend([0x03, 0x0C, 8, 0, 0xEB, 0x03, 0, 0]);
+    let response = connect_response(&conference_create_response(&blocks));
+    s.write_all(&x224::data(&response)).unwrap();
+    read_tpkt(&mut s); // Erect Domain
+    read_tpkt(&mut s); // Attach User
+    s.write_all(&x224::data(&attach_user_confirm(1007)))
+        .unwrap();
+    for ch in [1007, 1003] {
+        read_tpkt(&mut s);
+        s.write_all(&x224::data(&channel_join_confirm(1007, ch)))
+            .unwrap();
+    }
+    // Security Exchange PDU (2.2.1.10): decrypt the client random (5.3.4.2).
+    let exchange = read_send_data(&mut s, 1003);
+    assert_eq!(&exchange[..8], &[0x01, 0x02, 0, 0, 72, 0, 0, 0]);
+    let random =
+        crate::crypto::rsa_modpow_le(&exchange[8..72], &SAMPLE_MODULUS, &SAMPLE_PRIVATE_EXPONENT);
+    let client_random: [u8; 32] = random[..32].try_into().unwrap();
+    let k = session_keys(&client_random, &server_random, KeyStrength::Bits128);
+    let server_keys = SessionKeys {
+        mac: k.mac.clone(),
+        encrypt: k.decrypt.clone(),
+        decrypt: k.encrypt.clone(),
+    };
+    let level = crate::security::ENCRYPTION_LEVEL_CLIENT_COMPATIBLE;
+    let mut srv = StandardSecurity::from_keys(KeyStrength::Bits128, level, &server_keys);
+    // Client Info, encrypted (SEC_INFO_PKT | SEC_ENCRYPT, 4.1.10).
+    let info = read_send_data(&mut s, 1003);
+    assert_eq!(&info[..2], &[0x48, 0x00]);
+    let creds = crate::server::pdu::parse_client_info(&srv.unwrap(&info).unwrap()).unwrap();
+    assert_eq!(
+        (creds.user.as_str(), creds.password.as_str()),
+        ("alice", "secret")
+    );
+    // An encrypted "valid client" licensing PDU (4.1.11), then Demand Active.
+    srv.license_encrypt = true;
+    let lic = crate::server::pdu::license_valid_client();
+    let lic = srv.wrap(u16::from_le_bytes([lic[0], lic[1]]) | 0x0200, &lic[4..]);
+    s.write_all(&x224::data(&send_data_indication(1003, &lic)))
+        .unwrap();
+    let demand = srv.wrap(0, &crate::server::pdu::demand_active(0x103EA, 800, 600));
+    s.write_all(&x224::data(&send_data_indication(1003, &demand)))
+        .unwrap();
+    // Confirm Active, encrypted.
+    let confirm = srv.unwrap(&read_send_data(&mut s, 1003)).unwrap();
+    assert_eq!(confirm[2] & 0x0F, pdu::PDUTYPE_CONFIRMACTIVE as u8);
+    // Synchronize, Control (cooperate, request control), Font List.
+    for ty in [31, 20, 20, 39] {
+        let data = srv.unwrap(&read_send_data(&mut s, 1003)).unwrap();
+        assert_eq!(data[14], ty);
+    }
+    client_random
+}
+
+#[test]
+fn legacy_security_connects_only_when_allowed() {
+    use crate::security::tests::{SAMPLE_MODULUS, proprietary_certificate};
+    let cert = proprietary_certificate(&SAMPLE_MODULUS);
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let mut cfg = Config::new("127.0.0.1", "alice", "secret");
+    cfg.port = listener.local_addr().unwrap().port();
+    cfg.timeout = Duration::from_secs(10);
+
+    // Not allowed: refused at negotiation, naming the setting.
+    let refusing = std::thread::spawn(move || {
+        let (mut s, _) = listener.accept().unwrap();
+        read_tpkt(&mut s);
+        s.write_all(&crate::server::connect::negotiation_failure(2))
+            .unwrap();
+        listener
+    });
+    let e = Client::connect(&cfg).err().expect("refused").to_string();
+    assert!(e.contains(security::LEGACY_REFUSED), "{e}");
+    let listener = refusing.join().unwrap();
+
+    // Allowed: the certificate goes to the trust check first.
+    cfg.legacy_security = true;
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let log = seen.clone();
+    cfg.verify_certificate = Some(CertificateCheck(std::sync::Arc::new(move |c| {
+        log.lock().unwrap().push(c.sha256);
+        true
+    })));
+    let expected = sha256(&cert);
+    let server = std::thread::spawn(move || legacy_server(listener, cert));
+    let client = Client::connect(&cfg).unwrap();
+    let client_random = server.join().unwrap();
+    assert_ne!(client_random, [0; 32]);
+    assert_eq!(*seen.lock().unwrap(), [expected]);
+    let info = client.info();
+    assert_eq!(info.protocol, x224::PROTOCOL_RDP);
+    assert_eq!((info.encryption_method, info.encryption_level), (2, 2));
+    assert_eq!(info.certificate_sha256, expected);
+}
+
+/// Client Send Data Requests that are waiting, without blocking.
+fn requests(server: &mut TcpStream) -> Vec<(u16, Vec<u8>)> {
+    let mut v = Vec::new();
+    loop {
+        server.set_nonblocking(true).unwrap();
+        let ready = server.peek(&mut [0u8; 1]).is_ok();
+        server.set_nonblocking(false).unwrap();
+        if !ready {
+            return v;
+        }
+        v.push(read_request(server));
+    }
+}
+
+/// An Initiate Multitransport Request (MS-RDPBCGR 2.2.15.1) for `protocol`.
+fn initiate_request(protocol: u16) -> Vec<u8> {
+    let mut v = vec![0x02, 0x00, 0x00, 0x00];
+    v.extend(7u32.to_le_bytes());
+    v.extend(protocol.to_le_bytes());
+    v.extend([0, 0]);
+    v.extend(crate::multitransport::tests::COOKIE);
+    v
+}
+
+/// A DVC that answers each message with "re:" and the message.
+struct EchoDvc;
+
+impl crate::DynamicChannel for EchoDvc {
+    fn name(&self) -> &str {
+        "ECHO"
+    }
+    fn process(&mut self, msg: &[u8], out: &mut crate::DvcOut) -> Result<()> {
+        out.send([b"re:".as_slice(), msg].concat());
+        Ok(())
+    }
+}
+
+/// A session with the message channel 1004 and `drdynvc` on 1005 holding
+/// [`EchoDvc`], UDP offered to a server with the given multitransport flags.
+fn udp_session(server_flags: u32, certificate: Vec<u8>) -> (Client, TcpStream) {
+    let (mut client, server) = session();
+    client.message_channel = Some(1004);
+    client.channels.push(Slot {
+        id: 1005,
+        handler: Box::new(crate::Drdynvc::new(vec![Box::new(EchoDvc)])),
+        defrag: Default::default(),
+        failed: false,
+    });
+    client.udp = Udp {
+        offered: true,
+        server_flags,
+        state: UdpState::Offered,
+        certificate,
+        ..Udp::off()
+    };
+    (client, server)
+}
+
+/// Static `drdynvc` data from the server: one chunk.
+fn dvc_indication(pdu: &[u8]) -> Vec<u8> {
+    indication(1005, &channel::chunk(pdu, false).remove(0))
+}
+
+#[test]
+fn multitransport_requests_are_declined_unless_usable() {
+    use crate::multitransport::{
+        E_ABORT, PROTOCOL_UDPFECL, PROTOCOL_UDPFECR, SOFTSYNC_TCP_TO_UDP, TRANSPORTTYPE_UDPFECR,
+        initiate_response,
+    };
+    let declined = |client: &mut Client, server: &mut TcpStream, protocol| {
+        server
+            .write_all(&indication(1004, &initiate_request(protocol)))
+            .unwrap();
+        let mut got = Vec::new();
+        for _ in 0..50 {
+            assert!(
+                client
+                    .poll(Duration::from_millis(10))
+                    .unwrap()
+                    .closed
+                    .is_none()
+            );
+            got.extend(requests(server));
+            if !got.is_empty() {
+                break;
+            }
+        }
+        assert_eq!(got, vec![(1004, initiate_response(7, E_ABORT))]);
+    };
+    // The lossy transport needs DTLS.
+    let flags = TRANSPORTTYPE_UDPFECR | SOFTSYNC_TCP_TO_UDP;
+    let (mut client, mut server) = udp_session(flags, vec![1]);
+    declined(&mut client, &mut server, PROTOCOL_UDPFECL);
+    assert!(client.udp.tunnel.is_none());
+    // A server without Soft-Sync.
+    let (mut client, mut server) = udp_session(TRANSPORTTYPE_UDPFECR, vec![1]);
+    declined(&mut client, &mut server, PROTOCOL_UDPFECR);
+    // UDP not offered (the setting is off).
+    let (mut client, mut server) = session();
+    client.message_channel = Some(1004);
+    declined(&mut client, &mut server, PROTOCOL_UDPFECR);
+    assert_eq!(client.stats().udp.state, UdpState::Off);
+}
+
+#[test]
+fn a_udp_setup_failure_keeps_the_session_on_tcp() {
+    use crate::multitransport::{CLIENT_FLAGS, E_ABORT, PROTOCOL_UDPFECR, initiate_response};
+    // Nothing listens on the server's UDP port: the tunnel fails (port
+    // unreachable, or at the latest the setup timeout) and the request is
+    // declined; the session goes on.
+    let (mut client, mut server) = udp_session(CLIENT_FLAGS, vec![1]);
+    server
+        .write_all(&indication(1004, &initiate_request(PROTOCOL_UDPFECR)))
+        .unwrap();
+    let start = Instant::now();
+    let mut got = Vec::new();
+    while got.is_empty() && start.elapsed() < Duration::from_secs(15) {
+        assert!(
+            client
+                .poll(Duration::from_millis(20))
+                .unwrap()
+                .closed
+                .is_none()
+        );
+        got.extend(requests(&mut server));
+    }
+    assert_eq!(got, vec![(1004, initiate_response(7, E_ABORT))]);
+    assert_eq!(client.stats().udp.state, UdpState::Failed);
+    assert!(client.udp_failure().is_some());
+    // TCP still works: a DVC message is answered on the static channel.
+    server.write_all(&dvc_indication(&[0x50, 0, 1, 0])).unwrap();
+    let mut got = Vec::new();
+    for _ in 0..50 {
+        assert!(
+            client
+                .poll(Duration::from_millis(10))
+                .unwrap()
+                .closed
+                .is_none()
+        );
+        got.extend(requests(&mut server));
+        if !got.is_empty() {
+            break;
+        }
+    }
+    assert_eq!(got[0].0, 1005);
+}
+
+#[test]
+fn udp_tunnel_carries_the_dynamic_channels_after_soft_sync() {
+    use crate::dvc::{TUNNELTYPE_UDPFECR, soft_sync_request, soft_sync_response};
+    use crate::multitransport::tests::{COOKIE, FakeServer, identity};
+    use crate::multitransport::{CLIENT_FLAGS, PROTOCOL_UDPFECR, S_OK, initiate_response};
+    use std::net::UdpSocket;
+
+    let (cert, key) = identity("broker.example");
+    let (mut client, mut server) = udp_session(CLIENT_FLAGS, cert.clone());
+    // The fake server's UDP side on the TCP connection's port (3.1.3).
+    let udp = UdpSocket::bind(server.local_addr().unwrap()).unwrap();
+    udp.set_nonblocking(true).unwrap();
+    let mut fake = FakeServer::new(&cert, &key, S_OK);
+    fake.echo = false;
+    let mut peer = None;
+    let mut seen: Vec<(u16, Vec<u8>)> = Vec::new();
+    let mut pump = |client: &mut Client,
+                    server: &mut TcpStream,
+                    fake: &mut FakeServer,
+                    seen: &mut Vec<(u16, Vec<u8>)>| {
+        let out = client.poll(Duration::from_millis(2)).unwrap();
+        assert!(out.closed.is_none(), "{:?}", out.closed);
+        let mut buf = [0u8; 2048];
+        let mut incoming = Vec::new();
+        while let Ok((n, from)) = udp.recv_from(&mut buf) {
+            peer = Some(from);
+            incoming.push(buf[..n].to_vec());
+        }
+        for d in fake.step(incoming, Instant::now()) {
+            udp.send_to(&d, peer.unwrap()).unwrap();
+        }
+        seen.extend(requests(server));
+    };
+
+    // The DVC host opens ECHO as channel 3 over TCP.
+    server.write_all(&dvc_indication(&[0x50, 0, 1, 0])).unwrap();
+    server
+        .write_all(&dvc_indication(b"\x10\x03ECHO\0"))
+        .unwrap();
+    server
+        .write_all(&indication(1004, &initiate_request(PROTOCOL_UDPFECR)))
+        .unwrap();
+    for _ in 0..2_000 {
+        pump(&mut client, &mut server, &mut fake, &mut seen);
+        if client.stats().udp.state == UdpState::Active && !seen.is_empty() {
+            break;
+        }
+    }
+    assert_eq!(client.stats().udp.state, UdpState::Active);
+    // The tunnel carried the request's ID and cookie (MS-RDPEMT 2.2.2.1),
+    // and the server heard S_OK on the message channel (2.2.15.2).
+    assert_eq!(fake.create, Some((7, COOKIE)));
+    for _ in 0..50 {
+        pump(&mut client, &mut server, &mut fake, &mut seen);
+    }
+    assert!(seen.contains(&(1004, initiate_response(7, S_OK))));
+
+    // Soft-Sync moves channel 3 (2.2.5.1); the answer comes on TCP.
+    seen.clear();
+    server
+        .write_all(&dvc_indication(&soft_sync_request(&[(
+            TUNNELTYPE_UDPFECR,
+            &[3],
+        )])))
+        .unwrap();
+    for _ in 0..500 {
+        pump(&mut client, &mut server, &mut fake, &mut seen);
+        if !seen.is_empty() {
+            break;
+        }
+    }
+    let rsp = soft_sync_response(&[TUNNELTYPE_UDPFECR]);
+    assert_eq!(seen.len(), 1);
+    assert_eq!((seen[0].0, &seen[0].1[8..]), (1005, &rsp[..]));
+
+    // Channel data now flows over UDP both ways.
+    fake.send(b"\x30\x03ping");
+    for _ in 0..2_000 {
+        pump(&mut client, &mut server, &mut fake, &mut seen);
+        if !fake.data.is_empty() {
+            break;
+        }
+    }
+    assert_eq!(fake.data, vec![b"\x30\x03re:ping".to_vec()]);
+    let st = client.stats().udp;
+    assert_eq!((st.state, st.channels), (UdpState::Active, 1));
+    assert!(st.bytes_in > 0 && st.bytes_out > 0);
+    assert!(client.stats().bytes_in >= st.bytes_in);
+    // Nothing for the channel went over TCP after the switch.
+    assert_eq!(seen.len(), 1);
 }

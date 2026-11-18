@@ -101,8 +101,17 @@ changed certificate can also mean someone is in between. See
 ### The secure connection failed
 
 The TLS handshake did not finish. The server may need other security
-settings, or something on the network interferes with the connection. Note
-that Remora does not support the old RDP security without TLS.
+settings, or something on the network interferes with the connection.
+
+### This server only offers legacy, weak security
+
+The server has no TLS: it is set to the old "RDP Security Layer" (Standard
+RDP Security, RC4). The best fix is on the server: let it use TLS (on
+Windows, the Remote Desktop security layer "Negotiate" or "SSL"). If you
+cannot change it and trust the network, edit the connection and turn on
+**Allow legacy RDP security (weak)** under **Advanced**. A server that
+requires FIPS encryption cannot be reached with legacy security either. See
+[SECURITY.md](SECURITY.md#legacy-rdp-security).
 
 ## RD Gateway
 
@@ -114,8 +123,27 @@ and password), and that the gateway's policy lets you reach this server.
 ### The RD Gateway cannot be reached
 
 Check the gateway address in the connection's **Gateway** field and this PC's
-network. Remora connects to gateways over HTTPS (HTTP transport and
-WebSocket); gateways that offer only RPC over HTTP are not supported yet.
+network. Remora connects to gateways over HTTPS: the HTTP transport (over a
+WebSocket) first, and RPC over HTTP when the gateway does not offer HTTP.
+Turn on **Gateway over RPC** for a gateway that should only be reached over
+RPC over HTTP.
+
+The message names the step that failed:
+
+- **RPC OUT channel** or **RPC IN channel**: the gateway's
+  `/rpc/rpcproxy.dll` did not take the request. HTTP 404 means the gateway
+  does not offer RPC over HTTP either; "rejected the credentials" means the
+  user name or password.
+- **RPC virtual connection** or **RPC bind**: the gateway's RPC proxy did not
+  reach its own RPC service (port 3388 on the gateway).
+- **TsProxyCreateTunnel**, **TsProxyAuthorizeTunnel**: the gateway's
+  connection policy (RD CAP) refused the user.
+- **TsProxyCreateChannel**: the gateway's resource policy (RD RAP) refused
+  the server, or the gateway could not reach it.
+
+A session through RPC over HTTP ends after about 1 GB in either direction
+(Remora does not renew the gateway's RPC channels); it then reconnects on
+its own.
 
 ### The RD Gateway could not reach the server
 
@@ -149,6 +177,22 @@ on the diagnostic log, reproduce it, and [report it](#reporting-a-bug).
 ### Could not connect
 
 No more specific cause was found. **Copy details** has the technical text.
+
+## Shadowing
+
+These are the messages of `remora <server> --shadow ID` and `--list-sessions`.
+
+| Message | What to do |
+|---|---|
+| … is not reachable over SMB (TCP 445) … (RPC status 1722) | Remora requests the invitation over File and Printer Sharing. Allow **File and Printer Sharing (SMB-In)** on the server, and check the name. |
+| access denied by …: shadowing needs an administrator there | Sign in to this PC as an administrator of the server. `runas /netonly` also works. |
+| … refused to shadow session N: the user declined the request | The session's user clicked **No**, or did not answer within about 30 seconds. |
+| … policy requires the user's permission / allows view-only shadowing | The server's group policy **Set rules for remote control of Remote Desktop Services user sessions** forbids what you asked for. Leave out `--no-consent-prompt` or `--control`, or change the policy. |
+| … shadowing is disabled by policy on the server | The same policy turns remote control off. |
+| another shadow session already controls this session | Only one viewer can control a session at a time. Watch, or try again later. |
+| The connection to the shared desktop times out | Enable the firewall rule **Remote Desktop - Shadow (TCP-In)** on the server. The shadow connection uses a new port each time. |
+| the shared desktop only offers Standard RDP Security (no TLS) | This sharer offers only the old RDP encryption, which Remora does not implement. [Report it](#reporting-a-bug) with the diagnostic log. |
+| server refused negotiation: … | The sharer wanted another security protocol. Try again with `--preconnection`, then report it. |
 
 ## When a session ends
 
@@ -184,6 +228,47 @@ A session that ends without an error shows why and how long it ran, with
 - **The picture looks wrong with GFX (H.264).** The graphics pipeline is
   experimental. Switch the connection back to **Bitmaps** on the editor's
   Advanced page, and please report it.
+- **A shared COM or LPT port does not show in the session, or cannot be
+  opened there.** The port must be on this PC when you switch it on (the
+  message says so otherwise). The server must allow port redirection: its
+  Remote Desktop Session Host policies "Do not allow COM port redirection"
+  and "Do not allow LPT port redirection" must not be enabled. A program on this PC that has the port open blocks it for the
+  session: the session's program then gets "access denied". Some servers
+  keep showing a port after you switch it off; it no longer works there
+  and goes away at the next connection.
+- **A shared camera does not appear in the session.** Camera redirection
+  needs Windows 10 version 1803, Windows Server 2019 or later on the server,
+  and the server's policy "Do not allow video capture redirection" (Remote
+  Desktop Session Host, Device and Resource Redirection) must not be
+  enabled. Check that **Camera** is on in the side panel and that the camera
+  was plugged in when the session started (otherwise reconnect).
+  `remora --list-cameras` shows the cameras Remora sees, without opening
+  them. A camera another app on this PC is using may refuse to start.
+- **A video plays in the wrong place, flickers or freezes with video
+  redirection.** Switch **Video redirection** off on the editor's Advanced
+  page (or the side panel's Quality page) and reconnect: the server then
+  sends the video inside the desktop picture again. The diagnostic log shows
+  the video presentations (`video N: start ...`) and their geometry
+  (`geometry ...`); please attach it to the report.
+- **The statistics say "TCP · UDP failed" or "UDP offered, not used".** The
+  UDP transport (editor's Advanced page) could not be used; the session runs
+  normally over TCP. Common causes:
+  - A firewall drops **UDP port 3389** (or the connection's port) on the way
+    to the server or on the server itself. Windows' rule is "Remote Desktop -
+    User Mode (UDP-In)"; it must be allowed for the profile of the server's
+    network. TCP 3389 being open is not enough.
+  - The server has UDP switched off: the policy "Select RDP transport
+    protocols" (Computer Configuration, Administrative Templates, Windows
+    Components, Remote Desktop Services, Remote Desktop Session Host,
+    Connections) set to **Use only TCP**.
+  - A port forwarding or NAT that forwards only TCP. Forward UDP to the
+    same port too.
+  - The server presented a different certificate on UDP than on TCP; Remora
+    then refuses UDP on purpose.
+
+  The diagnostic log names the reason in its "UDP tunnel failed" line. When
+  UDP breaks during a session that already uses it, Remora reconnects that
+  tab (resuming the same Windows session) and keeps it on TCP.
 - **Windows warns when starting the setup.** The setup is not code-signed yet.
   Choose **More info**, then **Run anyway**.
 

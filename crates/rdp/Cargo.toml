@@ -12,3 +12,8 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 ring = "0.17"
 # Wipes the password of a received Client Info PDU (server side).
 zeroize = "1.9"
+
+[dev-dependencies]
+# Test certificates for the UDP tunnel's TLS (already in the workspace
+# through remora-host).
+rcgen = { version = "0.14.10", default-features = false, features = ["crypto", "ring"] }

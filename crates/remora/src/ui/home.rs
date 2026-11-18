@@ -913,7 +913,8 @@ impl Ui {
                 }
             }
             HomeHit::Import => {
-                // The backup's password is asked on the Settings page.
+                // A password, when the file needs one, is asked on the
+                // Settings page.
                 self.settings_open = true;
                 self.home_scroll = 0;
                 self.focus = None;
@@ -2555,7 +2556,7 @@ impl Ui {
             Font::Regular,
             size::SMALL,
             Rect::new(cx, y, cw, p(18.0)),
-            "Import reads a Remora backup (Settings, Export).",
+            "Import reads a Remora backup, mRemoteNG's confCons.xml or an RDCMan .rdg file.",
             c.text_faint,
         );
         y + p(18.0)

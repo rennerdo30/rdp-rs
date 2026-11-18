@@ -113,7 +113,7 @@ impl Peer {
     }
 }
 
-fn header<'a>(head: &'a str, name: &str) -> &'a str {
+pub(super) fn header<'a>(head: &'a str, name: &str) -> &'a str {
     head.split("\r\n")
         .find_map(|l| {
             let (n, v) = l.split_once(':')?;
@@ -123,7 +123,7 @@ fn header<'a>(head: &'a str, name: &str) -> &'a str {
 }
 
 /// A CHALLENGE_MESSAGE (MS-NLMP 2.2.1.2) with extended session security.
-fn ntlm_challenge() -> Vec<u8> {
+pub(super) fn ntlm_challenge() -> Vec<u8> {
     let mut ti = Vec::new();
     ti.put_u16(2); // MsvAvNbDomainName
     ti.put_u16(4);
@@ -335,7 +335,7 @@ fn vectored_writes_share_one_data_packet() {
     let (mut peer, _) = listener.accept().unwrap();
     peer.set_read_timeout(Some(Duration::from_secs(10)))
         .unwrap();
-    let mut s = GatewayStream {
+    let mut s = WsStream {
         link: Arc::new(Mutex::new(Link { sock, tls: None })),
         closed: false,
     };

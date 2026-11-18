@@ -2221,7 +2221,7 @@ pub fn sample_reconnecting() -> Ui {
 }
 
 /// The failure samples: suffix, cause, step, technical text.
-pub const FAILURES: [(&str, Cause, Option<ConnectStep>, &str); 10] = [
+pub const FAILURES: [(&str, Cause, Option<ConnectStep>, &str); 11] = [
     (
         "host",
         Cause::HostNotFound,
@@ -2282,6 +2282,12 @@ pub const FAILURES: [(&str, Cause, Option<ConnectStep>, &str); 10] = [
         None,
         "protocol error: unexpected fast-path update code 0x0e",
     ),
+    (
+        "legacy",
+        Cause::LegacySecurity,
+        Some(ConnectStep::Tls),
+        "unsupported: the server offers only legacy RDP security (Standard RDP Security: RC4, no TLS, no server authentication)",
+    ),
 ];
 
 /// One of [`FAILURES`].
@@ -2329,6 +2335,12 @@ pub fn sample_stats() -> Ui {
             input_ms: Some((28.4, 41.0)),
             repaints_per_s: 58.0,
             screen_ms: Some((2.4, 7.0)),
+            udp: rdp::multitransport::UdpStats {
+                state: rdp::multitransport::UdpState::Active,
+                channels: 4,
+                rtt: Some(std::time::Duration::from_millis(12)),
+                ..Default::default()
+            },
         });
     }
     m

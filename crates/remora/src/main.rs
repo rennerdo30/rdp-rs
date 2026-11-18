@@ -2,8 +2,8 @@
 //!
 //!   remora                                       connection manager
 //!   remora <host[:port]> -u <[DOMAIN\]user> [-d domain] [--size WxH] [-v]
-//!          [--compression off|rdp4|rdp5|rdp6|rdp61] [--gfx] [--multimon] [--kerberos]
-//!          [--surface-commands] [--drawing-orders]
+//!          [--compression off|rdp4|rdp5|rdp6|rdp61] [--gfx [--video]] [--multimon] [--kerberos]
+//!          [--surface-commands] [--drawing-orders] [--legacy-security]
 //!                                                one session window
 //!   remora <host> -u <user> --screenshot out.png [--wait SECONDS]
 //!                                                headless: save the desktop as PNG
@@ -18,6 +18,7 @@
 mod app;
 mod audio;
 mod audio_mf;
+mod camera;
 mod clipboard;
 mod controls;
 mod failure;
@@ -30,6 +31,7 @@ mod helper;
 mod helper_app;
 mod icon;
 mod icons;
+mod import;
 mod keyboard;
 mod keyhook;
 mod kit;
@@ -42,8 +44,10 @@ mod picker;
 mod printing;
 mod recorder;
 mod remoteapp;
+mod serial;
 mod session;
 mod settings;
+mod shadow;
 mod smartcard;
 mod span;
 #[cfg(windows)]
@@ -72,6 +76,8 @@ struct Args {
     domain: String,
     /// RD Gateway `host[:port]`; it takes the RDP credentials.
     gateway: Option<(String, u16)>,
+    /// `--gateway-rpc`: reach the gateway over RPC over HTTP only.
+    gateway_rpc: bool,
     size: Option<(u16, u16)>,
     screenshot: Option<String>,
     /// `--record out.mp4`: headless recording for `--wait` seconds.
@@ -89,7 +95,12 @@ struct Args {
     /// `--microphone [index]`: Some(None) is the default device.
     microphone: Option<Option<u32>>,
     list_microphones: bool,
+    /// `--camera [NAME]`: Some(None) shares every camera.
+    camera: Option<Option<String>>,
+    list_cameras: bool,
     gfx: bool,
+    /// `--video`: with `--gfx`, offer video redirection (MS-RDPEVOR).
+    video: bool,
     /// `--surface-commands`, `--drawing-orders`: the experimental picture
     /// paths (RemoteFX/NSCodec surface bits, MS-RDPEGDI orders), off by default.
     surface_commands: bool,
@@ -98,9 +109,26 @@ struct Args {
     multimon: bool,
     /// `--kerberos`: NLA through Windows SSPI Negotiate (Kerberos, NTLM fallback).
     kerberos: bool,
+    /// `--legacy-security`: allow Standard RDP Security (RC4, no TLS) when
+    /// the server offers nothing better (MS-RDPBCGR 5.3). Weak.
+    legacy_security: bool,
+    /// `--udp`: offer the UDP transport (MS-RDPEMT) for the dynamic channels.
+    udp: bool,
     /// `--expect-fingerprint`: the server certificate's SHA-256 (hex, any
     /// separators); any other certificate is refused.
     expect_fingerprint: Option<String>,
+    /// `--list-sessions`: print the server's sessions (for `--shadow`).
+    list_sessions: bool,
+    /// `--shadow ID`: watch session ID of the server, like mstsc /shadow.
+    shadow: Option<u32>,
+    /// `--control`: ask for mouse and keyboard control (mstsc /control).
+    control: bool,
+    /// `--no-consent-prompt`: do not ask the session's user (policy must allow).
+    no_consent: bool,
+    /// `--invitation FILE`: join a Desktop Sharing or shadow invitation.
+    invitation: Option<String>,
+    /// `--preconnection`: send the invitation's SID in a Preconnection PDU.
+    preconnection: bool,
 }
 
 fn usage() -> ! {
@@ -108,16 +136,25 @@ fn usage() -> ! {
         "usage: remora                                 (connection manager)\n\
          \x20      remora <host[:port]> -u <[DOMAIN\\]user> [-d domain] [--size WxH] [-v]\n\
          \x20           [--gateway gwhost[:port]]   (RD Gateway, same credentials)\n\
+         \x20           [--gateway-rpc]   (the gateway over RPC over HTTP only)\n\
          \x20           [--compression off|rdp4|rdp5|rdp6|rdp61]\n\
          \x20           [--gfx]   (graphics pipeline, MS-RDPEGFX)\n\
+         \x20           [--video]   (with --gfx: video redirection, MS-RDPEVOR)\n\
          \x20           [--surface-commands] [--drawing-orders]   (experimental picture paths)\n\
          \x20           [--expect-fingerprint SHA256]   (accept only this server certificate)\n\
+         \x20           [--legacy-security]   (allow weak RC4 security for servers without TLS)\n\
          \x20           [--multimon]   (all local monitors, MS-RDPBCGR 2.2.1.3.6)\n\
+         \x20           [--udp]   (dynamic channels over UDP when the server offers it)\n\
          \x20           [--kerberos]   (Windows Negotiate: Kerberos, NTLM fallback;\n\
          \x20                           without -u: single sign-on as the logged-on user)\n\
+         \x20      remora <host> --list-sessions   (the server's sessions, as the logged-on user)\n\
+         \x20      remora <host> --shadow ID [--control] [--no-consent-prompt]\n\
+         \x20                                  (watch or control session ID, like mstsc /shadow)\n\
+         \x20      remora --invitation FILE [--preconnection]   (join a Desktop Sharing invitation)\n\
          \x20      remora <host> -u <user> --screenshot out.png [--wait SECONDS]\n\
          \x20      remora <host> -u <user> --record out.mp4 [--wait SECONDS]\n\
          \x20      remora ... --microphone [INDEX]   (microphone on; see --list-microphones)\n\
+         \x20      remora ... --camera [NAME]   (cameras shared; see --list-cameras)\n\
          \x20      remora --snapshot-ui out.png [--scale 1.5] [--only TEXT]\n\
          \x20      remora --icon-png out.png [--icon-size N]\n\
          \x20      remora --version\n\
@@ -147,6 +184,7 @@ fn parse_args() -> Args {
                     None => (v, 443),
                 });
             }
+            "--gateway-rpc" => a.gateway_rpc = true,
             "--size" => {
                 let v = val();
                 let (w, h) = v.split_once('x').unwrap_or_else(|| usage());
@@ -180,11 +218,24 @@ fn parse_args() -> Args {
                 a.microphone = Some(index.and_then(|v| v.parse().ok()));
             }
             "--list-microphones" => a.list_microphones = true,
+            "--camera" => {
+                a.camera = Some(it.next_if(|v| !v.starts_with('-')));
+            }
+            "--list-cameras" => a.list_cameras = true,
             "--gfx" => a.gfx = true,
+            "--video" => a.video = true,
             "--surface-commands" => a.surface_commands = true,
             "--drawing-orders" => a.drawing_orders = true,
             "--multimon" => a.multimon = true,
             "--kerberos" => a.kerberos = true,
+            "--legacy-security" => a.legacy_security = true,
+            "--list-sessions" => a.list_sessions = true,
+            "--shadow" => a.shadow = Some(val().parse().unwrap_or_else(|_| usage())),
+            "--control" => a.control = true,
+            "--no-consent-prompt" => a.no_consent = true,
+            "--invitation" => a.invitation = Some(val()),
+            "--preconnection" => a.preconnection = true,
+            "--udp" => a.udp = true,
             "-h" | "--help" => usage(),
             s if s.starts_with('-') => usage(),
             s => {
@@ -200,13 +251,133 @@ fn parse_args() -> Args {
     // cmd.exe passes single quotes through literally: 'DOMAIN\user' keeps its quotes.
     a.user = strip_quotes(&a.user);
     a.domain = strip_quotes(&a.domain);
+    // Shadowing and invitations need no RDP logon: the RPC runs as the
+    // logged-on Windows user and the sharer checks the invitation.
+    let shared = a.list_sessions || a.shadow.is_some() || a.invitation.is_some();
+    if (a.list_sessions || a.shadow.is_some()) && a.host.is_empty()
+        || a.invitation.is_some() && (a.shadow.is_some() || a.list_sessions)
+    {
+        usage();
+    }
     // --kerberos without -u signs on as the logged-on Windows user.
-    if !a.host.is_empty() && a.user.is_empty() && !a.kerberos
-        || (a.screenshot.is_some() || a.record.is_some()) && a.host.is_empty()
+    if !a.host.is_empty() && a.user.is_empty() && !a.kerberos && !shared
+        || (a.screenshot.is_some() || a.record.is_some())
+            && a.host.is_empty()
+            && a.invitation.is_none()
     {
         usage();
     }
     a
+}
+
+/// The connection to a shared desktop (RDP-77): `--shadow` asks the server
+/// for an invitation first (MS-TSTS RpcShadow2); `--invitation` reads one.
+/// The configuration connects to the invitation's listener with the Remote
+/// Assistance logon (MS-RA 2.2.7.2); its name is for the window title.
+fn shared_desktop_config(args: &Args) -> Result<(String, Config), String> {
+    let (text, server) = match (&args.invitation, args.shadow) {
+        (Some(path), _) => {
+            let bytes = std::fs::read(path).map_err(|e| format!("cannot read {path}: {e}"))?;
+            (shadow::invitation_text(&bytes), None)
+        }
+        (None, Some(id)) => {
+            let req = shadow::ShadowRequest {
+                session_id: id,
+                control: args.control,
+                consent: !args.no_consent,
+            };
+            if req.consent {
+                eprintln!("asking the user of session {id} on {} ...", args.host);
+            }
+            (
+                shadow::request_invitation(&args.host, req)?,
+                Some(args.host.as_str()),
+            )
+        }
+        (None, None) => return Err("no invitation".into()),
+    };
+    let inv = rdp::Invitation::parse(&text).map_err(|e| e.to_string())?;
+    let addrs: Vec<std::net::IpAddr> = server
+        .and_then(|h| std::net::ToSocketAddrs::to_socket_addrs(&(h, 0)).ok())
+        .map(|a| a.map(|s| s.ip()).collect())
+        .unwrap_or_default();
+    let (host, port, sid) =
+        shadow::pick_target(&inv, &addrs).ok_or("the invitation lists no listener")?;
+    // The name the sharer shows for this participant.
+    let viewer = Some(args.user.clone())
+        .filter(|u| !u.is_empty())
+        .or_else(|| std::env::var("USERNAME").ok())
+        .unwrap_or_else(|| "Remora".into());
+    let mut cfg = Config::new(&host, &viewer, "");
+    cfg.port = port;
+    cfg.assistance = Some(rdp::AssistanceLogon::from_invitation(
+        &inv,
+        args.preconnection.then_some(sid),
+    ));
+    let name = match (server, args.shadow) {
+        (Some(s), Some(id)) => format!("{s} session {id} (shadow)"),
+        _ => format!("Shared desktop {host}"),
+    };
+    Ok((name, cfg))
+}
+
+/// `--list-sessions`, `--shadow` and `--invitation`; the process exit code.
+fn shared_desktop(args: &Args) -> i32 {
+    if args.list_sessions {
+        return match shadow::list_sessions(&args.host) {
+            Ok(sessions) => {
+                println!("{:>5}  {:<14} {:<13} USER", "ID", "SESSION", "STATE");
+                for s in sessions {
+                    println!("{:>5}  {:<14} {:<13} {}", s.id, s.station, s.state, s.user);
+                }
+                0
+            }
+            Err(e) => {
+                eprintln!("error: {e}");
+                1
+            }
+        };
+    }
+    let (name, mut cfg) = match shared_desktop_config(args) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return 1;
+        }
+    };
+    if let Some((w, h)) = args.size {
+        cfg.width = w;
+        cfg.height = h;
+    }
+    // The sharer's certificate is self-signed and its port changes with
+    // every invitation: asked about on the console, or pinned by
+    // --expect-fingerprint.
+    let want = args
+        .expect_fingerprint
+        .as_deref()
+        .map(normalize_fingerprint);
+    cfg.verify_certificate = Some(match want {
+        Some(want) => rdp::CertificateCheck(std::sync::Arc::new(move |c| {
+            known_hosts::hex(&c.sha256) == want
+        })),
+        None => console_certificate_check(),
+    });
+    eprintln!(
+        "connecting to the shared desktop at {}:{} ...",
+        cfg.host, cfg.port
+    );
+    if args.screenshot.is_some() || args.record.is_some() {
+        let wait = Duration::from_secs(args.wait);
+        let (png, mp4) = (args.screenshot.as_deref(), args.record.as_deref());
+        return match screenshot(&cfg, png, mp4, wait) {
+            Ok(()) => 0,
+            Err(e) => {
+                eprintln!("error: {e}");
+                1
+            }
+        };
+    }
+    app::run(Some((name, cfg)))
 }
 
 fn strip_quotes(s: &str) -> String {
@@ -267,8 +438,21 @@ fn main() {
         }
         return;
     }
+    if args.list_cameras {
+        // Lists the devices only; no camera is opened.
+        for cam in camera::list() {
+            println!("{}", cam.name);
+        }
+        return;
+    }
     if let Some(device) = args.microphone {
         controls::enable_microphone_for_all(device);
+    }
+    if let Some(name) = args.camera.clone() {
+        controls::enable_camera_for_all(name);
+    }
+    if args.list_sessions || args.shadow.is_some() || args.invitation.is_some() {
+        std::process::exit(shared_desktop(&args));
     }
     if args.host.is_empty() {
         #[cfg(windows)]
@@ -297,6 +481,9 @@ fn main() {
         let mut gw = rdp::GatewayConfig::new(host, &args.user, &password);
         gw.port = *port;
         gw.domain = args.domain.clone();
+        if args.gateway_rpc {
+            gw.transport = rdp::gateway::GatewayTransport::Rpc;
+        }
         cfg.gateway = Some(gw);
     }
     cfg.compression = args.compression;
@@ -321,6 +508,8 @@ fn main() {
     }
     cfg.surface_commands = args.surface_commands;
     cfg.drawing_orders = args.drawing_orders;
+    cfg.legacy_security = args.legacy_security;
+    cfg.multitransport = args.udp;
     if let Some(expected) = &args.expect_fingerprint {
         let want = normalize_fingerprint(expected);
         if want.len() != 64 {
@@ -348,6 +537,7 @@ fn main() {
         {
             cfg.h264 = Some(h264_mf::factory());
         }
+        cfg.video = args.video;
     }
 
     if args.screenshot.is_some() || args.record.is_some() {
@@ -432,7 +622,16 @@ fn screenshot(
     max_wait: Duration,
 ) -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("connecting to {}:{} ...", cfg.host, cfg.port);
-    let mut client = Client::connect(cfg)?;
+    // A shared desktop reports who may control it (MS-RDPEMC).
+    let (channels, multiparty) = match cfg.assistance {
+        Some(_) => {
+            let (channel, handle) = rdp::multiparty();
+            let c: Box<dyn rdp::StaticChannel> = Box::new(channel);
+            (vec![c], Some(handle))
+        }
+        None => (Vec::new(), None),
+    };
+    let mut client = Client::connect_with(cfg, channels)?;
     let info = client.info().clone();
     eprintln!(
         "connected: protocol {:#x}, desktop {}x{} at {} bpp, server RDP version {:#x}",
@@ -462,6 +661,9 @@ fn screenshot(
     let mut refreshed = false;
     while start.elapsed() < max_wait {
         let out = client.poll(Duration::from_millis(50))?;
+        for ev in multiparty.iter().flat_map(|h| h.take_events()) {
+            eprintln!("shared desktop: {}", shadow::event_text(&ev));
+        }
         if let Some(reason) = out.closed {
             return Err(format!("session closed: {reason}").into());
         }
@@ -494,6 +696,31 @@ fn screenshot(
             g.codec.unwrap_or("none")
         );
     }
+    // Video redirection (RDP-76): whether the server used it.
+    if let Some(v) = client.video_stats() {
+        eprintln!(
+            "video redirection: {} presentations, {} samples decoded, {} frames shown, {} skipped, {:.2} ms decoding per sample",
+            v.presentations,
+            v.decoded,
+            v.presented,
+            v.skipped,
+            v.decode.as_secs_f64() * 1000.0 / v.decoded.max(1) as f64
+        );
+    }
+    // Which transport carried the session (RDP-79).
+    let udp = client.stats().udp;
+    eprintln!(
+        "transport: {:?}, {} dynamic channels on UDP, {} datagram bytes in, {} out, {} retransmits{}",
+        udp.state,
+        udp.channels,
+        udp.bytes_in,
+        udp.bytes_out,
+        udp.retransmits,
+        client
+            .udp_failure()
+            .map(|f| format!(" (UDP failed: {f})"))
+            .unwrap_or_default()
+    );
     if let Some(r) = recorder {
         let i = r.finish()?;
         eprintln!(
@@ -540,9 +767,19 @@ fn snapshot_ui(
         ("-form-experience", || ui::sample_form(2)),
         ("-form-keyboard", ui::sample_form_keyboard),
         ("-form-sharing", || ui::sample_form(3)),
+        // Serial and parallel ports (RDP-74): editor and panel.
+        ("-form-ports", || ui::sample_ports(false)),
+        ("-panel-ports", || ui::sample_ports(true)),
         ("-form-advanced", || ui::sample_form(4)),
         ("-settings", || ui::sample_settings(false)),
         ("-settings-vault", || ui::sample_settings(true)),
+        // Import from mRemoteNG and RDCMan (RDP-80).
+        ("-settings-import-mremoteng", || {
+            ui::sample_settings_import(true)
+        }),
+        ("-settings-import-rdcman", || {
+            ui::sample_settings_import(false)
+        }),
         ("-cert", || ui::sample_cert(false)),
         ("-cert-changed", || ui::sample_cert(true)),
         ("-panel-display", || ui::sample_panel(1, false)),
@@ -597,6 +834,7 @@ fn snapshot_ui(
         // The session screens and toolbar (RDP-31).
         ("-connecting-steps", || sv::sample_connecting(false)),
         ("-connecting-gateway", || sv::sample_connecting(true)),
+        ("-editor-gateway-rpc", ui::sample_form_gateway_rpc),
         ("-reconnecting", sv::sample_reconnecting),
         ("-ended-signed-out", || {
             sv::sample_ended(failure::EndReason::SignedOut)
@@ -701,7 +939,7 @@ fn snapshot_ui(
         ("-site-editor", || ui::sample_form(0), 1440.0, 900.0),
     ];
     // One error screen per kind of failure.
-    let failures: [Screen; 10] = [
+    let failures: [Screen; 11] = [
         || sv::sample_failed(0),
         || sv::sample_failed(1),
         || sv::sample_failed(2),
@@ -712,6 +950,7 @@ fn snapshot_ui(
         || sv::sample_failed(7),
         || sv::sample_failed(8),
         || sv::sample_failed(9),
+        || sv::sample_failed(10),
     ]
     .map(|f| ("", f));
     for (i, (_, make)) in failures.into_iter().enumerate() {

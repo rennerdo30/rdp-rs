@@ -56,6 +56,8 @@ pub struct Stats {
     /// From a decoded update to the window showing it: average and worst
     /// since the last reading, ms (the UI fills it in).
     pub screen_ms: Option<(f64, f64)>,
+    /// Whether the session runs over UDP (MS-RDPEMT) or TCP only.
+    pub udp: rdp::multitransport::UdpStats,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -156,6 +158,7 @@ impl Meter {
             input_ms,
             repaints_per_s: 0.0,
             screen_ms: None,
+            udp: cur.udp,
         };
         self.since = now;
         self.prev = cur;
@@ -180,6 +183,7 @@ pub fn rows(
             (None, None) => "not measured".into(),
         },
     ));
+    v.push(("Transport", transport(&st.udp)));
     if let Some(s) = server {
         v.push(("Server measured", s.to_string()));
     }
@@ -217,6 +221,30 @@ pub fn rows(
         v.push(("Desktop", format!("{w} × {h}")));
     }
     v
+}
+
+/// The Transport row: UDP with its channels and round trip once the tunnel
+/// is up, else TCP and what became of UDP.
+fn transport(u: &rdp::multitransport::UdpStats) -> String {
+    use rdp::multitransport::UdpState;
+    match u.state {
+        UdpState::Off => "TCP".into(),
+        UdpState::Offered => "TCP · UDP offered, not used".into(),
+        UdpState::Connecting => "TCP · UDP connecting".into(),
+        UdpState::Failed => "TCP · UDP failed".into(),
+        UdpState::Active => {
+            let rtt = u
+                .rtt
+                .map(|d| format!(" · {}", fmt_ms(d.as_secs_f64() * 1000.0)))
+                .unwrap_or_default();
+            let ch = if u.channels == 1 {
+                "channel"
+            } else {
+                "channels"
+            };
+            format!("UDP · {} {ch}{rtt}", u.channels)
+        }
+    }
 }
 
 fn fmt_ms(ms: f64) -> String {
@@ -403,6 +431,7 @@ mod tests {
                     decode: ms(20),
                     codec: Some("AVC420"),
                 }),
+                ..ClientStats::default()
             },
         );
         m.picture(t0 + ms(100));
@@ -419,6 +448,7 @@ mod tests {
                     decode: ms(140),
                     codec: Some("AVC444"),
                 }),
+                ..ClientStats::default()
             },
             Some(Duration::from_micros(3_500)),
             Some(Duration::from_micros(1_250)),
@@ -468,6 +498,7 @@ mod tests {
             input_ms: Some((28.4, 41.0)),
             repaints_per_s: 57.6,
             screen_ms: Some((2.4, 7.0)),
+            udp: Default::default(),
         };
         let r = rows(&st, Some("RTT 4 ms"), Some((1828, 1232)));
         let get = |k: &str| r.iter().find(|(l, _)| *l == k).map(|(_, v)| v.as_str());
@@ -495,6 +526,45 @@ mod tests {
         assert_eq!(get("Graphics"), Some("Bitmap"));
         assert_eq!(get("Input → picture"), Some("press a key to measure"));
         assert_eq!(get("Server measured"), None);
+        assert_eq!(get("Transport"), Some("TCP"));
+    }
+
+    #[test]
+    fn transport_row_says_whether_udp_is_in_use() {
+        use rdp::multitransport::{UdpState, UdpStats};
+        let row = |udp: UdpStats| {
+            let st = Stats {
+                udp,
+                ..Stats::default()
+            };
+            rows(&st, None, None)
+                .into_iter()
+                .find(|(l, _)| *l == "Transport")
+                .unwrap()
+                .1
+        };
+        let s = |state| UdpStats {
+            state,
+            ..UdpStats::default()
+        };
+        assert_eq!(row(s(UdpState::Off)), "TCP");
+        assert_eq!(row(s(UdpState::Connecting)), "TCP · UDP connecting");
+        assert_eq!(row(s(UdpState::Failed)), "TCP · UDP failed");
+        let active = UdpStats {
+            state: UdpState::Active,
+            channels: 3,
+            rtt: Some(ms(12)),
+            ..UdpStats::default()
+        };
+        assert_eq!(row(active), "UDP · 3 channels · 12 ms");
+        // The reading carries the client's UDP state through.
+        let t0 = Instant::now();
+        let mut m = Meter::new(t0, ClientStats::default());
+        let cur = ClientStats {
+            udp: active,
+            ..ClientStats::default()
+        };
+        assert_eq!(m.take(t0 + ms(1000), cur, None, None).udp, active);
     }
 
     #[test]

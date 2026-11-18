@@ -50,9 +50,10 @@ pub enum UserEvent {
     Recorded(Result<crate::recorder::RecordingInfo, String>),
     /// The helper update for a tab was downloaded and checked (RDP-61).
     HelperDownload(u64, Result<(String, Vec<u8>), String>),
-    /// Export: the chosen file; Import: the chosen backup (asks its password).
+    /// Export: the chosen file; Import: the chosen file and what it is (a
+    /// Remora backup or a custom mRemoteNG master asks for its password).
     ExportTo(std::path::PathBuf),
-    ImportFrom(std::path::PathBuf),
+    ImportFrom(std::path::PathBuf, Result<crate::import::Probe, String>),
     /// The folder picker closed: (session or None for the form, folder).
     Picked(Option<u64>, Option<std::path::PathBuf>),
     /// A session waits for the user to trust its server certificate.
@@ -80,8 +81,8 @@ pub enum VaultResult {
     Created(Result<crate::vault::VaultKey, String>),
     /// A new master password's key (or why the change failed).
     Rekeyed(Result<crate::vault::VaultKey, String>),
-    /// The contents of a backup (or why it could not be opened).
-    Imported(Result<(Vec<crate::store::Group>, Vec<crate::store::Connection>), String>),
+    /// The contents of an imported file (or why it could not be read).
+    Imported(Result<crate::import::Imported, String>),
 }
 
 struct Gfx {
@@ -135,6 +136,8 @@ struct Session {
     worker: Option<Worker>,
     cfg: Config,
     controls: Controls,
+    /// A shared desktop's control handle (MS-RDPEMC), once connected (RDP-77).
+    shared: Option<rdp::MultipartyHandle>,
     mouse: (u16, u16),
     /// The size last requested for fit-to-window.
     fit_requested: Option<(u32, u32)>,
@@ -534,6 +537,7 @@ impl App {
                 worker: Some(worker),
                 cfg,
                 controls,
+                shared: None,
                 mouse: (0, 0),
                 fit_requested: None,
                 cursor: RemoteCursor::Default,
@@ -598,6 +602,7 @@ impl App {
         let printers = opts.printers && on(c.set_printers(true), "Printers");
         let smart_cards = opts.smart_cards && on(c.set_smart_cards(true), "Smart cards");
         let microphone = opts.microphone && on(c.set_microphone(true), "Microphone");
+        let camera = opts.camera && on(c.set_camera(true, opts.cam.as_deref()), "Camera");
         // The server helper may do what the connection allows (taken at
         // its next HelloAck).
         c.helper()
@@ -606,6 +611,13 @@ impl App {
             crate::helper_app::attempts_path(),
             crate::helper_app::expected_fingerprint(&opts.helper),
         );
+        let mut ports = Vec::new();
+        for name in &opts.ports {
+            match c.set_port(name, true) {
+                Ok(()) => ports.push(name.to_ascii_uppercase()),
+                Err(e) => warn.push(e),
+            }
+        }
         let mut drives = Vec::new();
         for path in &opts.drives {
             let name = drive_name(path);
@@ -627,11 +639,14 @@ impl App {
             t.speaker = opts.speaker.clone();
             t.microphone = microphone;
             t.mic = opts.mic.clone();
+            t.camera = camera;
+            t.cam = opts.cam.clone();
             t.scale = opts.scale;
             t.clipboard = clipboard;
             t.sound = sound;
             t.printers = printers;
             t.smart_cards = smart_cards;
+            t.ports = ports;
             t.drives = drives;
             t.helper.opts = opts.helper.clone();
         }
@@ -656,6 +671,7 @@ impl App {
             printers: t.printers,
             smart_cards: t.smart_cards,
             drives: t.drives.iter().map(|d| d.path.clone()).collect(),
+            ports: t.ports.clone(),
             quality: t.quality,
             win_keys: t.win_keys,
             keyboard: t.keyboard,
@@ -663,6 +679,8 @@ impl App {
             speaker: t.speaker.clone(),
             microphone: t.microphone,
             mic: t.mic.clone(),
+            camera: t.camera,
+            cam: t.cam.clone(),
             // A reconnect keeps the session's monitors in its config.
             monitors: Vec::new(),
             helper: t.helper.opts.clone(),
@@ -806,6 +824,32 @@ impl App {
         self.send(id, events);
     }
 
+    /// A shared desktop's control level, for the tab's commands (RDP-77).
+    fn set_shared_level(&mut self, id: u64, level: rdp::Control) {
+        if let Some(t) = self.win.as_mut().and_then(|w| w.ui.tab_mut(id)) {
+            t.shared = Some(level);
+        }
+        self.dirty();
+    }
+
+    /// Asks the sharer for control, or gives it back (MS-RDPEMC 2.2.4.3);
+    /// the answer arrives as a Shared event.
+    fn request_shared_control(&mut self, id: u64) {
+        let Some(h) = self.sessions.get(&id).and_then(|s| s.shared.clone()) else {
+            return;
+        };
+        let interact = h.control() != rdp::Control::Interact;
+        h.request_control(interact);
+        self.message(
+            if interact {
+                "Asked the sharer for control..."
+            } else {
+                "Gave control back to the sharer."
+            },
+            Tone::Muted,
+        );
+    }
+
     fn message(&mut self, text: impl Into<String>, tone: Tone) {
         if let Some(w) = &mut self.win {
             w.ui.set_message(text, tone);
@@ -833,6 +877,9 @@ impl App {
                     // Desktop widths must be even; sizes between 200 and 8192.
                     cfg.width = ((w.clamp(200, 8192) as u16) & !1).max(200);
                     cfg.height = h.clamp(200, 8192) as u16;
+                }
+                if let Some(w) = self.win.as_mut() {
+                    w.ui.local_ports = local_port_names();
                 }
                 self.start_session(name, *cfg, fit, opts, apps);
             }
@@ -867,6 +914,16 @@ impl App {
                     .map(|s| s.controls.set_microphone(on));
                 if let Some(Err(e)) = r {
                     self.message(format!("Microphone: {e}"), Tone::Danger);
+                }
+                self.dirty();
+            }
+            Action::SetCamera(id, on, name) => {
+                let r = self
+                    .sessions
+                    .get(&id)
+                    .map(|s| s.controls.set_camera(on, name.as_deref()));
+                if let Some(Err(e)) = r {
+                    self.message(format!("Camera: {e}"), Tone::Warning);
                 }
                 self.dirty();
             }
@@ -967,6 +1024,18 @@ impl App {
                     .map(|s| s.controls.set_smart_cards(on));
                 self.toggle_result(id, r, on, "Smart cards", |t| t.smart_cards = false);
             }
+            Action::SetPort(id, name, on) => {
+                let r = self
+                    .sessions
+                    .get(&id)
+                    .map(|s| s.controls.set_port(&name, on));
+                let what = name.clone();
+                self.toggle_result(id, r, on, &what, |t| t.ports.retain(|p| *p != name));
+                // Ports come and go (USB adapters): list them again.
+                if let Some(w) = self.win.as_mut() {
+                    w.ui.local_ports = local_port_names();
+                }
+            }
             Action::SetClipboard(id, on) => {
                 rdp::trace!("ui: Clipboard switched {}", if on { "on" } else { "off" });
                 let r = self.sessions.get(&id).map(|s| s.controls.set_clipboard(on));
@@ -1047,6 +1116,7 @@ impl App {
             Action::WinClose => self.request_quit(),
             Action::Quit => self.quit = true,
             Action::ToggleRecording(id) => self.toggle_recording(id),
+            Action::ShareControl(id) => self.request_shared_control(id),
             Action::Unspan(id) => self.unspan(id),
             Action::Relayout => {
                 if let Some(m) = &mut self.win {
@@ -1224,7 +1294,11 @@ impl App {
                     self.hwnd(),
                     move |path| {
                         if let (Some(path), Ok(p)) = (path, proxy.lock()) {
-                            let _ = p.send_event(UserEvent::ImportFrom(path));
+                            // On the picker thread: tell the format from the
+                            // content, and whether a password is needed.
+                            let probe = crate::import::read_file(&path)
+                                .and_then(|bytes| crate::import::probe(&bytes));
+                            let _ = p.send_event(UserEvent::ImportFrom(path, probe));
                         }
                     },
                 );
@@ -1232,13 +1306,9 @@ impl App {
             Action::Import { path, password } => {
                 let proxy = self.proxy.clone();
                 std::thread::spawn(move || {
-                    let r = std::fs::read(&path)
-                        .map_err(|e| format!("Cannot read {}: {e}", path.display()))
-                        .and_then(|bytes| {
-                            let key = crate::vault::read_params(&bytes)
-                                .and_then(|p| crate::vault::derive(&password, p))?;
-                            crate::store::read_backup(&bytes, &key)
-                        });
+                    let r = crate::import::read_file(&path).and_then(|bytes| {
+                        crate::import::read(&bytes, &password, &crate::import::SystemDpapi)
+                    });
                     let _ = proxy.send_event(UserEvent::Vault(VaultResult::Imported(r)));
                 });
             }
@@ -1755,16 +1825,19 @@ impl App {
                 }
             }
             VaultResult::Rekeyed(Err(e)) => ui.settings_done(false, e),
-            VaultResult::Imported(Ok((groups, connections))) => {
+            VaultResult::Imported(Ok(mut imported)) => {
+                // Passwords live only in the vault: without one they are
+                // left out, and the result line says so.
+                if !ui.store_is_vault() {
+                    imported.drop_passwords();
+                }
+                let total = imported.connections.len();
+                let groups = std::mem::take(&mut imported.groups);
+                let connections = std::mem::take(&mut imported.connections);
                 let added = ui.store_mut().merge(groups, connections);
+                imported.report.duplicates = total.saturating_sub(added);
                 match ui.store_mut().save() {
-                    Ok(()) => ui.settings_done(
-                        true,
-                        format!(
-                            "Imported {added} connection{}.",
-                            if added == 1 { "" } else { "s" }
-                        ),
-                    ),
+                    Ok(()) => ui.settings_done(true, imported.report.summary(added)),
                     Err(e) => ui.settings_done(false, e),
                 }
                 ui.refresh_selection();
@@ -2148,6 +2221,9 @@ impl ApplicationHandler<UserEvent> for App {
                             remembered_unlock(&mut ui);
                             ui.speakers = crate::audio::output_devices();
                             ui.mics = crate::mic::input_devices();
+                            ui.local_ports = local_port_names();
+                            // Names only; no camera is opened.
+                            ui.cams = crate::camera::names();
                             ui.local_monitors = crate::monitors::list();
                             // Loads the folder picker's shell components early.
                             crate::picker::prewarm();
@@ -2362,11 +2438,23 @@ impl ApplicationHandler<UserEvent> for App {
                 }
                 return self.dirty();
             }
-            UserEvent::ImportFrom(path) => {
+            UserEvent::ImportFrom(path, probe) => {
                 if let Some(m) = &mut self.win {
-                    m.ui.import_file = Some(path);
-                    m.ui.settings_note = None;
-                    m.ui.focus_import();
+                    match probe {
+                        Ok(probe) => {
+                            m.ui.import_file = Some(path);
+                            m.ui.import_probe = Some(probe);
+                            m.ui.settings_note = None;
+                            if probe.needs_password {
+                                m.ui.focus_import();
+                            }
+                        }
+                        Err(e) => {
+                            m.ui.import_file = None;
+                            m.ui.import_probe = None;
+                            m.ui.settings_done(false, e);
+                        }
+                    }
                 }
                 return self.dirty();
             }
@@ -2491,6 +2579,28 @@ impl ApplicationHandler<UserEvent> for App {
             }
             session::Event::RailReady(handle) => self.rail_ready(id, handle),
             session::Event::Rail(events) => self.rail_events(el, id, events),
+            session::Event::SharedReady(handle) => {
+                let level = handle.control();
+                if let Some(s) = self.sessions.get_mut(&id) {
+                    s.shared = Some(handle);
+                }
+                self.set_shared_level(id, level);
+            }
+            session::Event::Shared(events) => {
+                for ev in &events {
+                    if let rdp::MultipartyEvent::ControlChanged(level) = ev {
+                        self.set_shared_level(id, *level);
+                    }
+                    let tone = match ev {
+                        rdp::MultipartyEvent::ControlChanged(rdp::Control::Interact) => {
+                            Tone::Accent
+                        }
+                        rdp::MultipartyEvent::Paused(true) => Tone::Warning,
+                        _ => Tone::Muted,
+                    };
+                    self.message(crate::shadow::event_text(ev), tone);
+                }
+            }
             session::Event::Frame if self.sessions.get(&id).is_some_and(|s| s.rail.is_some()) => {
                 self.render_rail(id);
             }
@@ -2548,7 +2658,19 @@ impl ApplicationHandler<UserEvent> for App {
                 self.dropped(id, why, None)
             }
             session::Event::Failed { why, failure } => self.failed(id, why, failure),
-            session::Event::Dropped { why, cookie } => self.dropped(id, why, cookie),
+            session::Event::Dropped {
+                why,
+                cookie,
+                udp_failed,
+            } => {
+                if udp_failed && let Some(s) = self.sessions.get_mut(&id) {
+                    // UDP failed (blocked, lost or refused): this tab's
+                    // reconnects stay on TCP.
+                    rdp::trace!("ui: session {id}: UDP failed; reconnects use TCP only");
+                    s.cfg.multitransport = false;
+                }
+                self.dropped(id, why, cookie)
+            }
             session::Event::Redirected { cfg, to } => self.redirected(id, *cfg, to),
             session::Event::Stats(mut st) => {
                 let Some(m) = &mut self.win else { return };
@@ -2850,6 +2972,14 @@ fn panel_chord(ev: &winit::event::KeyEvent, mods: ModifiersState) -> bool {
             WKey::Character(c) => c.eq_ignore_ascii_case("p"),
             _ => true,
         }
+}
+
+/// The names of this PC's serial and parallel ports ("COM3", "LPT1").
+fn local_port_names() -> Vec<String> {
+    crate::serial::local_ports()
+        .into_iter()
+        .map(|p| p.name)
+        .collect()
 }
 
 /// The display name of a shared folder: its last path component.

@@ -271,7 +271,7 @@ impl Drop for Keys {
 }
 
 /// SaltedHash(S, I) = MD5(S + SHA-1(I + S + A + B)).
-fn salted_hash(s: &[u8], i: &[u8], a: &[u8], b: &[u8]) -> [u8; 16] {
+pub(crate) fn salted_hash(s: &[u8], i: &[u8], a: &[u8], b: &[u8]) -> [u8; 16] {
     let inner = sha1(&[i, s, a, b].concat());
     md5(&[s, &inner[..]].concat())
 }
@@ -524,6 +524,9 @@ pub struct Licensing {
     last: Option<Vec<u8>>,
     /// An error alert to send before the connection ends.
     alert: Option<Vec<u8>>,
+    /// The Server Security Data certificate, for a license request without
+    /// one (Standard RDP Security, MS-RDPELE 2.2.2.1).
+    server_certificate: Vec<u8>,
 }
 
 impl Licensing {
@@ -546,7 +549,16 @@ impl Licensing {
             session: None,
             last: None,
             alert: None,
+            server_certificate: Vec::new(),
         }
+    }
+
+    /// Under Standard RDP Security the server may leave the certificate out
+    /// of its License Request; the one from the Server Security Data
+    /// (MS-RDPBCGR 2.2.1.4.3) is used then.
+    pub fn with_server_certificate(mut self, cert: &[u8]) -> Licensing {
+        self.server_certificate = cert.to_vec();
+        self
     }
 
     /// Handles one licensing PDU from the I/O channel (security header,
@@ -639,7 +651,10 @@ impl Licensing {
     }
 
     fn license_request(&mut self, msg: &[u8]) -> Result<Vec<u8>> {
-        let req = parse_license_request(msg)?;
+        let mut req = parse_license_request(msg)?;
+        if req.certificate.is_empty() {
+            req.certificate = self.server_certificate.clone();
+        }
         if req.certificate.is_empty() {
             return Err(Error::Unsupported(
                 "licensing without a server certificate (needs Standard RDP Security)".into(),

@@ -103,6 +103,7 @@ pub enum Command {
     Clipboard(u64),
     Sound(u64),
     Microphone(u64),
+    Camera(u64),
     Printers(u64),
     SmartCards(u64),
     ShareFolder(u64),
@@ -114,6 +115,8 @@ pub enum Command {
     /// Pairing was blocked after aborted attempts: allow it again.
     RetryHelperPairing(u64),
     Record(u64),
+    /// A shared desktop: request control or give it back.
+    ShareControl(u64),
     /// Show or hide the session panel (its toolbar button, Ctrl+Alt+P).
     Panel,
     /// Dock the panel beside the picture, or float it over the picture.
@@ -160,6 +163,7 @@ impl Command {
             Command::Clipboard(id) => Hit::Clipboard(id),
             Command::Sound(id) => Hit::Sound(id),
             Command::Microphone(id) => Hit::Microphone(id),
+            Command::Camera(id) => Hit::Camera(id),
             Command::Printers(id) => Hit::Printers(id),
             Command::SmartCards(id) => Hit::SmartCards(id),
             Command::ShareFolder(id) => Hit::BrowseDrive(id),
@@ -169,6 +173,7 @@ impl Command {
             Command::ForgetHelper(id) => Hit::ForgetHelper(id),
             Command::RetryHelperPairing(id) => Hit::RetryHelperPairing(id),
             Command::Record(id) => Hit::Record(id),
+            Command::ShareControl(id) => Hit::ShareControl(id),
             Command::Panel => Hit::Drawer,
             Command::PinPanel => Hit::PanelPin,
             Command::Stats => Hit::StatsOverlay,
@@ -575,6 +580,14 @@ impl Ui {
                         t.microphone,
                     ),
                     (
+                        Command::Camera(id),
+                        "Camera",
+                        "Share this PC's cameras with the session",
+                        "webcam video share",
+                        Icon::Camera,
+                        t.camera,
+                    ),
+                    (
                         Command::Printers(id),
                         "Printers",
                         "Print from the session to this PC's printers",
@@ -752,6 +765,32 @@ impl Ui {
                         Lead::Icon(Icon::Keyboard, Tone::Neutral),
                         Chip::None,
                         "Send",
+                    );
+                }
+                // A shared desktop (RDP-77): control is the sharer's to give.
+                if let Some(level) = t.shared {
+                    let control = level == rdp::Control::Interact;
+                    push(
+                        Command::ShareControl(id),
+                        s,
+                        if control {
+                            "Stop controlling".into()
+                        } else {
+                            "Request control".into()
+                        },
+                        if control {
+                            "Watch only; the sharer keeps mouse and keyboard".into()
+                        } else {
+                            "Ask the sharer for mouse and keyboard control".into()
+                        },
+                        "shadow shared desktop control view interact request",
+                        Lead::Icon(Icon::Keyboard, Tone::Accent),
+                        if control {
+                            Chip::Pill("In control", Tone::Accent, kit::Lead::Dot)
+                        } else {
+                            Chip::Pill("View only", Tone::Neutral, kit::Lead::None)
+                        },
+                        if control { "Release" } else { "Request" },
                     );
                 }
             }
@@ -1718,6 +1757,7 @@ mod tests {
             Command::Clipboard(1),
             Command::Sound(1),
             Command::Microphone(1),
+            Command::Camera(1),
             Command::Printers(1),
             Command::SmartCards(1),
             Command::ShareFolder(1),
@@ -1742,6 +1782,24 @@ mod tests {
         assert!(!c.contains(&Command::Disconnect(2)));
         assert!(!c.contains(&Command::Clipboard(2)));
         assert!(!c.contains(&Command::Record(2)));
+    }
+
+    #[test]
+    fn shared_desktops_offer_control_requests() {
+        // A normal session has no control command (RDP-77).
+        let mut m = super::super::sample(true);
+        assert!(!cmds(&m).contains(&Command::ShareControl(1)));
+        let title = |m: &Ui| {
+            m.palette_entries()
+                .into_iter()
+                .find(|e| e.cmd == Command::ShareControl(1))
+                .map(|e| e.title)
+        };
+        m.tab_mut(1).unwrap().shared = Some(rdp::Control::View);
+        assert_eq!(title(&m).as_deref(), Some("Request control"));
+        m.tab_mut(1).unwrap().shared = Some(rdp::Control::Interact);
+        assert_eq!(title(&m).as_deref(), Some("Stop controlling"));
+        assert_eq!(Command::ShareControl(1).hit(), Hit::ShareControl(1));
     }
 
     #[test]

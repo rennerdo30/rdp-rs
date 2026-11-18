@@ -13,13 +13,24 @@
 //! (3.3.5.4); keep-alives are dropped, server pings answered, and a channel
 //! close (3.3.5.5) ends the byte stream.
 //!
+//! Gateways that do not offer the HTTP transport (older ones, or with it
+//! turned off) are reached over RPC over HTTP instead ([`rpc`], MS-TSGU
+//! 1.3.1, 3.6): [`GatewayTransport::Auto`] tries the HTTP transport first
+//! and falls back when the gateway does not know its URL.
+//!
 //! The result is a [`GatewayStream`] / [`GatewayReader`] pair that
 //! [`crate::transport::Framer::over`] runs the RDP connection on.
 
+pub mod dcerpc;
 pub mod http;
 pub mod packets;
+pub mod rpc;
+pub mod rts;
+pub mod tsproxy;
 pub mod ws;
 
+#[cfg(test)]
+mod rpc_tests;
 #[cfg(test)]
 mod tests;
 
@@ -49,6 +60,20 @@ pub struct GatewayConfig {
     pub username: String,
     pub domain: String,
     pub password: String,
+    pub transport: GatewayTransport,
+}
+
+/// How to reach the gateway.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum GatewayTransport {
+    /// The HTTP transport over a WebSocket; RPC over HTTP when the gateway
+    /// does not offer it.
+    #[default]
+    Auto,
+    /// Only the HTTP transport.
+    Http,
+    /// Only RPC over HTTP.
+    Rpc,
 }
 
 impl GatewayConfig {
@@ -59,6 +84,7 @@ impl GatewayConfig {
             username: username.into(),
             domain: String::new(),
             password: password.into(),
+            transport: GatewayTransport::Auto,
         }
     }
 }
@@ -72,6 +98,7 @@ impl fmt::Debug for GatewayConfig {
             .field("username", &self.username)
             .field("domain", &self.domain)
             .field("password", &"<redacted>")
+            .field("transport", &self.transport)
             .finish()
     }
 }
@@ -94,6 +121,54 @@ pub fn connect(
     deadline: Instant,
     verify: Option<&crate::client::CertificateCheck>,
 ) -> Result<Tunnel> {
+    let target = Target {
+        host: target_host,
+        port: target_port,
+        client_name,
+    };
+    connect_with(gw, &target, true, deadline, verify)
+}
+
+/// [`connect`]; `tls` false is the plain transport of the loopback tests.
+pub(crate) fn connect_with(
+    gw: &GatewayConfig,
+    target: &Target,
+    tls: bool,
+    deadline: Instant,
+    verify: Option<&crate::client::CertificateCheck>,
+) -> Result<Tunnel> {
+    let rpc = |trusted: Option<Vec<u8>>| {
+        let out = tcp(gw, deadline)?;
+        let inn = tcp(gw, deadline)?;
+        rpc::open(out, inn, gw, tls, target, deadline, verify, trusted)
+    };
+    if gw.transport == GatewayTransport::Rpc {
+        return rpc(None);
+    }
+    match open_ws(tcp(gw, deadline)?, gw, tls, target, deadline, verify)? {
+        Opened::Tunnel(t) => Ok(*t),
+        Opened::NotOffered {
+            status,
+            certificate,
+        } => {
+            if gw.transport == GatewayTransport::Http {
+                return Err(not_offered(status));
+            }
+            trace!("gateway has no HTTP transport (HTTP {status}); trying RPC over HTTP");
+            rpc(certificate)
+        }
+    }
+}
+
+/// Where the tunnel leads, and the client's name for the gateway.
+pub(crate) struct Target<'a> {
+    pub host: &'a str,
+    pub port: u16,
+    pub client_name: &'a str,
+}
+
+/// A TCP connection to the gateway.
+fn tcp(gw: &GatewayConfig, deadline: Instant) -> Result<TcpStream> {
     let addr = (gw.host.as_str(), gw.port)
         .to_socket_addrs()?
         .next()
@@ -104,20 +179,30 @@ pub fn connect(
     }
     let sock = TcpStream::connect_timeout(&addr, left)?;
     sock.set_nodelay(true)?;
-    open(
-        sock,
-        gw,
-        true,
-        target_host,
-        target_port,
-        client_name,
-        deadline,
-        verify,
-    )
+    Ok(sock)
 }
 
-/// Runs the gateway setup on a connected socket; `tls` false is the plain
-/// transport of the loopback tests.
+fn not_offered(status: u16) -> Error {
+    Error::Unsupported(format!(
+        "RD Gateway does not offer the HTTP transport (HTTP {status}); \
+         it may need RPC over HTTP"
+    ))
+}
+
+/// The HTTP transport's setup: a tunnel, or the gateway's answer that it
+/// does not know the transport's URL.
+enum Opened {
+    Tunnel(Box<Tunnel>),
+    NotOffered {
+        status: u16,
+        /// The gateway certificate already checked on the way.
+        certificate: Option<Vec<u8>>,
+    },
+}
+
+/// Runs the HTTP transport setup on a connected socket; `tls` false is the
+/// plain transport of the loopback tests.
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn open(
     sock: TcpStream,
@@ -129,6 +214,26 @@ pub(crate) fn open(
     deadline: Instant,
     verify: Option<&crate::client::CertificateCheck>,
 ) -> Result<Tunnel> {
+    let target = Target {
+        host: target_host,
+        port: target_port,
+        client_name,
+    };
+    match open_ws(sock, gw, tls, &target, deadline, verify)? {
+        Opened::Tunnel(t) => Ok(*t),
+        Opened::NotOffered { status, .. } => Err(not_offered(status)),
+    }
+}
+
+fn open_ws(
+    sock: TcpStream,
+    gw: &GatewayConfig,
+    tls: bool,
+    target: &Target,
+    deadline: Instant,
+    verify: Option<&crate::client::CertificateCheck>,
+) -> Result<Opened> {
+    let (target_host, target_port, client_name) = (target.host, target.port, target.client_name);
     let mut deadline = deadline;
     let budget = deadline.saturating_duration_since(Instant::now());
     let rx = spawn_socket_reader(sock.try_clone()?);
@@ -160,7 +265,9 @@ pub(crate) fn open(
             }
             deadline = Instant::now() + budget;
         }
-        upgrade(&link, &mut inbound, gw, client_name, deadline)?;
+        if let Some(status) = upgrade(&link, &mut inbound, gw, client_name, deadline)? {
+            return Ok((certificate, Some(status)));
+        }
         create_tunnel(
             &link,
             &mut inbound,
@@ -169,23 +276,30 @@ pub(crate) fn open(
             client_name,
             deadline,
         )?;
-        Ok(certificate)
+        Ok((certificate, None))
     })();
     match setup {
-        Ok(certificate) => Ok(Tunnel {
-            stream: GatewayStream {
+        Ok((certificate, None)) => Ok(Opened::Tunnel(Box::new(Tunnel {
+            stream: GatewayStream::Ws(WsStream {
                 link: link.clone(),
                 closed: false,
-            },
-            reader: GatewayReader {
+            }),
+            reader: GatewayReader::Ws(WsReader {
                 link,
                 inbound,
                 out: Vec::new(),
                 pos: 0,
                 done: false,
-            },
+            }),
             certificate,
-        }),
+        }))),
+        Ok((certificate, Some(status))) => {
+            let _ = lock(&link).sock.shutdown(Shutdown::Both);
+            Ok(Opened::NotOffered {
+                status,
+                certificate,
+            })
+        }
         Err(e) => {
             // Ends the socket reader thread.
             let _ = lock(&link).sock.shutdown(Shutdown::Both);
@@ -200,8 +314,8 @@ struct Link {
     tls: Option<Box<ClientConnection>>,
 }
 
-fn lock(link: &Mutex<Link>) -> MutexGuard<'_, Link> {
-    link.lock().unwrap_or_else(|e| e.into_inner())
+fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 impl Link {
@@ -314,6 +428,11 @@ impl Inbound {
                 }
             }
         };
+        self.take(link, chunk)
+    }
+
+    /// Decrypts one chunk from the socket reader into `plain`.
+    fn take(&mut self, link: &Mutex<Link>, chunk: Chunk) -> Result<()> {
         let raw = chunk.map_err(|e| match e.kind() {
             io::ErrorKind::ConnectionReset | io::ErrorKind::ConnectionAborted => {
                 Error::ConnectionLost("connection reset by the RD Gateway".into())
@@ -448,13 +567,14 @@ fn split_user(gw: &GatewayConfig) -> (String, String) {
 
 /// WebSocket Upgrade with NTLM (RFC 4559 style) on one connection:
 /// NEGOTIATE, 401 with the CHALLENGE, AUTHENTICATE, 101 Switching Protocols.
+/// Some(status) when the gateway does not offer the HTTP transport.
 fn upgrade(
     link: &Mutex<Link>,
     inbound: &mut Inbound,
     gw: &GatewayConfig,
     client_name: &str,
     deadline: Instant,
-) -> Result<()> {
+) -> Result<Option<u16>> {
     let (user, domain) = split_user(gw);
     let mut ntlm = Ntlm::new(&user, &domain, &gw.password, client_name);
     let key = ws::base64_encode(&crate::crypto::random::<16>());
@@ -467,6 +587,9 @@ fn upgrade(
     lock(link).send(request(&ntlm.negotiate()).as_bytes())?;
     let r = read_response(link, inbound, deadline)?;
     trace!("gateway answered NTLM negotiate with HTTP {}", r.status);
+    if http_transport_missing(r.status) {
+        return Ok(Some(r.status));
+    }
     if r.status != 401 {
         return proto(format!(
             "RD Gateway answered HTTP {} to NTLM negotiate",
@@ -491,6 +614,7 @@ fn upgrade(
     match r.status {
         101 => {}
         401 => return Err(Error::Auth("RD Gateway rejected the credentials".into())),
+        s if http_transport_missing(s) => return Ok(Some(s)),
         s => {
             return proto(format!(
                 "RD Gateway refused the WebSocket upgrade: HTTP {s}"
@@ -500,7 +624,13 @@ fn upgrade(
     if r.header("Sec-WebSocket-Accept") != Some(ws::accept_key(&key).as_str()) {
         return proto("RD Gateway sent a wrong Sec-WebSocket-Accept");
     }
-    Ok(())
+    Ok(None)
+}
+
+/// The answers of a gateway that does not know the HTTP transport's URL:
+/// no RD Gateway HTTP endpoint behind the web server.
+fn http_transport_missing(status: u16) -> bool {
+    matches!(status, 404 | 405 | 501)
 }
 
 /// Handshake, tunnel, tunnel authorization and channel (MS-TSGU 3.3.5.2).
@@ -567,13 +697,63 @@ fn create_tunnel(
     Ok(())
 }
 
+/// The write half of a tunnel, over either transport.
+pub enum GatewayStream {
+    Ws(WsStream),
+    Rpc(rpc::RpcStream),
+}
+
+impl Write for GatewayStream {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        match self {
+            Self::Ws(s) => s.write(buf),
+            Self::Rpc(s) => s.write(buf),
+        }
+    }
+
+    fn write_vectored(&mut self, bufs: &[IoSlice<'_>]) -> io::Result<usize> {
+        match self {
+            Self::Ws(s) => s.write_vectored(bufs),
+            Self::Rpc(s) => s.write_vectored(bufs),
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+impl ByteStream for GatewayStream {
+    fn shutdown(&mut self) {
+        match self {
+            Self::Ws(s) => s.shutdown(),
+            Self::Rpc(s) => s.shutdown(),
+        }
+    }
+}
+
+/// The read half of a tunnel, over either transport.
+pub enum GatewayReader {
+    Ws(WsReader),
+    Rpc(Box<rpc::RpcReader>),
+}
+
+impl Read for GatewayReader {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        match self {
+            Self::Ws(r) => r.read(buf),
+            Self::Rpc(r) => r.read(buf),
+        }
+    }
+}
+
 /// The write half: RDP bytes go out in HTTP_DATA_PACKETs.
-pub struct GatewayStream {
+pub struct WsStream {
     link: Arc<Mutex<Link>>,
     closed: bool,
 }
 
-impl Write for GatewayStream {
+impl Write for WsStream {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         self.write_vectored(&[IoSlice::new(buf)])
     }
@@ -600,7 +780,7 @@ impl Write for GatewayStream {
     }
 }
 
-impl ByteStream for GatewayStream {
+impl ByteStream for WsStream {
     /// Closes the channel and the WebSocket (best effort), then the socket.
     fn shutdown(&mut self) {
         let mut l = lock(&self.link);
@@ -615,7 +795,7 @@ impl ByteStream for GatewayStream {
 
 /// The read half: blocking reads return the RDP bytes of HTTP_DATA_PACKETs;
 /// Ok(0) once the gateway closed the channel or the connection.
-pub struct GatewayReader {
+pub struct WsReader {
     link: Arc<Mutex<Link>>,
     inbound: Inbound,
     out: Vec<u8>,
@@ -623,7 +803,7 @@ pub struct GatewayReader {
     done: bool,
 }
 
-impl GatewayReader {
+impl WsReader {
     fn handle(&mut self, pkt: &[u8]) -> Result<()> {
         let (t, body) = p::split(pkt);
         match t {
@@ -652,7 +832,7 @@ impl GatewayReader {
     }
 }
 
-impl Read for GatewayReader {
+impl Read for WsReader {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         loop {
             if self.pos < self.out.len() {
