@@ -419,6 +419,10 @@ pub struct Quality {
     /// Touch and pen go to the session as touch and pen (MS-RDPEI) when the
     /// server offers it; off, they act as the mouse. Applies live.
     pub touch: bool,
+    /// Video redirection (MS-RDPEVOR, MS-RDPEGT): video the server detects
+    /// comes as an H.264 stream decoded here. Needs `gfx`; off by default
+    /// until checked against live servers (RDP-76).
+    pub video: bool,
 }
 
 /// Bulk compression setting, saved by name.
@@ -493,6 +497,7 @@ impl Quality {
             compression: Comp::Off,
             gfx: true,
             touch: true,
+            video: false,
         }
     }
 
@@ -511,6 +516,7 @@ impl Quality {
             cfg.graphics = rdp::Graphics::Bitmap;
             cfg.h264 = None;
         }
+        cfg.video = self.gfx && self.video;
         cfg.experience = rdp::Experience {
             wallpaper: self.wallpaper,
             font_smoothing: self.font_smoothing,
@@ -1546,6 +1552,27 @@ mod tests {
         };
         let back: Quality = serde_json::from_str(&serde_json::to_string(&off).unwrap()).unwrap();
         assert!(!back.touch);
+    }
+
+    #[test]
+    fn video_redirection_is_off_unless_chosen_and_needs_gfx() {
+        assert!(!Quality::default().video);
+        // Saved before the setting existed.
+        let o: SessionOptions =
+            serde_json::from_str(r#"{"quality":{"connection":6,"gfx":true}}"#).unwrap();
+        assert!(!o.quality.video);
+        let mut cfg = rdp::Config::new("h", "u", "p");
+        let on = Quality {
+            video: true,
+            ..Quality::default()
+        };
+        on.apply(&mut cfg);
+        assert!(cfg.video);
+        let back: Quality = serde_json::from_str(&serde_json::to_string(&on).unwrap()).unwrap();
+        assert!(back.video);
+        // Without the graphics pipeline there is no video redirection.
+        Quality { gfx: false, ..on }.apply(&mut cfg);
+        assert!(!cfg.video);
     }
 
     #[test]

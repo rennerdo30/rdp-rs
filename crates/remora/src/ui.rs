@@ -110,6 +110,18 @@ const FIELD_TEXT: f32 = 13.0;
 const DEPTHS: [u16; 4] = [32, 24, 16, 15];
 /// Sub-label of the "Touch and pen" switch.
 const TOUCH_HINT: &str = "Off: they act as the mouse";
+/// `TabGraphics` / `FormGraphics` index of the video redirection switch
+/// (0 and 1 choose bitmaps or GFX).
+const VIDEO_SWITCH: usize = 2;
+
+/// Sub-label of the "Video redirection" switch.
+fn video_hint(gfx: bool) -> &'static str {
+    if gfx {
+        "Video the server detects plays as H.264 here"
+    } else {
+        "Needs GFX (H.264)"
+    }
+}
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Field {
@@ -2125,9 +2137,10 @@ impl Ui {
             Hit::CertRefuse(id) => return Some(Action::CertAnswer(id, false)),
             Hit::TabPreset(id, i) => {
                 let t = self.tab_mut(id)?;
-                let touch = t.quality.touch;
+                let (touch, video) = (t.quality.touch, t.quality.video);
                 t.quality = Quality::preset(PRESETS[i].0, t.quality.color_depth);
                 t.quality.touch = touch;
+                t.quality.video = video;
                 return Some(Action::SetQuality(id, t.quality));
             }
             Hit::TabDepth(id, i) => {
@@ -2158,16 +2171,23 @@ impl Ui {
             Hit::FormCompression(i) => self.opts.quality.compression = COMPRESSION[i].0,
             Hit::TabGraphics(id, i) => {
                 let t = self.tab_mut(id)?;
-                t.quality.gfx = i == 1;
+                match i {
+                    VIDEO_SWITCH => t.quality.video = !t.quality.video,
+                    _ => t.quality.gfx = i == 1,
+                }
                 return Some(Action::SetQuality(id, t.quality));
+            }
+            Hit::FormGraphics(VIDEO_SWITCH) => {
+                self.opts.quality.video = !self.opts.quality.video;
             }
             Hit::FormGraphics(i) => self.opts.quality.gfx = i == 1,
             Hit::FormPreset(i) => {
                 let depth = self.opts.quality.color_depth;
-                let (touch, gfx) = (self.opts.quality.touch, self.opts.quality.gfx);
+                let q = self.opts.quality;
                 self.opts.quality = Quality::preset(PRESETS[i].0, depth);
-                self.opts.quality.touch = touch;
-                self.opts.quality.gfx = gfx;
+                self.opts.quality.touch = q.touch;
+                self.opts.quality.gfx = q.gfx;
+                self.opts.quality.video = q.video;
             }
             Hit::FormDepth(i) => self.opts.quality.color_depth = DEPTHS[i],
             Hit::FormExperience(i) => {
@@ -5766,7 +5786,19 @@ impl Ui {
                 Hit::FormGraphics(i),
             );
         }
-        y += 2 * p(50.0) + p(20.0);
+        y += 2 * p(50.0) + p(8.0);
+        let cells = self.card(cv, x, y, w, &[p(50.0)]);
+        self.card_switch(
+            cv,
+            te,
+            f,
+            cells[0],
+            "Video redirection",
+            video_hint(q.gfx),
+            q.video,
+            Hit::FormGraphics(VIDEO_SWITCH),
+        );
+        y += p(50.0) + p(20.0);
 
         self.caption(cv, te, f, x, y, w, "WINDOWS KEYS (WIN, ALT+TAB, …)");
         y += p(24.0);
@@ -6726,7 +6758,19 @@ impl Ui {
             .map(|(i, n)| (n.to_string(), q.gfx == (i == 1), Hit::TabGraphics(id, i)))
             .collect();
         self.segmented(cv, te, f, Rect::new(x, y, w, p(34.0)), &items);
-        y += p(34.0) + p(24.0);
+        y += p(34.0) + p(8.0);
+        let cells = self.card(cv, x, y, w, &[p(58.0)]);
+        self.card_switch(
+            cv,
+            te,
+            f,
+            cells[0],
+            "Video redirection",
+            video_hint(q.gfx),
+            q.video,
+            Hit::TabGraphics(id, VIDEO_SWITCH),
+        );
+        y += p(58.0) + p(24.0);
 
         self.caption(cv, te, f, x, y, w, "Compression");
         y += p(26.0);
@@ -8053,6 +8097,24 @@ mod tests {
         assert!(!m.opts.quality.touch, "a speed preset keeps the choice");
         m.activate(Hit::FormExperience(6));
         assert!(m.opts.quality.touch);
+    }
+
+    #[test]
+    fn video_switch_toggles_and_survives_a_speed_preset() {
+        let mut m = sample(false);
+        assert!(!m.opts.quality.video, "off by default");
+        m.activate(Hit::FormGraphics(VIDEO_SWITCH));
+        assert!(m.opts.quality.video);
+        assert!(m.opts.quality.gfx, "GFX stays chosen");
+        m.activate(Hit::FormPreset(PRESETS.len() - 1)); // Modem
+        assert!(m.opts.quality.video, "a speed preset keeps the choice");
+        m.activate(Hit::FormGraphics(0));
+        assert!(
+            !m.opts.quality.gfx && m.opts.quality.video,
+            "bitmaps keep it"
+        );
+        m.activate(Hit::FormGraphics(VIDEO_SWITCH));
+        assert!(!m.opts.quality.video);
     }
 
     #[test]

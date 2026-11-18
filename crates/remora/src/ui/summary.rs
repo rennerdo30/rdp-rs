@@ -150,7 +150,9 @@ impl Ui {
             detail: format!(
                 "{}-bit colour · {}",
                 q.color_depth,
-                if q.gfx {
+                if q.gfx && q.video {
+                    "GFX graphics pipeline with video redirection"
+                } else if q.gfx {
                     "GFX graphics pipeline"
                 } else {
                     "bitmap graphics"

@@ -598,6 +598,71 @@ mod tests {
         assert_eq!(fb.pixels[31 * 48 + 31], inside);
         assert_eq!(fb.pixels[5 * 48 + 5], 0, "outside the region");
     }
+
+    /// Video redirection end to end (RDP-76): the spec's presentation
+    /// request (MS-RDPEVOR 4.1) and its 480 x 244 H.264 keyframe (4.3)
+    /// through the control and data channels, placed by the spec's
+    /// geometry (MS-RDPEGT 4.1): the picture comes out of this decoder at
+    /// once and is painted into the tracked rectangle only.
+    #[test]
+    #[ignore]
+    fn media_foundation_decodes_the_video_redirection_example() {
+        use rdp::video::geometry::{self, MappedGeometry, Rect32};
+        let start = include_bytes!("../../rdp/src/video/testdata/rdpevor_4_1.bin");
+        let data = include_bytes!("../../rdp/src/video/testdata/rdpevor_4_3.bin");
+        let made = std::sync::Arc::new(std::sync::Mutex::new(0));
+        let n = made.clone();
+        let factory: rdp::H264Factory = Arc::new(move || {
+            *n.lock().unwrap() += 1;
+            Some(Box::new(MfH264::new().expect("Media Foundation H.264 decoder")) as _)
+        });
+        let (mut channels, handle) = rdp::video::video(factory);
+        let mut out = rdp::DvcOut::default();
+        channels[0].opened(&mut out).unwrap();
+        channels[0].process(start, &mut out).unwrap();
+        assert_eq!(out.take(), vec![rdp::video::pdu::presentation_response(3)]);
+        let g = MappedGeometry {
+            mapping_id: 0x8000_7ABA_0004_0222,
+            top_level_id: 0x301E2,
+            tracked: Rect32::new(16, 138, 496, 382),
+            top_level: Rect32::new(291, 114, 1144, 714),
+            bound: Rect32::new(0, 0, 480, 244),
+            rects: vec![Rect32::new(0, 0, 480, 244)],
+        };
+        channels[2]
+            .process(&geometry::encode_update(&g), &mut out)
+            .unwrap();
+        channels[1].process(data, &mut out).unwrap();
+        let s = handle.stats();
+        assert_eq!(*made.lock().unwrap(), 1);
+        assert_eq!(s.decoded, 1, "the keyframe comes out at once");
+        const MARK: u32 = 0x00FF_00FF;
+        let mut fb = rdp::Framebuffer::new(1024, 768);
+        fb.pixels.fill(MARK);
+        let mut damage = Vec::new();
+        handle.present(&mut fb, &mut damage, 0, std::time::Instant::now());
+        assert_eq!(
+            damage,
+            vec![rdp::Damage {
+                x: 307,
+                y: 252,
+                w: 480,
+                h: 244
+            }]
+        );
+        let at = |x: usize, y: usize| fb.pixels[y * 1024 + x];
+        for (x, y) in [(307, 252), (786, 495), (500, 400)] {
+            assert_ne!(at(x, y), MARK, "painted at ({x}, {y})");
+        }
+        for (x, y) in [(306, 252), (787, 495), (307, 251), (500, 496)] {
+            assert_eq!(at(x, y), MARK, "outside at ({x}, {y})");
+        }
+        println!(
+            "spec sample colours: {:06x} {:06x}",
+            at(307, 252),
+            at(500, 400)
+        );
+    }
 }
 
 #[cfg(test)]

@@ -2,7 +2,7 @@
 //!
 //!   remora                                       connection manager
 //!   remora <host[:port]> -u <[DOMAIN\]user> [-d domain] [--size WxH] [-v]
-//!          [--compression off|rdp4|rdp5|rdp6|rdp61] [--gfx] [--multimon] [--kerberos]
+//!          [--compression off|rdp4|rdp5|rdp6|rdp61] [--gfx [--video]] [--multimon] [--kerberos]
 //!          [--surface-commands] [--drawing-orders]
 //!                                                one session window
 //!   remora <host> -u <user> --screenshot out.png [--wait SECONDS]
@@ -90,6 +90,8 @@ struct Args {
     microphone: Option<Option<u32>>,
     list_microphones: bool,
     gfx: bool,
+    /// `--video`: with `--gfx`, offer video redirection (MS-RDPEVOR).
+    video: bool,
     /// `--surface-commands`, `--drawing-orders`: the experimental picture
     /// paths (RemoteFX/NSCodec surface bits, MS-RDPEGDI orders), off by default.
     surface_commands: bool,
@@ -110,6 +112,7 @@ fn usage() -> ! {
          \x20           [--gateway gwhost[:port]]   (RD Gateway, same credentials)\n\
          \x20           [--compression off|rdp4|rdp5|rdp6|rdp61]\n\
          \x20           [--gfx]   (graphics pipeline, MS-RDPEGFX)\n\
+         \x20           [--video]   (with --gfx: video redirection, MS-RDPEVOR)\n\
          \x20           [--surface-commands] [--drawing-orders]   (experimental picture paths)\n\
          \x20           [--expect-fingerprint SHA256]   (accept only this server certificate)\n\
          \x20           [--multimon]   (all local monitors, MS-RDPBCGR 2.2.1.3.6)\n\
@@ -181,6 +184,7 @@ fn parse_args() -> Args {
             }
             "--list-microphones" => a.list_microphones = true,
             "--gfx" => a.gfx = true,
+            "--video" => a.video = true,
             "--surface-commands" => a.surface_commands = true,
             "--drawing-orders" => a.drawing_orders = true,
             "--multimon" => a.multimon = true,
@@ -348,6 +352,7 @@ fn main() {
         {
             cfg.h264 = Some(h264_mf::factory());
         }
+        cfg.video = args.video;
     }
 
     if args.screenshot.is_some() || args.record.is_some() {
@@ -492,6 +497,17 @@ fn screenshot(
             g.frames,
             g.decode.as_secs_f64() * 1000.0 / g.frames as f64,
             g.codec.unwrap_or("none")
+        );
+    }
+    // Video redirection (RDP-76): whether the server used it.
+    if let Some(v) = client.video_stats() {
+        eprintln!(
+            "video redirection: {} presentations, {} samples decoded, {} frames shown, {} skipped, {:.2} ms decoding per sample",
+            v.presentations,
+            v.decoded,
+            v.presented,
+            v.skipped,
+            v.decode.as_secs_f64() * 1000.0 / v.decoded.max(1) as f64
         );
     }
     if let Some(r) = recorder {
