@@ -17,6 +17,8 @@
 //!   [`PrintBackend`]
 //! - [`fscc`]: NTSTATUS values, FILETIME conversion and MS-FSCC structures
 //! - [`smartcard`]: smart card redirection (MS-RDPESC), [`smart_card_device`]
+//! - [`serial`]: serial and parallel port redirection (MS-RDPESP),
+//!   [`port_device`] and its [`SerialBackend`]
 //!
 //! # Devices
 //!
@@ -46,6 +48,7 @@ pub mod drive;
 pub mod fscc;
 pub mod path;
 pub mod printer;
+pub mod serial;
 pub mod smartcard;
 
 #[cfg(test)]
@@ -60,6 +63,7 @@ pub use self::drive::Drive;
 pub use self::printer::{
     PrintBackend, PrintFormat, Printer, PrinterInfo, SharedBackend, share_printers,
 };
+pub use self::serial::{PortInfo, PortKind, SerialBackend, SerialPort, port_device};
 pub use self::smartcard::{SmartCard, SmartCardBackend, smart_card_device};
 
 /// DeviceType values (MS-RDPEFS 2.2.1.3).

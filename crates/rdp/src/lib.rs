@@ -25,7 +25,7 @@
 //! - [`rdpei`]: touch and pen input on the `Microsoft::Windows::RDS::Input` dynamic channel (MS-RDPEI)
 //! - [`server`]: the server side for Remora Host: TLS, the connection sequence,
 //!   bitmap updates and input (MS-RDPBCGR)
-//! - [`rdpdr`]: device redirection (MS-RDPEFS) with shared drives, printers (MS-RDPEPC) and smart cards (MS-RDPESC)
+//! - [`rdpdr`]: device redirection (MS-RDPEFS) with shared drives, printers (MS-RDPEPC), smart cards (MS-RDPESC) and serial/parallel ports (MS-RDPESP)
 
 pub mod audin;
 pub mod autodetect;
@@ -96,6 +96,7 @@ pub use rdpdr::{
     Device, Drive, IoCompletion, IoRequest, PrintBackend, PrintFormat, Printer, PrinterInfo, Rdpdr,
     RdpdrHandle, SmartCardBackend, rdpdr, share_printers, smart_card_device,
 };
+pub use rdpdr::{PortInfo, PortKind, SerialBackend, SerialPort, port_device};
 pub use rdpei::{
     PenContact, PenFrame, TouchContact, TouchFrame, TouchHandle, TouchInput, TouchOptions,
     touch_input,
