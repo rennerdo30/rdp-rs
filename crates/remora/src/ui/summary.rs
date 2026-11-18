@@ -50,6 +50,7 @@ impl Ui {
         c.gateway = text(Field::Gateway);
         c.group = normalize_path(&text(Field::GroupPath));
         c.kerberos = self.kerberos;
+        c.gateway_rpc = self.gateway_rpc;
         c.inherit = self.form_inherit();
         (c.width, c.height) = if self.size == 0 {
             (0, 0)
@@ -265,6 +266,8 @@ impl Ui {
                         format!(" on port {}", r.port)
                     }
                 )
+            } else if r.gateway_rpc {
+                "RD Gateway over RPC over HTTPS, with the same sign-in".into()
             } else {
                 "RD Gateway over HTTPS, with the same sign-in".into()
             },

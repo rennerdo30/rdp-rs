@@ -36,6 +36,10 @@ pub struct Connection {
     /// RD Gateway as host[:port]; empty: direct. Part of Credentials.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub gateway: String,
+    /// Reach the gateway over RPC over HTTP only; off: the HTTP transport,
+    /// and RPC over HTTP when the gateway lacks it. Part of Credentials.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub gateway_rpc: bool,
     /// Sign in with Windows (Kerberos, NTLM fallback) instead of Remora's own
     /// NTLM. Part of Credentials.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -151,6 +155,9 @@ pub struct Group {
     /// RD Gateway as host[:port]; empty: direct.
     #[serde(skip_serializing_if = "String::is_empty")]
     pub gateway: String,
+    /// Reach the gateway over RPC over HTTP only.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub gateway_rpc: bool,
     /// Sign in with Windows (Kerberos).
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub kerberos: bool,
@@ -970,6 +977,7 @@ impl Store {
             out.user = g.user.clone();
             out.password = g.password.clone();
             out.gateway = g.gateway.clone();
+            out.gateway_rpc = g.gateway_rpc;
             out.kerberos = g.kerberos;
         }
         if let Some(g) = self.source_of(&c.group, &c.inherit, |i| i.display) {
@@ -1070,6 +1078,39 @@ mod tests {
             !plain.contains("opens") && !plain.contains("apps"),
             "{plain}"
         );
+    }
+
+    #[test]
+    fn gateway_rpc_round_trips_and_comes_with_the_sign_in() {
+        // Off is not written, so older files and older Remora versions agree.
+        let plain = serde_json::to_string(&Connection::default()).unwrap();
+        assert!(!plain.contains("gateway_rpc"), "{plain}");
+        let c = Connection {
+            name: "old gateway".into(),
+            gateway: "rdg.example".into(),
+            gateway_rpc: true,
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&c).unwrap();
+        assert!(json.contains(r#""gateway_rpc":true"#), "{json}");
+        assert_eq!(serde_json::from_str::<Connection>(&json).unwrap(), c);
+        // A member inheriting the sign-in takes the group's gateway and
+        // its transport.
+        let work = Group {
+            path: "Work".into(),
+            gateway: "rdg.corp".into(),
+            gateway_rpc: true,
+            ..Default::default()
+        };
+        let member = Connection {
+            group: "Work".into(),
+            gateway: "own".into(),
+            inherit: Inherit::ALL,
+            ..Default::default()
+        };
+        let s = store_with(vec![work], vec![member.clone()]);
+        let r = s.resolve(&member);
+        assert_eq!((r.gateway.as_str(), r.gateway_rpc), ("rdg.corp", true));
     }
 
     #[test]
