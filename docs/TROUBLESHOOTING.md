@@ -184,6 +184,12 @@ A session that ends without an error shows why and how long it ran, with
 - **The picture looks wrong with GFX (H.264).** The graphics pipeline is
   experimental. Switch the connection back to **Bitmaps** on the editor's
   Advanced page, and please report it.
+- **A video plays in the wrong place, flickers or freezes with video
+  redirection.** Switch **Video redirection** off on the editor's Advanced
+  page (or the side panel's Quality page) and reconnect: the server then
+  sends the video inside the desktop picture again. The diagnostic log shows
+  the video presentations (`video N: start ...`) and their geometry
+  (`geometry ...`); please attach it to the report.
 - **Windows warns when starting the setup.** The setup is not code-signed yet.
   Choose **More info**, then **Run anyway**.
 
