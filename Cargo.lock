@@ -1939,7 +1939,7 @@ dependencies = [
 
 [[package]]
 name = "rdp"
-version = "0.1.0-beta.8"
+version = "0.1.0-beta.9"
 dependencies = [
  "ring",
  "rustls",
@@ -1975,7 +1975,7 @@ dependencies = [
 
 [[package]]
 name = "remora"
-version = "0.1.0-beta.8"
+version = "0.1.0-beta.9"
 dependencies = [
  "argon2",
  "chacha20poly1305 0.11.0",
@@ -1999,7 +1999,7 @@ dependencies = [
 
 [[package]]
 name = "remora-agent"
-version = "0.1.0-beta.8"
+version = "0.1.0-beta.9"
 dependencies = [
  "remora-link",
  "windows",
@@ -2008,7 +2008,7 @@ dependencies = [
 
 [[package]]
 name = "remora-host"
-version = "0.1.0-beta.8"
+version = "0.1.0-beta.9"
 dependencies = [
  "argon2",
  "rcgen",
@@ -2021,7 +2021,7 @@ dependencies = [
 
 [[package]]
 name = "remora-link"
-version = "0.1.0-beta.8"
+version = "0.1.0-beta.9"
 dependencies = [
  "blake3",
  "getrandom 0.4.3",
@@ -2034,7 +2034,7 @@ dependencies = [
 
 [[package]]
 name = "remora-update"
-version = "0.1.0-beta.8"
+version = "0.1.0-beta.9"
 dependencies = [
  "serde_json",
  "sha2 0.11.1",
