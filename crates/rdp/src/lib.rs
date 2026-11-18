@@ -21,6 +21,7 @@
 //! - [`redirect`]: server redirection (session broker, load balancing) and RDSTLS
 //! - [`rdpsnd`]: audio output on the `rdpsnd` channel (MS-RDPEA)
 //! - [`audin`]: microphone redirection on the `AUDIO_INPUT` dynamic channel (MS-RDPEAI)
+//! - [`camera`]: camera redirection on the `RDCamera_*` dynamic channels (MS-RDPECAM)
 //! - [`rail`]: RemoteApp, the `rail` channel and window orders (MS-RDPERP)
 //! - [`rdpei`]: touch and pen input on the `Microsoft::Windows::RDS::Input` dynamic channel (MS-RDPEI)
 //! - [`server`]: the server side for Remora Host: TLS, the connection sequence,
@@ -29,6 +30,7 @@
 
 pub mod audin;
 pub mod autodetect;
+pub mod camera;
 pub mod channel;
 pub mod client;
 pub mod cliprdr;
@@ -69,6 +71,7 @@ pub mod x224;
 
 pub use audin::{AudioInput, AudioInputHandle, CaptureBackend, audin};
 pub use autodetect::NetworkCharacteristics;
+pub use camera::{CameraBackend, CameraHandle, cameras};
 pub use channel::{ChannelOut, StaticChannel};
 pub use client::{
     CertificateCheck, Client, ClientStats, CloseReason, Config, ConnectionInfo, PollOutcome,

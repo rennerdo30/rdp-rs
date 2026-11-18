@@ -166,6 +166,7 @@ impl Ui {
             (o.clipboard, "clipboard"),
             (o.sound, "sound"),
             (o.microphone, "microphone"),
+            (o.camera, "camera"),
             (o.printers, "printers"),
             (o.smart_cards, "smart cards"),
         ] {

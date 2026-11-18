@@ -10,8 +10,8 @@ and what it never does.
 - Passwords are saved only in an encrypted vault, and only after you set a
   master password. Without one, no password is ever written to disk.
 - A server's certificate is checked before your password is sent.
-- Sharing (clipboard, folders, printers, smart cards, sound, microphone) is off
-  until you switch it on.
+- Sharing (clipboard, folders, printers, smart cards, sound, microphone,
+  camera) is off until you switch it on.
 - Logs never contain passwords.
 
 ## What is stored where
@@ -115,6 +115,13 @@ that session.
 - **Clipboard** sharing works both ways, for text and files, while it is on.
 - **Printers, smart cards, sound and the microphone** reach the session only
   while their switch is on.
+- **Cameras** are only named to the server while **Camera** is on, and only
+  the cameras you chose. A camera is opened for capture only while an app
+  in the session records from it, and is closed at once when the app stops,
+  when you switch **Camera** off or when the session ends. To offer the
+  camera's formats, Remora reads them from the device when the server first
+  asks, without capturing. Pictures are sent as the camera makes them and
+  are never written to disk or the log.
 
 ## Logs and what is never logged
 

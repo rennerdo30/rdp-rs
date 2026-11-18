@@ -193,8 +193,8 @@ or hold **Alt** to bring it back. Its buttons, from the left:
 
 **The side panel** has four pages:
 
-- **Sharing**: switch clipboard, sound, microphone, printers, smart cards
-  and ports, and share folders, live.
+- **Sharing**: switch clipboard, sound, microphone, camera, printers, smart
+  cards and ports, and share folders, live.
 - **Display**: full screen, **Fit to window** and the scale, which apply
   live.
 
@@ -282,6 +282,16 @@ need a reconnect.
   under **Play sound on**.
 - **Microphone**: this PC's microphone in the session, from the device you
   choose under **Record from**.
+- **Camera**: this PC's cameras in the session, for video calls and other
+  camera apps there. Choose **All cameras** or one camera under **Share
+  camera**. A shared camera appears in the session's apps under its own
+  name; it turns on only while an app in the session uses it, and it turns
+  off at once when the app stops, when you switch **Camera** off, or when
+  the session ends. The session gets the picture in a format the camera
+  makes itself (MJPG, YUY2, NV12 and the like, or H.264 where the camera
+  offers it). It needs a server running Windows 10 version 1803, Windows
+  Server 2019 or later, with video capture redirection allowed. Cameras
+  plugged in during a session appear after a reconnect.
 - **Printers**: this PC's printers in the session, through Easy Print, so the
   server needs no printer drivers.
 - **Smart cards**: this PC's card readers and cards, for example to sign in

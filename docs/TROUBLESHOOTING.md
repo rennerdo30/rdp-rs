@@ -192,6 +192,14 @@ A session that ends without an error shows why and how long it ran, with
   session: the session's program then gets "access denied". Some servers
   keep showing a port after you switch it off; it no longer works there
   and goes away at the next connection.
+- **A shared camera does not appear in the session.** Camera redirection
+  needs Windows 10 version 1803, Windows Server 2019 or later on the server,
+  and the server's policy "Do not allow video capture redirection" (Remote
+  Desktop Session Host, Device and Resource Redirection) must not be
+  enabled. Check that **Camera** is on in the side panel and that the camera
+  was plugged in when the session started (otherwise reconnect).
+  `remora --list-cameras` shows the cameras Remora sees, without opening
+  them. A camera another app on this PC is using may refuse to start.
 - **Windows warns when starting the setup.** The setup is not code-signed yet.
   Choose **More info**, then **Run anyway**.
 
