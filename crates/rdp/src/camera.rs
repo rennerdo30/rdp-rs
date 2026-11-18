@@ -29,8 +29,8 @@
 //! MS-RDPECAM 3.2.5 requires; they never close the channel. Sample data is
 //! never traced.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 use crate::cursor::{Put, Reader};
 use crate::dvc::{DvcOut, DynamicChannel};
@@ -688,16 +688,7 @@ pub fn cameras(
         seen: u64::MAX,
     })];
     for (index, backend) in backends.into_iter().enumerate() {
-        channels.push(Box::new(DeviceChannel {
-            shared: shared.clone(),
-            index,
-            backend,
-            activations: 0,
-            media_types: None,
-            current: None,
-            streaming: None,
-            pending: 0,
-        }));
+        channels.push(Box::new(DeviceChannel::new(shared.clone(), index, backend)));
     }
     (channels, CameraHandle { shared })
 }
@@ -805,12 +796,27 @@ impl DynamicChannel for Enumerator {
 
 /// One device channel (MS-RDPECAM 1.3.4 to 1.3.7).
 ///
+/// Windows opens a device channel once per capture client and keeps the
+/// instances open together: it may start the stream on one and send the
+/// Sample Requests on another (RDP-83). So the device's state lives in
+/// [`DevState`], shared by all instances; each instance only keeps its own
+/// waiting Sample Requests, since a response goes back on the channel the
+/// request came on.
+///
 /// States (MS-RDPECAM 3.1.1): Deactivated while `activations` is 0,
 /// Activated after an Activate Device Request, Streaming while `streaming`
 /// is set.
 pub struct DeviceChannel {
     shared: Arc<Shared>,
     index: usize,
+    dev: Arc<Mutex<DevState>>,
+    /// Sample Requests on this instance waiting for a sample.
+    pending: u32,
+}
+
+/// The camera and its protocol state, common to a device channel's
+/// instances.
+struct DevState {
     backend: Box<dyn CameraBackend>,
     /// Activate Device Requests not yet matched by a Deactivate.
     activations: u32,
@@ -820,16 +826,74 @@ pub struct DeviceChannel {
     current: Option<MediaType>,
     /// The format the backend captures in; None while not streaming.
     streaming: Option<MediaType>,
-    /// Sample Requests waiting for a sample.
-    pending: u32,
+    /// Instances open now.
+    open: u32,
+}
+
+impl DevState {
+    /// Stops capture (MS-RDPECAM 3.2.5.24); waiting Sample Requests of
+    /// every instance are answered with an error on their next turn.
+    fn stop(&mut self, index: usize) {
+        if self.streaming.take().is_some() {
+            self.backend.stop();
+            trace!("camera {index}: capture stopped");
+        }
+    }
+
+    /// Back to the Deactivated state with the camera closed.
+    fn reset(&mut self, index: usize) {
+        self.stop(index);
+        self.activations = 0;
+    }
+
+    /// The camera's formats, asked from the backend the first time.
+    fn media_types(&mut self, index: usize) -> std::result::Result<&[MediaType], u32> {
+        if self.media_types.is_none() {
+            match self.backend.media_types() {
+                Ok(list) if !list.is_empty() => {
+                    trace!("camera {index}: {} media types", list.len());
+                    self.media_types = Some(list);
+                }
+                Ok(_) => {
+                    trace!("camera {index}: no usable media types");
+                    return Err(ERR_UNEXPECTED_ERROR);
+                }
+                Err(e) => {
+                    trace!("camera {index}: media types failed: {e}");
+                    return Err(ERR_UNEXPECTED_ERROR);
+                }
+            }
+        }
+        Ok(self.media_types.as_deref().unwrap_or_default())
+    }
 }
 
 /// The only stream index this client offers.
 const STREAM: u8 = 0;
 
 impl DeviceChannel {
+    fn new(shared: Arc<Shared>, index: usize, backend: Box<dyn CameraBackend>) -> DeviceChannel {
+        DeviceChannel {
+            shared,
+            index,
+            dev: Arc::new(Mutex::new(DevState {
+                backend,
+                activations: 0,
+                media_types: None,
+                current: None,
+                streaming: None,
+                open: 0,
+            })),
+            pending: 0,
+        }
+    }
+
     fn device(&self) -> &Device {
         &self.shared.devices[self.index]
+    }
+
+    fn dev(&self) -> std::sync::MutexGuard<'_, DevState> {
+        self.dev.lock().unwrap_or_else(|p| p.into_inner())
     }
 
     fn version(&self, request_version: u8) -> u8 {
@@ -839,37 +903,17 @@ impl DeviceChannel {
         }
     }
 
-    /// Stops capture and answers every waiting Sample Request with
-    /// `code` (MS-RDPECAM 3.2.5.24).
-    fn stop_streaming(&mut self, version: u8, code: u32, out: &mut DvcOut) {
-        if self.streaming.take().is_some() {
-            self.backend.stop();
-            trace!("camera {}: capture stopped", self.index);
-        }
+    /// Answers this instance's waiting Sample Requests with `code`.
+    fn fail_pending(&mut self, version: u8, code: u32, out: &mut DvcOut) {
         for _ in 0..std::mem::take(&mut self.pending) {
             out.send(sample_error_response(version, STREAM, code));
         }
     }
 
-    /// The camera's formats, asked from the backend the first time.
-    fn media_types(&mut self) -> std::result::Result<&[MediaType], u32> {
-        if self.media_types.is_none() {
-            match self.backend.media_types() {
-                Ok(list) if !list.is_empty() => {
-                    trace!("camera {}: {} media types", self.index, list.len());
-                    self.media_types = Some(list);
-                }
-                Ok(_) => {
-                    trace!("camera {}: no usable media types", self.index);
-                    return Err(ERR_UNEXPECTED_ERROR);
-                }
-                Err(e) => {
-                    trace!("camera {}: media types failed: {e}", self.index);
-                    return Err(ERR_UNEXPECTED_ERROR);
-                }
-            }
-        }
-        Ok(self.media_types.as_deref().unwrap_or_default())
+    /// Stops capture and fails the waiting Sample Requests.
+    fn stop_streaming(&mut self, d: &mut DevState, version: u8, code: u32, out: &mut DvcOut) {
+        d.stop(self.index);
+        self.fail_pending(version, code, out);
     }
 
     /// Answers one request (MS-RDPECAM 3.2.5.5 to 3.2.5.21); Err is the
@@ -883,20 +927,23 @@ impl DeviceChannel {
         if req.version2_only() && version < 2 {
             return Err(ERR_INVALID_MESSAGE);
         }
-        if req != DeviceRequest::Activate && self.activations == 0 {
+        let dev = self.dev.clone();
+        let mut d = dev.lock().unwrap_or_else(|p| p.into_inner());
+        if req != DeviceRequest::Activate && d.activations == 0 {
             // MS-RDPECAM 3.1.1: in the Deactivated state every request but
             // Activate fails with NotInitialized.
             return Err(ERR_NOT_INITIALIZED);
         }
+        let index = self.index;
         match req {
             DeviceRequest::Activate => {
-                self.activations = self.activations.saturating_add(1);
+                d.activations = d.activations.saturating_add(1);
                 out.send(success_response(version));
             }
             DeviceRequest::Deactivate => {
-                self.activations -= 1;
-                if self.activations == 0 {
-                    self.stop_streaming(version, ERR_NOT_INITIALIZED, out);
+                d.activations -= 1;
+                if d.activations == 0 {
+                    self.stop_streaming(&mut d, version, ERR_NOT_INITIALIZED, out);
                 }
                 out.send(success_response(version));
             }
@@ -905,14 +952,14 @@ impl DeviceChannel {
             }
             DeviceRequest::MediaTypeList(stream) => {
                 check_stream(stream)?;
-                let list = self.media_types()?;
+                let list = d.media_types(index)?;
                 out.send(media_type_list_response(version, list));
             }
             DeviceRequest::CurrentMediaType(stream) => {
                 check_stream(stream)?;
-                let current = match self.current {
+                let current = match d.current {
                     Some(t) => t,
-                    None => self.media_types()?[0],
+                    None => d.media_types(index)?[0],
                 };
                 out.send(current_media_type_response(version, &current));
             }
@@ -925,44 +972,46 @@ impl DeviceChannel {
                     wanted = Some(t);
                 }
                 let wanted = wanted.ok_or(ERR_INVALID_MESSAGE)?;
-                let Some(&format) = self.media_types()?.iter().find(|t| t.same_format(&wanted))
+                let Some(&format) = d
+                    .media_types(index)?
+                    .iter()
+                    .find(|t| t.same_format(&wanted))
                 else {
                     return Err(ERR_INVALID_MEDIA_TYPE);
                 };
-                self.stop_streaming(version, ERR_NOT_INITIALIZED, out);
-                if let Err(e) = self.backend.start(&format) {
-                    trace!("camera {}: capture start failed: {e}", self.index);
+                self.stop_streaming(&mut d, version, ERR_NOT_INITIALIZED, out);
+                if let Err(e) = d.backend.start(&format) {
+                    trace!("camera {index}: capture start failed: {e}");
                     return Err(ERR_UNEXPECTED_ERROR);
                 }
                 trace!(
-                    "camera {}: capture started, {} {}x{} at {}/{} fps",
-                    self.index,
+                    "camera {index}: capture started, {} {}x{} at {}/{} fps",
                     format.format.name(),
                     format.width,
                     format.height,
                     format.frame_rate_numerator,
                     format.frame_rate_denominator
                 );
-                self.current = Some(format);
-                self.streaming = Some(format);
+                d.current = Some(format);
+                d.streaming = Some(format);
                 out.send(success_response(version));
             }
             DeviceRequest::StopStreams => {
-                self.stop_streaming(version, ERR_NOT_INITIALIZED, out);
+                self.stop_streaming(&mut d, version, ERR_NOT_INITIALIZED, out);
                 out.send(success_response(version));
             }
             // Answered by `sample_request`, never through here.
             DeviceRequest::Sample(_) => return Err(ERR_INVALID_REQUEST),
             DeviceRequest::PropertyList => {
-                let list = self.backend.properties();
+                let list = d.backend.properties();
                 out.send(property_list_response(version, &list));
             }
             DeviceRequest::PropertyValue(set, id) => {
-                let value = self.backend.property(set, id)?;
+                let value = d.backend.property(set, id)?;
                 out.send(property_value_response(version, &value));
             }
             DeviceRequest::SetPropertyValue(set, id, value) => {
-                self.backend.set_property(set, id, value)?;
+                d.backend.set_property(set, id, value)?;
                 out.send(success_response(version));
             }
         }
@@ -972,9 +1021,10 @@ impl DeviceChannel {
     /// A Sample Request (MS-RDPECAM 3.2.5.13): queued while streaming,
     /// else answered with a Sample Error Response.
     fn sample_request(&mut self, version: u8, stream: u8, out: &mut DvcOut) {
+        let streaming = self.dev().streaming.is_some();
         let code = if stream != STREAM {
             Some(ERR_INVALID_STREAM_NUMBER)
-        } else if self.streaming.is_none() {
+        } else if !streaming {
             Some(ERR_NOT_INITIALIZED)
         } else if self.pending >= MAX_PENDING_SAMPLES {
             Some(ERR_INVALID_REQUEST)
@@ -990,10 +1040,17 @@ impl DeviceChannel {
         }
     }
 
-    /// Answers waiting Sample Requests with what the backend captured.
+    /// Answers waiting Sample Requests with what the backend captured; once
+    /// capture stopped (on any instance) they get an error.
     fn deliver(&mut self, version: u8, out: &mut DvcOut) {
-        while self.pending > 0 && self.streaming.is_some() {
-            match self.backend.sample() {
+        let dev = self.dev.clone();
+        let mut d = dev.lock().unwrap_or_else(|p| p.into_inner());
+        while self.pending > 0 {
+            if d.streaming.is_none() {
+                self.fail_pending(version, ERR_NOT_INITIALIZED, out);
+                break;
+            }
+            match d.backend.sample() {
                 Ok(Some(sample)) => {
                     self.pending -= 1;
                     out.send(sample_response(version, STREAM, &sample));
@@ -1003,7 +1060,7 @@ impl DeviceChannel {
                     // The camera is gone: fail the waiting requests, stop
                     // capture and tell the server it was removed.
                     trace!("camera {}: capture failed: {e}", self.index);
-                    self.stop_streaming(version, ERR_UNEXPECTED_ERROR, out);
+                    self.stop_streaming(&mut d, version, ERR_UNEXPECTED_ERROR, out);
                     self.device().gone.store(true, Ordering::Relaxed);
                     self.shared.bump();
                 }
@@ -1011,21 +1068,17 @@ impl DeviceChannel {
         }
     }
 
-    /// Back to the Deactivated state with the camera closed.
+    /// Back to the Deactivated state with the camera closed; waiting
+    /// Sample Requests get an error when `out` is given.
     fn reset(&mut self, out: Option<&mut DvcOut>) {
+        self.dev().reset(self.index);
         match out {
             Some(out) => {
                 let version = self.version(MAX_VERSION);
-                self.stop_streaming(version, ERR_NOT_INITIALIZED, out);
+                self.fail_pending(version, ERR_NOT_INITIALIZED, out);
             }
-            None => {
-                if self.streaming.take().is_some() {
-                    self.backend.stop();
-                }
-                self.pending = 0;
-            }
+            None => self.pending = 0,
         }
-        self.activations = 0;
     }
 }
 
@@ -1042,9 +1095,16 @@ impl DynamicChannel for DeviceChannel {
         &self.shared.devices[self.index].channel
     }
 
+    /// The first instance starts from the Deactivated state; a further one
+    /// joins the device as it is.
     fn opened(&mut self, _out: &mut DvcOut) -> Result<()> {
-        self.reset(None);
-        self.current = None;
+        self.pending = 0;
+        let mut d = self.dev();
+        if d.open == 0 {
+            d.reset(self.index);
+            d.current = None;
+        }
+        d.open += 1;
         Ok(())
     }
 
@@ -1062,7 +1122,11 @@ impl DynamicChannel for DeviceChannel {
         if !self.device().wanted() {
             // Not shared (any more): nothing reaches the camera, and one
             // still capturing closes now rather than on the next tick.
-            if self.streaming.is_some() || self.activations > 0 {
+            let busy = {
+                let d = self.dev();
+                d.streaming.is_some() || d.activations > 0
+            };
+            if busy {
                 self.reset(Some(out));
             }
             let code = ERR_NOT_INITIALIZED;
@@ -1087,7 +1151,7 @@ impl DynamicChannel for DeviceChannel {
             }
         };
         if let DeviceRequest::Sample(stream) = req {
-            if self.activations == 0 {
+            if self.dev().activations == 0 {
                 out.send(sample_error_response(version, stream, ERR_NOT_INITIALIZED));
             } else {
                 self.sample_request(version, stream, out);
@@ -1107,7 +1171,7 @@ impl DynamicChannel for DeviceChannel {
     /// Follows the switch, and answers waiting Sample Requests.
     fn tick(&mut self, out: &mut DvcOut) -> Result<()> {
         let version = self.version(MAX_VERSION);
-        if self.streaming.is_some() && !self.device().wanted() {
+        if self.dev().streaming.is_some() && !self.device().wanted() {
             trace!("camera {}: sharing off, capture stopped", self.index);
             self.reset(Some(out));
             return Ok(());
@@ -1118,22 +1182,39 @@ impl DynamicChannel for DeviceChannel {
         Ok(())
     }
 
-    /// The channel closed: the camera closes at once.
+    /// The last instance closed: the camera closes at once.
     fn closed(&mut self) {
-        self.reset(None);
-        self.current = None;
+        self.pending = 0;
+        let mut d = self.dev();
+        d.open = d.open.saturating_sub(1);
+        if d.open == 0 {
+            d.reset(self.index);
+            d.current = None;
+        }
     }
 
     fn max_message_size(&self) -> usize {
         4096
     }
+
+    /// Another instance of this device channel, over the same device state.
+    fn new_instance(&mut self) -> Option<Box<dyn DynamicChannel>> {
+        Some(Box::new(DeviceChannel {
+            shared: self.shared.clone(),
+            index: self.index,
+            dev: self.dev.clone(),
+            pending: 0,
+        }))
+    }
 }
 
 impl Drop for DeviceChannel {
-    /// The session ended: the camera closes at once.
+    /// The session ended: the camera closes at once. An extra instance
+    /// dropped after it closed leaves the others' capture running; the
+    /// last handle on the device closes the camera.
     fn drop(&mut self) {
-        if self.streaming.take().is_some() {
-            self.backend.stop();
+        if Arc::strong_count(&self.dev) == 1 {
+            self.dev().stop(self.index);
         }
     }
 }

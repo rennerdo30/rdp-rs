@@ -144,6 +144,15 @@ pub trait DynamicChannel: Send {
         true
     }
 
+    /// The server opens this channel again while it is open, and both
+    /// instances stay in use (MS-RDPECAM device channels are opened once per
+    /// capture client). `Some` serves the new ChannelId with that handler
+    /// next to the open one, until it closes; `None` (the default) leaves it
+    /// to [`Self::allow_second_instance`].
+    fn new_instance(&mut self) -> Option<Box<dyn DynamicChannel>> {
+        None
+    }
+
     /// The client is about to close the channel on its own for `why`;
     /// [`Self::closed`] follows.
     fn closing(&mut self, _why: LocalClose) {}
@@ -175,6 +184,9 @@ struct Dvc {
     reasm: Option<Reassembly>,
     /// Sends on the UDP tunnel instead of the static channel.
     udp: bool,
+    /// Another instance from [`DynamicChannel::new_instance`]: dropped once
+    /// it closes.
+    extra: bool,
 }
 
 /// The `drdynvc` static channel: client side of MS-RDPEDYC.
@@ -207,6 +219,7 @@ impl Drdynvc {
                     id: None,
                     reasm: None,
                     udp: false,
+                    extra: false,
                 })
                 .collect(),
             version: 0,
@@ -226,6 +239,7 @@ impl Drdynvc {
             id: None,
             reasm: None,
             udp: false,
+            extra: false,
         });
     }
 
@@ -258,6 +272,7 @@ impl Drdynvc {
         self.from_tunnel = true;
         let r = self.handle(msg, out);
         self.from_tunnel = false;
+        self.prune();
         r
     }
 
@@ -316,6 +331,12 @@ impl Drdynvc {
     /// Negotiated DVC version (0 before the capabilities request).
     pub fn version(&self) -> u16 {
         self.version
+    }
+
+    /// Drops extra instances that closed (indices stay valid while a PDU
+    /// is handled; this runs after).
+    fn prune(&mut self) {
+        self.channels.retain(|d| !d.extra || d.id.is_some());
     }
 
     fn find_open(&self, id: u32) -> Option<usize> {
@@ -419,8 +440,38 @@ impl Drdynvc {
             }
             return;
         };
-        // A second create for a name that is already open: the channel
-        // decides whether the new instance replaces the open one.
+        // A second create for a name that is already open: the channel may
+        // serve it next to the open one (RDP-83).
+        if let Some(open) = self.channels[i].id
+            && open != id
+            && let Some(handler) = self.channels[i].handler.new_instance()
+        {
+            if let Some(j) = self.find_open(id) {
+                self.close(j, false, out);
+            }
+            trace!(
+                "dvc create {} ({id}): another instance next to {open}",
+                self.channels[i].handler.name()
+            );
+            if udp {
+                self.tunnel_out.send(create_response(id, 0));
+            } else {
+                out.send(create_response(id, 0));
+            }
+            self.channels.push(Dvc {
+                handler,
+                id: Some(id),
+                reasm: None,
+                udp,
+                extra: true,
+            });
+            let k = self.channels.len() - 1;
+            let res = self.channels[k].handler.opened(&mut self.out);
+            self.finish(k, res, out);
+            return;
+        }
+        // Otherwise the channel decides whether the new instance replaces
+        // the open one.
         if let Some(open) = self.channels[i].id
             && open != id
             && !self.channels[i].handler.allow_second_instance()
@@ -596,7 +647,9 @@ impl StaticChannel for Drdynvc {
     }
 
     fn process(&mut self, msg: &[u8], out: &mut ChannelOut) -> Result<()> {
-        self.handle(msg, out)
+        let r = self.handle(msg, out);
+        self.prune();
+        r
     }
 
     fn tick(&mut self, out: &mut ChannelOut) -> Result<()> {
@@ -610,6 +663,7 @@ impl StaticChannel for Drdynvc {
             }
             self.finish(i, res, out);
         }
+        self.prune();
         Ok(())
     }
 
@@ -935,6 +989,71 @@ mod tests {
             vec![vec![0x10, 0x03, 0, 0, 0, 0], vec![0x30, 0x03, b'h', b'i']]
         );
         assert_eq!(log.lock().unwrap().events, ["opened"]);
+    }
+
+    /// Hands out a fresh handler for every further instance.
+    struct Multi {
+        log: Arc<Mutex<Log>>,
+        n: u8,
+    }
+
+    impl DynamicChannel for Multi {
+        fn name(&self) -> &str {
+            "CAM"
+        }
+        fn process(&mut self, msg: &[u8], out: &mut DvcOut) -> Result<()> {
+            self.log
+                .lock()
+                .unwrap()
+                .events
+                .push(format!("{} got {msg:?}", self.n));
+            out.send(vec![self.n]);
+            Ok(())
+        }
+        fn closed(&mut self) {
+            self.log
+                .lock()
+                .unwrap()
+                .events
+                .push(format!("{} closed", self.n));
+        }
+        fn new_instance(&mut self) -> Option<Box<dyn DynamicChannel>> {
+            Some(Box::new(Multi {
+                log: self.log.clone(),
+                n: self.n + 1,
+            }))
+        }
+    }
+
+    #[test]
+    fn a_channel_can_serve_several_instances_at_once() {
+        // RDP-83: Windows opens a camera's device channel again while the
+        // first instance is still in use; both must keep working.
+        let log = Arc::new(Mutex::new(Log::default()));
+        let mut d = Drdynvc::new(vec![Box::new(Multi {
+            log: log.clone(),
+            n: 1,
+        })]);
+        assert_eq!(
+            feed(&mut d, &create_req(13, "CAM")),
+            vec![vec![0x10, 13, 0, 0, 0, 0]]
+        );
+        assert_eq!(
+            feed(&mut d, &create_req(14, "CAM")),
+            vec![vec![0x10, 14, 0, 0, 0, 0]]
+        );
+        // Each id reaches its own handler.
+        assert_eq!(feed(&mut d, &[0x30, 13, 7]), vec![vec![0x30, 13, 1]]);
+        assert_eq!(feed(&mut d, &[0x30, 14, 8]), vec![vec![0x30, 14, 2]]);
+        // Closing the second keeps the first, and the extra one is dropped.
+        assert_eq!(feed(&mut d, &[0x40, 14]), vec![vec![0x40, 14]]);
+        assert_eq!(d.channels.len(), 1);
+        assert_eq!(feed(&mut d, &[0x30, 13, 9]), vec![vec![0x30, 13, 1]]);
+        assert!(feed(&mut d, &[0x30, 14, 9]).is_empty(), "14 is gone");
+        assert_eq!(
+            log.lock().unwrap().events,
+            ["1 got [7]", "2 got [8]", "2 closed", "1 got [9]"]
+        );
     }
 
     #[test]

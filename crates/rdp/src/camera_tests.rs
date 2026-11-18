@@ -593,6 +593,36 @@ fn video_capture_sequence_one_sample_per_request() {
     assert_eq!(r.send(1, &hex("02 08")), vec![hex("02 01")]);
 }
 
+/// Windows opens a device channel more than once and sends the Sample
+/// Requests on another instance than Start Streams (RDP-83): all instances
+/// share the device, and closing one leaves the others' capture running.
+#[test]
+fn instances_of_a_device_channel_share_the_device() {
+    let mut r = Rig::streaming();
+    let mut second = r.channels[1].new_instance().expect("a second instance");
+    let mut out = DvcOut::default();
+    second.opened(&mut out).unwrap();
+    // The second instance sees the activated, streaming device.
+    r.push_sample(0, b"frame1");
+    second.process(&hex("02 11 00"), &mut out).unwrap();
+    assert_eq!(out.take(), vec![sample_response(2, 0, b"frame1")]);
+    // Closing and dropping it keeps the first instance's capture.
+    second.closed();
+    drop(second);
+    assert!(
+        r.scripts[0].lock().unwrap().capturing,
+        "capture still running"
+    );
+    r.push_sample(0, b"frame2");
+    assert_eq!(
+        r.send(1, &hex("02 11 00")),
+        vec![sample_response(2, 0, b"frame2")]
+    );
+    // The last instance closing closes the camera.
+    r.channels[1].closed();
+    assert!(!r.scripts[0].lock().unwrap().capturing);
+}
+
 #[test]
 fn start_streams_checks_stream_and_format() {
     let mut r = Rig::negotiated(1);
