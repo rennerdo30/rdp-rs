@@ -600,6 +600,9 @@ mod win {
 }
 
 #[cfg(test)]
+mod live_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use rdp::rdpdr::serial::STATUS_CANCELLED;

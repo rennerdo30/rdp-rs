@@ -193,8 +193,8 @@ or hold **Alt** to bring it back. Its buttons, from the left:
 
 **The side panel** has four pages:
 
-- **Sharing**: switch clipboard, sound, microphone, printers and smart cards,
-  and share folders, live.
+- **Sharing**: switch clipboard, sound, microphone, printers, smart cards
+  and ports, and share folders, live.
 - **Display**: full screen, **Fit to window** and the scale, which apply
   live.
 
@@ -286,6 +286,15 @@ need a reconnect.
   server needs no printer drivers.
 - **Smart cards**: this PC's card readers and cards, for example to sign in
   inside the session.
+- **Ports**: this PC's serial (COM) and parallel (LPT) ports, one switch
+  each, for devices such as barcode scanners, scales, modems or label
+  printers. A shared port appears in the session under the same name
+  (COM3 stays COM3), and programs there open it as if it were plugged into
+  the server. The card shows only when this PC has ports; a port the
+  connection names but this PC lacks now (an unplugged USB adapter) shows as
+  **Not on this PC now** and is skipped. While the session uses a port,
+  programs on this PC cannot open it, and the other way round. Ports
+  plugged in later appear the next time you connect or switch a port.
 - **Shared folders**: a folder of this PC appears as a drive in the session's
   Explorer. **Browse for a folder…**, or type a path and click **Add**. The
   server can reach only what is inside that folder.
