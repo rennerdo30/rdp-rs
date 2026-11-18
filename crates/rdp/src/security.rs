@@ -243,6 +243,10 @@ impl Cipher {
             self.key = update_key(&self.initial, &self.key, self.strength);
             self.rc4 = Rc4::new(&self.key);
             self.used = 0;
+            crate::trace!(
+                "legacy RDP security: RC4 key updated after {} packets",
+                self.count
+            );
         }
         self.rc4.process(data);
         self.used += 1;

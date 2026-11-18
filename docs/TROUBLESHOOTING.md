@@ -101,8 +101,17 @@ changed certificate can also mean someone is in between. See
 ### The secure connection failed
 
 The TLS handshake did not finish. The server may need other security
-settings, or something on the network interferes with the connection. Note
-that Remora does not support the old RDP security without TLS.
+settings, or something on the network interferes with the connection.
+
+### This server only offers legacy, weak security
+
+The server has no TLS: it is set to the old "RDP Security Layer" (Standard
+RDP Security, RC4). The best fix is on the server: let it use TLS (on
+Windows, the Remote Desktop security layer "Negotiate" or "SSL"). If you
+cannot change it and trust the network, edit the connection and turn on
+**Allow legacy RDP security (weak)** under **Advanced**. A server that
+requires FIPS encryption cannot be reached with legacy security either. See
+[SECURITY.md](SECURITY.md#legacy-rdp-security).
 
 ## RD Gateway
 

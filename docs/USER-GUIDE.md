@@ -148,6 +148,18 @@ explained in [Server helper](#server-helper).
   default), or **Remote in full screen**.
 - **Compression**: **Off** is fastest on a LAN; RDP 6.1, 6.0 or 5.0 send less
   data on slow links for a little more CPU.
+- **Security: Allow legacy RDP security (weak)**, off by default. Only for
+  old servers that have no TLS (Windows' "RDP Security Layer", or servers
+  set to it): Remora then connects with Standard RDP Security, RC4
+  encryption without TLS. It is weak: anyone on the network path can
+  intercept the session, and the server's identity rests only on the key it
+  showed the first time (Remora asks you to trust it, like a certificate).
+  TLS is still used whenever the server offers it; Remora never picks the
+  legacy security on its own. The switch belongs to the connection, not to
+  its group, and the connection shows a **Legacy security** label. A server
+  that offers only legacy security and a connection without the switch end
+  with "This server only offers legacy, weak security". Servers that
+  require FIPS encryption are not supported.
 
 ## Groups
 
@@ -607,5 +619,7 @@ Portable copies do not check for updates; new versions are on the
 ## The command line
 
 `remora.exe` also connects from the command line, takes headless screenshots
-and recordings, and prints a protocol trace. See the
+and recordings, and prints a protocol trace. `--legacy-security` allows the
+weak legacy RDP security for that connection, as the Advanced switch does.
+See the
 [README](../README.md#build-and-run).
