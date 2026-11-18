@@ -342,3 +342,33 @@ fn parses_the_new_license_of_4_6() {
     assert_eq!(r.array::<16>().unwrap()[..], NEW_LICENSE_MSG[0x7f7..]);
     assert_eq!(r.remaining(), 0);
 }
+
+/// Under Standard RDP Security the License Request may carry no
+/// certificate (MS-RDPELE 2.2.2.1); the Server Security Data's is used.
+#[test]
+fn license_request_without_certificate_uses_the_server_security_data() {
+    let req = parse_license_request(&REQUEST[4..]).unwrap();
+    let mut b = Vec::new();
+    b.put_bytes(&req.server_random);
+    b.put_u32(req.product.version);
+    b.put_u32(req.product.company.len() as u32);
+    b.put_bytes(&req.product.company);
+    b.put_u32(req.product.product_id.len() as u32);
+    b.put_bytes(&req.product.product_id);
+    put_blob(
+        &mut b,
+        BB_KEY_EXCHG_ALG_BLOB,
+        &KEY_EXCHANGE_ALG_RSA.to_le_bytes(),
+    );
+    put_blob(&mut b, BB_CERTIFICATE_BLOB, &[]);
+    b.put_u32(1);
+    put_blob(&mut b, BB_SCOPE_BLOB, &req.scopes[0]);
+    let msg = server_message(LICENSE_REQUEST, &b);
+
+    let (_, step) = Licensing::new(None, "u", "m").process(&msg);
+    assert!(matches!(step, Err(Error::Unsupported(_))));
+    let mut lic = Licensing::new(None, "u", "m").with_server_certificate(&req.certificate);
+    let (send, step) = lic.process(&msg);
+    assert_eq!(step.unwrap(), Step::Continue);
+    assert_eq!(send[0][4], NEW_LICENSE_REQUEST);
+}

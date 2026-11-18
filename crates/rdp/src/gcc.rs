@@ -148,7 +148,13 @@ pub fn client_data_blocks(s: &ClientSettings) -> Vec<u8> {
     block(&mut out, CS_CORE, &core);
 
     let mut sec = Vec::new();
-    sec.put_u32(0); // encryptionMethods: none, TLS/CredSSP protect the session
+    // encryptionMethods: none when TLS/CredSSP protect the session; 40, 56
+    // and 128-bit RC4 for Standard RDP Security (2.2.1.3.3, 5.3.2).
+    sec.put_u32(if s.selected_protocol == crate::x224::PROTOCOL_RDP {
+        crate::security::CLIENT_ENCRYPTION_METHODS
+    } else {
+        0
+    });
     sec.put_u32(0); // extEncryptionMethods
     block(&mut out, CS_SECURITY, &sec);
 
@@ -223,6 +229,12 @@ pub struct ServerData {
     pub channel_ids: Vec<u16>,
     pub encryption_method: u32,
     pub encryption_level: u32,
+    /// serverRandom (2.2.1.4.3): sent with a nonzero method or level,
+    /// that is under Standard RDP Security only.
+    pub server_random: Option<[u8; 32]>,
+    /// serverCertificate (2.2.1.4.3.1): a proprietary certificate or an
+    /// X.509 chain; empty under Enhanced RDP Security.
+    pub server_certificate: Vec<u8>,
     /// The MCS message channel (2.2.1.4.5); None when the server sent none
     /// or sent zero (then it is not joined).
     pub message_channel: Option<u16>,
@@ -254,6 +266,15 @@ pub fn parse_conference_create_response(data: &[u8]) -> Result<ServerData> {
             SC_SECURITY => {
                 sd.encryption_method = b.u32()?;
                 sd.encryption_level = b.u32()?;
+                if (sd.encryption_method != 0 || sd.encryption_level != 0) && b.remaining() > 0 {
+                    let random_len = b.u32()? as usize;
+                    let cert_len = b.u32()? as usize;
+                    if random_len != 32 {
+                        return proto(format!("server random of {random_len} bytes"));
+                    }
+                    sd.server_random = Some(b.array()?);
+                    sd.server_certificate = b.bytes(cert_len)?.to_vec();
+                }
             }
             SC_NET => {
                 sd.io_channel = b.u16()?;
@@ -296,6 +317,14 @@ mod tests {
         let b = client_data_blocks(&s);
         assert_eq!(u16::from_le_bytes([b[0], b[1]]), CS_CORE);
         assert_eq!(u16::from_le_bytes([b[2], b[3]]), 234);
+        // Client Security Data (2.2.1.3.3): no methods under TLS, 40, 56
+        // and 128 bits under Standard RDP Security.
+        assert_eq!(&b[234..242], &[0x02, 0xC0, 12, 0, 0, 0, 0, 0]);
+        let rdp = client_data_blocks(&ClientSettings {
+            selected_protocol: 0,
+            ..s
+        });
+        assert_eq!(&rdp[234..242], &[0x02, 0xC0, 12, 0, 0x0B, 0, 0, 0]);
         // Scale fields at the end of the core block: desktop 150, device 140.
         assert_eq!(&b[226..234], &[150, 0, 0, 0, 140, 0, 0, 0]);
         // earlyCapabilityFlags (offset 144): ERRINFO | WANT_32BPP |

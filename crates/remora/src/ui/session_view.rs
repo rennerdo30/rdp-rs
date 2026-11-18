@@ -2221,7 +2221,7 @@ pub fn sample_reconnecting() -> Ui {
 }
 
 /// The failure samples: suffix, cause, step, technical text.
-pub const FAILURES: [(&str, Cause, Option<ConnectStep>, &str); 10] = [
+pub const FAILURES: [(&str, Cause, Option<ConnectStep>, &str); 11] = [
     (
         "host",
         Cause::HostNotFound,
@@ -2281,6 +2281,12 @@ pub const FAILURES: [(&str, Cause, Option<ConnectStep>, &str); 10] = [
         Cause::Protocol,
         None,
         "protocol error: unexpected fast-path update code 0x0e",
+    ),
+    (
+        "legacy",
+        Cause::LegacySecurity,
+        Some(ConnectStep::Tls),
+        "unsupported: the server offers only legacy RDP security (Standard RDP Security: RC4, no TLS, no server authentication)",
     ),
 ];
 

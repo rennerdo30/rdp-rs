@@ -189,6 +189,8 @@ pub enum Hit {
     FormPage(u8),
     /// Sign in with Windows (Kerberos) on or off.
     FormKerberos,
+    /// Allow legacy RDP security (no TLS) for this connection.
+    FormLegacySecurity,
     /// Group form: colour swatch (index into GROUP_COLORS; past the end: automatic).
     FormColor(usize),
     /// Settings page and its controls.
@@ -718,6 +720,8 @@ pub struct Ui {
     inherit: Inherit,
     /// The edited connection or group signs in with Windows (Kerberos).
     kerberos: bool,
+    /// The edited connection allows legacy RDP security (never a group's).
+    legacy_security: bool,
     /// The edited group's chosen colour (None: automatic).
     group_color: Option<u8>,
     /// Collapsed group paths in the sidebar.
@@ -880,6 +884,7 @@ impl Ui {
             group_edit: None,
             inherit: Inherit::default(),
             kerberos: false,
+            legacy_security: false,
             group_color: None,
             collapsed: Default::default(),
             opts: SessionOptions::default(),
@@ -1097,6 +1102,7 @@ impl Ui {
         self.field_mut(Field::HelperFingerprint)
             .set(c.options.helper.fingerprint.as_deref().unwrap_or(""));
         self.kerberos = c.kerberos;
+        self.legacy_security = c.legacy_security;
         self.size = size_index(c.width, c.height);
         self.opts = c.options.clone();
         self.opens = c.opens;
@@ -1161,6 +1167,7 @@ impl Ui {
         }
         self.field_mut(Field::Port).set("3389");
         self.field_mut(Field::GroupPath).set(group);
+        self.legacy_security = false;
         self.size = 0;
         self.opts = SessionOptions::default();
         self.opens = Opens::Desktop;
@@ -1301,6 +1308,7 @@ impl Ui {
             group: normalize_path(&self.field(Field::GroupPath).text),
             gateway: self.field(Field::Gateway).text.trim().to_string(),
             kerberos: self.kerberos,
+            legacy_security: self.legacy_security,
             inherit,
             opens: self.opens,
             apps: self.apps.clone(),
@@ -2066,6 +2074,7 @@ impl Ui {
                 self.focus = Some(Field::Master);
             }
             Hit::FormKerberos => self.kerberos = !self.kerberos,
+            Hit::FormLegacySecurity => self.legacy_security = !self.legacy_security,
             Hit::FormPage(i) => {
                 self.form_page = i;
                 self.home_scroll = 0;
@@ -4463,6 +4472,9 @@ impl Ui {
             if conn.kerberos {
                 pills.push(("Windows sign-in", Tone::Neutral, Lead::Icon(Icon::Shield)));
             }
+            if conn.legacy_security {
+                pills.push(("Legacy security", Tone::Warning, Lead::Icon(Icon::Warning)));
+            }
             self.store.connection_color(&self.store.connections[i])
         } else {
             let g = normalize_path(&self.field(Field::GroupPath).text);
@@ -5894,6 +5906,25 @@ impl Ui {
     ) -> i32 {
         let s = self.scale;
         let p = |v: f32| (v * s).round() as i32;
+        // Per connection and never inherited, so above the inherited part.
+        if self.group_edit.is_none() {
+            self.caption(cv, te, f, x, y, w, "SECURITY");
+            y += p(24.0);
+            let cells = self.card(cv, x, y, w, &[p(60.0)]);
+            let on = self.legacy_security;
+            self.card_switch_i(
+                cv,
+                te,
+                f,
+                cells[0],
+                Some(Icon::Warning),
+                "Allow legacy RDP security (weak)",
+                "Only for old servers without TLS: RC4, easy to intercept",
+                on,
+                Hit::FormLegacySecurity,
+            );
+            y += p(60.0) + p(20.0);
+        }
         if self.inherit_card(
             cv,
             te,
@@ -7624,6 +7655,8 @@ fn session_action(r: &Connection, password: &str, app: Option<&AppEntry>) -> Act
     cfg.remote_app = app.map(AppEntry::remote_app);
     cfg.license_store = crate::settings::license_dir();
     cfg.bitmap_cache_dir = crate::settings::bitmap_cache_dir(&r.host, r.port);
+    // Opt-in per connection; never inherited from a group.
+    cfg.legacy_security = r.legacy_security;
     #[cfg(windows)]
     if r.kerberos {
         cfg.auth = Some(crate::sspi::factory());
@@ -8382,6 +8415,40 @@ mod tests {
         m.mouse_move(x, y);
         m.mouse_down(x, y, te, fonts);
         m.mouse_up(x, y)
+    }
+
+    /// RDP-73: the Advanced page's legacy security switch is off by
+    /// default, saved per connection and passed to the session; a group's
+    /// editor has none.
+    #[test]
+    fn legacy_security_switch_is_per_connection() {
+        let mut te = TextEngine::new();
+        let Some(fonts) = load_fonts(&mut te) else {
+            return; // no UI font on this machine (headless CI)
+        };
+        let mut m = sample(false);
+        let name = m.store.connections[0].name.clone();
+        click(&mut m, &mut te, &fonts, Hit::Row(0));
+        click(&mut m, &mut te, &fonts, Hit::FormPage(4));
+        assert!(!m.legacy_security);
+        click(&mut m, &mut te, &fonts, Hit::FormLegacySecurity);
+        click(&mut m, &mut te, &fonts, Hit::Save);
+        let c = m
+            .store
+            .connections
+            .iter()
+            .find(|c| c.name == name)
+            .unwrap()
+            .clone();
+        assert!(c.legacy_security);
+        let Action::Connect { cfg, .. } = session_action(&m.store.resolve(&c), "pw", None) else {
+            panic!("expected Connect");
+        };
+        assert!(cfg.legacy_security);
+        m.select_group(0);
+        let mut px = vec![0u32; 1320 * 860];
+        m.paint(&mut Canvas::new(&mut px, 1320, 860), &mut te, &fonts);
+        assert!(m.hits.iter().all(|(_, h)| *h != Hit::FormLegacySecurity));
     }
 
     #[test]

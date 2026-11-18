@@ -64,6 +64,7 @@ pub mod rdpdr;
 pub mod rdpei;
 pub mod rdpsnd;
 pub mod redirect;
+pub mod security;
 pub mod server;
 pub mod surfcmd;
 pub mod transport;

@@ -40,6 +40,11 @@ pub struct Connection {
     /// NTLM. Part of Credentials.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub kerberos: bool,
+    /// Allow legacy RDP security (Standard RDP Security: RC4, no TLS) when
+    /// the server offers nothing better. Weak; off by default, per
+    /// connection, never inherited from a group.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub legacy_security: bool,
     /// Sections taken from the group instead of this connection.
     #[serde(default)]
     pub inherit: Inherit,
@@ -1080,6 +1085,32 @@ mod tests {
             !plain.contains("opens") && !plain.contains("apps"),
             "{plain}"
         );
+    }
+
+    /// RDP-73: legacy RDP security is off unless the connection says so,
+    /// stays the connection's own when everything else is inherited, and
+    /// older files without the field read as off.
+    #[test]
+    fn legacy_security_is_per_connection_and_off_by_default() {
+        let c = Connection::default();
+        assert!(!c.legacy_security);
+        assert!(!serde_json::to_string(&c).unwrap().contains("legacy"));
+        let on = Connection {
+            legacy_security: true,
+            group: "Work".into(),
+            inherit: Inherit::ALL,
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&on).unwrap();
+        assert!(json.contains(r#""legacy_security":true"#), "{json}");
+        let mut s = store_with(vec![], vec![on.clone()]);
+        s.ensure_group("Work");
+        assert!(s.resolve(&s.connections[0]).legacy_security);
+        let off = Connection {
+            legacy_security: false,
+            ..on
+        };
+        assert!(!s.resolve(&off).legacy_security);
     }
 
     #[test]
