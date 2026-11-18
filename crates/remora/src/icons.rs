@@ -87,10 +87,12 @@ pub enum Icon {
     Upload,
     /// A web link (the server helper's link requests).
     Link,
+    /// A serial or parallel port (a D-sub connector with its pins).
+    SerialPort,
 }
 
 impl Icon {
-    pub const ALL: [Icon; 59] = [
+    pub const ALL: [Icon; 60] = [
         Icon::Plus,
         Icon::Search,
         Icon::Gear,
@@ -150,6 +152,7 @@ impl Icon {
         Icon::Menu,
         Icon::Upload,
         Icon::Link,
+        Icon::SerialPort,
     ];
 }
 
@@ -679,6 +682,16 @@ pub fn draw(cv: &mut Canvas, icon: Icon, x: f32, y: f32, size: f32, color: u32) 
             p.rrect(10.2, 3.8, 4.2, 8.4, 1.4);
             p.dot((12.3, 6.4), 0.8);
             p.dot((12.3, 9.6), 0.8);
+        }
+        Icon::SerialPort => {
+            // A 9-pin D-sub: the trapezoid shell, five pins over four.
+            p.shape(&[(1.4, 4.2), (14.6, 4.2), (12.8, 11.8), (3.2, 11.8)]);
+            for x in [4.4, 6.2, 8.0, 9.8, 11.6] {
+                p.dot((x, 6.8), 0.75);
+            }
+            for x in [5.3, 7.1, 8.9, 10.7] {
+                p.dot((x, 9.4), 0.75);
+            }
         }
     }
 }

@@ -31,6 +31,7 @@ url = "2.5.8"
 # The system folder picker (IFileOpenDialog) for shared folders.
 rfd = { version = "0.18.0", default-features = false }
 windows-sys = { version = "0.61.2", features = [
+    "Win32_Devices_Communication",
     "Win32_Foundation",
     "Win32_Globalization",
     "Win32_Graphics_Gdi",

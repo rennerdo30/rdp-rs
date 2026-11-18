@@ -42,6 +42,7 @@ mod picker;
 mod printing;
 mod recorder;
 mod remoteapp;
+mod serial;
 mod session;
 mod settings;
 mod smartcard;
@@ -540,6 +541,9 @@ fn snapshot_ui(
         ("-form-experience", || ui::sample_form(2)),
         ("-form-keyboard", ui::sample_form_keyboard),
         ("-form-sharing", || ui::sample_form(3)),
+        // Serial and parallel ports (RDP-74): editor and panel.
+        ("-form-ports", || ui::sample_ports(false)),
+        ("-panel-ports", || ui::sample_ports(true)),
         ("-form-advanced", || ui::sample_form(4)),
         ("-settings", || ui::sample_settings(false)),
         ("-settings-vault", || ui::sample_settings(true)),

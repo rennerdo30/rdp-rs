@@ -606,6 +606,13 @@ impl App {
             crate::helper_app::attempts_path(),
             crate::helper_app::expected_fingerprint(&opts.helper),
         );
+        let mut ports = Vec::new();
+        for name in &opts.ports {
+            match c.set_port(name, true) {
+                Ok(()) => ports.push(name.to_ascii_uppercase()),
+                Err(e) => warn.push(e),
+            }
+        }
         let mut drives = Vec::new();
         for path in &opts.drives {
             let name = drive_name(path);
@@ -632,6 +639,7 @@ impl App {
             t.sound = sound;
             t.printers = printers;
             t.smart_cards = smart_cards;
+            t.ports = ports;
             t.drives = drives;
             t.helper.opts = opts.helper.clone();
         }
@@ -656,6 +664,7 @@ impl App {
             printers: t.printers,
             smart_cards: t.smart_cards,
             drives: t.drives.iter().map(|d| d.path.clone()).collect(),
+            ports: t.ports.clone(),
             quality: t.quality,
             win_keys: t.win_keys,
             keyboard: t.keyboard,
@@ -834,6 +843,9 @@ impl App {
                     cfg.width = ((w.clamp(200, 8192) as u16) & !1).max(200);
                     cfg.height = h.clamp(200, 8192) as u16;
                 }
+                if let Some(w) = self.win.as_mut() {
+                    w.ui.local_ports = local_port_names();
+                }
                 self.start_session(name, *cfg, fit, opts, apps);
             }
             Action::SetQuality(id, q) => {
@@ -966,6 +978,18 @@ impl App {
                     .get(&id)
                     .map(|s| s.controls.set_smart_cards(on));
                 self.toggle_result(id, r, on, "Smart cards", |t| t.smart_cards = false);
+            }
+            Action::SetPort(id, name, on) => {
+                let r = self
+                    .sessions
+                    .get(&id)
+                    .map(|s| s.controls.set_port(&name, on));
+                let what = name.clone();
+                self.toggle_result(id, r, on, &what, |t| t.ports.retain(|p| *p != name));
+                // Ports come and go (USB adapters): list them again.
+                if let Some(w) = self.win.as_mut() {
+                    w.ui.local_ports = local_port_names();
+                }
             }
             Action::SetClipboard(id, on) => {
                 rdp::trace!("ui: Clipboard switched {}", if on { "on" } else { "off" });
@@ -2148,6 +2172,7 @@ impl ApplicationHandler<UserEvent> for App {
                             remembered_unlock(&mut ui);
                             ui.speakers = crate::audio::output_devices();
                             ui.mics = crate::mic::input_devices();
+                            ui.local_ports = local_port_names();
                             ui.local_monitors = crate::monitors::list();
                             // Loads the folder picker's shell components early.
                             crate::picker::prewarm();
@@ -2850,6 +2875,14 @@ fn panel_chord(ev: &winit::event::KeyEvent, mods: ModifiersState) -> bool {
             WKey::Character(c) => c.eq_ignore_ascii_case("p"),
             _ => true,
         }
+}
+
+/// The names of this PC's serial and parallel ports ("COM3", "LPT1").
+fn local_port_names() -> Vec<String> {
+    crate::serial::local_ports()
+        .into_iter()
+        .map(|p| p.name)
+        .collect()
 }
 
 /// The display name of a shared folder: its last path component.

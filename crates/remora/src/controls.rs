@@ -17,6 +17,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::clipboard::WindowsClipboard;
 use crate::printing::WindowsSpooler;
+use crate::serial::WinSerial;
 use crate::smartcard::WinSCard;
 
 pub struct Controls {
@@ -34,6 +35,8 @@ pub struct Controls {
     printers: Mutex<Vec<u32>>,
     /// Device id of the shared smart card subsystem, while shared.
     smart_card: Mutex<Option<u32>>,
+    /// Shared serial and parallel ports: (port name, device id).
+    ports: Mutex<Vec<(String, u32)>>,
     /// Touch and pen over `Microsoft::Windows::RDS::Input` (MS-RDPEI); only
     /// declared when this PC has a digitizer (MS-RDPEI 3.3.3).
     touch: Option<rdp::TouchHandle>,
@@ -104,6 +107,7 @@ impl Controls {
             mic_device,
             printers: Mutex::new(Vec::new()),
             smart_card: Mutex::new(None),
+            ports: Mutex::new(Vec::new()),
             touch,
             helper,
         };
@@ -178,6 +182,38 @@ impl Controls {
             let device = rdp::smart_card_device(Arc::new(WinSCard));
             *shared = Some(self.devices.add_device(device));
         }
+        Ok(())
+    }
+
+    /// Shares one local serial or parallel port ("COM3", "LPT1") with the
+    /// session (MS-RDPESP), or stops sharing it: the server sees it appear
+    /// or go away without a reconnect. Only ports this PC has now.
+    pub fn set_port(&self, name: &str, on: bool) -> Result<(), String> {
+        let mut shared = self.ports.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(i) = shared
+            .iter()
+            .position(|(n, _)| n.eq_ignore_ascii_case(name))
+        {
+            if on {
+                return Ok(());
+            }
+            // Closes the port if the session had it open.
+            let (_, id) = shared.remove(i);
+            self.devices.remove(id);
+            return Ok(());
+        }
+        if !on {
+            return Ok(());
+        }
+        let present = crate::serial::local_ports()
+            .iter()
+            .any(|p| p.name.eq_ignore_ascii_case(name));
+        if !present {
+            return Err(format!("{name} is not on this PC."));
+        }
+        let device = rdp::port_device(name, Arc::new(WinSerial))
+            .ok_or_else(|| format!("{name} is not a COM or LPT port."))?;
+        shared.push((name.to_ascii_uppercase(), self.devices.add_device(device)));
         Ok(())
     }
 
