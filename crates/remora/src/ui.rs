@@ -745,9 +745,11 @@ pub struct Ui {
     pub update_channel: String,
     /// Colour theme choice (the app applies the palette).
     pub theme: ThemeChoice,
-    /// Settings: the change-master form is open; a backup waits for its password.
+    /// Settings: the change-master form is open; a picked file waits for
+    /// Import (and its password, when it has one).
     change_master: bool,
     pub import_file: Option<std::path::PathBuf>,
+    pub import_probe: Option<crate::import::Probe>,
     pub settings_note: Option<(String, Tone)>,
     /// Asking whether to quit while this many sessions are open.
     pub confirm_exit: Option<usize>,
@@ -882,6 +884,7 @@ impl Ui {
             theme: ThemeChoice::Dark,
             change_master: false,
             import_file: None,
+            import_probe: None,
             settings_note: None,
             confirm_exit: None,
             session_focus: false,
@@ -2016,6 +2019,7 @@ impl Ui {
             Hit::ImportOk => return self.import_action(),
             Hit::ImportCancel => {
                 self.import_file = None;
+                self.import_probe = None;
                 self.field_mut(Field::ImportPass).set("");
             }
             Hit::SetupVault => {
@@ -3820,14 +3824,19 @@ impl Ui {
 
     fn import_action(&mut self) -> Option<Action> {
         let path = self.import_file.clone()?;
+        let probe = self.import_probe?;
         let password = zeroize::Zeroizing::new(self.field(Field::ImportPass).text.clone());
-        if password.is_empty() {
-            self.settings_note = Some(("Enter the backup's master password.".into(), Tone::Danger));
+        if probe.needs_password && password.is_empty() {
+            let ask = match probe.format {
+                crate::import::Format::MRemoteNg => "Enter the mRemoteNG master password.",
+                _ => "Enter the backup's master password.",
+            };
+            self.settings_note = Some((ask.into(), Tone::Danger));
             return None;
         }
         self.field_mut(Field::ImportPass).set("");
         self.unlocking = true;
-        self.settings_note = Some(("Opening the backup…".into(), Tone::Muted));
+        self.settings_note = Some(("Reading the file…".into(), Tone::Muted));
         Some(Action::Import { path, password })
     }
 
@@ -3837,6 +3846,7 @@ impl Ui {
         if ok {
             self.change_master = false;
             self.import_file = None;
+            self.import_probe = None;
         }
         self.settings_note = Some((text, if ok { Tone::Success } else { Tone::Danger }));
     }
@@ -4090,17 +4100,31 @@ impl Ui {
             cells[1],
             Icon::FolderOpen,
             "Import connections",
-            "Adds the connections and groups of a backup",
+            "From a Remora backup, mRemoteNG or RDCMan",
             "Import…",
             Hit::Import,
         );
         y += 2 * row + p(16.0);
         if let Some(path) = self.import_file.clone() {
+            use crate::import::Format;
             let name = path
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default();
-            let cells = self.card(cv, x, y, w, &[p(46.0), p(52.0), p(60.0)]);
+            let format = self.import_probe.map(|p| p.format);
+            let source = match format {
+                Some(Format::MRemoteNg) => "mRemoteNG",
+                Some(Format::RdcMan) => "Remote Desktop Connection Manager",
+                _ => "Remora backup",
+            };
+            // The password row only when the file needs one.
+            let needs = self.import_probe.is_some_and(|p| p.needs_password);
+            let rows = if needs {
+                vec![p(46.0), p(52.0), p(60.0)]
+            } else {
+                vec![p(46.0), p(60.0)]
+            };
+            let cells = self.card(cv, x, y, w, &rows);
             {
                 let mut k = Kit::new(cv, te, f, s);
                 let r = cells[0];
@@ -4115,21 +4139,27 @@ impl Ui {
                     Font::Regular,
                     12.5,
                     Rect::new(r.x + p(46.0), r.y, r.w - p(62.0), r.h),
-                    &format!("Import from {name}"),
+                    &format!("Import from {name} ({source})"),
                     c.text_secondary,
                 );
             }
-            self.field_row_i(
-                cv,
-                te,
-                f,
-                cells[1],
-                "Password",
-                Some(Icon::Key),
-                Field::ImportPass,
-                "Master password of the backup",
-            );
-            let r = cells[2];
+            if needs {
+                self.field_row_i(
+                    cv,
+                    te,
+                    f,
+                    cells[1],
+                    "Password",
+                    Some(Icon::Key),
+                    Field::ImportPass,
+                    if format == Some(Format::MRemoteNg) {
+                        "mRemoteNG master password"
+                    } else {
+                        "Master password of the backup"
+                    },
+                );
+            }
+            let r = cells[rows.len() - 1];
             let label = if self.unlocking {
                 "Working…"
             } else {
@@ -4138,11 +4168,13 @@ impl Ui {
             let ok = Button::primary(label).icon(Icon::Check);
             let ow = self.btn_w(te, f, &ok);
             let by = r.y + (r.h - p(34.0)) / 2;
+            // Under the password field, or under the file name.
+            let bx = r.x + if needs { p(132.0) } else { p(30.0) };
             self.btn(
                 cv,
                 te,
                 f,
-                Rect::new(r.x + p(132.0), by, ow, p(34.0)),
+                Rect::new(bx, by, ow, p(34.0)),
                 &ok,
                 Hit::ImportOk,
             );
@@ -4152,11 +4184,11 @@ impl Ui {
                 cv,
                 te,
                 f,
-                Rect::new(r.x + p(140.0) + ow, by, cw, p(34.0)),
+                Rect::new(bx + p(8.0) + ow, by, cw, p(34.0)),
                 &cancel,
                 Hit::ImportCancel,
             );
-            y += p(158.0) + p(16.0);
+            y += rows.iter().sum::<i32>() + p(16.0);
         }
         y += p(12.0);
 
@@ -7467,6 +7499,25 @@ pub fn sample_settings(vault: bool) -> Ui {
         m.store.vault_sample();
         m.change_master = true;
     }
+    m
+}
+
+/// Settings with a picked import file waiting: an mRemoteNG file with a
+/// custom master password (`password`), or an RDCMan file (no password row).
+pub fn sample_settings_import(password: bool) -> Ui {
+    use crate::import::{Format, Probe};
+    let mut m = sample_settings(false);
+    let (file, format) = if password {
+        ("confCons.xml", Format::MRemoteNg)
+    } else {
+        ("servers.rdg", Format::RdcMan)
+    };
+    m.import_file = Some(file.into());
+    m.import_probe = Some(Probe {
+        format,
+        needs_password: password,
+    });
+    m.home_scroll = 380;
     m
 }
 

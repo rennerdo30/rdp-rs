@@ -195,6 +195,18 @@ enum Parsed {
     Xml(xml::Elem),
 }
 
+/// Reads a picked file, refusing one too large to be a connections file
+/// before it is in memory.
+pub fn read_file(path: &std::path::Path) -> Result<Vec<u8>, String> {
+    use std::io::Read;
+    let cannot = |e: std::io::Error| format!("Cannot read {}: {e}", path.display());
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)
+        .and_then(|f| f.take(MAX_FILE as u64 + 1).read_to_end(&mut bytes))
+        .map_err(cannot)?;
+    Ok(bytes)
+}
+
 fn parse(bytes: &[u8]) -> Result<(Format, Parsed), String> {
     if bytes.len() > MAX_FILE {
         return Err("The file is too large to be a connections file.".into());

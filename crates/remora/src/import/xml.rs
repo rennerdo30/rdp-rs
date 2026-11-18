@@ -48,9 +48,10 @@ impl Elem {
 pub fn decode(bytes: &[u8]) -> Result<String, String> {
     let utf16 = |be: bool| {
         let units: Vec<u16> = bytes[2..]
-            .chunks_exact(2)
-            .map(|c| {
-                let b = [c[0], c[1]];
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|&b| {
                 if be {
                     u16::from_be_bytes(b)
                 } else {

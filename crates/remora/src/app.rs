@@ -50,9 +50,10 @@ pub enum UserEvent {
     Recorded(Result<crate::recorder::RecordingInfo, String>),
     /// The helper update for a tab was downloaded and checked (RDP-61).
     HelperDownload(u64, Result<(String, Vec<u8>), String>),
-    /// Export: the chosen file; Import: the chosen backup (asks its password).
+    /// Export: the chosen file; Import: the chosen file and what it is (a
+    /// Remora backup or a custom mRemoteNG master asks for its password).
     ExportTo(std::path::PathBuf),
-    ImportFrom(std::path::PathBuf),
+    ImportFrom(std::path::PathBuf, Result<crate::import::Probe, String>),
     /// The folder picker closed: (session or None for the form, folder).
     Picked(Option<u64>, Option<std::path::PathBuf>),
     /// A session waits for the user to trust its server certificate.
@@ -80,8 +81,8 @@ pub enum VaultResult {
     Created(Result<crate::vault::VaultKey, String>),
     /// A new master password's key (or why the change failed).
     Rekeyed(Result<crate::vault::VaultKey, String>),
-    /// The contents of a backup (or why it could not be opened).
-    Imported(Result<(Vec<crate::store::Group>, Vec<crate::store::Connection>), String>),
+    /// The contents of an imported file (or why it could not be read).
+    Imported(Result<crate::import::Imported, String>),
 }
 
 struct Gfx {
@@ -1224,7 +1225,11 @@ impl App {
                     self.hwnd(),
                     move |path| {
                         if let (Some(path), Ok(p)) = (path, proxy.lock()) {
-                            let _ = p.send_event(UserEvent::ImportFrom(path));
+                            // On the picker thread: tell the format from the
+                            // content, and whether a password is needed.
+                            let probe = crate::import::read_file(&path)
+                                .and_then(|bytes| crate::import::probe(&bytes));
+                            let _ = p.send_event(UserEvent::ImportFrom(path, probe));
                         }
                     },
                 );
@@ -1232,13 +1237,9 @@ impl App {
             Action::Import { path, password } => {
                 let proxy = self.proxy.clone();
                 std::thread::spawn(move || {
-                    let r = std::fs::read(&path)
-                        .map_err(|e| format!("Cannot read {}: {e}", path.display()))
-                        .and_then(|bytes| {
-                            let key = crate::vault::read_params(&bytes)
-                                .and_then(|p| crate::vault::derive(&password, p))?;
-                            crate::store::read_backup(&bytes, &key)
-                        });
+                    let r = crate::import::read_file(&path).and_then(|bytes| {
+                        crate::import::read(&bytes, &password, &crate::import::SystemDpapi)
+                    });
                     let _ = proxy.send_event(UserEvent::Vault(VaultResult::Imported(r)));
                 });
             }
@@ -1755,16 +1756,19 @@ impl App {
                 }
             }
             VaultResult::Rekeyed(Err(e)) => ui.settings_done(false, e),
-            VaultResult::Imported(Ok((groups, connections))) => {
+            VaultResult::Imported(Ok(mut imported)) => {
+                // Passwords live only in the vault: without one they are
+                // left out, and the result line says so.
+                if !ui.store_is_vault() {
+                    imported.drop_passwords();
+                }
+                let total = imported.connections.len();
+                let groups = std::mem::take(&mut imported.groups);
+                let connections = std::mem::take(&mut imported.connections);
                 let added = ui.store_mut().merge(groups, connections);
+                imported.report.duplicates = total.saturating_sub(added);
                 match ui.store_mut().save() {
-                    Ok(()) => ui.settings_done(
-                        true,
-                        format!(
-                            "Imported {added} connection{}.",
-                            if added == 1 { "" } else { "s" }
-                        ),
-                    ),
+                    Ok(()) => ui.settings_done(true, imported.report.summary(added)),
                     Err(e) => ui.settings_done(false, e),
                 }
                 ui.refresh_selection();
@@ -2362,11 +2366,23 @@ impl ApplicationHandler<UserEvent> for App {
                 }
                 return self.dirty();
             }
-            UserEvent::ImportFrom(path) => {
+            UserEvent::ImportFrom(path, probe) => {
                 if let Some(m) = &mut self.win {
-                    m.ui.import_file = Some(path);
-                    m.ui.settings_note = None;
-                    m.ui.focus_import();
+                    match probe {
+                        Ok(probe) => {
+                            m.ui.import_file = Some(path);
+                            m.ui.import_probe = Some(probe);
+                            m.ui.settings_note = None;
+                            if probe.needs_password {
+                                m.ui.focus_import();
+                            }
+                        }
+                        Err(e) => {
+                            m.ui.import_file = None;
+                            m.ui.import_probe = None;
+                            m.ui.settings_done(false, e);
+                        }
+                    }
                 }
                 return self.dirty();
             }

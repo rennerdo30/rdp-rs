@@ -544,6 +544,13 @@ fn snapshot_ui(
         ("-form-advanced", || ui::sample_form(4)),
         ("-settings", || ui::sample_settings(false)),
         ("-settings-vault", || ui::sample_settings(true)),
+        // Import from mRemoteNG and RDCMan (RDP-80).
+        ("-settings-import-mremoteng", || {
+            ui::sample_settings_import(true)
+        }),
+        ("-settings-import-rdcman", || {
+            ui::sample_settings_import(false)
+        }),
         ("-cert", || ui::sample_cert(false)),
         ("-cert-changed", || ui::sample_cert(true)),
         ("-panel-display", || ui::sample_panel(1, false)),
