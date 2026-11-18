@@ -3,7 +3,7 @@
 //!   remora                                       connection manager
 //!   remora <host[:port]> -u <[DOMAIN\]user> [-d domain] [--size WxH] [-v]
 //!          [--compression off|rdp4|rdp5|rdp6|rdp61] [--gfx] [--multimon] [--kerberos]
-//!          [--surface-commands] [--drawing-orders]
+//!          [--surface-commands] [--drawing-orders] [--legacy-security]
 //!                                                one session window
 //!   remora <host> -u <user> --screenshot out.png [--wait SECONDS]
 //!                                                headless: save the desktop as PNG
@@ -98,6 +98,9 @@ struct Args {
     multimon: bool,
     /// `--kerberos`: NLA through Windows SSPI Negotiate (Kerberos, NTLM fallback).
     kerberos: bool,
+    /// `--legacy-security`: allow Standard RDP Security (RC4, no TLS) when
+    /// the server offers nothing better (MS-RDPBCGR 5.3). Weak.
+    legacy_security: bool,
     /// `--expect-fingerprint`: the server certificate's SHA-256 (hex, any
     /// separators); any other certificate is refused.
     expect_fingerprint: Option<String>,
@@ -112,6 +115,7 @@ fn usage() -> ! {
          \x20           [--gfx]   (graphics pipeline, MS-RDPEGFX)\n\
          \x20           [--surface-commands] [--drawing-orders]   (experimental picture paths)\n\
          \x20           [--expect-fingerprint SHA256]   (accept only this server certificate)\n\
+         \x20           [--legacy-security]   (allow weak RC4 security for servers without TLS)\n\
          \x20           [--multimon]   (all local monitors, MS-RDPBCGR 2.2.1.3.6)\n\
          \x20           [--kerberos]   (Windows Negotiate: Kerberos, NTLM fallback;\n\
          \x20                           without -u: single sign-on as the logged-on user)\n\
@@ -185,6 +189,7 @@ fn parse_args() -> Args {
             "--drawing-orders" => a.drawing_orders = true,
             "--multimon" => a.multimon = true,
             "--kerberos" => a.kerberos = true,
+            "--legacy-security" => a.legacy_security = true,
             "-h" | "--help" => usage(),
             s if s.starts_with('-') => usage(),
             s => {
@@ -321,6 +326,7 @@ fn main() {
     }
     cfg.surface_commands = args.surface_commands;
     cfg.drawing_orders = args.drawing_orders;
+    cfg.legacy_security = args.legacy_security;
     if let Some(expected) = &args.expect_fingerprint {
         let want = normalize_fingerprint(expected);
         if want.len() != 64 {
@@ -701,7 +707,7 @@ fn snapshot_ui(
         ("-site-editor", || ui::sample_form(0), 1440.0, 900.0),
     ];
     // One error screen per kind of failure.
-    let failures: [Screen; 10] = [
+    let failures: [Screen; 11] = [
         || sv::sample_failed(0),
         || sv::sample_failed(1),
         || sv::sample_failed(2),
@@ -712,6 +718,7 @@ fn snapshot_ui(
         || sv::sample_failed(7),
         || sv::sample_failed(8),
         || sv::sample_failed(9),
+        || sv::sample_failed(10),
     ]
     .map(|f| ("", f));
     for (i, (_, make)) in failures.into_iter().enumerate() {

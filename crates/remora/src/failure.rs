@@ -45,6 +45,9 @@ pub enum Cause {
     SecureChannel,
     /// The server needs a feature Remora does not have.
     Unsupported,
+    /// The server offers only legacy RDP security (no TLS) and this
+    /// connection does not allow it.
+    LegacySecurity,
     /// Malformed or unexpected data: a bug on one side.
     Protocol,
     /// The network dropped the running session and reconnecting failed.
@@ -153,6 +156,7 @@ pub fn classify(e: &rdp::Error, step: Option<&ConnectStep>) -> Cause {
             _ => Cause::WrongPassword,
         },
         E::Tls(_) => Cause::SecureChannel,
+        E::Unsupported(m) if m.starts_with(rdp::security::LEGACY_REFUSED) => Cause::LegacySecurity,
         E::Unsupported(_) => Cause::Unsupported,
         E::Protocol(m) if m.contains("licens") => Cause::License,
         E::Protocol(_) => Cause::Protocol,
@@ -235,6 +239,7 @@ impl Cause {
             Cause::License => Icon::FileText,
             Cause::ServerDenied => Icon::Power,
             Cause::Unsupported | Cause::Protocol | Cause::Unknown => Icon::Warning,
+            Cause::LegacySecurity => Icon::ShieldAlert,
         }
     }
 
@@ -268,6 +273,7 @@ impl Cause {
             Cause::ServerDenied => "The server turned the connection down",
             Cause::SecureChannel => "The secure connection failed",
             Cause::Unsupported => "This server needs a feature Remora lacks",
+            Cause::LegacySecurity => "This server only offers legacy, weak security",
             Cause::Protocol => "Unexpected answer from the server",
             Cause::ConnectionLost => "The connection was lost",
             Cause::Unknown => "Could not connect",
@@ -338,6 +344,9 @@ impl Cause {
                     .into()
             }
             Cause::Unsupported => "Copy the details to see which feature is missing.".into(),
+            Cause::LegacySecurity => format!(
+                "{host} has no TLS, only RC4 that others on the network can break. Best: turn on TLS on the server. Or, on a network you trust, edit this connection and turn on Allow legacy RDP security under Advanced."
+            ),
             Cause::Protocol => {
                 "This looks like a bug in Remora or the server. Copy the details and report it."
                     .into()
@@ -523,6 +532,20 @@ mod tests {
         assert_eq!(
             classify(&E::Unsupported("no RemoteApp".into()), None),
             Cause::Unsupported
+        );
+        // RDP-73: the refusal of a legacy-only server names the switch.
+        let legacy = rdp::security::legacy_refused();
+        assert_eq!(classify(&legacy, None), Cause::LegacySecurity);
+        let ctx = Context {
+            host: "old-srv",
+            port: 3389,
+            user: "u",
+            gateway: None,
+        };
+        assert!(
+            Cause::LegacySecurity
+                .fix(&ctx)
+                .contains("Allow legacy RDP security")
         );
     }
 
