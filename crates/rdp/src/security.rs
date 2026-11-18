@@ -269,7 +269,7 @@ pub struct StandardSecurity {
     /// Sets carry ENC_SALTED_CHECKSUM (5.3.6.1.1).
     salted: bool,
     /// The server takes encrypted licensing PDUs (SEC_LICENSE_ENCRYPT_CS).
-    license_encrypt: bool,
+    pub(crate) license_encrypt: bool,
 }
 
 impl Drop for StandardSecurity {
@@ -553,7 +553,7 @@ pub fn server_key(cert: &[u8]) -> Result<PublicKey> {
     k.u32()?; // datalen
     let exponent = k.u32()?;
     let modulus = k.bytes(keylen)?;
-    if bitlen % 8 != 0 || bitlen / 8 > keylen {
+    if !bitlen.is_multiple_of(8) || bitlen / 8 > keylen {
         return proto(format!("server RSA key of {bitlen} bits in {keylen} bytes"));
     }
     // 5.3.3.1.3: s^e mod n is the MD5 hash, 0x00, 0xFF up to byte 62, 0x01.
@@ -576,4 +576,4 @@ pub fn server_key(cert: &[u8]) -> Result<PublicKey> {
 
 #[cfg(test)]
 #[path = "security_tests.rs"]
-mod tests;
+pub(crate) mod tests;

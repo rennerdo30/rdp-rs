@@ -91,6 +91,19 @@ pub fn negotiation_flags(frame: &[u8]) -> u8 {
     }
 }
 
+/// RDP_NEG_FAILURE code: the server allows only Standard RDP Security
+/// (MS-RDPBCGR 2.2.1.2.2).
+pub const SSL_NOT_ALLOWED_BY_SERVER: u32 = 2;
+
+/// The failureCode of an RDP_NEG_FAILURE in an X.224 Connection Confirm
+/// (MS-RDPBCGR 2.2.1.2.2); None for any other answer.
+pub fn negotiation_failure(frame: &[u8]) -> Option<u32> {
+    match frame.get(4..) {
+        Some(p) if p.len() >= 15 && p[0] as usize >= 6 + 8 && p[7] == 0x03 => le32(p, 11),
+        _ => None,
+    }
+}
+
 /// Wraps MCS data in an X.224 Data TPDU inside TPKT.
 pub fn data(payload: &[u8]) -> Vec<u8> {
     let mut b = vec![0x02, 0xF0, 0x80];

@@ -169,8 +169,8 @@ const AUTO_RECONNECT_VERSION_1: u32 = 1;
 
 /// The client random that MS-RDPBCGR 5.5 step 4 prescribes under Enhanced RDP
 /// Security (TLS, CredSSP): no client random is generated (5.3.2), so the
-/// verifier is computed over "an array of 32 zero bytes". This crate only
-/// speaks Enhanced RDP Security, so this is the only client random it uses.
+/// verifier is computed over "an array of 32 zero bytes". Under Standard
+/// RDP Security (5.3) the real client random of the Security Exchange is used.
 pub const ENHANCED_SECURITY_CLIENT_RANDOM: [u8; 32] = [0; 32];
 
 /// The server's auto-reconnect cookie (ARC_SC_PRIVATE_PACKET, MS-RDPBCGR
@@ -423,6 +423,9 @@ pub struct DemandActive {
     /// inputFlags of the server's Input Capability Set (2.2.7.1.6), if it
     /// sent one.
     pub input_flags: Option<u16>,
+    /// ENC_SALTED_CHECKSUM in the server's General Capability Set extraFlags
+    /// (2.2.7.1.1): it takes salted MACs under Standard RDP Security (5.3.6.1.1).
+    pub salted_checksum: bool,
 }
 
 /// Window List Capability Set fields (MS-RDPERP 2.2.1.1.2).
@@ -468,6 +471,7 @@ pub fn parse_demand_active(body: &[u8]) -> Result<DemandActive> {
         frame_ack: false,
         bitmap_cache_host: false,
         input_flags: None,
+        salted_checksum: false,
     };
     for _ in 0..count {
         let ty = r.u16()?;
@@ -486,6 +490,10 @@ pub fn parse_demand_active(body: &[u8]) -> Result<DemandActive> {
         }
         if ty == crate::orders::CAPSTYPE_BITMAPCACHE_HOSTSUPPORT {
             da.bitmap_cache_host = true;
+        }
+        if ty == CAPSTYPE_GENERAL {
+            const ENC_SALTED_CHECKSUM: u16 = 0x0010;
+            da.salted_checksum = le16(cap, 10).is_some_and(|f| f & ENC_SALTED_CHECKSUM != 0);
         }
         if ty == CAPSTYPE_INPUT {
             da.input_flags = le16(cap, 0);
@@ -942,6 +950,17 @@ mod tests {
         let mut input = vec![13, 0, 88, 0, 0x35, 0x00];
         input.resize(88, 0);
         assert_eq!(demand(&input, 2).input_flags, Some(0x0035));
+        // General capability set (2.2.7.1.1), extraFlags at offset 10 of
+        // the body: ENC_SALTED_CHECKSUM (5.3.6.1.1).
+        assert!(!demand(&[], 1).salted_checksum);
+        let general = |extra: u16| {
+            let mut g = vec![1, 0, 24, 0, 1, 0, 3, 0, 0, 2, 0, 0, 0, 0];
+            g.extend(extra.to_le_bytes());
+            g.resize(24, 0);
+            demand(&g, 2).salted_checksum
+        };
+        assert!(general(0x041D));
+        assert!(!general(0x040D));
     }
 
     #[test]
