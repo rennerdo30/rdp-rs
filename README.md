@@ -40,9 +40,9 @@ No account and no telemetry.
 [Troubleshooting](docs/TROUBLESHOOTING.md) · [Security and privacy](docs/SECURITY.md) ·
 [Install](docs/INSTALL.md)
 
-## RDP coverage: about 78 %
+## RDP coverage: about 89 %
 
-Of the 38 features a full RDP client offers (below), 29 are done and 1 partly (78 %, counting a partial one as half). That covers the everyday desktop: logon with NLA, the picture, keyboard and mouse, clipboard, drives, printers, smart cards and sound. The missing ones are mostly special cases and enterprise features.
+Of the 38 features a full RDP client offers (below), 32 are done and 4 partly (89 %, counting a partial one as half). That covers the everyday desktop: logon with NLA, the picture, keyboard and mouse, clipboard, drives, printers, smart cards, ports, cameras and sound. USB and plug and play devices are missing: they need a driver on this PC to take a device away from Windows.
 
 <details>
 <summary>Feature list</summary>
@@ -52,13 +52,13 @@ Of the 38 features a full RDP client offers (below), 29 are done and 1 partly (7
 | Connection and security | Connection sequence (X.224, MCS, GCC, capabilities, finalization) | ✅ | MS-RDPBCGR |
 |  | TLS and NLA (CredSSP with NTLMv2) | ✅ | MS-CSSP, MS-NLMP |
 |  | Kerberos authentication | ✅ | MS-KILE via Windows SSPI Negotiate; single sign-on |
-|  | Legacy RDP security (RC4, no TLS) | — | MS-RDPBCGR 5.3 |
+|  | Legacy RDP security (RC4, no TLS) | ✅ | MS-RDPBCGR 5.3: opt-in per connection; 40/56/128-bit, salted MAC, key updates; no FIPS |
 |  | Licensing | ✅ | MS-RDPELE: 'valid client', new and upgraded licenses with platform challenge; licenses kept in `%LOCALAPPDATA%\rdp-rs\licenses` |
 |  | Auto-reconnect and heartbeat | ✅ | MS-RDPBCGR 5.5, 2.2.16 |
 |  | Server certificate check | ✅ | trust on first use |
 |  | Session broker redirection | ✅ | MS-RDPBCGR 2.2.13: followed while connecting and mid-session |
-|  | RD Gateway | ◐ | MS-TSGU: HTTP/WebSocket with NTLM; no RPC over HTTP, no UDP |
-|  | UDP transport and multitransport | — | MS-RDPEMT, MS-RDPEUDP |
+|  | RD Gateway | ◐ | MS-TSGU: HTTP/WebSocket and RPC over HTTP (MS-RPCH) with NTLM; no UDP |
+|  | UDP transport and multitransport | ◐ | MS-RDPEMT, MS-RDPEUDP: reliable UDP with TLS, Soft-Sync, TCP fallback; opt-in; no lossy UDP (DTLS), no RDP-UDP v3 |
 |  | Network auto-detect | ✅ | MS-RDPBCGR 2.2.14: "Detect automatically" speed; RTT and bandwidth answered, results in the session panel |
 | Graphics | Bitmap updates (planar, interleaved RLE) | ✅ | MS-RDPBCGR, MS-RDPEGDI |
 |  | Bulk compression (MPPC, NCRUSH, XCRUSH) | ✅ | MS-RDPBCGR 3.1.8, MS-RDPEGDI |
@@ -78,15 +78,15 @@ Of the 38 features a full RDP client offers (below), 29 are done and 1 partly (7
 |  | Drives | ✅ | MS-RDPEFS |
 |  | Printers (Easy Print) | ✅ | MS-RDPEPC |
 |  | Smart cards | ✅ | MS-RDPESC |
-|  | Serial and parallel ports | — | MS-RDPESP |
+|  | Serial and parallel ports | ✅ | MS-RDPESP: COM and LPT, live on and off |
 |  | USB devices | — | MS-RDPEUSB |
-|  | Cameras | — | MS-RDPECAM |
+|  | Cameras | ✅ | MS-RDPECAM: Media Foundation capture; opt-in per connection |
 |  | Plug and play devices | — | MS-RDPEPNP |
 | Audio and video | Audio playback | ✅ | MS-RDPEA: PCM, ADPCM, AAC, MP3 |
 |  | Microphone | ✅ | MS-RDPEAI |
-|  | Video redirection | — | MS-RDPEVOR, MS-RDPEV |
+|  | Video redirection | ◐ | MS-RDPEVOR with MS-RDPEGT: opt-in; no MS-RDPEV (TSMF) |
 | Remote apps and collaboration | RemoteApp (seamless windows) | ✅ | MS-RDPERP: apps per connection, one window each, taskbar |
-|  | Multiparty and shadowing | — | MS-RDPEMC |
+|  | Multiparty and shadowing | ◐ | MS-TSTS RpcShadow2, MS-RA, MS-RDPEMC, MS-RDPEPS: `--shadow`, `--invitation`, control requests; command line only |
 
 </details>
 
@@ -108,10 +108,9 @@ Windows: download the setup or the portable zip from
 
 ## Not yet
 
-UDP transport, RD Gateway over RPC/HTTP, legacy RDP security (no TLS),
-serial ports, USB, cameras, plug and play devices, video redirection and
-shadowing. Everything listed as done above is built and unit tested; most of
-it has not yet been tried against every kind of Windows server.
+USB and plug and play devices, lossy UDP, FIPS-level legacy security and
+MS-RDPEV video. Everything listed as done above is built and unit tested; most
+of it has not yet been tried against every kind of Windows server.
 
 ## Layout
 
