@@ -603,6 +603,10 @@ sent such an offer (its decoder refuses the trailing bytes).
   one transfer under the folder's id: summed progress, done with the last
   file. Links, junctions and other reparse points are never followed; names
   the receiver would refuse are left out. Empty subfolders are not sent.
+- **Ending a folder:** the side that ends a folder (cancelled, a file that
+  cannot be read, transfers switched off) also sends `FileCancel` with the
+  folder's own id, and the other side ends the whole folder. Without it,
+  nobody would hear of the end while no file of the folder is in flight.
 - **Receiver:** checks `top` and every part of `path` like a file name
   (section 7.1), at most 32 parts deep, and refuses the file with reason 3
   otherwise. The first file of a folder raises one question to the user

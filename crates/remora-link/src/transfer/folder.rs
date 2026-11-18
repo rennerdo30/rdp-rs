@@ -27,7 +27,7 @@ use std::path::{Path, PathBuf};
 
 use super::io::{Source, TargetDir};
 use super::{Direction, Engine, MAX_ACTIVE, TransferEvent, new_id, path, reason};
-use crate::msg::{FolderRef, TransferId};
+use crate::msg::{FolderRef, Message, TransferId};
 
 /// Files of one folder in flight at a time.
 pub const FOLDER_PARALLEL: usize = 4;
@@ -308,7 +308,9 @@ impl Engine {
         }
     }
 
-    /// Ends a folder being sent: its files in flight are cancelled.
+    /// Ends a folder being sent: its files in flight are cancelled. Ended
+    /// here, the receiver also gets a `FileCancel` with the folder's id: it
+    /// would hear nothing when no file is in flight (RDP-72).
     pub(super) fn fail_folder_out(
         &mut self,
         id: TransferId,
@@ -322,6 +324,9 @@ impl Engine {
         for fid in f.active.keys() {
             self.fail_send(*fid, code, "the folder was cancelled", true);
         }
+        if !by_peer && self.connected {
+            self.out.push(Message::FileCancel { id, reason: code });
+        }
         self.folders.ready.push_back(TransferEvent::Failed {
             id,
             direction: Direction::Send,
@@ -331,7 +336,9 @@ impl Engine {
         });
     }
 
-    /// Ends a folder being received: its files are refused or cancelled.
+    /// Ends a folder being received: its files are refused or cancelled,
+    /// and, ended here, the sender gets a `FileCancel` with the folder's id
+    /// (RDP-72).
     pub(super) fn fail_folder_in(&mut self, id: TransferId, code: u8, by_peer: bool, detail: &str) {
         let Some(f) = self.folders.inc.get_mut(&id) else {
             return;
@@ -345,6 +352,9 @@ impl Engine {
         }
         for fid in ids {
             self.fail_receive(fid, code, "the folder was cancelled", true);
+        }
+        if !by_peer && self.connected {
+            self.out.push(Message::FileCancel { id, reason: code });
         }
         self.folders.ready.push_back(TransferEvent::Failed {
             id,

@@ -1151,6 +1151,76 @@ fn the_sender_can_cancel_a_folder() {
     assert_eq!(p.tx.active() + p.rx.active(), 0);
 }
 
+/// A folder being sent whose first file is on its way, with the receiver
+/// knowing the folder.
+fn folder_under_way() -> (Pair, TransferId) {
+    let mut p = Pair::new();
+    let files = vec![
+        mem_file("", "a.txt", b"one".to_vec()),
+        mem_file("", "b.txt", b"two".to_vec()),
+    ];
+    p.drain_tx = true;
+    let id = p.tx.send_folder("Photos", files).unwrap();
+    p.run(&mut |p| !p.rx_events.is_empty(), &mut Some);
+    (p, id)
+}
+
+#[test]
+fn ending_a_folder_tells_the_peer_under_its_id() {
+    // The sender ends the folder: the receiver hears it under the folder's
+    // id, also when none of its files is in flight (RDP-72).
+    let (mut p, id) = folder_under_way();
+    p.tx.cancel(id);
+    let sent = p.tx.take_messages();
+    assert!(
+        sent.iter()
+            .any(|m| matches!(m, Message::FileCancel { id: f, reason: reason::USER } if *f == id)),
+        "{sent:?}"
+    );
+    for m in sent
+        .iter()
+        .filter(|m| matches!(m, Message::FileCancel { id: f, .. } if *f == id))
+    {
+        p.rx.handle(&wire(m));
+    }
+    let rx = rx_events(&mut p);
+    assert!(
+        rx.iter()
+            .any(|e| matches!(e, TransferEvent::Failed { id: f, by_peer: true, .. } if *f == id)),
+        "{rx:?}"
+    );
+    assert_eq!(p.rx.active(), 0);
+
+    // The receiver ends it: the sender hears it and sends nothing back.
+    let (mut p, id) = folder_under_way();
+    p.rx.cancel(id);
+    let sent = p.rx.take_messages();
+    for m in sent
+        .iter()
+        .filter(|m| matches!(m, Message::FileCancel { id: f, .. } if *f == id))
+    {
+        p.tx.handle(&wire(m));
+    }
+    assert!(
+        sent.iter()
+            .any(|m| matches!(m, Message::FileCancel { id: f, .. } if *f == id)),
+        "{sent:?}"
+    );
+    let tx = events(&mut p.tx);
+    assert!(
+        tx.iter()
+            .any(|e| matches!(e, TransferEvent::Failed { id: f, by_peer: true, .. } if *f == id)),
+        "{tx:?}"
+    );
+    assert_eq!(p.tx.active(), 0);
+    assert!(
+        !p.tx
+            .take_messages()
+            .iter()
+            .any(|m| matches!(m, Message::FileCancel { id: f, .. } if *f == id))
+    );
+}
+
 #[test]
 fn a_folder_resumes_after_a_disconnect() {
     let mut p = Pair::new();

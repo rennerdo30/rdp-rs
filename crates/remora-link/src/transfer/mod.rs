@@ -744,6 +744,14 @@ impl Engine {
             Message::FileCancel { id, reason } => {
                 self.fail_send(*id, *reason, "cancelled by the peer", false);
                 self.fail_receive(*id, *reason, "cancelled by the peer", false);
+                // A folder's own id ends the whole folder (RDP-72).
+                let (out, inc) = self.is_folder(id);
+                if out {
+                    self.fail_folder_out(*id, *reason, true, "cancelled by the peer");
+                }
+                if inc {
+                    self.fail_folder_in(*id, *reason, true, "cancelled by the peer");
+                }
             }
             Message::FileComplete { id } => match self
                 .sending
