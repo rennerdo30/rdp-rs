@@ -102,6 +102,11 @@ The editor has five pages.
     servers, NTLM as a fallback. With no user name, it signs in as you.
   - **Gateway**: an RD Gateway as `host` or `host:port`, or empty for a
     direct connection. The gateway gets the same user name and password.
+    Remora uses the gateway's HTTP transport, and RPC over HTTP when the
+    gateway does not offer HTTP (older gateways, or HTTP turned off).
+  - **Gateway over RPC** (shown once a gateway is entered) skips the HTTP
+    attempt and uses RPC over HTTP only. On the command line:
+    `--gateway-rpc`.
 
 ### Display
 
