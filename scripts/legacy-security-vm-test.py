@@ -2,11 +2,12 @@
 """Live test of legacy RDP security (Standard RDP Security, MS-RDPBCGR 5.3;
 RDP-73) against Windows' own RDP server in a throwaway lab clone.
 
-    python scripts/legacy-security-vm-test.py [--seconds 60] [--levels 1,2,3]
+    python scripts/legacy-security-vm-test.py [--seconds 60] [--levels 1,2,3,4]
 
 The clone's RDP-Tcp listener is set to the RDP Security Layer
 (SecurityLayer=0, no NLA) and each encryption level in turn
-(MinEncryptionLevel 1 Low, 2 Client Compatible, 3 High). For each level:
+(MinEncryptionLevel 1 Low, 2 Client Compatible, 3 High, 4 FIPS; RDP-84).
+For each level:
 
 1. Without `--legacy-security` the headless client must refuse the server
    and say so ("only legacy RDP security"); this also proves the registry
@@ -15,9 +16,10 @@ The clone's RDP-Tcp listener is set to the RDP Security Layer
    printed (the same trust check as a TLS certificate, RDP-54).
 3. With `--legacy-security --expect-fingerprint`, the client records the
    desktop for `--seconds` while a test window repaints at 30 fps: exit 0, no
-   protocol error or MAC mismatch, the trace names the RC4 strength and
-   level, and at least one RC4 key update (after 4,096 packets, 5.3.7)
-   happens in a run.
+   protocol error or MAC mismatch, the trace names the cipher (RC4
+   strength, or FIPS Triple DES at level 4) and level, and at least one RC4
+   key update (after 4,096 packets, 5.3.7) happens in a run with an RC4
+   level.
 
 Nothing appears on this PC; the clone is discarded.
 """
@@ -47,7 +49,7 @@ RDP_TCP = r"HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\R
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--seconds", type=int, default=60)
-    ap.add_argument("--levels", default="1,2,3",
+    ap.add_argument("--levels", default="1,2,3,4",
                     help="encryption levels to test (a key update needs 4,096 packets: "
                          "use one level and --seconds 900 to see one)")
     a = ap.parse_args()
@@ -87,7 +89,8 @@ def main() -> int:
                                errors="replace", timeout=timeout)
             return r.returncode, r.stdout + r.stderr
 
-        names = {1: "low", 2: "client compatible", 3: "high"}
+        names = {1: "low", 2: "client compatible", 3: "high", 4: "FIPS"}
+        rc4_runs = 0
         for level in [int(v) for v in a.levels.split(",")]:
             name = names[level]
             h.ps(f"Set-ItemProperty '{RDP_TCP}' SecurityLayer 0; "
@@ -125,10 +128,14 @@ def main() -> int:
                             "--screenshot", str(work / f"level{level}.png"),
                             "--wait", str(a.seconds), "-v", timeout=a.seconds + 180)
             log.write_text(out, encoding="utf-8")
-            sec = re.search(r"legacy RDP security \(no TLS\): (\d+)-bit RC4, encryption level (\d)", out)
+            sec = re.search(r"legacy RDP security \(no TLS\): (\d+-bit RC4|FIPS Triple DES), "
+                            r"encryption level (\d)", out)
             frames = re.search(r"recorded [\d.]+ s, (\d+) frames", out)
             updates += out.count("RC4 key updated")
+            fips = sec is not None and sec.group(1).startswith("FIPS")
+            rc4_runs += sec is not None and not fips
             ok = (code == 0 and sec is not None and int(sec.group(2)) >= level
+                  and (fips or level < 4)
                   and "protocol error" not in out and "MAC mismatch" not in out
                   and (work / f"level{level}.png").exists())
             check(f"[{name}] session for {a.seconds} s", ok,
@@ -136,8 +143,9 @@ def main() -> int:
                   f"{frames.group(1) if frames else '?'} frames, {time.time() - t:.0f} s; log {log}")
             if not ok:
                 h.log("\n".join(l for l in out.splitlines() if "error" in l.lower())[-1500:])
-        check("an RC4 key update (4,096 packets) happened and the session went on", updates > 0,
-              f"{updates} updates")
+        if rc4_runs:
+            check("an RC4 key update (4,096 packets) happened and the session went on",
+                  updates > 0, f"{updates} updates")
     finally:
         try:
             h.wc("stop")

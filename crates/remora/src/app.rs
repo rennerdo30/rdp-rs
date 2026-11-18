@@ -71,6 +71,11 @@ pub enum UserEvent {
     /// Files picked to send to a tab's server; the download folder picked.
     PickedFiles(u64, Vec<std::path::PathBuf>),
     PickedDownloads(std::path::PathBuf),
+    /// A server's sessions for the shadow dialog (RDP-85).
+    ShadowSessions(String, Result<Vec<crate::shadow::RemoteSession>, String>),
+    /// A shared desktop to open (its name and configuration), from a
+    /// shadow request to the server named (Some) or an invitation file.
+    SharedDesktop(Option<String>, Result<(String, Box<Config>), String>),
 }
 
 /// Automatic reconnect attempts after a network drop, and the wait before each.
@@ -1303,6 +1308,47 @@ impl App {
                     },
                 );
             }
+            Action::ListSessions(host) => {
+                let proxy = self.proxy.clone();
+                std::thread::spawn(move || {
+                    let r = crate::shadow::list_sessions(&host);
+                    let _ = proxy.send_event(UserEvent::ShadowSessions(host, r));
+                });
+            }
+            Action::Shadow { name, host, req } => {
+                // Blocks while the session's user decides (about 30 s).
+                let proxy = self.proxy.clone();
+                std::thread::spawn(move || {
+                    let r = crate::shadow::request_invitation(&host, req)
+                        .and_then(|text| {
+                            crate::shadow::invitation_config(&text, Some(&host), "", false)
+                        })
+                        .map(|cfg| {
+                            let n = crate::shadow::window_name(&cfg, Some((&name, req.session_id)));
+                            (n, Box::new(cfg))
+                        });
+                    let _ = proxy.send_event(UserEvent::SharedDesktop(Some(host), r));
+                });
+            }
+            Action::PickInvitation => {
+                let proxy = std::sync::Mutex::new(self.proxy.clone());
+                crate::picker::pick_with(
+                    crate::picker::Pick::Invitation,
+                    self.hwnd(),
+                    move |path| {
+                        if let (Some(path), Ok(p)) = (path, proxy.lock()) {
+                            let r = std::fs::read(&path)
+                                .map_err(|e| format!("Cannot read {}: {e}", path.display()))
+                                .and_then(|b| {
+                                    let text = crate::shadow::invitation_text(&b);
+                                    crate::shadow::invitation_config(&text, None, "", false)
+                                })
+                                .map(|cfg| (crate::shadow::window_name(&cfg, None), Box::new(cfg)));
+                            let _ = p.send_event(UserEvent::SharedDesktop(None, r));
+                        }
+                    },
+                );
+            }
             Action::Import { path, password } => {
                 let proxy = self.proxy.clone();
                 std::thread::spawn(move || {
@@ -2434,6 +2480,42 @@ impl ApplicationHandler<UserEvent> for App {
                             m.ui.settings_done(true, format!("Exported to {}.", path.display()))
                         }
                         Err(e) => m.ui.settings_done(false, e),
+                    }
+                }
+                return self.dirty();
+            }
+            UserEvent::ShadowSessions(host, r) => {
+                if let Some(m) = &mut self.win {
+                    m.ui.shadow_sessions(&host, r);
+                }
+                return self.dirty();
+            }
+            UserEvent::SharedDesktop(host, r) => {
+                // A shadow request whose dialog was closed meanwhile is
+                // dropped: closing it is how the user gives up waiting.
+                if let Some(h) = &host
+                    && !self.win.as_ref().is_some_and(|m| m.ui.shadow_waiting(h))
+                {
+                    return;
+                }
+                match r {
+                    Ok((name, cfg)) => {
+                        if let Some(m) = &mut self.win {
+                            m.ui.shadow_done();
+                        }
+                        self.start_session(
+                            name,
+                            *cfg,
+                            false,
+                            SessionOptions::default(),
+                            Vec::new(),
+                        );
+                    }
+                    Err(e) => {
+                        let shown = self.win.as_mut().is_some_and(|m| m.ui.shadow_failed(&e));
+                        if !shown {
+                            self.message(e, Tone::Danger);
+                        }
                     }
                 }
                 return self.dirty();

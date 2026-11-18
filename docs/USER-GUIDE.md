@@ -176,15 +176,14 @@ explained in [Server helper](#server-helper).
 - **Security: Allow legacy RDP security (weak)**, off by default. Only for
   old servers that have no TLS (Windows' "RDP Security Layer", or servers
   set to it): Remora then connects with Standard RDP Security, RC4
-  encryption without TLS. It is weak: anyone on the network path can
+  encryption (Triple DES at the FIPS level) without TLS. It is weak: anyone on the network path can
   intercept the session, and the server's identity rests only on the key it
   showed the first time (Remora asks you to trust it, like a certificate).
   TLS is still used whenever the server offers it; Remora never picks the
   legacy security on its own. The switch belongs to the connection, not to
   its group, and the connection shows a **Legacy security** label. A server
   that offers only legacy security and a connection without the switch end
-  with "This server only offers legacy, weak security". Servers that
-  require FIPS encryption are not supported.
+  with "This server only offers legacy, weak security".
 
 ## Groups
 
@@ -555,7 +554,17 @@ not recorded.
 
 Remora can watch or control another user's session on a Windows server, as
 `mstsc /shadow` does. It can also join a Windows Desktop Sharing invitation.
-Both start from the command line:
+
+In the app, open the connection to the server, go to **Advanced** and click
+**Sessions…** under **Other sessions** (or run **Sessions on …** from the
+command palette). The dialog lists the server's signed-in sessions with
+their user and state. **Watch** shows a session; **Control** asks to
+control it too. **Ask the user first** is on by default; turned off, the
+server's policy must allow shadowing without permission. Closing the dialog
+while it waits for the user's answer gives up the request. To join an
+invitation file, run **Join a shared desktop** from the command palette.
+
+The same from the command line:
 
 ```text
 remora server01 --list-sessions
@@ -566,14 +575,15 @@ remora --invitation invite.xml                  join a Desktop Sharing invitatio
 ```
 
 - `--list-sessions` prints the server's sessions: the ID to shadow, the
-  session name, its state and the signed-in user.
+  session name, its state and the signed-in user (the dialog lists only
+  sessions with a user).
 - `--shadow` asks the server for a shadow invitation, then connects to it.
   Remora asks as the Windows user you are signed in as on this PC. That user
   must be an administrator on the server.
 - The session's user sees a "Remote Monitoring Request" with **Yes** and
   **No**. It closes by itself after about 30 seconds without an answer.
-  `--no-consent-prompt` works only where the server's policy allows shadowing
-  without permission.
+  `--no-consent-prompt` (in the app: **Ask the user first** off) works only
+  where the server's policy allows shadowing without permission.
 - The shared desktop opens like any session. The status line tells you
   whether you only watch it or also control it. In the command palette, the
   same entry is marked **View only** or **In control**. Without control,

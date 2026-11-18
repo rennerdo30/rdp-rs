@@ -44,6 +44,7 @@ pub mod credssp;
 pub mod crypto;
 pub mod cursor;
 pub mod der;
+pub(crate) mod des;
 pub mod disp;
 pub mod dvc;
 pub mod encomsp;

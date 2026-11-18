@@ -410,12 +410,16 @@ fn fastpath_output_decrypts_into_reassembler_frames() {
 
 #[test]
 fn methods_and_levels() {
-    assert_eq!(CLIENT_ENCRYPTION_METHODS, 0x0B);
+    assert_eq!(CLIENT_ENCRYPTION_METHODS, 0x1B);
     let r = (&CLIENT_RANDOM, &SERVER_RANDOM);
     assert!(StandardSecurity::new(ENCRYPTION_METHOD_128BIT, 2, r.0, r.1).is_ok());
+    assert!(StandardSecurity::new(ENCRYPTION_METHOD_FIPS, 4, r.0, r.1).is_ok());
+    assert!(check_method(ENCRYPTION_METHOD_FIPS).is_ok());
+    assert!(check_method(0).is_err());
     for (method, level) in [
         (0, 0),
-        (ENCRYPTION_METHOD_FIPS, 4),
+        (ENCRYPTION_METHOD_FIPS, 0),
+        (ENCRYPTION_METHOD_FIPS, 5),
         (2, 4),
         (2, 0),
         (2, 5),
@@ -427,4 +431,144 @@ fn methods_and_levels() {
         );
     }
     assert!(legacy_refused().to_string().contains(LEGACY_REFUSED));
+}
+
+/// FIPS reference values: keys from an independent Python transcription
+/// of 5.3.5.2 (hashlib SHA-1, Windows' bit order for the 3DES key
+/// expansion), the MAC from Python's hmac, the ciphertext from .NET's
+/// TripleDES (CBC, IV 12 34 56 78 90 ab cd ef), for the same randoms.
+#[test]
+fn fips_keys_and_first_pdus_match_the_reference() {
+    let k = fips_keys(&CLIENT_RANDOM, &SERVER_RANDOM);
+    assert_eq!(hx(&k.hmac), "eaed72ed00ba4ef449c0bb5765e26c3e89d3251f");
+    assert_eq!(
+        hx(&k.encrypt),
+        "735238734516323d79014f3264161f732329436d6d3b2638"
+    );
+    assert_eq!(
+        hx(&k.decrypt),
+        "2f25587a58293b2964021520133d5b7046254c5d70613b16"
+    );
+    assert_eq!(hx(&fips_mac(&k.hmac, b"hello", 0)), "bd36a8aeef93aa88");
+    assert_eq!(hx(&fips_mac(&k.hmac, b"hello", 7)), "7ff865bde8e62787");
+
+    let mut client = StandardSecurity::from_fips_keys(ENCRYPTION_LEVEL_FIPS, &k);
+    // TS_SECURITY_HEADER2: SEC_ENCRYPT, length 0x10, version 1, 3 bytes
+    // of padding, the MAC, then the padded ciphertext.
+    let first = client.wrap(0, b"hello");
+    assert_eq!(hx(&first[..8]), "0800000010000103");
+    assert_eq!(hx(&first[8..16]), "bd36a8aeef93aa88");
+    assert_eq!(hx(&first[16..]), "bcf1714f5d1ab41f");
+    // The CBC chain carries over into the next PDU; 16 bytes, no padding.
+    let second = client.wrap(0, b"0123456789abcdef");
+    assert_eq!(second[7], 0);
+    assert_eq!(hx(&second[16..]), "828f7762f2210efe5ab2d4247b1700d7");
+    assert_eq!(second[8..16], fips_mac(&k.hmac, b"0123456789abcdef", 1));
+}
+
+/// A FIPS client and server over the same randoms.
+fn fips_pair(level: u32) -> (StandardSecurity, StandardSecurity) {
+    let k = fips_keys(&CLIENT_RANDOM, &SERVER_RANDOM);
+    let server = FipsKeys {
+        hmac: k.hmac,
+        encrypt: k.decrypt,
+        decrypt: k.encrypt,
+    };
+    (
+        StandardSecurity::from_fips_keys(level, &k),
+        StandardSecurity::from_fips_keys(level, &server),
+    )
+}
+
+#[test]
+fn fips_slow_path_round_trips_with_every_padding() {
+    let (mut client, mut server) = fips_pair(ENCRYPTION_LEVEL_FIPS);
+    // The salted MAC does not apply: no SEC_SECURE_CHECKSUM.
+    client.set_salted_mac(true);
+    for n in 0..300usize {
+        let share: Vec<u8> = (0..n).map(|i| (i * 7 + n) as u8).collect();
+        let up = client.wrap(0, &share);
+        assert_eq!(&up[..2], &[0x08, 0x00]);
+        assert_eq!(up[7] as usize, (8 - n % 8) % 8, "pad length");
+        assert_eq!((up.len() - 16) % 8, 0);
+        assert_eq!(server.unwrap(&up).unwrap(), share, "up {n}");
+        let down = server.wrap(0, &share);
+        assert_eq!(client.unwrap(&down).unwrap(), share, "down {n}");
+    }
+    // Typed PDUs keep their basic header; licensing still goes in the
+    // clear until the server asks for it encrypted.
+    let info = client.wrap(0x0040, b"info");
+    assert_eq!(
+        server.unwrap(&info).unwrap(),
+        [&[0x40, 0, 0, 0][..], b"info"].concat()
+    );
+    assert_eq!(
+        client.wrap(0x0080, b"lic"),
+        [&[0x80, 0, 0, 0][..], b"lic"].concat()
+    );
+}
+
+#[test]
+fn fips_fastpath_carries_fips_information() {
+    let (mut client, mut server) = fips_pair(ENCRYPTION_LEVEL_FIPS);
+    let event = [0x20, 0x00, 0x08, 0xab, 0x02, 0x6f, 0x01];
+    let plain = [&[0x04, 9][..], &event].concat();
+    let pdu = client.fastpath_input(&plain);
+    // Encrypted, no checksum flag; length 2 + 4 + 8 + 8 (7 bytes padded).
+    assert_eq!(&pdu[..2], &[0x84, 22]);
+    assert_eq!(&pdu[2..6], &[0x10, 0x00, 0x01, 0x01]);
+    assert_eq!(server.fastpath_output(&pdu).unwrap(), plain);
+    // A long update in the other direction.
+    let mut update = vec![0x00, 0x80, 0x00, 0x01, 0xF0, 0x03];
+    update.extend((0..1000).map(|i| i as u8));
+    let n = update.len() as u16;
+    update[1..3].copy_from_slice(&(0x8000 | n).to_be_bytes());
+    let enc = server.fastpath_input(&update);
+    assert_eq!(client.fastpath_output(&enc).unwrap(), update);
+    // Unencrypted output is refused at the FIPS level.
+    assert!(client.fastpath_output(&update).is_err());
+}
+
+#[test]
+fn bad_fips_headers_are_refused() {
+    let (mut client, mut server) = fips_pair(ENCRYPTION_LEVEL_FIPS);
+    let good = server.wrap(0, b"bitmap update");
+    for (at, value) in [(4, 0x11), (6, 2), (7, 8), (7, 200), (20, 1)] {
+        let (mut c, mut s) = fips_pair(ENCRYPTION_LEVEL_FIPS);
+        let mut bad = s.wrap(0, b"bitmap update");
+        bad[at] ^= value;
+        assert!(c.unwrap(&bad).is_err(), "byte {at}");
+    }
+    // Windows pads a whole block with 8 bytes (seen against Windows 11):
+    // taken, and the MAC covers the data without them.
+    let k = fips_keys(&CLIENT_RANDOM, &SERVER_RANDOM);
+    let mut win = StandardSecurity::from_fips_keys(
+        ENCRYPTION_LEVEL_FIPS,
+        &FipsKeys {
+            hmac: k.hmac,
+            encrypt: k.decrypt,
+            decrypt: k.encrypt,
+        },
+    );
+    let mut c = StandardSecurity::from_fips_keys(ENCRYPTION_LEVEL_FIPS, &k);
+    let data = b"sixteen bytes!!!";
+    let sig = fips_mac(&k.hmac, data, 0);
+    let mut padded = [&data[..], &[0u8; 8]].concat();
+    if let Keys::Fips { encrypt, .. } = &mut win.keys {
+        encrypt.process(&mut padded);
+    }
+    let pdu = [&[0x08, 0, 0, 0, 0x10, 0, 1, 8][..], &sig, &padded].concat();
+    assert_eq!(c.unwrap(&pdu).unwrap(), data);
+    // Ciphertext not in whole blocks.
+    let (mut c, mut s) = fips_pair(ENCRYPTION_LEVEL_FIPS);
+    let bad = s.wrap(0, b"bitmap update");
+    assert!(c.unwrap(&bad[..bad.len() - 1]).is_err());
+    // Truncated: errors, not panics.
+    for n in 0..16 {
+        assert!(client.unwrap(&good[..n]).is_err(), "{n} bytes");
+    }
+    assert_eq!(client.unwrap(&good).unwrap(), b"bitmap update");
+    // An RC4 session does not read FIPS headers, and the other way round.
+    let (mut rc4, _) = pair(KeyStrength::Bits128, ENCRYPTION_LEVEL_HIGH);
+    assert!(rc4.unwrap(&server.wrap(0, b"x")).is_err());
 }

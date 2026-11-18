@@ -296,28 +296,8 @@ fn shared_desktop_config(args: &Args) -> Result<(String, Config), String> {
         }
         (None, None) => return Err("no invitation".into()),
     };
-    let inv = rdp::Invitation::parse(&text).map_err(|e| e.to_string())?;
-    let addrs: Vec<std::net::IpAddr> = server
-        .and_then(|h| std::net::ToSocketAddrs::to_socket_addrs(&(h, 0)).ok())
-        .map(|a| a.map(|s| s.ip()).collect())
-        .unwrap_or_default();
-    let (host, port, sid) =
-        shadow::pick_target(&inv, &addrs).ok_or("the invitation lists no listener")?;
-    // The name the sharer shows for this participant.
-    let viewer = Some(args.user.clone())
-        .filter(|u| !u.is_empty())
-        .or_else(|| std::env::var("USERNAME").ok())
-        .unwrap_or_else(|| "Remora".into());
-    let mut cfg = Config::new(&host, &viewer, "");
-    cfg.port = port;
-    cfg.assistance = Some(rdp::AssistanceLogon::from_invitation(
-        &inv,
-        args.preconnection.then_some(sid),
-    ));
-    let name = match (server, args.shadow) {
-        (Some(s), Some(id)) => format!("{s} session {id} (shadow)"),
-        _ => format!("Shared desktop {host}"),
-    };
+    let cfg = shadow::invitation_config(&text, server, &args.user, args.preconnection)?;
+    let name = shadow::window_name(&cfg, server.zip(args.shadow));
     Ok((name, cfg))
 }
 
@@ -782,6 +762,10 @@ fn snapshot_ui(
         }),
         ("-cert", || ui::sample_cert(false)),
         ("-cert-changed", || ui::sample_cert(true)),
+        ("-shadow-sessions", || ui::sample_shadow(0)),
+        ("-shadow-loading", || ui::sample_shadow(1)),
+        ("-shadow-asking", || ui::sample_shadow(2)),
+        ("-shadow-failed", || ui::sample_shadow(3)),
         ("-panel-display", || ui::sample_panel(1, false)),
         ("-panel-quality", || ui::sample_panel(2, false)),
         ("-panel-session", || ui::sample_panel(3, false)),

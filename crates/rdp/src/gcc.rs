@@ -159,7 +159,7 @@ pub fn client_data_blocks(s: &ClientSettings) -> Vec<u8> {
 
     let mut sec = Vec::new();
     // encryptionMethods: none when TLS/CredSSP protect the session; 40, 56
-    // and 128-bit RC4 for Standard RDP Security (2.2.1.3.3, 5.3.2).
+    // and 128-bit RC4 and FIPS for Standard RDP Security (2.2.1.3.3, 5.3.2).
     sec.put_u32(if s.selected_protocol == crate::x224::PROTOCOL_RDP {
         crate::security::CLIENT_ENCRYPTION_METHODS
     } else {
@@ -336,13 +336,13 @@ mod tests {
         assert_eq!(u16::from_le_bytes([b[0], b[1]]), CS_CORE);
         assert_eq!(u16::from_le_bytes([b[2], b[3]]), 234);
         // Client Security Data (2.2.1.3.3): no methods under TLS, 40, 56
-        // and 128 bits under Standard RDP Security.
+        // and 128-bit RC4 and FIPS under Standard RDP Security.
         assert_eq!(&b[234..242], &[0x02, 0xC0, 12, 0, 0, 0, 0, 0]);
         let rdp = client_data_blocks(&ClientSettings {
             selected_protocol: 0,
             ..s
         });
-        assert_eq!(&rdp[234..242], &[0x02, 0xC0, 12, 0, 0x0B, 0, 0, 0]);
+        assert_eq!(&rdp[234..242], &[0x02, 0xC0, 12, 0, 0x1B, 0, 0, 0]);
         // Scale fields at the end of the core block: desktop 150, device 140.
         assert_eq!(&b[226..234], &[150, 0, 0, 0, 140, 0, 0, 0]);
         // earlyCapabilityFlags (offset 144): ERRINFO | WANT_32BPP |

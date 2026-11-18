@@ -27,6 +27,8 @@ pub enum Pick {
     Files,
     /// The folder received files go to.
     DownloadFolder,
+    /// A Windows Desktop Sharing invitation (RDP-85).
+    Invitation,
 }
 
 struct Request {
@@ -116,6 +118,11 @@ fn pick(kind: Pick, owner: isize) -> Vec<PathBuf> {
                 .save_file(),
             // The import tells the format from the content; the filters
             // only help find the file.
+            Pick::Invitation => dialog
+                .set_title("Join a shared desktop")
+                .add_filter("Invitations", &["xml", "txt"])
+                .add_filter("All files", &["*"])
+                .pick_file(),
             Pick::OpenBackup => dialog
                 .set_title("Import connections")
                 .add_filter("All connection files", &["rdpbackup", "bin", "xml", "rdg"])

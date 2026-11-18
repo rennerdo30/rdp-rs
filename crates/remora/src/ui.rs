@@ -23,9 +23,11 @@ pub use palette::{SESSION_CHORD, sample as sample_palette};
 pub mod helper;
 mod home;
 mod panel;
+mod shadow;
 mod sidebar;
 mod summary;
 pub use panel::{sample_panel_float, sample_panel_strip};
+pub use shadow::sample_shadow;
 pub use sidebar::{Divider, sample_rail, sample_resized};
 
 pub use helper::{
@@ -410,6 +412,17 @@ pub enum Hit {
     FormForgetHelper,
     ForgetOk,
     ForgetCancel,
+    /// Shadowing (RDP-85): the editor's Sessions button; the dialog's
+    /// consent switch, Refresh, Close, and a session row's Watch and
+    /// Control (index into the listed sessions).
+    ShadowOpen,
+    ShadowConsent,
+    ShadowRefresh,
+    ShadowClose,
+    ShadowWatch(usize),
+    ShadowControl(usize),
+    /// The palette's "Join a shared desktop": pick an invitation file.
+    OpenInvitation,
 }
 
 /// A RemoteApp session tab: the connection's apps and the open windows.
@@ -703,6 +716,16 @@ pub enum Action {
     HelperUpdateNever(String),
     /// Download and send the helper update (RDP-61).
     UpdateHelper(u64),
+    /// Read a server's sessions for the shadow dialog (RDP-85).
+    ListSessions(String),
+    /// Ask a server for a shadow invitation and connect to it.
+    Shadow {
+        name: String,
+        host: String,
+        req: crate::shadow::ShadowRequest,
+    },
+    /// Pick a Desktop Sharing invitation file and connect to it.
+    PickInvitation,
 }
 
 pub enum Key {
@@ -891,6 +914,8 @@ pub struct Ui {
     pub client_fp: String,
     /// Asking to forget a paired helper: server id and host.
     pub forget: Option<(String, String)>,
+    /// The "Sessions on <server>" dialog (RDP-85).
+    shadow: Option<shadow::ShadowDialog>,
 }
 
 /// Title-row geometry in physical pixels for the frame hook.
@@ -994,6 +1019,7 @@ impl Ui {
             helper_pins: Default::default(),
             client_fp: String::new(),
             forget: None,
+            shadow: None,
         };
         m.fields[Field::Password as usize] = TextField::secret();
         m.fields[Field::Master as usize] = TextField::secret();
@@ -1982,6 +2008,13 @@ impl Ui {
             self.menu_done();
         }
         match hit {
+            Hit::ShadowOpen => return self.open_shadow(),
+            Hit::ShadowConsent
+            | Hit::ShadowRefresh
+            | Hit::ShadowClose
+            | Hit::ShadowWatch(_)
+            | Hit::ShadowControl(_) => return self.activate_shadow(hit),
+            Hit::OpenInvitation => return Some(Action::PickInvitation),
             Hit::ToolbarHandle
             | Hit::ToolbarMore
             | Hit::ToolbarBody
@@ -2610,6 +2643,9 @@ impl Ui {
             }
             return None;
         }
+        if self.shadow.is_some() {
+            return self.shadow_key(&k);
+        }
         if self.forget.is_some() {
             return match k {
                 Key::Esc => self.activate_helper(Hit::ForgetCancel),
@@ -2783,6 +2819,9 @@ impl Ui {
         if self.palette.is_some() && self.confirm_exit.is_none() {
             self.paint_palette(cv, te, f);
             self.toolbar_clear();
+        }
+        if self.shadow.is_some() && self.confirm_exit.is_none() {
+            self.paint_shadow(cv, te, f);
         }
         if let Some((_, host)) = self.forget.clone() {
             self.paint_forget_confirm(cv, te, f, &host);
@@ -5982,9 +6021,41 @@ impl Ui {
                 cells[0],
                 Some(Icon::Warning),
                 "Allow legacy RDP security (weak)",
-                "Only for old servers without TLS: RC4, easy to intercept",
+                "Only for old servers without TLS: RC4 or Triple DES, easy to intercept",
                 on,
                 Hit::FormLegacySecurity,
+            );
+            y += p(60.0) + p(20.0);
+            // Shadowing another user's session on this server (RDP-85).
+            self.caption(cv, te, f, x, y, w, "OTHER SESSIONS");
+            y += p(24.0);
+            let cells = self.card(cv, x, y, w, &[p(60.0)]);
+            let r = cells[0];
+            let b = Button::secondary("Sessions…").icon(Icon::Monitors);
+            let bw = self.btn_w(te, f, &b);
+            self.row_text(
+                cv,
+                te,
+                f,
+                r,
+                Some(Icon::Monitors),
+                "Sessions on this server",
+                "Watch or control a signed-in user's session (shadowing)",
+                false,
+                bw + p(24.0),
+            );
+            self.btn(
+                cv,
+                te,
+                f,
+                Rect::new(
+                    r.right() - p(12.0) - bw,
+                    r.y + (r.h - p(32.0)) / 2,
+                    bw,
+                    p(32.0),
+                ),
+                &b,
+                Hit::ShadowOpen,
             );
             y += p(60.0) + p(20.0);
         }

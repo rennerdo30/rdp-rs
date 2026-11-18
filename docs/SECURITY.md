@@ -119,16 +119,16 @@ What you give up:
   published, so anyone can make one. Remora checks that signature and then
   treats the key like a certificate: trust on first use, and a warning when
   it changes.
-- **Weak encryption.** RC4, 40, 56 or 128 bits as the server chooses, and
+- **Weak encryption.** RC4, 40, 56 or 128 bits as the server chooses
+  (or Triple DES at the FIPS level), and
   an RSA key of often only 512 bits. Your password travels in the encrypted
   Client Info PDU, not through NLA, so anyone who breaks or intercepts the
   connection gets it.
 - **No NLA.** The server starts a session before you sign in.
 
 Use it only on a network you trust, and prefer turning on TLS on the server.
-Remora never chooses legacy security on its own, refuses servers that offer
-no encryption at all, and does not support FIPS-level (Triple DES)
-encryption. Session keys are never logged.
+Remora never chooses legacy security on its own and refuses servers that
+offer no encryption at all. Session keys are never logged.
 
 ## Sharing
 
