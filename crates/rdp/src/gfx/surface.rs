@@ -369,6 +369,12 @@ impl GfxState {
         }
     }
 
+    /// Queues an output area for presenting again, unchanged: where
+    /// redirected video stopped covering the picture (MS-RDPEVOR).
+    pub fn restore(&mut self, d: Damage) {
+        self.pending.push(d);
+    }
+
     /// Copies composed areas to `fb` and appends them to `damage`. After a
     /// reset to a new size `fb` takes the output's size and is copied whole;
     /// returns true when `fb` was resized.

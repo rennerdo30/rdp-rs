@@ -248,6 +248,60 @@ fn gfx_channel_joins_drdynvc_or_brings_its_own() {
 }
 
 #[test]
+fn video_channels_are_offered_only_with_video_gfx_and_a_decoder() {
+    struct NoPicture;
+    impl crate::H264Decoder for NoPicture {
+        fn decode(&mut self, _: &[u8]) -> Result<Option<crate::Yuv420Frame>> {
+            Ok(None)
+        }
+    }
+    let accepted = |cfg: &Config, name: &str| {
+        let mut handlers: Vec<Box<dyn StaticChannel>> = Vec::new();
+        let handle = add_gfx_channel(cfg, &mut handlers);
+        let mut create = vec![0x10, 0x07];
+        create.extend_from_slice(name.as_bytes());
+        create.push(0);
+        let mut out = ChannelOut::default();
+        handlers[0].process(&create, &mut out).unwrap();
+        let ok = out.take()[0] == [0x10, 0x07, 0, 0, 0, 0];
+        (ok, handle.video_stats().is_some())
+    };
+    let decoder: crate::H264Factory =
+        std::sync::Arc::new(|| Some(Box::new(NoPicture) as Box<dyn crate::H264Decoder>));
+    let mut cfg = Config::new("h", "u", "p");
+    cfg.graphics = crate::Graphics::Gfx;
+    cfg.h264 = Some(decoder);
+    for name in [
+        crate::video::CONTROL_CHANNEL,
+        crate::video::DATA_CHANNEL,
+        crate::video::geometry::CHANNEL_NAME,
+    ] {
+        assert_eq!(
+            accepted(&cfg, name),
+            (false, false),
+            "{name}: not asked for"
+        );
+        cfg.video = true;
+        assert_eq!(accepted(&cfg, name), (true, true), "{name}: offered");
+        cfg.video = false;
+    }
+    // No decoder on this machine: not offered.
+    cfg.video = true;
+    cfg.h264 = Some(std::sync::Arc::new(|| None));
+    assert_eq!(
+        accepted(&cfg, crate::video::CONTROL_CHANNEL),
+        (false, false)
+    );
+    cfg.h264 = None;
+    assert_eq!(
+        accepted(&cfg, crate::video::CONTROL_CHANNEL),
+        (false, false)
+    );
+    // The graphics channel itself is still there.
+    assert_eq!(accepted(&cfg, crate::gfx::CHANNEL_NAME), (true, false));
+}
+
+#[test]
 fn gfx_reset_resizes_the_session_framebuffer() {
     let (mut client, _server) = session();
     let (mut channel, handle) = crate::gfx::graphics(None);

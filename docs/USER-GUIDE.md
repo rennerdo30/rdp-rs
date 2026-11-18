@@ -144,6 +144,15 @@ explained in [Server helper](#server-helper).
   default: smoother video and less traffic), or **Bitmaps**, classic bitmap
   updates, for a server or setup where GFX misbehaves. When a server's
   graphics fail, Remora reconnects the tab once with bitmaps on its own.
+- **Video redirection** (off by default; needs GFX): Remora offers Windows'
+  Video Optimized Remoting. When the server decides that part of the screen
+  is a playing video, it can send that part as its own H.264 stream instead
+  of painting it into the desktop picture; Remora decodes it on this PC and
+  shows it in the video's place, clipped where windows cover it and at the
+  pace of the video's own timestamps. Nothing changes unless the server
+  chooses to redirect a video; which servers and settings do so is still
+  being checked, so the switch is off until then. Applies on the next
+  connect, like the other quality settings.
 - **Windows keys (Win, Alt+Tab, …)**: **On this PC**, **On the remote** (the
   default), or **Remote in full screen**.
 - **Compression**: **Off** is fastest on a LAN; RDP 6.1, 6.0 or 5.0 send less
@@ -212,8 +221,8 @@ or hold **Alt** to bring it back. Its buttons, from the left:
 
   ![The side panel's Display page](images/panel-display.webp)
 
-- **Quality**: connection speed, colours and what to show. These apply at
-  logon, so the page offers **Reconnect now**.
+- **Quality**: connection speed, colours, what to show, graphics and video
+  redirection. These apply at logon, so the page offers **Reconnect now**.
 
   ![The side panel's Quality page, with Reconnect now](images/panel-quality.webp)
 

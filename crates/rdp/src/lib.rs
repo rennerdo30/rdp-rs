@@ -26,6 +26,7 @@
 //! - [`rdpei`]: touch and pen input on the `Microsoft::Windows::RDS::Input` dynamic channel (MS-RDPEI)
 //! - [`server`]: the server side for Remora Host: TLS, the connection sequence,
 //!   bitmap updates and input (MS-RDPBCGR)
+//! - [`video`]: video redirection, Video Optimized Remoting (MS-RDPEVOR) with geometry tracking (MS-RDPEGT)
 //! - [`rdpdr`]: device redirection (MS-RDPEFS) with shared drives, printers (MS-RDPEPC), smart cards (MS-RDPESC) and serial/parallel ports (MS-RDPESP)
 
 pub mod audin;
@@ -68,6 +69,7 @@ pub mod security;
 pub mod server;
 pub mod surfcmd;
 pub mod transport;
+pub mod video;
 pub mod x224;
 
 pub use audin::{AudioInput, AudioInputHandle, CaptureBackend, audin};

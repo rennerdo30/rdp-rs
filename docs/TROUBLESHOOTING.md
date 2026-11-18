@@ -209,6 +209,12 @@ A session that ends without an error shows why and how long it ran, with
   was plugged in when the session started (otherwise reconnect).
   `remora --list-cameras` shows the cameras Remora sees, without opening
   them. A camera another app on this PC is using may refuse to start.
+- **A video plays in the wrong place, flickers or freezes with video
+  redirection.** Switch **Video redirection** off on the editor's Advanced
+  page (or the side panel's Quality page) and reconnect: the server then
+  sends the video inside the desktop picture again. The diagnostic log shows
+  the video presentations (`video N: start ...`) and their geometry
+  (`geometry ...`); please attach it to the report.
 - **Windows warns when starting the setup.** The setup is not code-signed yet.
   Choose **More info**, then **Run anyway**.
 
