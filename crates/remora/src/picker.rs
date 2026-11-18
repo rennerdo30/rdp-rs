@@ -21,7 +21,7 @@ pub enum Pick {
     Folder,
     /// Where to write a connections backup.
     SaveBackup,
-    /// A connections backup to read.
+    /// A file to import: a Remora backup, mRemoteNG or RDCMan connections.
     OpenBackup,
     /// Files to send to the server helper (several at once).
     Files,
@@ -114,9 +114,14 @@ fn pick(kind: Pick, owner: isize) -> Vec<PathBuf> {
                 .set_file_name("remora-connections.rdpbackup")
                 .add_filter("Remora backup", &["rdpbackup"])
                 .save_file(),
+            // The import tells the format from the content; the filters
+            // only help find the file.
             Pick::OpenBackup => dialog
                 .set_title("Import connections")
+                .add_filter("All connection files", &["rdpbackup", "bin", "xml", "rdg"])
                 .add_filter("Remora backup", &["rdpbackup", "bin"])
+                .add_filter("mRemoteNG connections (confCons.xml)", &["xml"])
+                .add_filter("Remote Desktop Connection Manager", &["rdg"])
                 .pick_file(),
         };
         one.into_iter().collect()

@@ -23,6 +23,12 @@ serde_json = "1"
 argon2 = "0.6"
 chacha20poly1305 = "0.11"
 zeroize = "1.9"
+# Import from mRemoteNG and RDCMan: XML without DTD entity expansion, and
+# mRemoteNG's password scheme (PBKDF2-HMAC-SHA1 from ring, AES-256-GCM with a
+# 16-byte nonce).
+quick-xml = "0.42"
+aes-gcm = { version = "0.11.1", default-features = false, features = ["aes", "alloc", "zeroize"] }
+ring = "0.17"
 # WHATWG URL parsing for the helper's link requests (re-serialized, ASCII
 # host) before anything reaches the shell.
 url = "2.5.8"

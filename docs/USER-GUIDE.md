@@ -581,11 +581,73 @@ How the vault is encrypted, and what is stored where, is in
 - **Export…** writes all connections and groups, with their saved passwords,
   to one `.rdpbackup` file encrypted with your master password. It needs a
   master password; set one up first under **Security**.
-- **Import…** reads such a file. Type the master password it was made with;
-  its connections and groups are added to yours. Connections you already
-  have (same name, host and group) are skipped.
+- **Import…** reads such a file, or the connections of
+  [mRemoteNG](#from-mremoteng) and of
+  [Remote Desktop Connection Manager](#from-remote-desktop-connection-manager-rdcman).
+  Remora tells the kind of file from its content, not its name. The
+  connections and groups are added to yours. Connections you already have
+  (same name, host and group) are skipped.
 
 The first start also offers **Import connections**.
+
+After an import, a line says how many connections came over, and what did
+not: connections that aren't RDP, ones you already had, and passwords that
+could not be read, with the reason.
+
+**Passwords come over only into the vault.** Without a master password,
+Remora imports the connections without their passwords and says so: set up a
+master password under **Security**, then import again. Connections you
+already have are skipped, so a second import only adds what is missing; to
+get passwords for those, delete them first.
+
+### From a Remora backup
+
+Type the master password the backup was made with. Everything comes over,
+saved passwords included.
+
+### From mRemoteNG
+
+Pick `confCons.xml` (mRemoteNG keeps it in `%APPDATA%\mRemoteNG`). Files in
+mRemoteNG's current formats (2.6 to 2.9) are read.
+
+- **What comes over:** folders become groups; each RDP connection keeps its
+  name, host, port, user and domain (as `DOMAIN\user`), password, RD Gateway
+  (when set to Always or Detect), resolution (a fixed size, or fit to the tab
+  for Fit to window, Smart size and Full screen), and clipboard, sound
+  ("bring to this computer"), printers, smart cards and microphone.
+  Inherited settings are resolved to the values the connection really uses.
+  A connection that inherits its user and password from its folder inherits
+  them from the group in Remora too.
+- **What doesn't:** SSH, VNC, Telnet, HTTP and other non-RDP connections are
+  skipped and counted.
+- **Passwords:** mRemoteNG encrypts them with AES-GCM and its master
+  password. Remora tries mRemoteNG's built-in default first; only when the
+  file is protected with your own master password does Import ask for it
+  (**mRemoteNG master password**). A wrong password imports nothing.
+  Files that also encrypt the whole file are read the same way.
+  Passwords in files using another cipher (Serpent, Twofish, CCM or EAX), or
+  in files older than format 2.6, cannot be read: those connections come over
+  without them. Files from mRemoteNG's Windows protection (DPAPI) are read
+  for the Windows user who saved them.
+
+### From Remote Desktop Connection Manager (RDCMan)
+
+Pick the `.rdg` file. Files from RDCMan 2.2 and from 2.7 to 2.93 are read.
+
+- **What comes over:** the file becomes a group named after it, its groups
+  become groups below it, and each server keeps its display name, host and
+  port, logon credentials, gateway, remote desktop size (or fit to the tab
+  for "same size as client area" and full screen), and clipboard, sound,
+  printers, smart cards and microphone. Settings a server inherits from its
+  group are resolved; a server that inherits its logon credentials inherits
+  them from the group in Remora too. Credential profiles stored in the file
+  are used. Smart groups and server references are skipped.
+- **Passwords:** RDCMan encrypts them with Windows for the user who saved
+  them. Import them on the same PC, signed in as the same Windows user;
+  elsewhere they cannot be read and are counted. Passwords encrypted with a
+  certificate, and credential profiles kept in RDCMan's own settings rather
+  than in the file, cannot be read either: those connections come over with
+  the rest of their settings.
 
 ## Updates
 
