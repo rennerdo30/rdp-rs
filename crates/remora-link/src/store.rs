@@ -378,7 +378,10 @@ mod tests {
                 let p = p.clone();
                 std::thread::spawn(move || {
                     for j in 0..5 {
-                        update(&p, |cur| {
+                        // 40 updates on one file: a slow runner can keep a
+                        // writer waiting longer than the two-writer
+                        // LOCK_WAIT; merging, not the wait, is under test.
+                        update_within(&p, Duration::from_secs(60), |cur| {
                             let mut v: Vec<u32> = cur
                                 .map(|b| serde_json::from_slice(&b).unwrap())
                                 .unwrap_or_default();

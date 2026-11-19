@@ -850,6 +850,7 @@ fn snapshot_ui(
         ("-form-advanced", || ui::sample_form(4)),
         ("-settings", || ui::sample_settings(false)),
         ("-settings-vault", || ui::sample_settings(true)),
+        ("-settings-import-found", ui::sample_settings_found),
         // Import from mRemoteNG and RDCMan (RDP-80).
         ("-settings-import-mremoteng", || {
             ui::sample_settings_import(true)
@@ -903,6 +904,7 @@ fn snapshot_ui(
         ("-ended", || ui::sample_tab_state(1)),
         ("-spanned", || ui::sample_tab_state(3)),
         ("-empty", ui::sample_empty),
+        ("-empty-found", ui::sample_empty_found),
         ("-palette", || ui::sample_palette(false, "")),
         ("-palette-query", || ui::sample_palette(false, "of")),
         ("-palette-session", || ui::sample_palette(true, "")),

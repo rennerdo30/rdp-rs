@@ -127,14 +127,22 @@ fn pick(kind: Pick, owner: isize) -> Vec<PathBuf> {
                 .set_title("Import connections")
                 .add_filter(
                     "All connection files",
-                    &["rdpbackup", "bin", "xml", "rdg", "mxtsessions", "ini"],
+                    &[
+                        "rdpbackup",
+                        "bin",
+                        "xml",
+                        "rdg",
+                        "mxtsessions",
+                        "mobaconf",
+                        "ini",
+                    ],
                 )
                 .add_filter("Remora backup", &["rdpbackup", "bin"])
                 .add_filter("mRemoteNG connections (confCons.xml)", &["xml"])
                 .add_filter("Remote Desktop Connection Manager", &["rdg"])
                 .add_filter(
-                    "MobaXterm sessions (MobaXterm.ini, .mxtsessions)",
-                    &["mxtsessions", "ini"],
+                    "MobaXterm (MobaXterm.ini, .mobaconf, .mxtsessions)",
+                    &["mxtsessions", "mobaconf", "ini"],
                 )
                 .pick_file(),
         };

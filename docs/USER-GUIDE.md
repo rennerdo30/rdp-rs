@@ -760,8 +760,15 @@ How the vault is encrypted, and what is stored where, is in
   Remora tells the kind of file from its content, not its name. The
   connections and groups are added to yours. Connections you already have
   (same name, host and group) are skipped.
+- **Found on this PC:** when MobaXterm's or mRemoteNG's connections are where
+  those apps keep them (`%APPDATA%\MobaXterm\MobaXterm.ini` or
+  `Documents\MobaXterm\MobaXterm.ini`; `%APPDATA%\mRemoteNG\confCons.xml`),
+  a row for each sits under **Import connections**: **Import** reads it
+  without a file dialog. Remora only looks whether the files are there; it
+  reads one when you click.
 
-The first start also offers **Import connections**.
+The first start also offers **Import connections**, or **Import from
+MobaXterm** (or mRemoteNG) when their connections are found on this PC.
 
 After an import, a line says how many connections came over, and what did
 not: connections that aren't RDP, ones you already had, and passwords that
@@ -827,9 +834,11 @@ Pick the `.rdg` file. Files from RDCMan 2.2 and from 2.7 to 2.93 are read.
 
 ### From MobaXterm
 
-Pick `MobaXterm.ini` (in `%APPDATA%\MobaXterm`, or next to `MobaXterm.exe`
-for the portable edition), or a file from MobaXterm's **Export sessions**
-(`.mxtsessions`).
+Use the **MobaXterm on this PC** row (the installed edition's
+`%APPDATA%\MobaXterm\MobaXterm.ini`), or pick a file: `MobaXterm.ini` (next
+to `MobaXterm.exe` for the portable edition), a configuration export
+(**Settings → Export configuration**, `.mobaconf`) or a sessions export
+(`.mxtsessions`). Remora reads the sessions in any of them.
 
 - **What comes over:** folders become groups. RDP sessions keep their name,
   host, port, user and RD Gateway (when it is set to Always or Detect); SSH

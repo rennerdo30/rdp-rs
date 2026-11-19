@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **Imports found on this PC.** When MobaXterm's (`%APPDATA%\MobaXterm\MobaXterm.ini`) or mRemoteNG's (`%APPDATA%\mRemoteNG\confCons.xml`) connections are where those apps keep them, Settings shows a one-click **Import** for each, and the first start offers **Import from MobaXterm**. The file dialog also lists MobaXterm's configuration exports (`.mobaconf`) (RDP-89).
+
 ## 0.1.0-beta.12
 
 - **Import from MobaXterm.** **Import…** also reads `MobaXterm.ini` and exported `.mxtsessions` files: folders become groups, RDP sessions keep host, port, user and RD Gateway, SSH sessions become SSH connections with their key file, and an SSH gateway becomes the jump host. Other session types are skipped and counted; MobaXterm keeps passwords apart, so none come over. SSH connections can now have a jump host too (`ssh -J`) (RDP-89).

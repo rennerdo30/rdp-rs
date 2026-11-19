@@ -805,6 +805,41 @@ fn mobaxterm_sessions_import_rdp_and_ssh_with_folders() {
 }
 
 #[test]
+fn other_apps_files_are_found_where_they_keep_them() {
+    let dir = std::env::temp_dir().join(format!("remora-found-{}", std::process::id()));
+    let (appdata, docs) = (dir.join("Roaming"), dir.join("Documents"));
+    std::fs::create_dir_all(docs.join("MobaXterm")).unwrap();
+    std::fs::create_dir_all(appdata.join("MobaXterm")).unwrap();
+    std::fs::create_dir_all(appdata.join("mRemoteNG")).unwrap();
+    assert!(
+        found_in(Some(&appdata), Some(&docs)).is_empty(),
+        "folders alone are not files"
+    );
+    let in_docs = docs.join("MobaXterm").join("MobaXterm.ini");
+    std::fs::write(&in_docs, b"[Bookmarks]\r\n").unwrap();
+    let f = found_in(Some(&appdata), Some(&docs));
+    assert_eq!(
+        (f.len(), f[0].app, f[0].path.as_path()),
+        (1, "MobaXterm", in_docs.as_path())
+    );
+    let roaming = appdata.join("MobaXterm").join("MobaXterm.ini");
+    std::fs::write(&roaming, b"[Bookmarks]\r\n").unwrap();
+    std::fs::write(
+        appdata.join("mRemoteNG").join("confCons.xml"),
+        b"<Connections/>",
+    )
+    .unwrap();
+    let f = found_in(Some(&appdata), Some(&docs));
+    assert_eq!(f[0].path, roaming, "the installed edition's file first");
+    assert_eq!(
+        f.iter().map(|x| x.app).collect::<Vec<_>>(),
+        ["MobaXterm", "mRemoteNG"]
+    );
+    assert!(found_in(None, None).is_empty());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn text_without_mobaxterm_sessions_is_not_taken_for_them() {
     let ini = b"[Misc]\r\nBookmarksFile=1\r\n";
     assert!(probe(ini).is_err());

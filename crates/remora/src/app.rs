@@ -1323,6 +1323,14 @@ impl App {
                     },
                 );
             }
+            Action::ImportPath(path) => {
+                let proxy = self.proxy.clone();
+                std::thread::spawn(move || {
+                    let probe = crate::import::read_file(&path)
+                        .and_then(|bytes| crate::import::probe(&bytes));
+                    let _ = proxy.send_event(UserEvent::ImportFrom(path, probe));
+                });
+            }
             Action::ListSessions(host) => {
                 let proxy = self.proxy.clone();
                 std::thread::spawn(move || {
@@ -2283,6 +2291,8 @@ impl ApplicationHandler<UserEvent> for App {
                             ui.speakers = crate::audio::output_devices();
                             ui.mics = crate::mic::input_devices();
                             ui.local_ports = local_port_names();
+                            // Other apps' connection files: only whether they exist.
+                            ui.import_found = crate::import::found();
                             // Names only; no camera is opened.
                             ui.cams = crate::camera::names();
                             ui.local_monitors = crate::monitors::list();
