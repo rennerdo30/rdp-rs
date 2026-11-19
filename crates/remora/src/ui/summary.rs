@@ -7,7 +7,7 @@ use ffwd_render::{Canvas, Rect, TextEngine};
 use super::{Field, Fonts, SIZES, Ui, home, normalize_path, preset_name};
 use crate::icons::Icon;
 use crate::kit::{Font, Kit, Lead};
-use crate::store::{Connection, Inherit, Opens};
+use crate::store::{Connection, Inherit, Opens, Protocol};
 use crate::theme::{self, Tone, pal, size};
 
 /// One line of the summary.
@@ -45,9 +45,14 @@ impl Ui {
         let text = |f: Field| self.field(f).text.trim().to_string();
         c.name = text(Field::Name);
         c.host = text(Field::Host);
-        c.port = text(Field::Port).parse().unwrap_or(3389);
+        c.protocol = self.protocol;
+        c.port = text(Field::Port)
+            .parse()
+            .unwrap_or(self.protocol.default_port());
         c.user = text(Field::User);
         c.gateway = text(Field::Gateway);
+        c.jump = text(Field::Jump);
+        c.ssh_key = text(Field::SshKey);
         c.group = normalize_path(&text(Field::GroupPath));
         c.kerberos = self.kerberos;
         c.gateway_rpc = self.gateway_rpc;
@@ -66,6 +71,59 @@ impl Ui {
         c
     }
 
+    /// An SSH connection: the terminal, the sign-in and the address.
+    fn summary_ssh(&self, own: &Connection, r: &Connection) -> Vec<Line> {
+        let from = |pick: fn(&Inherit) -> bool| {
+            self.store
+                .source_of(&own.group, &own.inherit, pick)
+                .map(|g| g.name().to_string())
+        };
+        let user = if r.user.is_empty() {
+            "your Windows user name".to_string()
+        } else {
+            r.user.clone()
+        };
+        vec![
+            Line {
+                icon: Icon::Terminal,
+                title: "Opens a terminal".into(),
+                detail: "Windows' OpenSSH client, in Windows Terminal when installed".into(),
+                from: None,
+                tone: Tone::Accent,
+            },
+            Line {
+                icon: Icon::Key,
+                title: format!("Signs in as {user}"),
+                detail: if r.ssh_key.is_empty() {
+                    "With the OpenSSH agent's keys, or ssh asks for the password".into()
+                } else {
+                    "With the key file, or ssh asks".into()
+                },
+                from: from(|i| i.credentials),
+                tone: Tone::Warning,
+            },
+            Line {
+                icon: Icon::Globe,
+                title: "Direct connection".into(),
+                detail: format!(
+                    "To {}{}",
+                    if r.host.is_empty() {
+                        "the host"
+                    } else {
+                        &r.host
+                    },
+                    if r.port == 22 {
+                        String::new()
+                    } else {
+                        format!(" on port {}", r.port)
+                    }
+                ),
+                from: None,
+                tone: Tone::Info,
+            },
+        ]
+    }
+
     fn summary_lines(&self) -> Vec<Line> {
         let own = self.form_preview();
         let r = self.store.resolve(&own);
@@ -75,6 +133,9 @@ impl Ui {
                 .map(|g| g.name().to_string())
         };
         let mut out = Vec::new();
+        if r.protocol == Protocol::Ssh {
+            return self.summary_ssh(&own, &r);
+        }
 
         // What it opens.
         if r.opens == Opens::Apps {
@@ -256,6 +317,19 @@ impl Ui {
         });
 
         // Route.
+        if r.gateway.is_empty() && !r.jump.is_empty() {
+            out.push(Line {
+                icon: Icon::Terminal,
+                title: format!("Through jump host {}", r.jump),
+                detail: if r.ssh_key.is_empty() {
+                    "An SSH tunnel, signed in with the OpenSSH agent's keys".into()
+                } else {
+                    "An SSH tunnel, signed in with the key file".into()
+                },
+                from: from(|i| i.credentials),
+                tone: Tone::Info,
+            });
+        }
         out.push(Line {
             icon: Icon::Globe,
             title: if r.gateway.is_empty() {

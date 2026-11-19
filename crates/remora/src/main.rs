@@ -50,6 +50,8 @@ mod settings;
 mod shadow;
 mod smartcard;
 mod span;
+mod ssh_launch;
+mod ssh_tunnel;
 #[cfg(windows)]
 mod sspi;
 mod stats;
@@ -819,6 +821,13 @@ fn snapshot_ui(
         ("-connecting-steps", || sv::sample_connecting(false)),
         ("-connecting-gateway", || sv::sample_connecting(true)),
         ("-editor-gateway-rpc", ui::sample_form_gateway_rpc),
+        // SSH (RDP-87) and the SSH jump host (RDP-88).
+        ("-form-ssh", ui::sample_form_ssh),
+        ("-form-jump", ui::sample_form_jump),
+        ("-home-ssh", ui::sample_home_ssh),
+        ("-connecting-jump", sv::sample_connecting_jump),
+        ("-ssh-key", || ui::sample_ssh_key(false)),
+        ("-ssh-key-changed", || ui::sample_ssh_key(true)),
         ("-reconnecting", sv::sample_reconnecting),
         ("-ended-signed-out", || {
             sv::sample_ended(failure::EndReason::SignedOut)
@@ -923,7 +932,7 @@ fn snapshot_ui(
         ("-site-editor", || ui::sample_form(0), 1440.0, 900.0),
     ];
     // One error screen per kind of failure.
-    let failures: [Screen; 11] = [
+    let failures: [Screen; 12] = [
         || sv::sample_failed(0),
         || sv::sample_failed(1),
         || sv::sample_failed(2),
@@ -935,6 +944,7 @@ fn snapshot_ui(
         || sv::sample_failed(8),
         || sv::sample_failed(9),
         || sv::sample_failed(10),
+        || sv::sample_failed(11),
     ]
     .map(|f| ("", f));
     for (i, (_, make)) in failures.into_iter().enumerate() {

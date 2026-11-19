@@ -37,6 +37,14 @@ pub enum Cause {
     GatewayUnreachable,
     /// The RD Gateway works but could not open the server.
     Gateway,
+    /// The SSH jump host could not be reached (RDP-88).
+    JumpUnreachable,
+    /// The user did not trust the jump host's key.
+    JumpHostKey,
+    /// The jump host took none of the keys.
+    JumpAuth,
+    /// The jump host signed in but could not open the server.
+    Jump,
     /// No licence, or the licence server is unreachable.
     License,
     /// The server (or the connection broker) turned the connection down.
@@ -141,6 +149,16 @@ pub fn classify(e: &rdp::Error, step: Option<&ConnectStep>) -> Cause {
                 _ => Cause::Gateway,
             };
         }
+        Some(ConnectStep::Connector) => {
+            return match (e, io_kind) {
+                (E::Protocol(m), _) if m.contains("SSH key was not trusted") => Cause::JumpHostKey,
+                (E::Protocol(m), _) if m.contains("could not open") => Cause::Jump,
+                (E::Auth(_), _) => Cause::JumpAuth,
+                (E::Timeout, _) | (E::Io(_), _) => Cause::JumpUnreachable,
+                (E::Protocol(m), _) if m.starts_with("cannot resolve") => Cause::JumpUnreachable,
+                _ => Cause::Protocol,
+            };
+        }
         _ => {}
     }
     match e {
@@ -207,6 +225,8 @@ pub struct Context<'a> {
     pub port: u16,
     pub user: &'a str,
     pub gateway: Option<&'a str>,
+    /// SSH jump host (`ops@bastion`).
+    pub jump: Option<&'a str>,
 }
 
 impl Cause {
@@ -221,6 +241,7 @@ impl Cause {
                 | Cause::HostNotFound
                 | Cause::ConnectionLost
                 | Cause::GatewayUnreachable
+                | Cause::JumpUnreachable
         )
     }
 
@@ -236,6 +257,9 @@ impl Cause {
             }
             Cause::SecureChannel => Icon::Lock,
             Cause::GatewayUnreachable | Cause::Gateway => Icon::Globe,
+            Cause::JumpUnreachable | Cause::Jump => Icon::Globe,
+            Cause::JumpHostKey => Icon::ShieldAlert,
+            Cause::JumpAuth => Icon::Key,
             Cause::License => Icon::FileText,
             Cause::ServerDenied => Icon::Power,
             Cause::Unsupported | Cause::Protocol | Cause::Unknown => Icon::Warning,
@@ -247,7 +271,10 @@ impl Cause {
     /// are errors.
     pub fn tone(self) -> Tone {
         match self {
-            Cause::WrongPassword | Cause::SignInAgain | Cause::CertificateRejected => Tone::Warning,
+            Cause::WrongPassword
+            | Cause::SignInAgain
+            | Cause::CertificateRejected
+            | Cause::JumpHostKey => Tone::Warning,
             _ => Tone::Danger,
         }
     }
@@ -269,6 +296,10 @@ impl Cause {
             Cause::GatewayAuth => "The RD Gateway refused the sign-in",
             Cause::GatewayUnreachable => "The RD Gateway cannot be reached",
             Cause::Gateway => "The RD Gateway could not reach the server",
+            Cause::JumpUnreachable => "The SSH jump host cannot be reached",
+            Cause::JumpHostKey => "The jump host's key was not trusted",
+            Cause::JumpAuth => "The jump host refused the sign-in",
+            Cause::Jump => "The jump host could not reach the server",
             Cause::License => "A licensing problem on the server",
             Cause::ServerDenied => "The server turned the connection down",
             Cause::SecureChannel => "The secure connection failed",
@@ -284,6 +315,7 @@ impl Cause {
     pub fn fix(self, c: &Context) -> String {
         let (host, port, user) = (c.host, c.port, c.user);
         let gw = c.gateway.unwrap_or("the gateway");
+        let jump = c.jump.unwrap_or("the jump host");
         match self {
             Cause::HostNotFound => format!(
                 "Check the spelling of {host}. A name on a work network may need the VPN first."
@@ -330,6 +362,18 @@ impl Cause {
             }
             Cause::Gateway => format!(
                 "The gateway answered but could not open {host}: it may be off, or the gateway's policy blocks it."
+            ),
+            Cause::JumpUnreachable => format!(
+                "Check the jump host address ({jump}) and this PC's network. SSH uses port 22 unless the address names another."
+            ),
+            Cause::JumpHostKey => format!(
+                "Retry and choose Trust if you know {jump}, or check that the address is right."
+            ),
+            Cause::JumpAuth => format!(
+                "Remora signs in to {jump} with the connection's key file or a key in the OpenSSH agent (ssh-add). Check that the key is in authorized_keys for that user there."
+            ),
+            Cause::Jump => format!(
+                "{jump} signed you in but could not open {host} port {port}: check the address, and that the jump host allows forwarding (AllowTcpForwarding)."
             ),
             Cause::License => {
                 "The server has no free Remote Desktop licence, or cannot reach its licence server. Ask its administrator."
@@ -541,12 +585,46 @@ mod tests {
             port: 3389,
             user: "u",
             gateway: None,
+            jump: None,
         };
         assert!(
             Cause::LegacySecurity
                 .fix(&ctx)
                 .contains("Allow legacy RDP security")
         );
+    }
+
+    #[test]
+    fn jump_host_failures_by_cause() {
+        let s = Some(&ConnectStep::Connector);
+        let p = |m: &str| E::Protocol(m.into());
+        assert_eq!(
+            classify(&io(K::ConnectionRefused), s),
+            Cause::JumpUnreachable
+        );
+        assert_eq!(classify(&E::Timeout, s), Cause::JumpUnreachable);
+        assert_eq!(
+            classify(&p("cannot resolve the jump host bastion"), s),
+            Cause::JumpUnreachable
+        );
+        assert_eq!(
+            classify(&p("the jump host's SSH key was not trusted (SHA256:x)"), s),
+            Cause::JumpHostKey
+        );
+        assert_eq!(
+            classify(
+                &E::Auth("the jump host refused the sign-in as ops".into()),
+                s
+            ),
+            Cause::JumpAuth,
+            "not the RDP password"
+        );
+        assert_eq!(
+            classify(&p("the jump host could not open pc:3389: ConnectFailed"), s),
+            Cause::Jump
+        );
+        assert_eq!(classify(&p("SSH: bad packet"), s), Cause::Protocol);
+        assert!(Cause::JumpUnreachable.is_network() && !Cause::JumpAuth.is_network());
     }
 
     #[test]
@@ -573,8 +651,11 @@ mod tests {
             port: 3390,
             user: r"LAB\builder",
             gateway: Some("rdg.corp.example"),
+            jump: Some("ops@bastion"),
         };
         assert!(Cause::HostNotFound.fix(&c).contains("build-01.lab.local"));
+        assert!(Cause::JumpAuth.fix(&c).contains("ops@bastion"));
+        assert!(Cause::Jump.fix(&c).contains("build-01.lab.local port 3390"));
         assert!(Cause::Refused.fix(&c).contains("3390"));
         assert!(Cause::WrongPassword.fix(&c).contains(r"LAB\builder"));
         assert!(Cause::GatewayAuth.fix(&c).contains("rdg.corp.example"));

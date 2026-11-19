@@ -876,7 +876,14 @@ impl App {
                 fit,
                 opts,
                 apps,
+                jump,
             } => {
+                if let Some(j) = jump {
+                    // RDP-88: the stream goes through the jump host; a new
+                    // host key asks in the session tab this opens.
+                    let check = ssh_key_check(self.proxy.clone(), self.next_id);
+                    cfg.connector = Some(crate::ssh_tunnel::connector(*j, check));
+                }
                 if fit && let Some(m) = &self.win {
                     let (w, h) = m.ui.session_size_for(m.size.0 as i32, m.size.1 as i32);
                     // Desktop widths must be even; sizes between 200 and 8192.
@@ -886,7 +893,7 @@ impl App {
                 if let Some(w) = self.win.as_mut() {
                     w.ui.local_ports = local_port_names();
                 }
-                self.start_session(name, *cfg, fit, opts, apps);
+                self.start_session(name, *cfg, fit, *opts, apps);
             }
             Action::SetQuality(id, q) => {
                 // Used by the next logon of this session.
@@ -896,6 +903,14 @@ impl App {
                 self.dirty();
             }
             Action::SetFullscreen(on) => self.set_fullscreen(on),
+            Action::OpenSsh(launch) => {
+                if let Err(e) = crate::ssh_launch::start(&launch)
+                    && let Some(w) = self.win.as_mut()
+                {
+                    w.ui.set_message(e, Tone::Danger);
+                }
+                self.dirty();
+            }
             Action::CopyText(text) => {
                 use rdp::ClipboardBackend;
                 let mut cb = crate::clipboard::WindowsClipboard::new(self.hwnd());
@@ -3152,6 +3167,7 @@ fn certificate_check(proxy: EventLoopProxy<UserEvent>, id: u64) -> rdp::Certific
             fingerprint: c.fingerprint(),
             changed: known.is_some(),
             host: c.host.clone(),
+            ssh: false,
         };
         let sent = proxy
             .lock()
@@ -3163,6 +3179,31 @@ fn certificate_check(proxy: EventLoopProxy<UserEvent>, id: u64) -> rdp::Certific
         }
         trusted
     }))
+}
+
+/// A new or changed SSH jump host key asks the user in the session tab,
+/// like a certificate (the tunnel waits); trusted keys never get here.
+fn ssh_key_check(proxy: EventLoopProxy<UserEvent>, id: u64) -> crate::ssh_tunnel::HostKeyCheck {
+    let proxy = std::sync::Mutex::new(proxy);
+    Arc::new(move |k: &crate::ssh_tunnel::HostKeyPrompt| {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let host = if k.port == crate::ssh_tunnel::PORT {
+            k.host.clone()
+        } else {
+            format!("{}:{}", k.host, k.port)
+        };
+        let prompt = ui::CertPrompt {
+            fingerprint: k.fingerprint.clone(),
+            changed: k.changed,
+            host,
+            ssh: true,
+        };
+        let sent = proxy
+            .lock()
+            .map(|p| p.send_event(UserEvent::Certificate(id, prompt, tx)).is_ok())
+            .unwrap_or(false);
+        sent && rx.recv().unwrap_or(false)
+    })
 }
 
 /// Whether a "remember on this PC" key is stored.

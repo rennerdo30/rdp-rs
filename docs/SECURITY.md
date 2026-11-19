@@ -22,7 +22,7 @@ and what it never does.
 | `%APPDATA%\rdp-rs\vault.bin` | Saved connections, groups and passwords, when you have a master password. Encrypted. | Encrypted |
 | `%APPDATA%\rdp-rs\vault.key` | Only with **Unlock automatically on this PC**: the vault key, protected by Windows for your user account. | Protected |
 | `%APPDATA%\rdp-rs\settings.json` | App settings: theme, auto-lock, updates, diagnostic log. | No |
-| `%APPDATA%\rdp-rs\known_hosts.json` | Servers whose certificate you trusted, as SHA-256 fingerprints. | No |
+| `%APPDATA%\rdp-rs\known_hosts.json` | Servers whose certificate (or jump hosts whose SSH key) you trusted, as SHA-256 fingerprints. | No |
 | `%LOCALAPPDATA%\rdp-rs\licenses` | Remote Desktop client licences that servers issued to this PC. | No |
 | `%LOCALAPPDATA%\rdp-rs\bitmap-cache` | Pieces of remote screens the server asked to cache, per server, up to 100 MB. | Screen content |
 | `%LOCALAPPDATA%\rdp-rs\logs\remora.log` | The diagnostic log, only while it is switched on. | No passwords |
@@ -84,9 +84,16 @@ Remora uses trust on first use, like SSH:
 
 ![A changed certificate: Remora warns before connecting](images/certificate-changed.webp)
 
-The same check covers an RD Gateway's certificate. Trusted fingerprints live
-in `known_hosts.json`; to forget a server, remove its entry there while Remora
-is closed.
+The same check covers an RD Gateway's certificate, and an SSH jump host's
+key (as `SHA256:...`; a key already in OpenSSH's
+`%USERPROFILE%\.ssh\known_hosts` counts as trusted). Trusted fingerprints live
+in `known_hosts.json`, SSH keys under `ssh:host:port`; to forget a server,
+remove its entry there while Remora is closed.
+
+Through a jump host, Remora signs in with SSH keys only (a key file, the
+OpenSSH agent, Pageant), never with a password: your Windows password goes
+only to the PC, inside the tunnel, after its certificate check. SSH
+connections that open in a terminal leave all of this to `ssh.exe`.
 
 ## Signing in
 

@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- **SSH connections.** The editor has a **Type**: **Remote Desktop** or **SSH**. An SSH connection (host, port 22, user, optional key file) opens Windows' own OpenSSH client in a Windows Terminal tab, or a console without Windows Terminal; it has an **SSH** tag in the sidebar, Home and Ctrl+K. No password is saved for it: ssh asks, or uses the key or the OpenSSH agent. The mRemoteNG import now keeps SSH1 and SSH2 connections instead of skipping them (RDP-87).
+- **RDP through an SSH jump host.** **Jump host** (`user@host:port`) and **Key file** on the sign-in card: Remora signs in to the jump host with the key file, the OpenSSH agent or Pageant (never a password) and runs the Remote Desktop connection in an SSH tunnel to the PC. The jump host's key is trusted on first use like a certificate (or from OpenSSH's known_hosts); the connecting and error screens name the jump host step. Tested against an SSH server in the test suite, not yet against a real bastion (RDP-88).
+
 ## 0.1.0-beta.11
 
 - **On crates.io.** `cargo install remora-client --version 0.1.0-beta.11` builds and installs `remora` (Windows). The protocol library is published as `rdp-proto` (RDP-86).

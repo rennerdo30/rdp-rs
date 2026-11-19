@@ -15,6 +15,9 @@ pub enum ConnectStep {
     /// Reaching the server through the RD Gateway (MS-TSGU): the gateway's
     /// own connection, TLS, sign-in and tunnel.
     Gateway,
+    /// Opening the byte stream through the caller's [`crate::Connector`]
+    /// (an SSH jump host, a proxy) instead of TCP.
+    Connector,
     /// X.224 negotiation and the TLS handshake with the server; the
     /// certificate check runs at the end of it.
     Tls,

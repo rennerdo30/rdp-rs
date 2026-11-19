@@ -185,8 +185,20 @@ fn check_mrng_tree(i: &Imported, with_passwords: bool) {
     assert_eq!((bare.group.as_str(), bare.user.as_str()), ("", ""));
     assert!(!bare.inherit.credentials);
 
-    assert_eq!(i.connections.len(), 3);
-    assert_eq!(i.report.not_rdp, 3, "ssh1, inherits-ssh and vnc");
+    // SSH entries come over as SSH connections (RDP-87); VNC does not.
+    let ssh1 = by_name(i, "ssh1");
+    assert_eq!(ssh1.protocol, crate::store::Protocol::Ssh);
+    assert_eq!((ssh1.host.as_str(), ssh1.port), ("ssh1", 22));
+    assert_eq!(ssh1.group, "Work/Servers-Prod");
+    assert_eq!(ssh1.password, None);
+    assert_eq!(
+        by_name(i, "inherits-ssh").protocol,
+        crate::store::Protocol::Ssh,
+        "the protocol is inherited from the container"
+    );
+    assert_eq!(by_name(i, "db1").protocol, crate::store::Protocol::Rdp);
+    assert_eq!(i.connections.len(), 5);
+    assert_eq!(i.report.not_rdp, 1, "vnc");
 }
 
 #[test]
@@ -582,14 +594,16 @@ fn summary_names_what_did_not_come_over() {
     let mut r = Report::default();
     assert_eq!(r.summary(1), "Imported 1 connection.");
     r.not_rdp = 3;
+    r.ssh_passwords = 1;
     r.duplicates = 2;
     r.unreadable(Unreadable::OtherUser);
     r.no_vault = 4;
     assert_eq!(
         r.summary(12),
-        "Imported 12 connections. Skipped 3 that aren't RDP and 2 already here. \
+        "Imported 12 connections. Skipped 3 that aren't RDP or SSH and 2 already here. \
          1 password could not be read: saved by another Windows user or PC. \
-         4 passwords left out: set up a master password under Security to import passwords."
+         4 passwords left out: set up a master password under Security to import passwords. \
+         1 SSH password left out: ssh asks for it in the terminal."
     );
     r.unreadable(Unreadable::Certificate);
     assert!(r.summary(0).contains(

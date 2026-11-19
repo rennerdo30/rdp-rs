@@ -18,7 +18,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use ffwd_render::{Canvas, Rect, TextEngine};
 
-use super::{Action, Field, Fonts, Hit, Key, TabState, Ui, session_action};
+use super::{Action, Field, Fonts, Hit, Key, TabState, Ui};
 use crate::icons::Icon;
 use crate::kit::{Button, Font, Hint, Kit, Lead, State, Variant};
 use crate::store::{Connection, Opens};
@@ -447,8 +447,14 @@ fn card_frame(k: &mut Kit, r: Rect, hover: bool, focus: bool) {
 /// Chips of a connection: gateway, Windows sign-in, apps, monitors.
 fn chips(c: &Connection) -> Vec<(String, Tone, Lead)> {
     let mut v = Vec::new();
+    if c.protocol == crate::store::Protocol::Ssh {
+        v.push(("SSH".into(), Tone::Accent, Lead::Icon(Icon::Terminal)));
+        return v;
+    }
     if !c.gateway.is_empty() {
         v.push(("Gateway".into(), Tone::Info, Lead::Icon(Icon::Globe)));
+    } else if !c.jump.is_empty() {
+        v.push(("Jump host".into(), Tone::Info, Lead::Icon(Icon::Terminal)));
     }
     if c.kerberos {
         v.push((
@@ -631,6 +637,9 @@ impl Ui {
     pub(super) fn connect_saved(&mut self, i: usize) -> Option<Action> {
         let c = self.store.connections.get(i)?.clone();
         let r = self.store.resolve(&c);
+        if r.protocol == crate::store::Protocol::Ssh {
+            return self.open_ssh(&r);
+        }
         let first = r.apps.first().filter(|_| r.opens == Opens::Apps).cloned();
         if let Some(app) = &first
             && let Some(id) = self.launch_target(&r.name, &r.host)
@@ -666,7 +675,7 @@ impl Ui {
         }
         self.set_message(format!("Connecting to {}…", r.host), Tone::Muted);
         let password = r.password.clone().unwrap_or_default();
-        Some(session_action(&r, &password, first.as_ref()))
+        self.checked_session(&r, &password, first.as_ref())
     }
 
     /// A connection started from an unsaved form: its live card offers Save.
@@ -725,6 +734,10 @@ impl Ui {
 
     /// The live desktop tab of a saved connection, if one is connected.
     fn live_tab(&self, c: &Connection) -> Option<u64> {
+        // An SSH connection has no session tab.
+        if c.protocol == crate::store::Protocol::Ssh {
+            return None;
+        }
         self.tabs
             .iter()
             .find(|t| {
@@ -1044,6 +1057,21 @@ impl Ui {
         let now = self.now();
         self.mark_used(id, now, Some(now.saturating_sub(start)));
         self.home.thumbs.remove(&id);
+    }
+
+    /// A connection without a session tab (SSH) was opened now.
+    pub(super) fn mark_opened(&mut self, name: &str, host: &str) {
+        let now = self.now();
+        if let Some(c) = self
+            .store
+            .connections
+            .iter_mut()
+            .find(|c| c.name == name && c.host == host)
+        {
+            c.last_used = Some(now);
+            // A locked vault cannot be written; the next save keeps it.
+            let _ = self.store.save();
+        }
     }
 
     fn mark_used(&mut self, id: u64, now: u64, duration: Option<u64>) {
@@ -1996,7 +2024,10 @@ impl Ui {
                 c.text,
                 tw,
             );
-            let sub = match (conn.port == 3389, conn.user.is_empty()) {
+            let sub = match (
+                conn.port == conn.protocol.default_port(),
+                conn.user.is_empty(),
+            ) {
                 (true, true) => conn.host.clone(),
                 (true, false) => format!("{} · {}", conn.host, conn.user),
                 (false, true) => format!("{}:{}", conn.host, conn.port),
@@ -2398,7 +2429,7 @@ impl Ui {
             let sub = if !conn.apps.is_empty() {
                 let n = conn.apps.len();
                 format!("{} · {n} app{}", conn.host, if n == 1 { "" } else { "s" })
-            } else if conn.port != 3389 {
+            } else if conn.port != conn.protocol.default_port() {
                 format!("{}:{}", conn.host, conn.port)
             } else {
                 conn.host.clone()

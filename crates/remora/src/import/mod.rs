@@ -65,8 +65,10 @@ impl Unreadable {
 /// What did not come over, for the result line.
 #[derive(Debug, Default, PartialEq)]
 pub struct Report {
-    /// Connections that are not RDP (SSH, VNC, ...).
+    /// Connections that are neither RDP nor SSH (VNC, Telnet, ...).
     pub not_rdp: usize,
+    /// Passwords of SSH connections, left out: ssh asks in the terminal.
+    pub ssh_passwords: usize,
     /// Connections already present (same name, host and group).
     pub duplicates: usize,
     pub unreadable: BTreeMap<Unreadable, usize>,
@@ -87,7 +89,7 @@ impl Report {
         let mut out = format!("Imported {}.", plural(added, "connection", "connections"));
         let mut skipped = Vec::new();
         if self.not_rdp > 0 {
-            skipped.push(format!("{} that aren't RDP", self.not_rdp));
+            skipped.push(format!("{} that aren't RDP or SSH", self.not_rdp));
         }
         if self.duplicates > 0 {
             skipped.push(format!("{} already here", self.duplicates));
@@ -118,6 +120,17 @@ impl Report {
             out += &format!(
                 " {} left out: set up a master password under Security to import passwords.",
                 plural(self.no_vault, "password", "passwords")
+            );
+        }
+        if self.ssh_passwords > 0 {
+            out += &format!(
+                " {} left out: ssh asks for {} in the terminal.",
+                plural(self.ssh_passwords, "SSH password", "SSH passwords"),
+                if self.ssh_passwords == 1 {
+                    "it"
+                } else {
+                    "them"
+                }
             );
         }
         out
@@ -276,6 +289,8 @@ struct Resolved {
     password: Option<String>,
     /// User and password come from the group.
     inherit_credentials: bool,
+    /// RDP, or SSH (no session settings).
+    protocol: crate::store::Protocol,
     gateway: String,
     /// 0 x 0: fit to the tab.
     size: (u16, u16),
@@ -294,7 +309,12 @@ impl Resolved {
             } else {
                 name.trim().to_string()
             },
-            port: if self.port == 0 { 3389 } else { self.port },
+            port: if self.port == 0 {
+                self.protocol.default_port()
+            } else {
+                self.port
+            },
+            protocol: self.protocol,
             host: self.host,
             user: self.user,
             password: self.password,

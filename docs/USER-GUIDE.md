@@ -13,6 +13,7 @@ Start with [Getting started](GETTING-STARTED.md).
 - [Monitors and full screen](#monitors-and-full-screen)
 - [RemoteApp](#remoteapp)
 - [Recording](#recording)
+- [SSH](#ssh)
 - [Keyboard](#keyboard)
 - [The command palette](#the-command-palette)
 - [Themes](#themes)
@@ -86,6 +87,8 @@ The editor has five pages.
 
 ### General
 
+- **Type**: **Remote Desktop**, or **SSH** for a host that opens in a
+  terminal (see [SSH](#ssh)). An SSH connection has only this page.
 - **Name**, **Host** and port (3389 unless the server uses another), and
   **Group** (for example `Work/Servers`; empty for the top level).
 - **Opens**: what **Connect** (and **Enter**) starts: **Desktop** (the
@@ -107,6 +110,11 @@ The editor has five pages.
   - **Gateway over RPC** (shown once a gateway is entered) skips the HTTP
     attempt and uses RPC over HTTP only. On the command line:
     `--gateway-rpc`.
+  - **Jump host**: an SSH server the connection goes through, as
+    `user@host` or `user@host:port`, or empty for none (see
+    [SSH](#ssh)). A connection has a gateway or a jump host, not both.
+  - **Key file** (shown once a jump host is entered): the private key for
+    the jump host; empty uses the keys of the OpenSSH agent.
 
 ### Display
 
@@ -550,6 +558,47 @@ while it runs; press the button again to stop and save. Videos go to
 `Videos\Remora`, named after the connection with the date and time. Sound is
 not recorded.
 
+## SSH
+
+### SSH connections
+
+Choose **SSH** under **Type** in the editor for a Linux server, a router or
+anything else you reach with SSH. It has a host, a port (22), a user and an
+optional **Key file**; it sits in the sidebar, Home and the command palette
+with an **SSH** tag, and groups and **Connect all** include it.
+
+- **Connect** opens Windows' own OpenSSH client (`ssh.exe`) in a terminal: a
+  new Windows Terminal tab when Windows Terminal is installed, else a
+  console window. The terminal is yours: closing Remora leaves it open.
+- No password is saved for SSH: ssh asks in the terminal, or signs in with
+  the key file or a key in the OpenSSH agent (`ssh-add`). Without a user,
+  ssh uses your Windows user name.
+- ssh checks the server's key itself, in `%USERPROFILE%\.ssh\known_hosts`.
+- Without `ssh.exe`, Remora says how to add it: Settings → System →
+  Optional features → **OpenSSH Client**.
+
+### Through an SSH jump host
+
+An RDP connection can reach its PC through an SSH server (a bastion or
+jump host), like `ssh -J`: set **Jump host** on its General page.
+
+- Remora signs in to the jump host itself and asks it to open the PC's
+  RDP port. The Remote Desktop connection runs inside that tunnel unchanged:
+  the PC's certificate and your Windows sign-in are checked end to end, and
+  the jump host never sees your password.
+- Sign-in to the jump host: the **Key file** (a key without a passphrase),
+  then the keys of the OpenSSH agent and of Pageant. A key with a
+  passphrase belongs in the agent (`ssh-add`). Passwords are not used.
+- The jump host's key is trusted like a server certificate: the first
+  connection shows its SHA-256 fingerprint and asks; a key already in
+  `%USERPROFILE%\.ssh\known_hosts` connects without asking; a changed key
+  stops with a warning. Nothing is sent to the jump host before you trust
+  its key.
+- The steps show **Jump host** first; if it fails, the error screen says
+  whether the jump host could not be reached, its key was not trusted, it
+  refused the keys, or it could not open the PC.
+- No UDP transport is offered through a jump host.
+
 ## Shadowing and shared desktops
 
 Remora can watch or control another user's session on a Windows server, as
@@ -740,8 +789,11 @@ mRemoteNG's current formats (2.6 to 2.9) are read.
   Inherited settings are resolved to the values the connection really uses.
   A connection that inherits its user and password from its folder inherits
   them from the group in Remora too.
-- **What doesn't:** SSH, VNC, Telnet, HTTP and other non-RDP connections are
-  skipped and counted.
+- **SSH connections** (SSH1 and SSH2) come over as SSH connections with
+  their host, port and user. Their passwords are left out and counted: ssh
+  asks for them in the terminal.
+- **What doesn't:** VNC, Telnet, HTTP and other connections are skipped and
+  counted.
 - **Passwords:** mRemoteNG encrypts them with AES-GCM and its master
   password. Remora tries mRemoteNG's built-in default first; only when the
   file is protected with your own master password does Import ask for it

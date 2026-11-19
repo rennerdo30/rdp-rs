@@ -58,6 +58,10 @@ ring = "0.17"
 # WHATWG URL parsing for the helper's link requests (re-serialized, ASCII
 # host) before anything reaches the shell.
 url = "2.5.8"
+# RDP through an SSH jump host (RDP-88): pure-Rust SSH with ring for its
+# crypto (no C toolchain beyond ring's), on a small tokio runtime per tunnel.
+russh = { version = "0.65.2", default-features = false, features = ["ring", "rsa"] }
+tokio = { version = "1.54", features = ["rt", "net", "time", "io-util", "sync"] }
 
 [target.'cfg(windows)'.dependencies]
 # The system folder picker (IFileOpenDialog) for shared folders.
@@ -117,3 +121,7 @@ windows = { version = "0.62.2", features = [
 ] }
 # `#[implement]` of the data object and its streams expands to windows-core.
 windows-core = "0.62.2"
+
+[dev-dependencies]
+# Keys for the in-process SSH jump host in the tunnel tests.
+rand = "0.10.4"

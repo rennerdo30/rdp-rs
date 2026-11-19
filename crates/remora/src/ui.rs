@@ -12,8 +12,9 @@ use ffwd_render::{Canvas, FontId, Rect, TextEngine};
 use crate::icons::Icon;
 use crate::kit::{self, Button, Font, Hint as KitHint, Kit, Lead, Segment, State, Variant};
 use crate::store::{
-    AppEntry, COMPRESSION, Connection, Group, Inherit, KeyboardMode, Opens, PRESETS, Quality,
-    SessionOptions, Store, WinKeys, default_app_name, normalize_path, parent_of, preset_name,
+    AppEntry, COMPRESSION, Connection, Group, Inherit, KeyboardMode, Opens, PRESETS, Protocol,
+    Quality, SessionOptions, Store, WinKeys, default_app_name, normalize_path, parent_of,
+    preset_name,
 };
 use crate::text_field::TextField;
 use crate::theme::{self, ThemeChoice, Tone, pal, radius, size};
@@ -157,10 +158,14 @@ pub enum Field {
     Quick,
     /// Editor, Sharing page: the admin-set helper fingerprint.
     HelperFingerprint,
+    /// SSH jump host of an RDP connection (RDP-88).
+    Jump,
+    /// SSH key file: an SSH connection's own, or the jump host's.
+    SshKey,
 }
 
 /// Fields cleared for a new connection or group.
-const FORM: [Field; 12] = [
+const FORM: [Field; 14] = [
     Field::Name,
     Field::Host,
     Field::Port,
@@ -173,6 +178,8 @@ const FORM: [Field; 12] = [
     Field::AppArgs,
     Field::AppDir,
     Field::HelperFingerprint,
+    Field::Jump,
+    Field::SshKey,
 ];
 
 /// One sidebar row: a group, a connection, or one of a connection's
@@ -208,6 +215,8 @@ pub enum Hit {
     FormLegacySecurity,
     /// Reach the gateway over RPC over HTTP only, on or off.
     FormGatewayRpc,
+    /// Connection type: 0 Remote Desktop, 1 SSH (RDP-87).
+    FormProtocol(u8),
     /// Group form: colour swatch (index into GROUP_COLORS; past the end: automatic).
     FormColor(usize),
     /// Settings page and its controls.
@@ -554,6 +563,8 @@ pub struct CertPrompt {
     pub changed: bool,
     /// The server it belongs to: the RDP host, or the gateway.
     pub host: String,
+    /// An SSH jump host's key (`SHA256:...`), not a certificate.
+    pub ssh: bool,
 }
 
 /// The tab values the panel paints (copied out to paint without borrowing).
@@ -590,9 +601,14 @@ pub enum Action {
         name: String,
         cfg: Box<rdp::Config>,
         fit: bool,
-        opts: SessionOptions,
+        opts: Box<SessionOptions>,
         apps: Vec<AppEntry>,
+        /// Through this SSH jump host (the app adds the connector, which
+        /// asks about a new host key in the session tab).
+        jump: Option<Box<crate::ssh_tunnel::JumpHost>>,
     },
+    /// An SSH connection: start ssh.exe in a terminal (RDP-87).
+    OpenSsh(crate::ssh_launch::Launch),
     /// Start an app in a RemoteApp session that is up or connecting.
     ExecApp(u64, AppEntry),
     /// A remote window: bring it to the front, or ask it to close.
@@ -771,6 +787,8 @@ pub struct Ui {
     legacy_security: bool,
     /// The edited connection or group reaches its gateway over RPC over HTTP.
     gateway_rpc: bool,
+    /// The edited connection's type (RDP or SSH).
+    protocol: Protocol,
     /// The edited group's chosen colour (None: automatic).
     group_color: Option<u8>,
     /// Collapsed group paths in the sidebar.
@@ -788,7 +806,7 @@ pub struct Ui {
     /// Key derivation running.
     pub unlocking: bool,
     vault_error: Option<String>,
-    fields: [TextField; 20],
+    fields: [TextField; 22],
     size: usize,
     focus: Option<Field>,
     pub tabs: Vec<Tab>,
@@ -937,6 +955,7 @@ impl Ui {
             kerberos: false,
             legacy_security: false,
             gateway_rpc: false,
+            protocol: Protocol::Rdp,
             group_color: None,
             collapsed: Default::default(),
             opts: SessionOptions::default(),
@@ -1153,6 +1172,9 @@ impl Ui {
         self.field_mut(Field::Password).set("");
         self.field_mut(Field::GroupPath).set(&c.group);
         self.field_mut(Field::Gateway).set(&c.gateway);
+        self.field_mut(Field::Jump).set(&c.jump);
+        self.field_mut(Field::SshKey).set(&c.ssh_key);
+        self.protocol = c.protocol;
         self.field_mut(Field::HelperFingerprint)
             .set(c.options.helper.fingerprint.as_deref().unwrap_or(""));
         self.kerberos = c.kerberos;
@@ -1172,7 +1194,11 @@ impl Ui {
         }
         self.save_password = c.password.is_some();
         self.inherit = c.inherit;
-        self.focus = Some(Field::Password);
+        self.focus = Some(if c.protocol == Protocol::Ssh {
+            Field::Host
+        } else {
+            Field::Password
+        });
     }
 
     fn select_group(&mut self, gi: usize) {
@@ -1189,6 +1215,8 @@ impl Ui {
         self.field_mut(Field::GroupPath).set(g.parent());
         self.field_mut(Field::User).set(&g.user);
         self.field_mut(Field::Gateway).set(&g.gateway);
+        self.field_mut(Field::Jump).set(&g.jump);
+        self.field_mut(Field::SshKey).set(&g.ssh_key);
         self.kerberos = g.kerberos;
         self.gateway_rpc = g.gateway_rpc;
         self.group_color = g.color;
@@ -1223,6 +1251,7 @@ impl Ui {
         }
         self.field_mut(Field::Port).set("3389");
         self.field_mut(Field::GroupPath).set(group);
+        self.protocol = Protocol::Rdp;
         self.legacy_security = false;
         self.size = 0;
         self.opts = SessionOptions::default();
@@ -1311,23 +1340,35 @@ impl Ui {
         if host.is_empty() {
             return Err("Enter a host name or address.".into());
         }
+        let ssh = self.protocol == Protocol::Ssh;
         let port = match self.field(Field::Port).text.trim() {
-            "" => 3389,
+            "" => self.protocol.default_port(),
             p => p
                 .parse::<u16>()
-                .map_err(|_| format!("Port {p:?} is not a number from 1 to 65535."))?,
+                .ok()
+                .filter(|&p| p != 0)
+                .ok_or_else(|| format!("Port {p:?} is not a number from 1 to 65535."))?,
         };
         let inherit = self.form_inherit();
         let user = self.field(Field::User).text.trim().to_string();
-        // Windows sign-in may use the logged-on user (single sign-on).
-        if user.is_empty() && !inherit.credentials && !self.kerberos {
+        let jump = self.field(Field::Jump).text.trim().to_string();
+        let gateway = self.field(Field::Gateway).text.trim().to_string();
+        if ssh {
+            // SSH signs in with keys; without a user, ssh uses the Windows one.
+            crate::ssh_launch::check_host(&host)?;
+            crate::ssh_launch::check_user(&user)?;
+        } else if user.is_empty() && !inherit.credentials && !self.kerberos {
+            // Windows sign-in may use the logged-on user (single sign-on).
             return Err("Enter a user name.".into());
+        }
+        if !ssh && !inherit.credentials {
+            check_jump(&jump, &gateway)?;
         }
         let name = match self.field(Field::Name).text.trim() {
             "" => host.clone(),
             n => n.to_string(),
         };
-        if self.opens == Opens::Apps && self.apps.is_empty() {
+        if !ssh && self.opens == Opens::Apps && self.apps.is_empty() {
             return Err(
                 "Add at least one app below (type its program and press Add), or choose Desktop."
                     .into(),
@@ -1360,15 +1401,24 @@ impl Ui {
                 o.helper.fingerprint = (!fp.is_empty()).then_some(fp);
                 o
             },
-            password: self.form_password(inherit.credentials),
+            // SSH asks in the terminal; nothing to save.
+            password: if ssh {
+                None
+            } else {
+                self.form_password(inherit.credentials)
+            },
             group: normalize_path(&self.field(Field::GroupPath).text),
-            gateway: self.field(Field::Gateway).text.trim().to_string(),
+            gateway,
             gateway_rpc: self.gateway_rpc,
             kerberos: self.kerberos,
             legacy_security: self.legacy_security,
             inherit,
-            opens: self.opens,
-            apps: self.apps.clone(),
+            // An SSH connection has no RemoteApp programs.
+            opens: if ssh { Opens::Desktop } else { self.opens },
+            apps: if ssh { Vec::new() } else { self.apps.clone() },
+            protocol: self.protocol,
+            jump,
+            ssh_key: self.field(Field::SshKey).text.trim().to_string(),
             pinned: kept.0,
             last_used: kept.1,
             last_duration: kept.2,
@@ -1464,6 +1514,10 @@ impl Ui {
     /// of its connection, or connect one for it.
     fn launch_app(&mut self, ci: usize, ai: usize) -> Option<Action> {
         let c = self.store.connections.get(ci)?.clone();
+        if c.protocol == Protocol::Ssh {
+            let r = self.store.resolve(&c);
+            return self.open_ssh(&r);
+        }
         let app = c.apps.get(ai)?.clone();
         if let Some(id) = self.launch_target(&c.name, &c.host) {
             self.set_message(format!("Starting {}…", app.name), Tone::Muted);
@@ -1504,11 +1558,7 @@ impl Ui {
             format!("Connecting to {} for {}…", r.host, app.name),
             Tone::Muted,
         );
-        Some(session_action(
-            &r,
-            &password.unwrap_or_default(),
-            Some(&app),
-        ))
+        self.checked_session(&r, &password.unwrap_or_default(), Some(&app))
     }
 
     fn group_form(&self) -> Result<Group, String> {
@@ -1532,12 +1582,20 @@ impl Ui {
         }
         let inherit = self.form_inherit();
         let (width, height) = self.form_size();
+        if !inherit.credentials {
+            check_jump(
+                self.field(Field::Jump).text.trim(),
+                self.field(Field::Gateway).text.trim(),
+            )?;
+        }
         Ok(Group {
             path,
             user: self.field(Field::User).text.trim().to_string(),
             password: self.form_password(inherit.credentials),
             gateway: self.field(Field::Gateway).text.trim().to_string(),
             gateway_rpc: self.gateway_rpc,
+            jump: self.field(Field::Jump).text.trim().to_string(),
+            ssh_key: self.field(Field::SshKey).text.trim().to_string(),
             kerberos: self.kerberos,
             width,
             height,
@@ -1657,6 +1715,9 @@ impl Ui {
             }
         }
         let r = self.store.resolve(&c);
+        if r.protocol == Protocol::Ssh {
+            return self.open_ssh(&r);
+        }
         // Apps: Connect starts the first app (in a running session if any).
         let first = r.apps.first().filter(|_| r.opens == Opens::Apps).cloned();
         if let Some(app) = &first
@@ -1683,7 +1744,7 @@ impl Ui {
             // Not saved: the Home view offers to save it.
             self.home_note_unsaved(&c);
         }
-        Some(session_action(&r, &password, first.as_ref()))
+        self.checked_session(&r, &password, first.as_ref())
     }
 
     /// Opens every connection in a group (and its sub-groups) that has a
@@ -1692,14 +1753,23 @@ impl Ui {
         let typed = self.field(Field::Password).text.clone();
         let mut acts = Vec::new();
         let mut skipped = 0;
-        for c in self.store.members(path) {
+        let members: Vec<Connection> = self.store.members(path).cloned().collect();
+        for c in &members {
             let r = self.store.resolve(c);
+            if r.protocol == Protocol::Ssh {
+                // Each opens a terminal of its own.
+                match self.ssh_launch(&r) {
+                    Ok(l) => acts.push(Action::OpenSsh(l)),
+                    Err(_) => skipped += 1,
+                }
+                continue;
+            }
             let pw = r
                 .password
                 .clone()
                 .or_else(|| (!typed.is_empty()).then(|| typed.clone()));
             match pw {
-                Some(pw) if !r.user.is_empty() => {
+                Some(pw) if !r.user.is_empty() && route_error(&r).is_none() => {
                     let first = r.apps.first().filter(|_| r.opens == Opens::Apps);
                     acts.push(session_action(&r, &pw, first))
                 }
@@ -1879,8 +1949,9 @@ impl Ui {
             v.extend([Field::Host, Field::Port]);
         }
         v.push(Field::GroupPath);
-        // The Apps card is on every connection's General page.
-        if self.group_edit.is_none() {
+        let ssh = self.form_is_ssh();
+        // The Apps card is on every RDP connection's General page.
+        if self.group_edit.is_none() && !ssh {
             v.extend([
                 Field::AppProgram,
                 Field::AppName,
@@ -1892,9 +1963,19 @@ impl Ui {
         if own {
             v.push(Field::User);
         }
+        if ssh {
+            if own {
+                v.push(Field::SshKey);
+            }
+            return v;
+        }
         v.push(Field::Password);
         if own {
             v.push(Field::Gateway);
+            v.push(Field::Jump);
+            if !self.field(Field::Jump).text.trim().is_empty() {
+                v.push(Field::SshKey);
+            }
         }
         v
     }
@@ -2141,6 +2222,18 @@ impl Ui {
             Hit::FormKerberos => self.kerberos = !self.kerberos,
             Hit::FormLegacySecurity => self.legacy_security = !self.legacy_security,
             Hit::FormGatewayRpc => self.gateway_rpc = !self.gateway_rpc,
+            Hit::FormProtocol(i) => {
+                let new = if i == 1 { Protocol::Ssh } else { Protocol::Rdp };
+                // The port follows the type while it is the other's default.
+                let port = self.field(Field::Port).text.trim().to_string();
+                if port.is_empty() || port == self.protocol.default_port().to_string() {
+                    self.field_mut(Field::Port)
+                        .set(&new.default_port().to_string());
+                }
+                self.protocol = new;
+                self.form_page = 0;
+                self.home_scroll = 0;
+            }
             Hit::FormPage(i) => {
                 self.form_page = i;
                 self.home_scroll = 0;
@@ -3492,7 +3585,10 @@ impl Ui {
             c.text,
             text_w,
         );
-        let sub = match (conn.port == 3389, conn.user.is_empty()) {
+        let sub = match (
+            conn.port == conn.protocol.default_port(),
+            conn.user.is_empty(),
+        ) {
             (true, true) => conn.host.clone(),
             (true, false) => format!("{} · {}", conn.host, conn.user),
             (false, true) => format!("{}:{}", conn.host, conn.port),
@@ -4544,8 +4640,13 @@ impl Ui {
                 Some(_) => pills.push(("Connecting", Tone::Warning, Lead::Dot)),
                 None => {}
             }
-            if conn.opens == Opens::Apps {
+            if conn.protocol == Protocol::Ssh {
+                pills.push(("SSH", Tone::Accent, Lead::Icon(Icon::Terminal)));
+            } else if conn.opens == Opens::Apps {
                 pills.push(("Apps", Tone::Accent, Lead::Icon(Icon::Apps)));
+            }
+            if !conn.jump.is_empty() && conn.protocol == Protocol::Rdp {
+                pills.push(("Jump host", Tone::Info, Lead::Icon(Icon::Terminal)));
             }
             if conn.password.is_some() {
                 pills.push(("Saved password", Tone::Neutral, Lead::Icon(Icon::Key)));
@@ -4641,7 +4742,11 @@ impl Ui {
             }
         }
 
-        // Page switcher
+        // Page switcher; an SSH connection has only General.
+        let ssh = self.form_is_ssh();
+        if ssh {
+            self.form_page = 0;
+        }
         let pages: Vec<(String, Option<Icon>, bool, Hit)> = [
             ("General", Icon::Sliders),
             ("Display", Icon::Monitor),
@@ -4660,9 +4765,11 @@ impl Ui {
             )
         })
         .collect();
-        self.segmented_i(cv, te, f, Rect::new(x, top + p(104.0), w, p(38.0)), &pages);
+        if !ssh {
+            self.segmented_i(cv, te, f, Rect::new(x, top + p(104.0), w, p(38.0)), &pages);
+        }
 
-        let mut y = top + p(164.0);
+        let mut y = top + p(if ssh { 104.0 } else { 164.0 });
         let parent = normalize_path(&self.field(Field::GroupPath).text);
         let inh = self.form_inherit();
         y = match self.form_page {
@@ -4682,6 +4789,21 @@ impl Ui {
                 cy + p(4.0),
                 w,
                 "Connect all opens every member with a saved password, or the one typed here.",
+            );
+        } else if ssh {
+            self.key_hints(
+                cv,
+                te,
+                f,
+                x,
+                cy,
+                w,
+                &[
+                    KitHint::Keys("Enter"),
+                    KitHint::Text("opens a terminal"),
+                    KitHint::Keys("Ctrl+S"),
+                    KitHint::Text("saves"),
+                ],
             );
         } else if self.opens == Opens::Apps {
             self.key_hints(
@@ -4918,6 +5040,23 @@ impl Ui {
             self.color_row(cv, te, f, cells[2]);
             y += 2 * rh + p(56.0);
         } else {
+            let ssh = self.protocol == Protocol::Ssh;
+            let items = [
+                (
+                    "Remote Desktop".to_string(),
+                    Some(Icon::Monitor),
+                    !ssh,
+                    Hit::FormProtocol(0),
+                ),
+                (
+                    "SSH".to_string(),
+                    Some(Icon::Terminal),
+                    ssh,
+                    Hit::FormProtocol(1),
+                ),
+            ];
+            self.segmented_i(cv, te, f, Rect::new(x, y, w, p(36.0)), &items);
+            y += p(36.0) + p(16.0);
             let cells = self.card(cv, x, y, w, &[rh; 3]);
             self.field_row(
                 cv,
@@ -4971,7 +5110,19 @@ impl Ui {
             y += 3 * rh;
         }
         y += p(24.0);
-        if !group_mode {
+        let ssh = !group_mode && self.protocol == Protocol::Ssh;
+        if ssh {
+            self.hint(
+                cv,
+                te,
+                f,
+                x,
+                y - p(10.0),
+                w,
+                "Opens Windows' OpenSSH client in a terminal: a Windows Terminal tab when it is installed.",
+            );
+            y += p(18.0);
+        } else if !group_mode {
             y = self.form_opens(cv, te, f, x, y, w);
         }
 
@@ -4989,6 +5140,44 @@ impl Ui {
             inh.credentials,
             "sign-in",
         );
+        if inherited && ssh {
+            // The inherit card names the user and key it takes.
+            return y;
+        }
+        if ssh {
+            let cells = self.card(cv, x, y, w, &[rh, rh]);
+            self.field_row_i(
+                cv,
+                te,
+                f,
+                cells[0],
+                "User",
+                Some(Icon::User),
+                Field::User,
+                "Defaults to your Windows user name",
+            );
+            self.field_row_i(
+                cv,
+                te,
+                f,
+                cells[1],
+                "Key file",
+                Some(Icon::Key),
+                Field::SshKey,
+                r"Optional, e.g. C:\Users\you\.ssh\id_ed25519",
+            );
+            y += 2 * rh + p(12.0);
+            self.hint(
+                cv,
+                te,
+                f,
+                x,
+                y + p(4.0),
+                w,
+                "No password is saved: ssh asks in the terminal, or signs in with the key or the OpenSSH agent.",
+            );
+            return y + p(14.0);
+        }
         if inherited {
             let cells = self.card(cv, x, y, w, &[rh]);
             let saved_in = self
@@ -5010,10 +5199,20 @@ impl Ui {
             return y + rh;
         }
         let saved = self.save_password && self.own_password().is_some();
-        // The transport switch only once a gateway is entered.
+        // The transport switch only once a gateway is entered, the key
+        // file only once a jump host is.
         let has_gateway = !self.field(Field::Gateway).text.trim().is_empty();
-        let rows = [rh, rh, p(60.0), p(60.0), rh, p(60.0)];
-        let cells = self.card(cv, x, y, w, &rows[..if has_gateway { 6 } else { 5 }]);
+        let has_jump = !self.field(Field::Jump).text.trim().is_empty();
+        let mut rows = vec![rh, rh, p(60.0), p(60.0), rh];
+        if has_gateway {
+            rows.push(p(60.0));
+        }
+        rows.push(rh);
+        if has_jump {
+            rows.push(rh);
+        }
+        let cells = self.card(cv, x, y, w, &rows);
+        let height: i32 = rows.iter().sum();
         self.field_row_i(
             cv,
             te,
@@ -5079,22 +5278,45 @@ impl Ui {
             Field::Gateway,
             "None (direct), or rdg.example.com",
         );
-        if !has_gateway {
-            return y + 3 * rh + 2 * p(60.0);
+        let mut next = 5;
+        if has_gateway {
+            let gateway_rpc = self.gateway_rpc;
+            self.card_switch_i(
+                cv,
+                te,
+                f,
+                cells[5],
+                Some(Icon::Globe),
+                "Gateway over RPC",
+                "Always RPC over HTTP; off: only when the gateway lacks HTTP",
+                gateway_rpc,
+                Hit::FormGatewayRpc,
+            );
+            next = 6;
         }
-        let gateway_rpc = self.gateway_rpc;
-        self.card_switch_i(
+        self.field_row_i(
             cv,
             te,
             f,
-            cells[5],
-            Some(Icon::Globe),
-            "Gateway over RPC",
-            "Always RPC over HTTP; off: only when the gateway lacks HTTP",
-            gateway_rpc,
-            Hit::FormGatewayRpc,
+            cells[next],
+            "Jump host",
+            Some(Icon::Terminal),
+            Field::Jump,
+            "None, or user@bastion (SSH)",
         );
-        y + 3 * rh + 3 * p(60.0)
+        if has_jump {
+            self.field_row_i(
+                cv,
+                te,
+                f,
+                cells[next + 1],
+                "Key file",
+                Some(Icon::Key),
+                Field::SshKey,
+                "Optional; else the OpenSSH agent",
+            );
+        }
+        y + height
     }
 
     /// The group's colour: eight swatches and Auto.
@@ -6483,24 +6705,38 @@ impl Ui {
             w,
             h,
         );
-        let (icon, tone, title) = if cp.changed {
-            (
+        let (icon, tone, title) = match (cp.changed, cp.ssh) {
+            (true, false) => (
                 Icon::ShieldAlert,
                 Tone::Danger,
                 "The server certificate changed",
-            )
-        } else {
-            (Icon::ShieldCheck, Tone::Accent, "Verify the server")
+            ),
+            (true, true) => (
+                Icon::ShieldAlert,
+                Tone::Danger,
+                "The jump host's key changed",
+            ),
+            (false, false) => (Icon::ShieldCheck, Tone::Accent, "Verify the server"),
+            (false, true) => (Icon::ShieldCheck, Tone::Accent, "Verify the jump host"),
         };
-        let line = if cp.changed {
-            format!("{host} shows a different certificate than the one you trusted.")
-        } else {
-            format!("First connection to {host}. Check the fingerprint with its admin.")
+        // The prompt's own host: the jump host's, not the RDP server's.
+        let host = if cp.ssh { cp.host.as_str() } else { host };
+        let line = match (cp.changed, cp.ssh) {
+            (true, false) => {
+                format!("{host} shows a different certificate than the one you trusted.")
+            }
+            (true, true) => format!("{host} shows a different SSH key than the one you trusted."),
+            (false, false) => {
+                format!("First connection to {host}. Check the fingerprint with its admin.")
+            }
+            (false, true) => {
+                format!("First SSH connection to {host}. Check the key fingerprint with its admin.")
+            }
         };
-        let sub = if cp.changed {
-            "A reinstalled server does this, but so does an attack."
-        } else {
-            "Your password is sent only after you trust it."
+        let sub = match (cp.changed, cp.ssh) {
+            (true, _) => "A reinstalled server does this, but so does an attack.",
+            (false, false) => "Your password is sent only after you trust it.",
+            (false, true) => "Nothing is sent to it before you trust it.",
         };
         let x = r.x + p(28.0);
         let tw = r.w - p(56.0);
@@ -6547,8 +6783,15 @@ impl Ui {
             let fr = Rect::new(x, r.y + p(150.0), tw, p(72.0));
             k.cv.round_border(fr, radius::CONTROL * s, c.border, c.field);
             let cap_y = fr.y + p(20.0);
-            k.caption_text(fr.x + p(14.0), cap_y, "SHA-256 FINGERPRINT", c.text_faint);
-            let (a, b) = cp.fingerprint.split_at(cp.fingerprint.len().min(48));
+            let cap = if cp.ssh {
+                "SSH KEY FINGERPRINT"
+            } else {
+                "SHA-256 FINGERPRINT"
+            };
+            k.caption_text(fr.x + p(14.0), cap_y, cap, c.text_faint);
+            // An SSH fingerprint (SHA256:base64) fits one line.
+            let split = if cp.ssh { cp.fingerprint.len() } else { 48 };
+            let (a, b) = cp.fingerprint.split_at(cp.fingerprint.len().min(split));
             for (i, part) in [a.trim_end_matches(':'), b].iter().enumerate() {
                 k.text(
                     Font::Regular,
@@ -7821,6 +8064,103 @@ fn size_index(w: u16, h: u16) -> usize {
     SIZES.iter().position(|&s| s == (w, h)).map_or(0, |i| i + 1)
 }
 
+/// A jump host and a gateway exclude each other; a jump host must parse.
+fn check_jump(jump: &str, gateway: &str) -> Result<(), String> {
+    if jump.is_empty() {
+        return Ok(());
+    }
+    if !gateway.is_empty() {
+        return Err("Use a gateway or a jump host, not both: clear one of them.".into());
+    }
+    crate::ssh_tunnel::parse(jump, "user")
+        .map(drop)
+        .ok_or_else(|| {
+            format!("{jump:?} is not a jump host: write it as user@host or user@host:port.")
+        })
+}
+
+/// Why a resolved RDP connection cannot start as configured: a jump host
+/// that does not parse, or one next to a gateway. Never falls back to a
+/// direct connection.
+fn route_error(r: &Connection) -> Option<String> {
+    if r.jump.trim().is_empty() {
+        return None;
+    }
+    if !r.gateway.trim().is_empty() {
+        return Some(format!(
+            "{} has both a gateway and a jump host (from its group?): clear one of them.",
+            r.name
+        ));
+    }
+    if jump_host(r).is_none() {
+        return Some(format!(
+            "The jump host {:?} of {} is not user@host or user@host:port.",
+            r.jump, r.name
+        ));
+    }
+    None
+}
+
+/// The Windows user name, which OpenSSH also uses when none is given.
+fn windows_user() -> String {
+    std::env::var("USERNAME").unwrap_or_default()
+}
+
+/// The jump host of a resolved RDP connection, with its key file.
+fn jump_host(r: &Connection) -> Option<crate::ssh_tunnel::JumpHost> {
+    let mut j = crate::ssh_tunnel::parse(&r.jump, &windows_user())?;
+    let key = r.ssh_key.trim();
+    j.key_file = (!key.is_empty()).then(|| std::path::PathBuf::from(key));
+    Some(j)
+}
+
+impl Ui {
+    /// The edited item is an SSH connection (groups have no type).
+    fn form_is_ssh(&self) -> bool {
+        self.group_edit.is_none() && self.protocol == Protocol::Ssh
+    }
+
+    /// The terminal launch of a resolved SSH connection.
+    fn ssh_launch(&self, r: &Connection) -> Result<crate::ssh_launch::Launch, String> {
+        let key = r.ssh_key.trim();
+        let key = (!key.is_empty()).then(|| std::path::Path::new(key));
+        crate::ssh_launch::launch_for(&r.name, &r.host, r.port, &r.user, key)
+    }
+
+    /// The session for a resolved RDP connection, or a message why its
+    /// route (jump host, gateway) cannot work.
+    pub(super) fn checked_session(
+        &mut self,
+        r: &Connection,
+        password: &str,
+        app: Option<&AppEntry>,
+    ) -> Option<Action> {
+        if let Some(e) = route_error(r) {
+            self.set_message(e, Tone::Danger);
+            return None;
+        }
+        Some(session_action(r, password, app))
+    }
+
+    /// Opens a resolved SSH connection in a terminal and notes it as used.
+    pub(super) fn open_ssh(&mut self, r: &Connection) -> Option<Action> {
+        match self.ssh_launch(r) {
+            Ok(l) => {
+                self.set_message(
+                    format!("Opening SSH to {} in a terminal…", r.host),
+                    Tone::Muted,
+                );
+                self.mark_opened(&r.name, &r.host);
+                Some(Action::OpenSsh(l))
+            }
+            Err(e) => {
+                self.set_message(e, Tone::Danger);
+                None
+            }
+        }
+    }
+}
+
 /// The Connect action for a resolved connection; with `app`, a RemoteApp
 /// session that starts it (the app sizes the desktop to the monitors).
 fn session_action(r: &Connection, password: &str, app: Option<&AppEntry>) -> Action {
@@ -7849,16 +8189,24 @@ fn session_action(r: &Connection, password: &str, app: Option<&AppEntry>) -> Act
         cfg.width = r.width;
         cfg.height = r.height;
     }
+    // A gateway wins over a jump host (the editor allows only one).
+    let jump = cfg
+        .gateway
+        .is_none()
+        .then(|| jump_host(r))
+        .flatten()
+        .map(Box::new);
     Action::Connect {
         name: r.name.clone(),
         cfg: Box::new(cfg),
         fit,
-        opts: r.options.clone(),
+        opts: Box::new(r.options.clone()),
         apps: if app.is_some() {
             r.apps.clone()
         } else {
             Vec::new()
         },
+        jump,
     }
 }
 
@@ -7958,6 +8306,57 @@ pub fn sample_ports(panel: bool) -> Ui {
 }
 
 /// The editor's sign-in with a gateway: the "Gateway over RPC" switch on.
+/// An SSH connection in the editor, and in the sidebar (RDP-87).
+pub fn sample_form_ssh() -> Ui {
+    let mut m = sample(false);
+    m.store.connections.push(Connection {
+        name: "Web server".into(),
+        host: "web1.lab.local".into(),
+        port: 22,
+        user: "ops".into(),
+        group: "Work/Lab".into(),
+        protocol: Protocol::Ssh,
+        ssh_key: r"C:\Users\alex\.ssh\id_ed25519".into(),
+        ..Connection::default()
+    });
+    let i = m.store.connections.len() - 1;
+    m.select(i);
+    m.focus = None;
+    m
+}
+
+/// An RDP connection through an SSH jump host (RDP-88).
+pub fn sample_form_jump() -> Ui {
+    let mut m = sample(false);
+    m.store.connections[2].jump = "ops@bastion.corp.example".into();
+    m.select(2);
+    m.focus = None;
+    m.form_page = 0;
+    m.home_scroll = 480;
+    m
+}
+
+/// The Home view with SSH connections and a jump host among the cards.
+pub fn sample_home_ssh() -> Ui {
+    let mut m = sample_home();
+    for (name, host, group) in [
+        ("Web server", "web1.lab.local", "Work/Lab"),
+        ("Router", "192.168.1.1", ""),
+    ] {
+        m.store.connections.push(Connection {
+            name: name.into(),
+            host: host.into(),
+            port: 22,
+            user: "ops".into(),
+            group: group.into(),
+            protocol: Protocol::Ssh,
+            ..Connection::default()
+        });
+    }
+    m.store.connections[2].jump = "ops@bastion.corp.example".into();
+    m
+}
+
 pub fn sample_form_gateway_rpc() -> Ui {
     let mut m = sample(false);
     m.store.connections[2].gateway = "rdg.corp.example".into();
@@ -7981,6 +8380,23 @@ pub fn sample_cert(changed: bool) -> Ui {
                 .join(":"),
             changed,
             host: "10.0.0.15".into(),
+            ssh: false,
+        });
+    }
+    m
+}
+
+/// A session tab waiting for the user to trust a jump host's SSH key.
+pub fn sample_ssh_key(changed: bool) -> Ui {
+    let mut m = sample(true);
+    if let Some(t) = m.tab_mut(1) {
+        t.state = TabState::Connecting;
+        t.live.jump = Some("ops@bastion.corp.example".into());
+        t.cert = Some(CertPrompt {
+            fingerprint: "SHA256:k3Vq0Zp8yR2mXwT6cB1nH4sL9eJ7aU5dG0fK2iO3vQw".into(),
+            changed,
+            host: "bastion.corp.example".into(),
+            ssh: true,
         });
     }
     m
@@ -8865,5 +9281,94 @@ mod tests {
             Some(Action::Connect { cfg, .. }) => assert!(cfg.remote_app.is_some()),
             _ => panic!("expected Connect"),
         }
+    }
+
+    #[test]
+    fn ssh_connections_are_edited_and_open_a_terminal() {
+        let mut te = TextEngine::new();
+        let Some(fonts) = load_fonts(&mut te) else {
+            return;
+        };
+        let mut m = sample(false);
+        m.new_connection_in("");
+        assert_eq!(m.field(Field::Port).text, "3389");
+        click(&mut m, &mut te, &fonts, Hit::FormProtocol(1));
+        assert_eq!(m.field(Field::Port).text, "22", "the port follows the type");
+        // No password, gateway or apps for SSH; the key file instead.
+        let order = m.form_order();
+        assert!(order.contains(&Field::SshKey));
+        for f in [
+            Field::Password,
+            Field::Gateway,
+            Field::Jump,
+            Field::AppProgram,
+        ] {
+            assert!(!order.contains(&f), "{f:?}");
+        }
+        m.field_mut(Field::Host).set("-oProxyCommand=calc");
+        assert!(m.form().is_err(), "an option is not a host");
+        m.field_mut(Field::Host).set("web1.lab");
+        assert!(m.form().is_ok(), "no user: ssh uses the Windows one");
+        m.field_mut(Field::User).set("ops");
+        let c = m.form().unwrap();
+        assert_eq!(
+            (c.protocol, c.port, c.password.clone()),
+            (Protocol::Ssh, 22, None)
+        );
+        // Connect opens the terminal (or says how to install OpenSSH).
+        match m.connect() {
+            Some(Action::OpenSsh(l)) => {
+                let args: Vec<String> = l
+                    .args
+                    .iter()
+                    .map(|a| a.to_string_lossy().into_owned())
+                    .collect();
+                assert!(args.ends_with(&["-l", "ops", "--", "web1.lab"].map(String::from)));
+            }
+            None => assert_eq!(m.message.clone().unwrap().0, crate::ssh_launch::NO_SSH),
+            _ => panic!("expected OpenSsh"),
+        }
+        click(&mut m, &mut te, &fonts, Hit::FormProtocol(0));
+        assert_eq!(m.field(Field::Port).text, "3389");
+        m.field_mut(Field::Port).set("2222");
+        click(&mut m, &mut te, &fonts, Hit::FormProtocol(1));
+        assert_eq!(m.field(Field::Port).text, "2222", "a port of its own stays");
+    }
+
+    #[test]
+    fn a_jump_host_goes_with_the_rdp_connection() {
+        let mut m = sample(false);
+        m.select(2);
+        m.field_mut(Field::Jump).set("ops@bastion:2222");
+        m.field_mut(Field::SshKey).set(r"C:\keys\id");
+        assert!(m.form_order().contains(&Field::SshKey));
+        let c = m.form().unwrap();
+        assert_eq!(c.jump, "ops@bastion:2222");
+        match session_action(&m.store.resolve(&c), "pw", None) {
+            Action::Connect {
+                jump: Some(j), cfg, ..
+            } => {
+                assert_eq!(j.label(), "ops@bastion:2222");
+                assert_eq!(
+                    j.key_file.as_deref(),
+                    Some(std::path::Path::new(r"C:\keys\id"))
+                );
+                assert!(cfg.gateway.is_none());
+            }
+            _ => panic!("expected Connect through the jump host"),
+        }
+        // A route that cannot work never falls back to a direct one.
+        let mut both = c.clone();
+        both.gateway = "rdg.corp".into();
+        assert!(m.checked_session(&both, "pw", None).is_none());
+        let mut bad = c.clone();
+        bad.jump = "ops@bastion:x".into();
+        assert!(m.checked_session(&bad, "pw", None).is_none());
+        assert!(m.message.clone().unwrap().0.contains("is not user@host"));
+        m.field_mut(Field::Gateway).set("rdg.corp");
+        assert!(m.form().unwrap_err().contains("not both"));
+        m.field_mut(Field::Gateway).set("");
+        m.field_mut(Field::Jump).set("-oProxyCommand=x");
+        assert!(m.form().is_err());
     }
 }

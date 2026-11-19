@@ -59,6 +59,18 @@ pub struct Connection {
     /// The programs an Apps connection offers (its own, not inherited).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub apps: Vec<AppEntry>,
+    /// RDP (missing in older files), or an SSH host that opens in the
+    /// system terminal (RDP-87). Per connection, never inherited.
+    #[serde(default, skip_serializing_if = "Protocol::is_rdp")]
+    pub protocol: Protocol,
+    /// SSH jump host for RDP, `user@host:port`; empty: none (RDP-88).
+    /// Part of Credentials.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub jump: String,
+    /// SSH private key file: an SSH connection's own, or the jump host's;
+    /// empty: the OpenSSH agent. Part of Credentials.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub ssh_key: String,
     /// Pinned to the Home view's Favourites (the star).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub pinned: bool,
@@ -68,6 +80,30 @@ pub struct Connection {
     pub last_used: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_duration: Option<u64>,
+}
+
+/// What kind of connection it is.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Protocol {
+    #[default]
+    Rdp,
+    /// Opens Windows' OpenSSH client in a terminal window.
+    Ssh,
+}
+
+impl Protocol {
+    fn is_rdp(&self) -> bool {
+        *self == Protocol::Rdp
+    }
+
+    /// The port a new connection of this kind uses.
+    pub fn default_port(self) -> u16 {
+        match self {
+            Protocol::Rdp => 3389,
+            Protocol::Ssh => 22,
+        }
+    }
 }
 
 /// What a connection opens.
@@ -163,6 +199,11 @@ pub struct Group {
     /// Reach the gateway over RPC over HTTP only.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub gateway_rpc: bool,
+    /// SSH jump host and key file, as in [`Connection`].
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub jump: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub ssh_key: String,
     /// Sign in with Windows (Kerberos).
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub kerberos: bool,
@@ -759,10 +800,12 @@ impl Store {
         }
         let mut added = 0;
         for c in connections {
-            let dup = self
-                .connections
-                .iter()
-                .any(|o| o.name == c.name && o.host == c.host && o.group == c.group);
+            let dup = self.connections.iter().any(|o| {
+                o.name == c.name
+                    && o.host == c.host
+                    && o.group == c.group
+                    && o.protocol == c.protocol
+            });
             if !dup {
                 if !c.group.is_empty() {
                     self.ensure_group(&c.group);
@@ -1005,6 +1048,8 @@ impl Store {
             out.password = g.password.clone();
             out.gateway = g.gateway.clone();
             out.gateway_rpc = g.gateway_rpc;
+            out.jump = g.jump.clone();
+            out.ssh_key = g.ssh_key.clone();
             out.kerberos = g.kerberos;
         }
         if let Some(g) = self.source_of(&c.group, &c.inherit, |i| i.display) {
@@ -1818,5 +1863,75 @@ mod tests {
         let wrong = derive("nope", key.params).unwrap();
         assert!(read_backup(&backup, &wrong).is_err());
         s.backend = Backend::Memory;
+    }
+
+    #[test]
+    fn ssh_fields_round_trip_and_rdp_files_stay_unchanged() {
+        let old =
+            r#"[{"name":"pc","host":"10.0.0.1","port":3389,"user":"u","width":0,"height":0}]"#;
+        let list: Vec<Connection> = serde_json::from_str(old).unwrap();
+        assert_eq!(list[0].protocol, Protocol::Rdp);
+        assert_eq!((list[0].jump.as_str(), list[0].ssh_key.as_str()), ("", ""));
+        let json = serde_json::to_string(&list[0]).unwrap();
+        assert!(
+            !json.contains("protocol") && !json.contains("jump") && !json.contains("ssh_key"),
+            "{json}"
+        );
+        let ssh = Connection {
+            name: "web".into(),
+            host: "web1".into(),
+            port: 22,
+            protocol: Protocol::Ssh,
+            ssh_key: r"C:\keys\id".into(),
+            ..Connection::default()
+        };
+        let json = serde_json::to_string(&ssh).unwrap();
+        assert!(json.contains(r#""protocol":"ssh""#), "{json}");
+        assert_eq!(serde_json::from_str::<Connection>(&json).unwrap(), ssh);
+        assert_eq!(
+            (Protocol::Rdp.default_port(), Protocol::Ssh.default_port()),
+            (3389, 22)
+        );
+    }
+
+    #[test]
+    fn the_jump_host_is_part_of_the_inherited_sign_in() {
+        let mut s = Store::memory(vec![Connection {
+            name: "pc".into(),
+            host: "pc".into(),
+            group: "Lab".into(),
+            jump: "me@own".into(),
+            inherit: Inherit::ALL,
+            ..Connection::default()
+        }]);
+        s.groups.push(Group {
+            path: "Lab".into(),
+            jump: "ops@bastion".into(),
+            ssh_key: "k".into(),
+            ..Group::default()
+        });
+        let r = s.resolve(&s.connections[0].clone());
+        assert_eq!((r.jump.as_str(), r.ssh_key.as_str()), ("ops@bastion", "k"));
+    }
+
+    #[test]
+    fn an_rdp_and_an_ssh_entry_of_one_host_both_import() {
+        let mut s = Store::memory(Vec::new());
+        let rdp = Connection {
+            name: "web1".into(),
+            host: "web1".into(),
+            ..Connection::default()
+        };
+        let ssh = Connection {
+            protocol: Protocol::Ssh,
+            port: 22,
+            ..rdp.clone()
+        };
+        assert_eq!(s.merge(Vec::new(), vec![rdp.clone(), ssh.clone()]), 2);
+        assert_eq!(
+            s.merge(Vec::new(), vec![rdp, ssh]),
+            0,
+            "duplicates still skip"
+        );
     }
 }

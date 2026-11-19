@@ -108,6 +108,7 @@ library is [`rdp-proto`](https://crates.io/crates/rdp-proto) (`use rdp::...`).
 - **Input:** fast-path keyboard (scancodes) and mouse (buttons, wheel); Ctrl+Alt+Del button.
 - **Sharing, switchable live without reconnecting:** clipboard (Unicode text, both ways), shared folders (drive redirection, confined to the shared folder), printers (Easy Print / XPS, no drivers on the server), smart cards (MS-RDPESC, forwarded to the local WinSCard), sound (MS-RDPEA, PCM).
 - **Cursor:** the remote pointer shapes (32/24/16/8/1 bpp, large pointers) as native cursors.
+- **SSH:** SSH hosts sit in the connection manager next to RDP ones and open Windows' own OpenSSH client in a terminal (a Windows Terminal tab when installed). An RDP connection can go through an SSH jump host (a `direct-tcpip` tunnel, signed in with a key file or the OpenSSH agent).
 - **Client UI:** one window with a connections sidebar, a tab per session and a control panel per session. Saved connections live in `%APPDATA%\rdp-rs`; passwords are saved only in the encrypted vault, after you set a master password ([docs/SECURITY.md](docs/SECURITY.md)).
 
 ## Not yet
@@ -116,6 +117,7 @@ USB and plug and play devices, lossy UDP and MS-RDPEV video. Everything listed a
 of it has not yet been tried against every kind of Windows server.
 
 Built but not yet tried against a real server: RD Gateway over RPC, shadowing,
+RDP through an SSH jump host (tested against an SSH server in the test suite),
 UDP itself (only the fallback to TCP is checked) and video redirection (Windows
 opens its channels but did not redirect a video in tests). The user guide and
 [troubleshooting](docs/TROUBLESHOOTING.md) list each feature's limits.

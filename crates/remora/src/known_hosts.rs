@@ -48,6 +48,30 @@ fn remember_in(p: &Path, host: &str, port: u16, sha256_hex: &str) -> Result<(), 
     std::fs::rename(&tmp, p).map_err(|e| e.to_string())
 }
 
+/// SSH host keys (jump hosts, RDP-88) live in the same file under
+/// `ssh:host:port`, as OpenSSH's `SHA256:...` fingerprint.
+fn ssh_host(host: &str) -> String {
+    format!("ssh:{host}")
+}
+
+/// The remembered SSH host key fingerprint of a jump host.
+pub fn lookup_ssh(host: &str, port: u16) -> Option<String> {
+    lookup_in(&path()?, &ssh_host(host), port)
+}
+
+pub fn remember_ssh(host: &str, port: u16, fingerprint: &str) -> Result<(), String> {
+    let p = path().ok_or("no settings folder")?;
+    remember_in(&p, &ssh_host(host), port, fingerprint)
+}
+
+pub(crate) fn lookup_ssh_in(p: &Path, host: &str, port: u16) -> Option<String> {
+    lookup_in(p, &ssh_host(host), port)
+}
+
+pub(crate) fn remember_ssh_in(p: &Path, host: &str, port: u16, fp: &str) -> Result<(), String> {
+    remember_in(p, &ssh_host(host), port, fp)
+}
+
 pub fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
@@ -74,6 +98,14 @@ mod tests {
         );
         remember_in(&p, "pc", 3389, "bb").unwrap();
         assert_eq!(lookup_in(&p, "PC", 3389).as_deref(), Some("bb"));
+        assert_eq!(
+            lookup_ssh_in(&p, "pc", 3389),
+            None,
+            "SSH keys are kept apart"
+        );
+        remember_ssh_in(&p, "PC", 22, "SHA256:abc").unwrap();
+        assert_eq!(lookup_ssh_in(&p, "pc", 22).as_deref(), Some("SHA256:abc"));
+        assert_eq!(lookup_in(&p, "pc", 22), None);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

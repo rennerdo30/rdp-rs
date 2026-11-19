@@ -188,11 +188,11 @@ impl Reader<'_> {
                 self.walk(&node.children, &below, &sub);
                 continue;
             }
-            if !get("Protocol")
-                .unwrap_or("RDP")
-                .trim()
-                .eq_ignore_ascii_case("RDP")
-            {
+            let protocol = get("Protocol").unwrap_or("RDP").trim();
+            let ssh = ["SSH1", "SSH2"]
+                .iter()
+                .any(|p| protocol.eq_ignore_ascii_case(p));
+            if !ssh && !protocol.eq_ignore_ascii_case("RDP") {
                 self.out.report.not_rdp += 1;
                 continue;
             }
@@ -201,6 +201,28 @@ impl Reader<'_> {
                 && own("Username")
                 && own("Password")
                 && (own("Domain") || node.attr("Domain").is_none_or(|d| d.trim().is_empty()));
+            if ssh {
+                // RDP-87: host, port and user; ssh asks for a password.
+                let user = if inherit_credentials {
+                    String::new()
+                } else {
+                    get("Username").unwrap_or("").trim().to_string()
+                };
+                if !inherit_credentials && get("Password").is_some_and(|p| !p.trim().is_empty()) {
+                    self.out.report.ssh_passwords += 1;
+                }
+                let r = Resolved {
+                    host: node.attr("Hostname").unwrap_or("").trim().to_string(),
+                    port: get("Port").and_then(|p| p.trim().parse().ok()).unwrap_or(0),
+                    user,
+                    inherit_credentials,
+                    protocol: crate::store::Protocol::Ssh,
+                    ..Resolved::default()
+                };
+                let c = r.connection(node.attr("Name").unwrap_or(""), path);
+                self.out.connections.push(c);
+                continue;
+            }
             let (user, password) = if inherit_credentials {
                 (String::new(), None)
             } else {
@@ -220,6 +242,7 @@ impl Reader<'_> {
                 user,
                 password,
                 inherit_credentials,
+                protocol: crate::store::Protocol::Rdp,
                 gateway: gateway.to_string(),
                 size: get("Resolution").and_then(parse_size).unwrap_or((0, 0)),
                 clipboard: is_true(get("RedirectClipboard")),

@@ -541,7 +541,7 @@ impl Ui {
             bg,
         );
         self.hits.push((r, hit));
-        let mut where_ = if conn.port == 3389 {
+        let mut where_ = if conn.port == conn.protocol.default_port() {
             conn.host.clone()
         } else {
             format!("{}:{}", conn.host, conn.port)
