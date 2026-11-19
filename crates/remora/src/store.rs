@@ -800,10 +800,12 @@ impl Store {
         }
         let mut added = 0;
         for c in connections {
-            let dup = self
-                .connections
-                .iter()
-                .any(|o| o.name == c.name && o.host == c.host && o.group == c.group);
+            let dup = self.connections.iter().any(|o| {
+                o.name == c.name
+                    && o.host == c.host
+                    && o.group == c.group
+                    && o.protocol == c.protocol
+            });
             if !dup {
                 if !c.group.is_empty() {
                     self.ensure_group(&c.group);
@@ -1910,5 +1912,26 @@ mod tests {
         });
         let r = s.resolve(&s.connections[0].clone());
         assert_eq!((r.jump.as_str(), r.ssh_key.as_str()), ("ops@bastion", "k"));
+    }
+
+    #[test]
+    fn an_rdp_and_an_ssh_entry_of_one_host_both_import() {
+        let mut s = Store::memory(Vec::new());
+        let rdp = Connection {
+            name: "web1".into(),
+            host: "web1".into(),
+            ..Connection::default()
+        };
+        let ssh = Connection {
+            protocol: Protocol::Ssh,
+            port: 22,
+            ..rdp.clone()
+        };
+        assert_eq!(s.merge(Vec::new(), vec![rdp.clone(), ssh.clone()]), 2);
+        assert_eq!(
+            s.merge(Vec::new(), vec![rdp, ssh]),
+            0,
+            "duplicates still skip"
+        );
     }
 }

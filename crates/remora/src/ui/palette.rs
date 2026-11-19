@@ -911,11 +911,13 @@ impl Ui {
             let mut by_use: Vec<usize> = (0..conns.len()).collect();
             by_use.sort_by_key(|&i| (!conns[i].pinned, std::cmp::Reverse(conns[i].last_used)));
             for (i, c) in by_use.into_iter().map(|i| (i, &conns[i])) {
-                let open = self.tabs.iter().any(|t| {
-                    t.name == c.name
-                        && t.host == c.host
-                        && matches!(t.state, TabState::Connected { .. } | TabState::Connecting)
-                });
+                let ssh = c.protocol == crate::store::Protocol::Ssh;
+                let open = !ssh
+                    && self.tabs.iter().any(|t| {
+                        t.name == c.name
+                            && t.host == c.host
+                            && matches!(t.state, TabState::Connected { .. } | TabState::Connecting)
+                    });
                 let host = if c.port == c.protocol.default_port() {
                     c.host.clone()
                 } else {
@@ -971,6 +973,9 @@ impl Ui {
             // RemoteApp apps, of every connection that has any (what a
             // connection opens only decides what Connect does).
             for (ci, c) in self.store.connections.iter().enumerate() {
+                if c.protocol == crate::store::Protocol::Ssh {
+                    continue;
+                }
                 for (ai, a) in c.apps.iter().enumerate() {
                     let running = self.tabs.iter().any(|t| {
                         t.name == c.name

@@ -1413,8 +1413,9 @@ impl Ui {
             kerberos: self.kerberos,
             legacy_security: self.legacy_security,
             inherit,
-            opens: self.opens,
-            apps: self.apps.clone(),
+            // An SSH connection has no RemoteApp programs.
+            opens: if ssh { Opens::Desktop } else { self.opens },
+            apps: if ssh { Vec::new() } else { self.apps.clone() },
             protocol: self.protocol,
             jump,
             ssh_key: self.field(Field::SshKey).text.trim().to_string(),
@@ -1513,6 +1514,10 @@ impl Ui {
     /// of its connection, or connect one for it.
     fn launch_app(&mut self, ci: usize, ai: usize) -> Option<Action> {
         let c = self.store.connections.get(ci)?.clone();
+        if c.protocol == Protocol::Ssh {
+            let r = self.store.resolve(&c);
+            return self.open_ssh(&r);
+        }
         let app = c.apps.get(ai)?.clone();
         if let Some(id) = self.launch_target(&c.name, &c.host) {
             self.set_message(format!("Starting {}…", app.name), Tone::Muted);
@@ -1553,11 +1558,7 @@ impl Ui {
             format!("Connecting to {} for {}…", r.host, app.name),
             Tone::Muted,
         );
-        Some(session_action(
-            &r,
-            &password.unwrap_or_default(),
-            Some(&app),
-        ))
+        self.checked_session(&r, &password.unwrap_or_default(), Some(&app))
     }
 
     fn group_form(&self) -> Result<Group, String> {
@@ -1581,6 +1582,12 @@ impl Ui {
         }
         let inherit = self.form_inherit();
         let (width, height) = self.form_size();
+        if !inherit.credentials {
+            check_jump(
+                self.field(Field::Jump).text.trim(),
+                self.field(Field::Gateway).text.trim(),
+            )?;
+        }
         Ok(Group {
             path,
             user: self.field(Field::User).text.trim().to_string(),
@@ -1737,7 +1744,7 @@ impl Ui {
             // Not saved: the Home view offers to save it.
             self.home_note_unsaved(&c);
         }
-        Some(session_action(&r, &password, first.as_ref()))
+        self.checked_session(&r, &password, first.as_ref())
     }
 
     /// Opens every connection in a group (and its sub-groups) that has a
@@ -1762,7 +1769,7 @@ impl Ui {
                 .clone()
                 .or_else(|| (!typed.is_empty()).then(|| typed.clone()));
             match pw {
-                Some(pw) if !r.user.is_empty() => {
+                Some(pw) if !r.user.is_empty() && route_error(&r).is_none() => {
                     let first = r.apps.first().filter(|_| r.opens == Opens::Apps);
                     acts.push(session_action(&r, &pw, first))
                 }
@@ -8072,6 +8079,28 @@ fn check_jump(jump: &str, gateway: &str) -> Result<(), String> {
         })
 }
 
+/// Why a resolved RDP connection cannot start as configured: a jump host
+/// that does not parse, or one next to a gateway. Never falls back to a
+/// direct connection.
+fn route_error(r: &Connection) -> Option<String> {
+    if r.jump.trim().is_empty() {
+        return None;
+    }
+    if !r.gateway.trim().is_empty() {
+        return Some(format!(
+            "{} has both a gateway and a jump host (from its group?): clear one of them.",
+            r.name
+        ));
+    }
+    if jump_host(r).is_none() {
+        return Some(format!(
+            "The jump host {:?} of {} is not user@host or user@host:port.",
+            r.jump, r.name
+        ));
+    }
+    None
+}
+
 /// The Windows user name, which OpenSSH also uses when none is given.
 fn windows_user() -> String {
     std::env::var("USERNAME").unwrap_or_default()
@@ -8096,6 +8125,21 @@ impl Ui {
         let key = r.ssh_key.trim();
         let key = (!key.is_empty()).then(|| std::path::Path::new(key));
         crate::ssh_launch::launch_for(&r.name, &r.host, r.port, &r.user, key)
+    }
+
+    /// The session for a resolved RDP connection, or a message why its
+    /// route (jump host, gateway) cannot work.
+    pub(super) fn checked_session(
+        &mut self,
+        r: &Connection,
+        password: &str,
+        app: Option<&AppEntry>,
+    ) -> Option<Action> {
+        if let Some(e) = route_error(r) {
+            self.set_message(e, Tone::Danger);
+            return None;
+        }
+        Some(session_action(r, password, app))
     }
 
     /// Opens a resolved SSH connection in a terminal and notes it as used.
@@ -9313,6 +9357,14 @@ mod tests {
             }
             _ => panic!("expected Connect through the jump host"),
         }
+        // A route that cannot work never falls back to a direct one.
+        let mut both = c.clone();
+        both.gateway = "rdg.corp".into();
+        assert!(m.checked_session(&both, "pw", None).is_none());
+        let mut bad = c.clone();
+        bad.jump = "ops@bastion:x".into();
+        assert!(m.checked_session(&bad, "pw", None).is_none());
+        assert!(m.message.clone().unwrap().0.contains("is not user@host"));
         m.field_mut(Field::Gateway).set("rdg.corp");
         assert!(m.form().unwrap_err().contains("not both"));
         m.field_mut(Field::Gateway).set("");

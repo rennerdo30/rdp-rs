@@ -318,6 +318,30 @@ fn a_key_in_openssh_known_hosts_connects_without_asking() {
 }
 
 #[test]
+fn another_key_type_in_openssh_known_hosts_is_a_change() {
+    let lab = lab("keytype");
+    let opts = lab.options();
+    let other = PrivateKey::random(
+        &mut rng(),
+        Algorithm::Ecdsa {
+            curve: keys::EcdsaCurve::NistP256,
+        },
+    )
+    .unwrap();
+    let line = format!(
+        "[127.0.0.1]:{} {}
+",
+        lab.jump.port,
+        other.public_key().to_openssh().unwrap()
+    );
+    std::fs::write(opts.openssh.as_ref().unwrap(), line).unwrap();
+    let (check, asked) = answering(false);
+    let c = connector_with(lab.jump.clone(), check, opts);
+    assert!(c.open("127.0.0.1", lab.echo_port, soon()).is_err());
+    assert!(asked.lock().unwrap()[0].changed, "not a first connection");
+}
+
+#[test]
 fn a_wrong_key_file_is_a_sign_in_error() {
     let lab = lab("auth");
     let other = PrivateKey::random(&mut rng(), Algorithm::Ed25519).unwrap();

@@ -50,9 +50,9 @@ mod settings;
 mod shadow;
 mod smartcard;
 mod span;
-#[cfg(windows)]
 mod ssh_launch;
 mod ssh_tunnel;
+#[cfg(windows)]
 mod sspi;
 mod stats;
 mod store;

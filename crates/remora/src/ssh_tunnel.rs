@@ -29,6 +29,9 @@ use rdp::Error;
 /// Default SSH port.
 pub const PORT: u16 = 22;
 
+/// Agent keys tried at most (servers allow 6 attempts by default).
+const MAX_AGENT_KEYS: usize = 4;
+
 /// Where to jump through: `user@host:port`, and an optional key file.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct JumpHost {
@@ -137,11 +140,12 @@ fn known(pinned: Option<&str>, openssh: Option<bool>, fingerprint: &str) -> Know
 }
 
 /// OpenSSH's verdict on `key` for host:port in `file`.
+/// Any recorded key for the host that is not this one (another type
+/// included) counts as a change.
 fn openssh_known(file: &Path, host: &str, port: u16, key: &PublicKey) -> Option<bool> {
-    match keys::check_known_hosts_path(host, port, key, file) {
-        Ok(true) => Some(true),
-        Ok(false) => None,
-        Err(keys::Error::KeyChanged { .. }) => Some(false),
+    match keys::known_hosts::known_host_keys_path(host, port, file) {
+        Ok(recorded) if recorded.is_empty() => None,
+        Ok(recorded) => Some(recorded.iter().any(|(_, k)| k == key)),
         Err(e) => {
             rdp::trace!("ssh: cannot read {}: {e}", file.display());
             None
@@ -278,7 +282,11 @@ fn open(
 ) -> rdp::Result<rdp::ConnectorStream> {
     let (ready_tx, ready_rx) = mpsc::channel::<rdp::Result<()>>();
     let (up_tx, up_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
-    let (down_tx, down_rx) = mpsc::channel::<io::Result<Vec<u8>>>();
+    // Bounded: a slow reader holds the SSH window back instead of growing
+    // a queue.
+    let (down_tx, down_rx) = tokio::sync::mpsc::channel::<io::Result<Vec<u8>>>(64);
+    // Fired (or dropped) when the RDP side shuts the stream down.
+    let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
     let jump = jump.clone();
     let opts = opts.clone();
     let target = (host.to_string(), port);
@@ -296,13 +304,26 @@ fn open(
                 }
             };
             rt.block_on(run(
-                jump, check, opts, target, deadline, ready_tx, up_rx, down_tx,
+                jump,
+                check,
+                opts,
+                target,
+                deadline,
+                ready_tx,
+                Pipes {
+                    up: up_rx,
+                    down: down_tx,
+                    stop: stop_rx,
+                },
             ));
         })
         .map_err(Error::Io)?;
     match ready_rx.recv() {
         Ok(Ok(())) => Ok(rdp::ConnectorStream {
-            write: Box::new(TunnelWriter { tx: Some(up_tx) }),
+            write: Box::new(TunnelWriter {
+                tx: Some(up_tx),
+                stop: Some(stop_tx),
+            }),
             read: Box::new(TunnelReader {
                 rx: down_rx,
                 buf: Vec::new(),
@@ -322,8 +343,7 @@ async fn run(
     target: (String, u16),
     deadline: Instant,
     ready: mpsc::Sender<rdp::Result<()>>,
-    up: tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
-    down: mpsc::Sender<io::Result<Vec<u8>>>,
+    pipes: Pipes,
 ) {
     let paused = Arc::new(Paused::default());
     let setup = setup(&jump, check, &opts, &target, paused.clone());
@@ -343,7 +363,7 @@ async fn run(
     if ready.send(Ok(())).is_err() {
         return;
     }
-    pump(channel, up, down).await;
+    pump(channel, pipes).await;
     let _ = session
         .disconnect(russh::Disconnect::ByApplication, "", "en")
         .await;
@@ -388,14 +408,39 @@ async fn setup(
     target: &(String, u16),
     paused: Arc<Paused>,
 ) -> rdp::Result<(Session, Channel)> {
-    let addr = tokio::net::lookup_host((jump.host.as_str(), jump.port))
+    let addrs: Vec<_> = tokio::net::lookup_host((jump.host.as_str(), jump.port))
         .await
-        .ok()
-        .and_then(|mut a| a.next())
-        .ok_or_else(|| Error::Protocol(format!("cannot resolve the jump host {}", jump.host)))?;
-    let sock = tokio::net::TcpStream::connect(addr)
-        .await
-        .map_err(Error::Io)?;
+        .map(Iterator::collect)
+        .unwrap_or_default();
+    if addrs.is_empty() {
+        return Err(Error::Protocol(format!(
+            "cannot resolve the jump host {}",
+            jump.host
+        )));
+    }
+    // Each address in turn (an unreachable IPv6 one may come first).
+    let mut last = None;
+    let mut sock = None;
+    for addr in addrs {
+        match tokio::net::TcpStream::connect(addr).await {
+            Ok(s) => {
+                sock = Some(s);
+                break;
+            }
+            Err(e) => {
+                rdp::trace!("ssh: cannot reach {addr}: {e}");
+                last = Some(e);
+            }
+        }
+    }
+    let sock = match sock {
+        Some(s) => s,
+        None => {
+            return Err(Error::Io(
+                last.unwrap_or_else(|| io::ErrorKind::NotConnected.into()),
+            ));
+        }
+    };
     let _ = sock.set_nodelay(true);
     let refused = Arc::new(Mutex::new(None));
     let handler = Handler {
@@ -559,6 +604,11 @@ where
         let AgentIdentity::PublicKey { key, .. } = id else {
             continue;
         };
+        // OpenSSH servers drop the connection after MaxAuthTries (6).
+        if *tried >= MAX_AGENT_KEYS {
+            rdp::trace!("ssh: more agent keys than tried; set a key file");
+            break;
+        }
         *tried += 1;
         let hash = key.algorithm().is_rsa().then_some(rsa).flatten();
         match session
@@ -575,11 +625,19 @@ where
 
 /// Moves bytes between the channel and the blocking RDP side until either
 /// end closes.
-async fn pump(
-    channel: Channel,
-    mut up: tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
-    down: mpsc::Sender<io::Result<Vec<u8>>>,
-) {
+/// The tunnel thread's ends of the RDP side's stream.
+struct Pipes {
+    up: tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
+    down: tokio::sync::mpsc::Sender<io::Result<Vec<u8>>>,
+    stop: tokio::sync::oneshot::Receiver<()>,
+}
+
+async fn pump(channel: Channel, pipes: Pipes) {
+    let Pipes {
+        mut up,
+        down,
+        mut stop,
+    } = pipes;
     let (mut rd, mut wr) = tokio::io::split(channel.into_stream());
     let to_server = async {
         while let Some(buf) = up.recv().await {
@@ -595,26 +653,31 @@ async fn pump(
             match rd.read(&mut b).await {
                 Ok(0) => break,
                 Ok(n) => {
-                    if down.send(Ok(b[..n].to_vec())).is_err() {
+                    if down.send(Ok(b[..n].to_vec())).await.is_err() {
                         break;
                     }
                 }
                 Err(e) => {
-                    let _ = down.send(Err(e));
+                    let _ = down.send(Err(e)).await;
                     break;
                 }
             }
         }
     };
+    // The RDP side's shutdown ends it even while a write is stuck on a
+    // full SSH window.
     tokio::select! {
         _ = to_server => {}
         _ = from_server => {}
+        _ = &mut stop => {}
     }
 }
 
 /// The RDP side's write half: hands bytes to the tunnel thread.
 struct TunnelWriter {
     tx: Option<tokio::sync::mpsc::UnboundedSender<Vec<u8>>>,
+    /// Dropping it (shutdown, or the writer dropped) stops the pump.
+    stop: Option<tokio::sync::oneshot::Sender<()>>,
 }
 
 impl Write for TunnelWriter {
@@ -635,12 +698,15 @@ impl rdp::transport::ByteStream for TunnelWriter {
         // Ends the tunnel thread, which closes the channel and the SSH
         // connection; the read side then sees the end of the stream.
         self.tx = None;
+        if let Some(stop) = self.stop.take() {
+            let _ = stop.send(());
+        }
     }
 }
 
 /// The RDP side's read half.
 struct TunnelReader {
-    rx: mpsc::Receiver<io::Result<Vec<u8>>>,
+    rx: tokio::sync::mpsc::Receiver<io::Result<Vec<u8>>>,
     buf: Vec<u8>,
     at: usize,
 }
@@ -648,14 +714,15 @@ struct TunnelReader {
 impl Read for TunnelReader {
     fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
         if self.at >= self.buf.len() {
-            match self.rx.recv() {
-                Ok(Ok(b)) => {
+            // A plain thread (the framer's reader), never a runtime's.
+            match self.rx.blocking_recv() {
+                Some(Ok(b)) => {
                     self.buf = b;
                     self.at = 0;
                 }
-                Ok(Err(e)) => return Err(e),
+                Some(Err(e)) => return Err(e),
                 // The tunnel ended.
-                Err(_) => return Ok(0),
+                None => return Ok(0),
             }
         }
         let n = out.len().min(self.buf.len() - self.at);

@@ -18,7 +18,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use ffwd_render::{Canvas, Rect, TextEngine};
 
-use super::{Action, Field, Fonts, Hit, Key, TabState, Ui, session_action};
+use super::{Action, Field, Fonts, Hit, Key, TabState, Ui};
 use crate::icons::Icon;
 use crate::kit::{Button, Font, Hint, Kit, Lead, State, Variant};
 use crate::store::{Connection, Opens};
@@ -675,7 +675,7 @@ impl Ui {
         }
         self.set_message(format!("Connecting to {}…", r.host), Tone::Muted);
         let password = r.password.clone().unwrap_or_default();
-        Some(session_action(&r, &password, first.as_ref()))
+        self.checked_session(&r, &password, first.as_ref())
     }
 
     /// A connection started from an unsaved form: its live card offers Save.
@@ -734,6 +734,10 @@ impl Ui {
 
     /// The live desktop tab of a saved connection, if one is connected.
     fn live_tab(&self, c: &Connection) -> Option<u64> {
+        // An SSH connection has no session tab.
+        if c.protocol == crate::store::Protocol::Ssh {
+            return None;
+        }
         self.tabs
             .iter()
             .find(|t| {

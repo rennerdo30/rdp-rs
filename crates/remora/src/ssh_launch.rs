@@ -97,11 +97,17 @@ pub fn ssh_args(
 /// A tab title Windows Terminal takes as one argument: printable, no `;`,
 /// at most 60 characters.
 fn title(name: &str) -> String {
-    name.chars()
+    let t: String = name
+        .chars()
         .filter(|c| !c.is_control())
         .map(|c| if c == ';' || c == '"' { ',' } else { c })
         .take(60)
-        .collect()
+        .collect();
+    // Never something Windows Terminal could take for an option.
+    match t.trim_start_matches(['-', ' ']) {
+        "" => "SSH".into(),
+        rest => rest.to_string(),
+    }
 }
 
 /// The command: Windows Terminal's new tab with ssh.exe in it, or ssh.exe
@@ -257,6 +263,9 @@ mod tests {
                 "web1"
             ]
         );
+        let dashed = command(ssh, Some(wt), "--help -d C:\\x", args.clone());
+        assert_eq!(dashed.args[2], "help -d C:\\x", "no option as the title");
+        assert_eq!(command(ssh, Some(wt), "-", args.clone()).args[2], "SSH");
         let console = command(ssh, None, "Web", args.clone());
         assert_eq!(
             (console.program.as_path(), console.new_console),
