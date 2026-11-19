@@ -151,21 +151,23 @@ fn mrng_file(master: &str, root_attrs: &str, body: &str) -> Vec<u8> {
 
 fn check_mrng_tree(i: &Imported, with_passwords: bool) {
     let pw = |s: &str| with_passwords.then(|| s.to_string());
-    let work = by_path(i, "Work");
+    // Everything sits in one group named after the app.
+    assert!(i.groups.iter().any(|g| g.path == "mRemoteNG"));
+    let work = by_path(i, "mRemoteNG/Work");
     assert_eq!(
         (work.user.as_str(), work.password.clone()),
         ("CORP\\admin", pw("work-pw"))
     );
     // A container that inherits gets the effective values; '/' in a name
     // does not split the path.
-    let prod = by_path(i, "Work/Servers-Prod");
+    let prod = by_path(i, "mRemoteNG/Work/Servers-Prod");
     assert_eq!(
         (prod.user.as_str(), prod.password.clone()),
         ("CORP\\admin", pw("work-pw"))
     );
 
     let db1 = by_name(i, "db1");
-    assert_eq!(db1.group, "Work/Servers-Prod");
+    assert_eq!(db1.group, "mRemoteNG/Work/Servers-Prod");
     assert_eq!((db1.host.as_str(), db1.port), ("db1.corp", 3390));
     assert!(db1.inherit.credentials && db1.user.is_empty() && db1.password.is_none());
     assert_eq!(db1.gateway, "gw.corp");
@@ -174,7 +176,7 @@ fn check_mrng_tree(i: &Imported, with_passwords: bool) {
     assert!(o.clipboard && o.sound && o.printers && o.microphone && !o.smart_cards);
 
     let own = by_name(i, "own");
-    assert_eq!(own.group, "Work");
+    assert_eq!(own.group, "mRemoteNG/Work");
     assert_eq!((own.user.as_str(), own.port), ("bob@corp", 3389));
     assert_eq!(own.password, pw("own-pw"));
     assert!(!own.inherit.credentials);
@@ -182,14 +184,18 @@ fn check_mrng_tree(i: &Imported, with_passwords: bool) {
     assert!(own.options.smart_cards && !own.options.sound && !own.options.clipboard);
 
     let bare = by_name(i, "bare");
-    assert_eq!((bare.group.as_str(), bare.user.as_str()), ("", ""));
+    assert_eq!(
+        (bare.group.as_str(), bare.user.as_str()),
+        ("mRemoteNG", ""),
+        "top level: the app's group"
+    );
     assert!(!bare.inherit.credentials);
 
     // SSH entries come over as SSH connections (RDP-87); VNC does not.
     let ssh1 = by_name(i, "ssh1");
     assert_eq!(ssh1.protocol, crate::store::Protocol::Ssh);
     assert_eq!((ssh1.host.as_str(), ssh1.port), ("ssh1", 22));
-    assert_eq!(ssh1.group, "Work/Servers-Prod");
+    assert_eq!(ssh1.group, "mRemoteNG/Work/Servers-Prod");
     assert_eq!(ssh1.password, None);
     assert_eq!(
         by_name(i, "inherits-ssh").protocol,
@@ -761,7 +767,7 @@ fn mobaxterm_sessions_import_rdp_and_ssh_with_folders() {
         ("web1.lab", 22, "ops")
     );
     assert_eq!(web.ssh_key, r"C:\keys\id_ed25519");
-    assert_eq!(web.group, "");
+    assert_eq!(web.group, "MobaXterm");
     let behind = by_name(&i, "behind");
     assert_eq!(
         (behind.port, behind.user.as_str()),
@@ -778,7 +784,7 @@ fn mobaxterm_sessions_import_rdp_and_ssh_with_folders() {
     );
     assert_eq!(
         (dc.gateway.as_str(), dc.group.as_str()),
-        ("rdg.corp", "Work/Servers")
+        ("rdg.corp", "MobaXterm/Work/Servers")
     );
     let app = by_name(&i, "app");
     assert_eq!(
@@ -796,7 +802,10 @@ fn mobaxterm_sessions_import_rdp_and_ssh_with_folders() {
     assert!(i.connections.iter().all(|c| c.password.is_none()));
 
     let paths: Vec<&str> = i.groups.iter().map(|g| g.path.as_str()).collect();
-    assert_eq!(paths, ["Work", "Work/Servers"]);
+    assert_eq!(
+        paths,
+        ["MobaXterm", "MobaXterm/Work", "MobaXterm/Work/Servers"]
+    );
     assert_eq!(i.report.not_rdp, 1, "vnc");
     assert_eq!(i.report.no_jump, 2, "both and hops");
     assert!(i.report.summary(8).contains(

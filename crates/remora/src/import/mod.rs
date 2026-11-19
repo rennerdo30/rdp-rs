@@ -343,10 +343,41 @@ pub fn read(bytes: &[u8], password: &str, dpapi: &dyn Dpapi) -> Result<Imported,
                 report: Report::default(),
             })
         }
-        (Format::MRemoteNg, Parsed::Xml(root)) => mremoteng::read(&root, password, dpapi),
+        (Format::MRemoteNg, Parsed::Xml(root)) => {
+            mremoteng::read(&root, password, dpapi).map(|i| under("mRemoteNG", i))
+        }
+        // RDCMan's file already is a group named after it.
         (_, Parsed::Xml(root)) => rdcman::read(&root, dpapi),
-        (_, Parsed::Ini(text)) => Ok(mobaxterm::read(&text)),
+        (_, Parsed::Ini(text)) => Ok(under("MobaXterm", mobaxterm::read(&text))),
     }
+}
+
+/// Puts everything another app's file brings in one group named after the
+/// app ("MobaXterm/Work/Servers"), so it stays apart from the user's own.
+fn under(app: &str, mut i: Imported) -> Imported {
+    let nest = |path: &str| {
+        if path.is_empty() {
+            app.to_string()
+        } else {
+            format!("{app}/{path}")
+        }
+    };
+    for g in &mut i.groups {
+        g.path = nest(&g.path);
+    }
+    for c in &mut i.connections {
+        c.group = nest(&c.group);
+    }
+    if !i.groups.iter().any(|g| g.path == app) {
+        i.groups.insert(
+            0,
+            Group {
+                path: app.to_string(),
+                ..Group::default()
+            },
+        );
+    }
+    i
 }
 
 /// The settings an imported connection carries, already resolved.
