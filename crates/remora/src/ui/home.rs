@@ -56,6 +56,8 @@ pub enum HomeHit {
     Section(usize),
     /// First start: import a backup, or fill in a new connection.
     Import,
+    /// First start: import the first of the files found on this PC.
+    ImportFound,
     NewConnection,
 }
 
@@ -932,6 +934,15 @@ impl Ui {
                 self.home_scroll = 0;
                 self.focus = None;
                 return Some(Action::PickImport);
+            }
+            HomeHit::ImportFound => {
+                self.settings_open = true;
+                self.home_scroll = 0;
+                self.focus = None;
+                return self
+                    .import_found
+                    .first()
+                    .map(|f| Action::ImportPath(f.path.clone()));
             }
             HomeHit::NewConnection => {
                 self.new_connection_in("");
@@ -2559,20 +2570,27 @@ impl Ui {
         let fr = Rect::new(cx, y, cw, p(50.0));
         self.paint_quick_field(cv, te, f, fr);
         y = fr.bottom() + p(56.0);
-        // The other ways in.
-        let imp = Button::secondary("Import connections").icon(Icon::Download);
+        // The other ways in; connections found on this PC come first.
+        let first = self.import_found.first().cloned();
+        let found_label = first
+            .as_ref()
+            .map(|f| format!("Import from {}", f.app))
+            .unwrap_or_default();
+        let (imp, imp_hit) = match &first {
+            Some(_) => (
+                Button::primary(&found_label).icon(Icon::Download),
+                HomeHit::ImportFound,
+            ),
+            None => (
+                Button::secondary("Import connections").icon(Icon::Download),
+                HomeHit::Import,
+            ),
+        };
         let new = Button::ghost("Set up a connection").icon(Icon::Plus);
         let (iw, nw) = (self.btn_w(te, f, &imp), self.btn_w(te, f, &new));
         let total = iw + p(10.0) + nw;
         let bx = cx + (cw - total) / 2;
-        self.hbtn(
-            cv,
-            te,
-            f,
-            Rect::new(bx, y, iw, p(36.0)),
-            &imp,
-            HomeHit::Import,
-        );
+        self.hbtn(cv, te, f, Rect::new(bx, y, iw, p(36.0)), &imp, imp_hit);
         self.hbtn(
             cv,
             te,
@@ -2587,7 +2605,13 @@ impl Ui {
             Font::Regular,
             size::SMALL,
             Rect::new(cx, y, cw, p(18.0)),
-            "Import reads a Remora backup, mRemoteNG's confCons.xml, an RDCMan .rdg file or MobaXterm's sessions.",
+            &match &first {
+                Some(f) => format!(
+                    "Found {}'s connections on this PC. Other files: Settings → Import connections.",
+                    f.app
+                ),
+                None => "Import reads a Remora backup, mRemoteNG's confCons.xml, an RDCMan .rdg file or MobaXterm's sessions.".into(),
+            },
             c.text_faint,
         );
         y + p(18.0)

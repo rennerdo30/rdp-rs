@@ -228,6 +228,8 @@ pub enum Hit {
     ChangeMasterCancel,
     Export,
     Import,
+    /// Import one of [`Ui::import_found`].
+    ImportFound(usize),
     ImportOk,
     ImportCancel,
     CheckUpdates,
@@ -672,6 +674,8 @@ pub enum Action {
     },
     Export,
     PickImport,
+    /// Probe this file for an import, as if it had been picked.
+    ImportPath(std::path::PathBuf),
     Import {
         path: std::path::PathBuf,
         password: zeroize::Zeroizing<String>,
@@ -833,6 +837,8 @@ pub struct Ui {
     pub mics: Vec<String>,
     /// This PC's serial and parallel ports, "COM3" (the app fills it in).
     pub local_ports: Vec<String>,
+    /// Other apps' connection files on this PC (the app fills it in).
+    pub import_found: Vec<crate::import::Found>,
     /// Local cameras, by name (the app fills it in).
     pub cams: Vec<String>,
     /// This PC's monitors (the app fills it in).
@@ -995,6 +1001,7 @@ impl Ui {
             theme: ThemeChoice::Dark,
             change_master: false,
             import_file: None,
+            import_found: Vec::new(),
             import_probe: None,
             settings_note: None,
             confirm_exit: None,
@@ -2212,6 +2219,12 @@ impl Ui {
             Hit::ChangeMasterOk => return self.change_master_action(),
             Hit::Export => return Some(Action::Export),
             Hit::Import => return Some(Action::PickImport),
+            Hit::ImportFound(i) => {
+                return self
+                    .import_found
+                    .get(i)
+                    .map(|f| Action::ImportPath(f.path.clone()));
+            }
             Hit::ImportOk => return self.import_action(),
             Hit::ImportCancel => {
                 self.import_file = None;
@@ -4351,7 +4364,8 @@ impl Ui {
         // Backup
         self.caption(cv, te, f, x, y, w, "Backup");
         y += p(26.0);
-        let cells = self.card(cv, x, y, w, &[row, row]);
+        let found = self.import_found.clone();
+        let cells = self.card(cv, x, y, w, &vec![row; 2 + found.len()]);
         self.card_action(
             cv,
             te,
@@ -4374,7 +4388,21 @@ impl Ui {
             "Import…",
             Hit::Import,
         );
-        y += 2 * row + p(16.0);
+        // Found where those apps keep them: one click, no file dialog.
+        for (i, found) in found.iter().enumerate() {
+            self.card_action(
+                cv,
+                te,
+                f,
+                cells[2 + i],
+                Icon::FolderOpen,
+                &format!("{} on this PC", found.app),
+                &found.path.display().to_string(),
+                "Import",
+                Hit::ImportFound(i),
+            );
+        }
+        y += (2 + found.len() as i32) * row + p(16.0);
         if let Some(path) = self.import_file.clone() {
             use crate::import::Format;
             let name = path
@@ -8238,6 +8266,23 @@ pub fn sample_settings(vault: bool) -> Ui {
     m
 }
 
+/// Settings with MobaXterm's and mRemoteNG's files found on this PC.
+pub fn sample_settings_found() -> Ui {
+    let mut m = sample_settings(false);
+    m.import_found = vec![
+        crate::import::Found {
+            app: "MobaXterm",
+            path: r"C:\Users\alex\AppData\Roaming\MobaXterm\MobaXterm.ini".into(),
+        },
+        crate::import::Found {
+            app: "mRemoteNG",
+            path: r"C:\Users\alex\AppData\Roaming\mRemoteNG\confCons.xml".into(),
+        },
+    ];
+    m.home_scroll = 380;
+    m
+}
+
 /// Settings with a picked import file waiting: an mRemoteNG file with a
 /// custom master password (`password`), or an RDCMan file (no password row).
 pub fn sample_settings_import(password: bool) -> Ui {
@@ -8577,6 +8622,13 @@ pub fn sample_tab_state(state: u8) -> Ui {
 pub fn sample_empty() -> Ui {
     let mut m = Ui::new(Store::memory(Vec::new()), 1.0);
     m.focus = None;
+    m
+}
+
+/// First start with MobaXterm's sessions found on this PC.
+pub fn sample_empty_found() -> Ui {
+    let mut m = sample_empty();
+    m.import_found = sample_settings_found().import_found;
     m
 }
 

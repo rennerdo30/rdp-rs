@@ -223,6 +223,55 @@ enum Parsed {
     Ini(String),
 }
 
+/// Another app's connections found where it keeps them on this PC.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Found {
+    /// "MobaXterm", "mRemoteNG".
+    pub app: &'static str,
+    pub path: std::path::PathBuf,
+}
+
+/// The connection files of other apps in their usual places:
+/// - MobaXterm: `%APPDATA%\MobaXterm\MobaXterm.ini` (the installed
+///   edition), else `Documents\MobaXterm\MobaXterm.ini`; a portable copy
+///   keeps it next to its exe, which Remora cannot know.
+/// - mRemoteNG: `%APPDATA%\mRemoteNG\confCons.xml`.
+///
+/// Only files that exist; nothing is read here.
+pub fn found_in(
+    appdata: Option<&std::path::Path>,
+    documents: Option<&std::path::Path>,
+) -> Vec<Found> {
+    let mut out = Vec::new();
+    let moba = [
+        appdata.map(|d| d.join("MobaXterm").join("MobaXterm.ini")),
+        documents.map(|d| d.join("MobaXterm").join("MobaXterm.ini")),
+    ];
+    if let Some(path) = moba.into_iter().flatten().find(|p| p.is_file()) {
+        out.push(Found {
+            app: "MobaXterm",
+            path,
+        });
+    }
+    if let Some(path) = appdata
+        .map(|d| d.join("mRemoteNG").join("confCons.xml"))
+        .filter(|p| p.is_file())
+    {
+        out.push(Found {
+            app: "mRemoteNG",
+            path,
+        });
+    }
+    out
+}
+
+/// [`found_in`] for this user.
+pub fn found() -> Vec<Found> {
+    let env = |k| std::env::var_os(k).map(std::path::PathBuf::from);
+    let documents = env("USERPROFILE").map(|p| p.join("Documents"));
+    found_in(env("APPDATA").as_deref(), documents.as_deref())
+}
+
 /// Reads a picked file, refusing one too large to be a connections file
 /// before it is in memory.
 pub fn read_file(path: &std::path::Path) -> Result<Vec<u8>, String> {
