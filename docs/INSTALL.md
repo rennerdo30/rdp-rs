@@ -17,6 +17,8 @@ Download from [Releases](https://github.com/rennerdo30/rdp-rs/releases).
 
 Builds are not signed yet, so SmartScreen warns on the first run (More info → Run anyway).
 
+**SSH connections** use Windows' own OpenSSH client (`ssh.exe`). Windows 10 and 11 include it; if it is missing, add **OpenSSH Client** under Settings → System → Optional features. RDP through an SSH jump host needs nothing extra.
+
 The command line modes work from the installed copy too, for example `"%LOCALAPPDATA%\Programs\Remora\remora.exe" 192.168.1.20 -u DOMAIN\user` (see the [README](../README.md#build-and-run)).
 
 ## macOS and Linux
