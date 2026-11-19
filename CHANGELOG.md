@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.1.0-beta.13
+
 - **Imports found on this PC.** When MobaXterm's (`%APPDATA%\MobaXterm\MobaXterm.ini`) or mRemoteNG's (`%APPDATA%\mRemoteNG\confCons.xml`) connections are where those apps keep them, Settings shows a one-click **Import** for each, and the first start offers **Import from MobaXterm**. The file dialog also lists MobaXterm's configuration exports (`.mobaconf`) (RDP-89).
 
 ## 0.1.0-beta.12
