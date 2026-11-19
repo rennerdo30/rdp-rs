@@ -635,3 +635,177 @@ fn helpers() {
     assert_eq!(parse_size("1920 x 1080"), Some((1920, 1080)));
     assert_eq!(parse_size("FitToWindow"), None);
 }
+
+/// A MobaXterm session line: `name=` and `#icon#` with the `%` fields set
+/// at their positions (MobaXterm 26), and a terminal block after them.
+fn moba(name: &str, icon: u32, fields: &[(usize, &str)]) -> String {
+    let n = fields.iter().map(|f| f.0).max().unwrap_or(0) + 1;
+    let mut v = vec![String::new(); n.max(32)];
+    for (i, val) in fields {
+        v[*i] = val.to_string();
+    }
+    format!(
+        "{name}=#{icon}#{}#MobaFont%10%0%0%-1%15#0# #-1",
+        v.join("%")
+    )
+}
+
+fn moba_file() -> Vec<u8> {
+    let lines = [
+        "[Misc]".to_string(),
+        "SomeSetting=1".into(),
+        "[Bookmarks]".into(),
+        "SubRep=".into(),
+        "ImgNum=42".into(),
+        moba(
+            "web1",
+            109,
+            &[
+                (0, "0"),
+                (1, "web1.lab"),
+                (2, "22"),
+                (3, "ops"),
+                (14, r"_CurrentDrive_:\keys\id_ed25519"),
+            ],
+        ),
+        moba(
+            "behind",
+            109,
+            &[
+                (0, "0"),
+                (1, "10.1.0.9"),
+                (2, "2200"),
+                (3, "<default>"),
+                (8, "bastion.lab"),
+                (9, "2222"),
+                (10, "me"),
+            ],
+        ),
+        moba("vnc", 128, &[(0, "5"), (1, "v")]),
+        "[Bookmarks_1]".into(),
+        r"SubRep=Work\Servers".into(),
+        "ImgNum=41".into(),
+        moba(
+            "dc1",
+            91,
+            &[
+                (0, "4"),
+                (1, "dc1.corp"),
+                (2, "3390"),
+                (3, r"CORP\admin"),
+                (31, "100000100000,2,rdg.corp,,0"),
+            ],
+        ),
+        moba(
+            "app",
+            91,
+            &[
+                (0, "4"),
+                (1, "app.corp"),
+                (2, "3389"),
+                (3, "alex"),
+                (13, "jump.corp"),
+                (14, "22"),
+                (15, "ops"),
+            ],
+        ),
+        moba(
+            "both",
+            91,
+            &[
+                (0, "4"),
+                (1, "b.corp"),
+                (3, "alex"),
+                (13, "jump.corp"),
+                (31, "100000100000,2,rdg.corp"),
+            ],
+        ),
+        moba(
+            "hops",
+            91,
+            &[(0, "4"), (1, "h.corp"), (13, "a.corp__PIPE__b.corp")],
+        ),
+        moba(
+            "never",
+            91,
+            &[
+                (0, "4"),
+                (1, "n.corp"),
+                (20, "old-gw"),
+                (31, "100000100000,0,old-gw"),
+            ],
+        ),
+    ];
+    let mut bytes = lines.join("\r\n").into_bytes();
+    // A Windows-1252 name: "€ desk" (0x80 is the euro sign there).
+    bytes.extend_from_slice(b"\r\n\x80 desk=#91#4%euro.corp%3389%u\r\n");
+    bytes
+}
+
+#[test]
+fn mobaxterm_sessions_import_rdp_and_ssh_with_folders() {
+    use crate::store::Protocol;
+    let file = moba_file();
+    assert_eq!(
+        probe(&file).unwrap(),
+        Probe {
+            format: Format::MobaXterm,
+            needs_password: false
+        }
+    );
+    let i = read(&file, "", &FakeDpapi).unwrap();
+    let web = by_name(&i, "web1");
+    assert_eq!(web.protocol, Protocol::Ssh);
+    assert_eq!(
+        (web.host.as_str(), web.port, web.user.as_str()),
+        ("web1.lab", 22, "ops")
+    );
+    assert_eq!(web.ssh_key, r"C:\keys\id_ed25519");
+    assert_eq!(web.group, "");
+    let behind = by_name(&i, "behind");
+    assert_eq!(
+        (behind.port, behind.user.as_str()),
+        (2200, ""),
+        "<default> is no user"
+    );
+    assert_eq!(behind.jump, "me@bastion.lab:2222");
+
+    let dc = by_name(&i, "dc1");
+    assert_eq!(dc.protocol, Protocol::Rdp);
+    assert_eq!(
+        (dc.host.as_str(), dc.port, dc.user.as_str()),
+        ("dc1.corp", 3390, r"CORP\admin")
+    );
+    assert_eq!(
+        (dc.gateway.as_str(), dc.group.as_str()),
+        ("rdg.corp", "Work/Servers")
+    );
+    let app = by_name(&i, "app");
+    assert_eq!(
+        (app.jump.as_str(), app.gateway.as_str()),
+        ("ops@jump.corp", "")
+    );
+    let both = by_name(&i, "both");
+    assert_eq!(
+        (both.gateway.as_str(), both.jump.as_str()),
+        ("rdg.corp", "")
+    );
+    assert_eq!(by_name(&i, "hops").jump, "", "several hops: none");
+    assert_eq!(by_name(&i, "never").gateway, "", "the gateway set to Never");
+    assert_eq!(by_name(&i, "€ desk").host, "euro.corp");
+    assert!(i.connections.iter().all(|c| c.password.is_none()));
+
+    let paths: Vec<&str> = i.groups.iter().map(|g| g.path.as_str()).collect();
+    assert_eq!(paths, ["Work", "Work/Servers"]);
+    assert_eq!(i.report.not_rdp, 1, "vnc");
+    assert_eq!(i.report.no_jump, 2, "both and hops");
+    assert!(i.report.summary(8).contains(
+        "2 connections came over without their SSH gateway: Remora takes one jump host, and not next to an RD Gateway."
+    ));
+}
+
+#[test]
+fn text_without_mobaxterm_sessions_is_not_taken_for_them() {
+    let ini = b"[Misc]\r\nBookmarksFile=1\r\n";
+    assert!(probe(ini).is_err());
+}
