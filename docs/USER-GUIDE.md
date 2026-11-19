@@ -790,7 +790,8 @@ saved passwords included.
 Pick `confCons.xml` (mRemoteNG keeps it in `%APPDATA%\mRemoteNG`). Files in
 mRemoteNG's current formats (2.6 to 2.9) are read.
 
-- **What comes over:** folders become groups; each RDP connection keeps its
+- **What comes over:** everything lands in one group, **mRemoteNG**, apart
+  from your own connections; folders become groups inside it; each RDP connection keeps its
   name, host, port, user and domain (as `DOMAIN\user`), password, RD Gateway
   (when set to Always or Detect), resolution (a fixed size, or fit to the tab
   for Fit to window, Smart size and Full screen), and clipboard, sound
@@ -840,7 +841,8 @@ to `MobaXterm.exe` for the portable edition), a configuration export
 (**Settings → Export configuration**, `.mobaconf`) or a sessions export
 (`.mxtsessions`). Remora reads the sessions in any of them.
 
-- **What comes over:** folders become groups. RDP sessions keep their name,
+- **What comes over:** everything lands in one group, **MobaXterm**, apart
+  from your own connections; folders become groups inside it. RDP sessions keep their name,
   host, port, user and RD Gateway (when it is set to Always or Detect); SSH
   sessions come over as [SSH connections](#ssh-connections) with their host,
   port, user and private key file. An SSH gateway comes over as the
