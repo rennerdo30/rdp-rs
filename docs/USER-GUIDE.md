@@ -848,3 +848,10 @@ and recordings, shadows sessions
 protocol trace. `--legacy-security` allows the weak legacy RDP security for
 that connection, as the Advanced switch does. See the
 [README](../README.md#build-and-run).
+
+- `--jump user@host[:port]` connects through an SSH jump host, with
+  `--jump-key FILE` for its key file. A new jump host key is asked about on
+  the console; `--expect-jump-fingerprint SHA256:...` pins it instead (for
+  scripts: nothing asked, nothing remembered).
+- `remora --ssh user@host[:port] [--ssh-key FILE] [--title NAME]` opens ssh
+  in a terminal, as an SSH connection in the manager does.

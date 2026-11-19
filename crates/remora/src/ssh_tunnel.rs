@@ -178,6 +178,7 @@ struct Handler {
     /// Where Remora keeps trusted fingerprints; None: the default file.
     pins: Option<PathBuf>,
     openssh: Option<PathBuf>,
+    pinned: Option<String>,
 }
 
 impl client::Handler for Handler {
@@ -193,6 +194,14 @@ impl client::Handler for Handler {
             PublicKeyOrCertificate::Certificate(c) => PublicKey::from(c.public_key().clone()),
         };
         let fingerprint = key.fingerprint(HashAlg::Sha256).to_string();
+        if let Some(want) = &self.pinned {
+            if *want == fingerprint {
+                return Ok(true);
+            }
+            rdp::trace!("ssh: the jump host's key is {fingerprint}, not the pinned one");
+            *self.refused.lock().unwrap_or_else(|e| e.into_inner()) = Some(fingerprint);
+            return Ok(false);
+        }
         let pinned = match &self.pins {
             Some(p) => crate::known_hosts::lookup_ssh_in(p, &self.host, self.port),
             None => crate::known_hosts::lookup_ssh(&self.host, self.port),
@@ -247,6 +256,9 @@ struct Options {
     pins: Option<PathBuf>,
     openssh: Option<PathBuf>,
     agents: bool,
+    /// Only this fingerprint (`SHA256:...`) is trusted; nothing is asked or
+    /// remembered (the command line's `--expect-jump-fingerprint`).
+    pinned: Option<String>,
 }
 
 impl Default for Options {
@@ -255,6 +267,7 @@ impl Default for Options {
             pins: None,
             openssh: openssh_known_hosts(),
             agents: true,
+            pinned: None,
         }
     }
 }
@@ -262,6 +275,16 @@ impl Default for Options {
 /// A connector that reaches each RDP host through `jump`.
 pub fn connector(jump: JumpHost, check: HostKeyCheck) -> rdp::Connector {
     connector_with(jump, check, Options::default())
+}
+
+/// A connector that trusts only the jump host key with this fingerprint
+/// (`SHA256:...`), for scripts: no prompt, nothing remembered.
+pub fn connector_pinned(jump: JumpHost, fingerprint: &str) -> rdp::Connector {
+    let opts = Options {
+        pinned: Some(fingerprint.trim().to_string()),
+        ..Options::default()
+    };
+    connector_with(jump, Arc::new(|_: &HostKeyPrompt| false), opts)
 }
 
 fn connector_with(jump: JumpHost, check: HostKeyCheck, opts: Options) -> rdp::Connector {
@@ -451,6 +474,7 @@ async fn setup(
         refused: refused.clone(),
         pins: opts.pins.clone(),
         openssh: opts.openssh.clone(),
+        pinned: opts.pinned.clone(),
     };
     let config = Arc::new(client::Config {
         // A long RDP session: keep the tunnel alive, never time it out.

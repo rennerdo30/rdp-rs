@@ -80,6 +80,16 @@ struct Args {
     gateway: Option<(String, u16)>,
     /// `--gateway-rpc`: reach the gateway over RPC over HTTP only.
     gateway_rpc: bool,
+    /// `--jump user@host[:port]`: an SSH jump host (RDP-88), with
+    /// `--jump-key FILE` and `--expect-jump-fingerprint SHA256:...`.
+    jump: Option<String>,
+    jump_key: Option<String>,
+    expect_jump_fingerprint: Option<String>,
+    /// `--ssh user@host[:port]`: open an SSH connection in a terminal, as
+    /// the connection manager does (RDP-87), with `--ssh-key` and `--title`.
+    ssh: Option<String>,
+    ssh_key: Option<String>,
+    title: Option<String>,
     size: Option<(u16, u16)>,
     screenshot: Option<String>,
     /// `--record out.mp4`: headless recording for `--wait` seconds.
@@ -153,6 +163,9 @@ fn usage() -> ! {
          \x20      remora <host> --shadow ID [--control] [--no-consent-prompt]\n\
          \x20                                  (watch or control session ID, like mstsc /shadow)\n\
          \x20      remora --invitation FILE [--preconnection]   (join a Desktop Sharing invitation)\n\
+         \x20      remora <host> ... --jump user@host[:port] [--jump-key FILE]\n\
+         \x20                        [--expect-jump-fingerprint SHA256:...]   (through an SSH jump host)\n\
+         \x20      remora --ssh user@host[:port] [--ssh-key FILE] [--title NAME]   (ssh in a terminal)\n\
          \x20      remora <host> -u <user> --screenshot out.png [--wait SECONDS]\n\
          \x20      remora <host> -u <user> --record out.mp4 [--wait SECONDS]\n\
          \x20      remora ... --microphone [INDEX]   (microphone on; see --list-microphones)\n\
@@ -187,6 +200,12 @@ fn parse_args() -> Args {
                 });
             }
             "--gateway-rpc" => a.gateway_rpc = true,
+            "--jump" => a.jump = Some(val()),
+            "--jump-key" => a.jump_key = Some(val()),
+            "--expect-jump-fingerprint" => a.expect_jump_fingerprint = Some(val()),
+            "--ssh" => a.ssh = Some(val()),
+            "--ssh-key" => a.ssh_key = Some(val()),
+            "--title" => a.title = Some(val()),
             "--size" => {
                 let v = val();
                 let (w, h) = v.split_once('x').unwrap_or_else(|| usage());
@@ -383,6 +402,34 @@ fn main() {
     // -v, or Settings > Diagnostic log: trace to stderr and to the log file.
     settings::apply_logging(args.verbose || settings::AppSettings::load().diagnostic_log);
 
+    if let Some(target) = &args.ssh {
+        // The same launch as an SSH connection in the manager.
+        let me = std::env::var("USERNAME").unwrap_or_default();
+        let Some(t) = ssh_tunnel::parse(target, &me) else {
+            eprintln!("--ssh needs user@host or user@host:port");
+            std::process::exit(2);
+        };
+        let key = args.ssh_key.as_deref().map(std::path::Path::new);
+        let title = args.title.clone().unwrap_or_else(|| t.host.clone());
+        let started = ssh_launch::launch_for(&title, &t.host, t.port, &t.user, key)
+            .and_then(|l| ssh_launch::start(&l).map(|()| l));
+        match started {
+            Ok(l) => println!(
+                "started {} {}",
+                l.program.display(),
+                l.args
+                    .iter()
+                    .map(|a| format!("{:?}", a.to_string_lossy()))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            ),
+            Err(e) => {
+                eprintln!("{e}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
     if args.version {
         // The installer test and support reports read this line.
         println!("Remora {}", env!("CARGO_PKG_VERSION"));
@@ -467,6 +514,22 @@ fn main() {
             gw.transport = rdp::gateway::GatewayTransport::Rpc;
         }
         cfg.gateway = Some(gw);
+    }
+    if let Some(j) = &args.jump {
+        if cfg.gateway.is_some() {
+            eprintln!("--jump and --gateway exclude each other");
+            std::process::exit(2);
+        }
+        let me = std::env::var("USERNAME").unwrap_or_default();
+        let Some(mut jump) = ssh_tunnel::parse(j, &me) else {
+            eprintln!("--jump needs user@host or user@host:port");
+            std::process::exit(2);
+        };
+        jump.key_file = args.jump_key.as_ref().map(std::path::PathBuf::from);
+        cfg.connector = Some(match &args.expect_jump_fingerprint {
+            Some(fp) => ssh_tunnel::connector_pinned(jump, fp),
+            None => ssh_tunnel::connector(jump, console_ssh_key_check()),
+        });
     }
     cfg.compression = args.compression;
     if args.kerberos {
@@ -576,6 +639,38 @@ SHA-256 {}",
         }
         true
     }))
+}
+
+/// Trust on first use for a jump host's key on the console, like
+/// certificates: a known key never gets here; without a console, refused.
+fn console_ssh_key_check() -> ssh_tunnel::HostKeyCheck {
+    std::sync::Arc::new(|k: &ssh_tunnel::HostKeyPrompt| {
+        let what = if k.changed {
+            "CHANGED since you last trusted it"
+        } else {
+            "not known yet"
+        };
+        eprintln!(
+            "The SSH key of the jump host {}:{} is {what}.\n{}",
+            k.host, k.port, k.fingerprint
+        );
+        use std::io::IsTerminal;
+        if !std::io::stdin().is_terminal() {
+            eprintln!(
+                "refused: no console to ask; pass --expect-jump-fingerprint {}",
+                k.fingerprint
+            );
+            return false;
+        }
+        eprint!("Trust it and remember it on this PC? [y/N] ");
+        let mut answer = String::new();
+        let yes = std::io::stdin().read_line(&mut answer).is_ok()
+            && matches!(answer.trim(), "y" | "Y" | "yes" | "Yes");
+        if !yes {
+            eprintln!("refused");
+        }
+        yes
+    })
 }
 
 /// The connection manager started from the Start menu or Explorer gets a

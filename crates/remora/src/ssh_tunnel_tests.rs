@@ -213,6 +213,7 @@ impl Lab {
             pins: Some(self.dir.join("known_hosts.json")),
             openssh: Some(self.dir.join("openssh_known_hosts")),
             agents: false,
+            pinned: None,
         }
     }
 
@@ -342,6 +343,31 @@ fn another_key_type_in_openssh_known_hosts_is_a_change() {
 }
 
 #[test]
+fn a_pinned_key_connects_and_another_is_refused_without_asking() {
+    let lab = lab("pinned");
+    let opts = Options {
+        pinned: Some(lab.fingerprint()),
+        ..lab.options()
+    };
+    let (check, asked) = answering(true);
+    let c = connector_with(lab.jump.clone(), check.clone(), opts.clone());
+    echo_through(&c, lab.echo_port).unwrap();
+    let wrong = Options {
+        pinned: Some("SHA256:notthiskey".into()),
+        ..opts.clone()
+    };
+    let c = connector_with(lab.jump.clone(), check, wrong);
+    let e = c.open("127.0.0.1", lab.echo_port, soon()).err().unwrap();
+    assert!(e.to_string().contains("not trusted"), "{e}");
+    assert!(asked.lock().unwrap().is_empty(), "a pinned key never asks");
+    assert!(
+        crate::known_hosts::lookup_ssh_in(opts.pins.as_ref().unwrap(), "127.0.0.1", lab.jump.port)
+            .is_none(),
+        "nor is it remembered"
+    );
+}
+
+#[test]
 fn a_wrong_key_file_is_a_sign_in_error() {
     let lab = lab("auth");
     let other = PrivateKey::random(&mut rng(), Algorithm::Ed25519).unwrap();
@@ -408,6 +434,7 @@ fn an_unreachable_jump_host_is_an_io_error() {
             pins: None,
             openssh: None,
             agents: false,
+            pinned: None,
         },
     );
     match c.open("127.0.0.1", 3389, soon()) {
