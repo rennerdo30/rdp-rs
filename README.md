@@ -117,7 +117,6 @@ USB and plug and play devices, lossy UDP and MS-RDPEV video. Everything listed a
 of it has not yet been tried against every kind of Windows server.
 
 Built but not yet tried against a real server: RD Gateway over RPC, shadowing,
-RDP through an SSH jump host (tested against an SSH server in the test suite),
 UDP itself (only the fallback to TCP is checked) and video redirection (Windows
 opens its channels but did not redirect a video in tests). The user guide and
 [troubleshooting](docs/TROUBLESHOOTING.md) list each feature's limits.
