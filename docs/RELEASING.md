@@ -71,6 +71,7 @@ cargo publish --locked --no-verify -p rdp-proto -p remora-link -p remora-update 
 - **Names:** `rdp` and `remora` on crates.io belong to other projects. The packages are `rdp-proto` and `remora-client`; the library is still `rdp` in code and the program is still `remora.exe`.
 - **Versions:** the published crates depend on each other at exactly the workspace version, in `[workspace.dependencies]` of the root `Cargo.toml`. Change those three `version = "=…"` entries together with the workspace version; cargo refuses a mismatch.
 - **Prereleases:** a plain `cargo install remora-client` skips them; a beta needs `--version`.
+- **After a publication:** the `cargo install … --version` command in the main README, `docs/INSTALL.md` and the website's download section names the published version; update all three (the website then needs a Pages deploy).
 - **The workflow checks** that the tag matches the workspace version and is on `main`, and that each crate's `LICENSE-MIT` and `LICENSE-APACHE` match the repository's (crates cannot ship files from outside their folder, so each has a copy). Then `cargo package` builds every crate from its packaged sources without a token. Only the last step, `cargo publish --no-verify`, gets the token.
 - **What ships:** `include` in each crate's `Cargo.toml`: `src`, `Cargo.toml`, the crate's `README.md` and the two licence files; the app also ships `build.rs` and its icon. `cargo package --list -p <crate>` shows it.
 

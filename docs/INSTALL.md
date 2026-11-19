@@ -12,6 +12,7 @@ Download from [Releases](https://github.com/rennerdo30/rdp-rs/releases).
   - **Coming from rdpc** (Remora's old name, 0.1.0-beta.1): rdpc updates itself to Remora, or run the Remora setup. It removes rdpc's program folder (`%LOCALAPPDATA%\Programs\rdpc`), Start menu shortcut and Installed apps entry; saved connections and settings stay.
 - **Silent install:** `remora-<version>-setup.exe /S`, with `/COMPONENTS=helper` (only the server helper) or `/COMPONENTS=app,helper` (both). Updates keep what is installed.
 - **Portable:** unpack `remora-<version>-windows-x64.zip` anywhere and run `remora.exe`. A portable copy does not look for updates; new versions are on the releases page.
+- **With Cargo:** `cargo install remora-client --version 0.1.0-beta.11 --locked` builds Remora from [crates.io](https://crates.io/crates/remora-client) and puts `remora.exe` in `%USERPROFILE%\.cargo\bin`. It needs Rust 1.100 or newer with the MSVC build tools. Like the portable zip it does not look for updates and adds no Start menu entry; run the command with a newer version to update, and `cargo uninstall remora-client` to remove it. Betas need `--version`: a plain `cargo install remora-client` skips them.
 - **Uninstall:** Settings → Apps → Installed apps → Remora, or `"%LOCALAPPDATA%\Programs\Remora\uninstall.exe" /S`. Your saved connections in `%APPDATA%\rdp-rs` stay.
 
 Builds are not signed yet, so SmartScreen warns on the first run (More info → Run anyway).

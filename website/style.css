@@ -267,6 +267,9 @@ h3 { font-size: 1.1rem; margin: 0 0 8px; }
 .dl { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); padding: 26px; }
 .dl p { color: var(--muted); margin: 0 0 18px; }
 .dl .cta { justify-content: flex-start; margin: 0; }
+.dl .cmd { margin: 0; }
+.dl .cmd code { display: block; padding: 10px 12px; user-select: all; }
+.dl .cmd span { white-space: nowrap; }
 .tag { font-size: 0.72rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; color: var(--accent); margin-left: 6px; vertical-align: 2px; }
 
 /* Footer */

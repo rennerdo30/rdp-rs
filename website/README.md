@@ -16,6 +16,9 @@ point at the releases page and the sentence stays hidden.
   numbers: none has been measured yet, and none is added before it is. The coverage figure
   (29 of 38 features done, 1 partly, 78 %) comes from the table in the main README; change
   both together, including the meter width in `style.css`.
+- **Cargo command:** the download section names the crates.io version
+  (`0.1.0-beta.11`); change it after each crates.io publication, with `docs/INSTALL.md` and the
+  main README (docs/RELEASING.md).
 - **Deploy:** run the **Website Pages** workflow from the Actions tab (manual only, from `main`).
   It needs GitHub Pages set to "GitHub Actions" in the repository settings and a DNS record for
   `remora.renner.dev` (`CNAME`) pointing at `rennerdo30.github.io`.
