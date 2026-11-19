@@ -74,9 +74,12 @@ pub struct ConnectorStream {
 /// top unchanged (X.224, TLS, NLA), so the server certificate is still
 /// checked end to end. Not combined with a gateway; no UDP transport is
 /// offered over it.
+/// What a [`Connector`] calls: host, port and deadline to a stream.
+type OpenFn = dyn Fn(&str, u16, Instant) -> Result<ConnectorStream> + Send + Sync;
+
 #[derive(Clone)]
 pub struct Connector {
-    open: std::sync::Arc<dyn Fn(&str, u16, Instant) -> Result<ConnectorStream> + Send + Sync>,
+    open: std::sync::Arc<OpenFn>,
     /// What the stream goes through, for progress and messages
     /// ("ops@bastion").
     pub label: String,

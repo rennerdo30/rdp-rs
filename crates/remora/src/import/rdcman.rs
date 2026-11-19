@@ -195,6 +195,7 @@ impl<'a> Reader<'a> {
             user,
             password,
             inherit_credentials,
+            protocol: crate::store::Protocol::Rdp,
             gateway: gateway.to_string(),
             size,
             clipboard: flag("redirectClipboard"),

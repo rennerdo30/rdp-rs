@@ -156,7 +156,10 @@ impl Live {
                 self.gateway.as_deref().unwrap_or("")
             ),
             ConnectStep::Connector => {
-                format!("Reaching jump host {}", self.jump.as_deref().unwrap_or(""))
+                // The jump host's address, without the user.
+                let j = self.jump.as_deref().unwrap_or("");
+                let host = j.rsplit_once('@').map_or(j, |(_, h)| h);
+                format!("Reaching jump host {host}")
             }
             ConnectStep::Tls => "Securing the connection".into(),
             ConnectStep::SignIn if self.user.is_empty() => "Signing in".into(),
@@ -2218,6 +2221,17 @@ pub fn sample_connecting(gateway: bool) -> Ui {
     m
 }
 
+/// Connecting through an SSH jump host (RDP-88), at the jump host step.
+pub fn sample_connecting_jump() -> Ui {
+    let mut m = sample(false);
+    let mut live = sample_live(false);
+    live.jump = Some("ops@bastion.corp.example".into());
+    live.step = Some(ConnectStep::Connector);
+    sample_on(&mut m, TabState::Connecting, live);
+    m.set_message("Connecting to 10.0.0.15…", Tone::Muted);
+    m
+}
+
 /// An automatic reconnect over the dimmed last picture.
 pub fn sample_reconnecting() -> Ui {
     let mut m = sample(false);
@@ -2234,7 +2248,7 @@ pub fn sample_reconnecting() -> Ui {
 }
 
 /// The failure samples: suffix, cause, step, technical text.
-pub const FAILURES: [(&str, Cause, Option<ConnectStep>, &str); 11] = [
+pub const FAILURES: [(&str, Cause, Option<ConnectStep>, &str); 12] = [
     (
         "host",
         Cause::HostNotFound,
@@ -2301,6 +2315,12 @@ pub const FAILURES: [(&str, Cause, Option<ConnectStep>, &str); 11] = [
         Some(ConnectStep::Tls),
         "unsupported: the server offers only legacy RDP security (Standard RDP Security: RC4, no TLS, no server authentication)",
     ),
+    (
+        "jump",
+        Cause::JumpAuth,
+        Some(ConnectStep::Connector),
+        "authentication failed: the jump host refused the sign-in as ops (tried 2 agent keys)",
+    ),
 ];
 
 /// One of [`FAILURES`].
@@ -2308,6 +2328,9 @@ pub fn sample_failed(i: usize) -> Ui {
     let (_, cause, step, why) = FAILURES[i].clone();
     let mut m = sample(false);
     let mut live = sample_live(step == Some(ConnectStep::Gateway));
+    if step == Some(ConnectStep::Connector) {
+        live.jump = Some("ops@bastion.corp.example".into());
+    }
     live.step = step.clone();
     live.failure = Some(Failure { cause, step });
     sample_on(&mut m, TabState::Failed(why.into()), live);

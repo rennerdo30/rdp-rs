@@ -916,7 +916,7 @@ impl Ui {
                         && t.host == c.host
                         && matches!(t.state, TabState::Connected { .. } | TabState::Connecting)
                 });
-                let host = if c.port == 3389 {
+                let host = if c.port == c.protocol.default_port() {
                     c.host.clone()
                 } else {
                     format!("{}:{}", c.host, c.port)
@@ -926,10 +926,20 @@ impl Ui {
                 } else {
                     format!("{host} · {}", c.group.replace('/', " / "))
                 };
-                let kw = format!("{} {} {} {}", c.host, c.group, c.user, c.gateway);
+                let ssh = if c.protocol == crate::store::Protocol::Ssh {
+                    "ssh"
+                } else {
+                    ""
+                };
+                let kw = format!(
+                    "{} {} {} {} {} {ssh}",
+                    c.host, c.group, c.user, c.gateway, c.jump
+                );
                 let color = self.store.connection_color(c);
                 let lead = Lead::Avatar(color, self.connection_dot(c));
-                let (chip, verb) = if c.opens == Opens::Apps {
+                let (chip, verb) = if c.protocol == crate::store::Protocol::Ssh {
+                    (Chip::Pill("SSH", Tone::Accent, kit::Lead::None), "Open")
+                } else if c.opens == Opens::Apps {
                     (Chip::Pill("Apps", Tone::Accent, kit::Lead::None), "Start")
                 } else {
                     (Chip::None, "Connect")

@@ -91,10 +91,12 @@ pub enum Icon {
     Link,
     /// A serial or parallel port (a D-sub connector with its pins).
     SerialPort,
+    /// A terminal window with a prompt (SSH connections).
+    Terminal,
 }
 
 impl Icon {
-    pub const ALL: [Icon; 61] = [
+    pub const ALL: [Icon; 62] = [
         Icon::Plus,
         Icon::Search,
         Icon::Gear,
@@ -156,6 +158,7 @@ impl Icon {
         Icon::Upload,
         Icon::Link,
         Icon::SerialPort,
+        Icon::Terminal,
     ];
 }
 
@@ -699,6 +702,12 @@ pub fn draw(cv: &mut Canvas, icon: Icon, x: f32, y: f32, size: f32, color: u32) 
             for x in [5.3, 7.1, 8.9, 10.7] {
                 p.dot((x, 9.4), 0.75);
             }
+        }
+        Icon::Terminal => {
+            // A window with a prompt: ">" and a cursor line.
+            p.rrect(1.6, 2.6, 12.8, 10.8, 2.0);
+            p.line(&[(4.6, 6.2), (6.8, 8.0), (4.6, 9.8)]);
+            p.line(&[(8.2, 10.0), (11.4, 10.0)]);
         }
     }
 }
