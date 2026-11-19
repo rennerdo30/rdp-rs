@@ -103,8 +103,16 @@ impl Ui {
                 tone: Tone::Warning,
             },
             Line {
-                icon: Icon::Globe,
-                title: "Direct connection".into(),
+                icon: if r.jump.is_empty() {
+                    Icon::Globe
+                } else {
+                    Icon::Terminal
+                },
+                title: if r.jump.is_empty() {
+                    "Direct connection".into()
+                } else {
+                    format!("Through jump host {}", r.jump)
+                },
                 detail: format!(
                     "To {}{}",
                     if r.host.is_empty() {

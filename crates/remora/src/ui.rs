@@ -1357,6 +1357,9 @@ impl Ui {
             // SSH signs in with keys; without a user, ssh uses the Windows one.
             crate::ssh_launch::check_host(&host)?;
             crate::ssh_launch::check_user(&user)?;
+            if !inherit.credentials {
+                check_jump(&jump, "")?;
+            }
         } else if user.is_empty() && !inherit.credentials && !self.kerberos {
             // Windows sign-in may use the logged-on user (single sign-on).
             return Err("Enter a user name.".into());
@@ -1966,6 +1969,7 @@ impl Ui {
         if ssh {
             if own {
                 v.push(Field::SshKey);
+                v.push(Field::Jump);
             }
             return v;
         }
@@ -4366,7 +4370,7 @@ impl Ui {
             cells[1],
             Icon::FolderOpen,
             "Import connections",
-            "From a Remora backup, mRemoteNG or RDCMan",
+            "From a Remora backup, mRemoteNG, RDCMan or MobaXterm",
             "Import…",
             Hit::Import,
         );
@@ -4381,6 +4385,7 @@ impl Ui {
             let source = match format {
                 Some(Format::MRemoteNg) => "mRemoteNG",
                 Some(Format::RdcMan) => "Remote Desktop Connection Manager",
+                Some(Format::MobaXterm) => "MobaXterm",
                 _ => "Remora backup",
             };
             // The password row only when the file needs one.
@@ -5145,7 +5150,7 @@ impl Ui {
             return y;
         }
         if ssh {
-            let cells = self.card(cv, x, y, w, &[rh, rh]);
+            let cells = self.card(cv, x, y, w, &[rh, rh, rh]);
             self.field_row_i(
                 cv,
                 te,
@@ -5166,7 +5171,17 @@ impl Ui {
                 Field::SshKey,
                 r"Optional, e.g. C:\Users\you\.ssh\id_ed25519",
             );
-            y += 2 * rh + p(12.0);
+            self.field_row_i(
+                cv,
+                te,
+                f,
+                cells[2],
+                "Jump host",
+                Some(Icon::Terminal),
+                Field::Jump,
+                "None, or user@bastion (ssh -J)",
+            );
+            y += 3 * rh + p(12.0);
             self.hint(
                 cv,
                 te,
@@ -8124,7 +8139,8 @@ impl Ui {
     fn ssh_launch(&self, r: &Connection) -> Result<crate::ssh_launch::Launch, String> {
         let key = r.ssh_key.trim();
         let key = (!key.is_empty()).then(|| std::path::Path::new(key));
-        crate::ssh_launch::launch_for(&r.name, &r.host, r.port, &r.user, key)
+        let jump = Some(r.jump.trim()).filter(|j| !j.is_empty());
+        crate::ssh_launch::launch_for(&r.name, &r.host, r.port, &r.user, key, jump)
     }
 
     /// The session for a resolved RDP connection, or a message why its
@@ -9294,15 +9310,11 @@ mod tests {
         assert_eq!(m.field(Field::Port).text, "3389");
         click(&mut m, &mut te, &fonts, Hit::FormProtocol(1));
         assert_eq!(m.field(Field::Port).text, "22", "the port follows the type");
-        // No password, gateway or apps for SSH; the key file instead.
+        // No password, gateway or apps for SSH; the key file and a jump
+        // host (ssh -J) instead.
         let order = m.form_order();
-        assert!(order.contains(&Field::SshKey));
-        for f in [
-            Field::Password,
-            Field::Gateway,
-            Field::Jump,
-            Field::AppProgram,
-        ] {
+        assert!(order.contains(&Field::SshKey) && order.contains(&Field::Jump));
+        for f in [Field::Password, Field::Gateway, Field::AppProgram] {
             assert!(!order.contains(&f), "{f:?}");
         }
         m.field_mut(Field::Host).set("-oProxyCommand=calc");

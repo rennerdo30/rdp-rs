@@ -2587,7 +2587,7 @@ impl Ui {
             Font::Regular,
             size::SMALL,
             Rect::new(cx, y, cw, p(18.0)),
-            "Import reads a Remora backup, mRemoteNG's confCons.xml or an RDCMan .rdg file.",
+            "Import reads a Remora backup, mRemoteNG's confCons.xml, an RDCMan .rdg file or MobaXterm's sessions.",
             c.text_faint,
         );
         y + p(18.0)

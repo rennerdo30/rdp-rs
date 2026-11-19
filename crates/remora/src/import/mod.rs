@@ -1,11 +1,13 @@
-//! Importing connections: a Remora backup, mRemoteNG's `confCons.xml` or a
-//! Remote Desktop Connection Manager (RDCMan) `.rdg` file. The format is
-//! told from the content, never from the file name.
+//! Importing connections: a Remora backup, mRemoteNG's `confCons.xml`, a
+//! Remote Desktop Connection Manager (RDCMan) `.rdg` file, or MobaXterm's
+//! sessions (`MobaXterm.ini`, `.mxtsessions`). The format is told from the
+//! content, never from the file name.
 //!
 //! The parsers are pure: they take the file's bytes, the password the user
 //! typed (if any) and a DPAPI hook, and return groups, connections and a
 //! report of what could not come over. Nothing here touches disk or the UI.
 
+mod mobaxterm;
 mod mremoteng;
 mod rdcman;
 #[cfg(test)]
@@ -26,6 +28,7 @@ pub enum Format {
     Remora,
     MRemoteNg,
     RdcMan,
+    MobaXterm,
 }
 
 /// What a picked file is, and whether the import needs a password.
@@ -69,6 +72,9 @@ pub struct Report {
     pub not_rdp: usize,
     /// Passwords of SSH connections, left out: ssh asks in the terminal.
     pub ssh_passwords: usize,
+    /// SSH gateways that could not come over: several hops, or one next
+    /// to an RD Gateway (MobaXterm).
+    pub no_jump: usize,
     /// Connections already present (same name, host and group).
     pub duplicates: usize,
     pub unreadable: BTreeMap<Unreadable, usize>,
@@ -120,6 +126,13 @@ impl Report {
             out += &format!(
                 " {} left out: set up a master password under Security to import passwords.",
                 plural(self.no_vault, "password", "passwords")
+            );
+        }
+        if self.no_jump > 0 {
+            out += &format!(
+                " {} came over without {} SSH gateway: Remora takes one jump host, and not next to an RD Gateway.",
+                plural(self.no_jump, "connection", "connections"),
+                if self.no_jump == 1 { "its" } else { "their" }
             );
         }
         if self.ssh_passwords > 0 {
@@ -206,6 +219,8 @@ impl Dpapi for SystemDpapi {
 enum Parsed {
     Remora,
     Xml(xml::Elem),
+    /// MobaXterm's INI-style sessions, decoded.
+    Ini(String),
 }
 
 /// Reads a picked file, refusing one too large to be a connections file
@@ -227,8 +242,12 @@ fn parse(bytes: &[u8]) -> Result<(Format, Parsed), String> {
     if crate::vault::read_params(bytes).is_ok() {
         return Ok((Format::Remora, Parsed::Remora));
     }
-    let not_known = "This is not a Remora backup, an mRemoteNG connections file \
-                     or a Remote Desktop Connection Manager (.rdg) file.";
+    let not_known = "This is not a Remora backup, an mRemoteNG connections file, \
+                     a Remote Desktop Connection Manager (.rdg) file or MobaXterm sessions.";
+    let ini = mobaxterm::decode(bytes);
+    if !ini.trim_start().starts_with('<') && mobaxterm::looks_like(&ini) {
+        return Ok((Format::MobaXterm, Parsed::Ini(ini)));
+    }
     let text = xml::decode(bytes).map_err(|_| not_known.to_string())?;
     if !text.trim_start().starts_with('<') {
         return Err(not_known.into());
@@ -250,7 +269,7 @@ pub fn probe(bytes: &[u8]) -> Result<Probe, String> {
     let needs_password = match &parsed {
         Parsed::Remora => true,
         Parsed::Xml(root) if format == Format::MRemoteNg => mremoteng::needs_password(root),
-        Parsed::Xml(_) => false,
+        Parsed::Xml(_) | Parsed::Ini(_) => false,
     };
     Ok(Probe {
         format,
@@ -277,6 +296,7 @@ pub fn read(bytes: &[u8], password: &str, dpapi: &dyn Dpapi) -> Result<Imported,
         }
         (Format::MRemoteNg, Parsed::Xml(root)) => mremoteng::read(&root, password, dpapi),
         (_, Parsed::Xml(root)) => rdcman::read(&root, dpapi),
+        (_, Parsed::Ini(text)) => Ok(mobaxterm::read(&text)),
     }
 }
 
