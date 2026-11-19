@@ -49,6 +49,8 @@ pub struct Live {
     /// RD Gateway host, user and port of the connection (for the step
     /// labels and the fixes).
     pub gateway: Option<String>,
+    /// SSH jump host (`ops@bastion`), RDP-88.
+    pub jump: Option<String>,
     pub user: String,
     pub port: u16,
     /// The last connection step reached in this attempt.
@@ -72,6 +74,7 @@ impl Live {
     pub fn for_config(cfg: &rdp::Config) -> Live {
         Live {
             gateway: cfg.gateway.as_ref().map(|g| g.host.clone()),
+            jump: cfg.connector.as_ref().map(|c| c.label.clone()),
             user: cfg.username.clone(),
             port: cfg.port,
             started: Some(Instant::now()),
@@ -118,6 +121,8 @@ impl Live {
         use ConnectStep as S;
         let mut v = if self.gateway.is_some() {
             vec![S::Gateway]
+        } else if self.jump.is_some() {
+            vec![S::Connector]
         } else {
             vec![S::Resolving, S::Tcp]
         };
@@ -136,7 +141,7 @@ impl Live {
         let step = step?;
         let steps = self.steps();
         steps.iter().position(|s| s == step).or(match step {
-            // Through a gateway these happen inside its step.
+            // Through a gateway or a jump host these happen inside its step.
             ConnectStep::Resolving | ConnectStep::Tcp => Some(0),
             _ => None,
         })
@@ -150,6 +155,9 @@ impl Live {
                 "Reaching RD Gateway {}",
                 self.gateway.as_deref().unwrap_or("")
             ),
+            ConnectStep::Connector => {
+                format!("Reaching jump host {}", self.jump.as_deref().unwrap_or(""))
+            }
             ConnectStep::Tls => "Securing the connection".into(),
             ConnectStep::SignIn if self.user.is_empty() => "Signing in".into(),
             ConnectStep::SignIn => format!("Signing in as {}", self.user),
@@ -167,6 +175,7 @@ fn short(step: &ConnectStep) -> &'static str {
         ConnectStep::Resolving => "Find",
         ConnectStep::Tcp => "Connect",
         ConnectStep::Gateway => "Gateway",
+        ConnectStep::Connector => "Jump host",
         ConnectStep::Tls => "Secure",
         ConnectStep::SignIn => "Sign in",
         ConnectStep::Licensing => "Licence",
@@ -795,6 +804,9 @@ impl Ui {
         if let Some(g) = &l.gateway {
             out += &format!("RD Gateway: {g}\n");
         }
+        if let Some(j) = &l.jump {
+            out += &format!("SSH jump host: {j}\n");
+        }
         if let Some(r) = &l.redirected {
             out += &format!("Redirected to: {r}\n");
         }
@@ -1362,7 +1374,7 @@ impl Ui {
         );
         y += p(26.0);
         let mut sub = host.to_string();
-        if let Some(g) = &live.gateway {
+        if let Some(g) = live.gateway.as_ref().or(live.jump.as_ref()) {
             sub += &format!("  ·  via {g}");
         }
         if let Some(r) = &live.redirected {
@@ -1468,6 +1480,7 @@ impl Ui {
             port: live.port,
             user: &live.user,
             gateway: live.gateway.as_deref(),
+            jump: live.jump.as_deref(),
         };
         let fix = cause.fix(&ctx);
         let steps = live.steps();
@@ -1504,7 +1517,7 @@ impl Ui {
         );
         y += p(28.0);
         let mut sub = format!("{name}  ·  {host}");
-        if let Some(g) = &live.gateway {
+        if let Some(g) = live.gateway.as_ref().or(live.jump.as_ref()) {
             sub += &format!("  ·  via {g}");
         }
         k.text_center(

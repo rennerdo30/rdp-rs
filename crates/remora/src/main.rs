@@ -51,6 +51,7 @@ mod shadow;
 mod smartcard;
 mod span;
 #[cfg(windows)]
+mod ssh_tunnel;
 mod sspi;
 mod stats;
 mod store;

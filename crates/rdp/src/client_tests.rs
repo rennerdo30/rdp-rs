@@ -1175,3 +1175,81 @@ fn udp_tunnel_carries_the_dynamic_channels_after_soft_sync() {
     // Nothing for the channel went over TCP after the switch.
     assert_eq!(seen.len(), 1);
 }
+
+/// A connector that opens a loopback TCP pair and records the hosts asked.
+fn loopback_connector(
+    fail: &'static [&'static str],
+) -> (
+    Connector,
+    TcpListener,
+    std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let asked = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let log = asked.clone();
+    let c = Connector::new("jump", move |host, port, _deadline| {
+        log.lock().unwrap().push(format!("{host}:{port}"));
+        if fail.contains(&host) {
+            return Err(Error::Protocol(format!("cannot reach {host}")));
+        }
+        let sock = TcpStream::connect(addr)?;
+        let read = sock.try_clone()?;
+        Ok(ConnectorStream {
+            write: Box::new(sock),
+            read: Box::new(read),
+        })
+    });
+    (c, listener, asked)
+}
+
+#[test]
+fn a_connector_opens_the_stream_instead_of_tcp() {
+    let (c, listener, asked) = loopback_connector(&[]);
+    let mut cfg = Config::new("server.lan", "u", "p");
+    cfg.connector = Some(c);
+    let steps = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let seen = steps.clone();
+    cfg.progress = Some(crate::ConnectProgress::new(move |s| {
+        seen.lock().unwrap().push(s.clone())
+    }));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let (mut f, cert, host) = open(&cfg, deadline).unwrap();
+    assert_eq!((cert, host.as_str()), (None, "server.lan"));
+    assert_eq!(*asked.lock().unwrap(), ["server.lan:3389"]);
+    assert_eq!(*steps.lock().unwrap(), [ConnectStep::Connector]);
+    let (mut server, _) = listener.accept().unwrap();
+    f.write(b"hello").unwrap();
+    let mut got = [0u8; 5];
+    std::io::Read::read_exact(&mut server, &mut got).unwrap();
+    assert_eq!(&got, b"hello", "bytes go through the connector's stream");
+    server.write_all(b"back").unwrap();
+    assert_eq!(f.read_exact(4, deadline).unwrap(), b"back");
+}
+
+#[test]
+fn a_connector_tries_each_redirection_target_in_turn() {
+    let (c, _listener, asked) = loopback_connector(&["a.lan"]);
+    let mut cfg = Config::new("server.lan", "u", "p");
+    cfg.connector = Some(c);
+    cfg.redirection = Some(Redirection {
+        target_net_addresses: vec!["a.lan".into(), "b.lan".into()],
+        ..Redirection::default()
+    });
+    let (_, _, host) = open(&cfg, Instant::now() + Duration::from_secs(5)).unwrap();
+    assert_eq!(host, "b.lan");
+    assert_eq!(*asked.lock().unwrap(), ["a.lan:3389", "b.lan:3389"]);
+}
+
+#[test]
+fn a_connector_and_a_gateway_are_refused_together() {
+    let (c, _listener, asked) = loopback_connector(&[]);
+    let mut cfg = Config::new("server.lan", "u", "p");
+    cfg.connector = Some(c);
+    cfg.gateway = Some(crate::GatewayConfig::new("gw.lan", "u", "p"));
+    let e = open(&cfg, Instant::now() + Duration::from_secs(5))
+        .err()
+        .unwrap();
+    assert!(e.to_string().contains("cannot be combined"), "{e}");
+    assert!(asked.lock().unwrap().is_empty());
+}

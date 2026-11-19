@@ -59,6 +59,46 @@ impl ServerCertificate {
 #[derive(Clone)]
 pub struct CertificateCheck(pub std::sync::Arc<dyn Fn(&ServerCertificate) -> bool + Send + Sync>);
 
+/// A byte stream opened by a [`Connector`]: the write side, and the read
+/// side, read on a thread of its own with blocking reads (Ok(0) is the end
+/// of the stream). Shutting the write side down must end a blocking read.
+pub struct ConnectorStream {
+    pub write: Box<dyn crate::transport::ByteStream>,
+    pub read: Box<dyn std::io::Read + Send>,
+}
+
+/// Opens the byte stream to `host:port` itself, instead of a TCP
+/// connection: an SSH jump host, a proxy. Called with the deadline of the
+/// connection step, on the connecting thread, once per attempt (a
+/// redirection or a reconnect calls it again). The RDP connection runs on
+/// top unchanged (X.224, TLS, NLA), so the server certificate is still
+/// checked end to end. Not combined with a gateway; no UDP transport is
+/// offered over it.
+#[derive(Clone)]
+pub struct Connector {
+    open: std::sync::Arc<dyn Fn(&str, u16, Instant) -> Result<ConnectorStream> + Send + Sync>,
+    /// What the stream goes through, for progress and messages
+    /// ("ops@bastion").
+    pub label: String,
+}
+
+impl Connector {
+    pub fn new(
+        label: impl Into<String>,
+        open: impl Fn(&str, u16, Instant) -> Result<ConnectorStream> + Send + Sync + 'static,
+    ) -> Connector {
+        Connector {
+            open: std::sync::Arc::new(open),
+            label: label.into(),
+        }
+    }
+
+    /// Opens the stream to `host:port`.
+    pub fn open(&self, host: &str, port: u16, deadline: Instant) -> Result<ConnectorStream> {
+        (self.open)(host, port, deadline)
+    }
+}
+
 #[derive(Clone)]
 pub struct Config {
     pub host: String,
@@ -92,6 +132,9 @@ pub struct Config {
     pub verify_certificate: Option<CertificateCheck>,
     /// Connect through this RD Gateway (MS-TSGU); None connects directly.
     pub gateway: Option<crate::gateway::GatewayConfig>,
+    /// Open the byte stream with this instead of TCP (an SSH jump host);
+    /// None connects directly. Not combined with `gateway`.
+    pub connector: Option<Connector>,
     /// Highest bulk compression type to advertise (MS-RDPBCGR 3.1.8).
     pub compression: Compression,
     /// Bitmap updates (default) or the graphics pipeline (MS-RDPEGFX).
@@ -185,6 +228,7 @@ impl Config {
             experience: crate::Experience::default(),
             verify_certificate: None,
             gateway: None,
+            connector: None,
             compression: Compression::Off,
             graphics: crate::Graphics::Bitmap,
             h264: None,
@@ -481,6 +525,27 @@ fn open(cfg: &Config, deadline: Instant) -> Result<(Framer, Option<[u8; 32]>, St
         hosts.push(cfg.host.clone());
     }
     let progress = cfg.progress.as_ref();
+    if cfg.gateway.is_some() && cfg.connector.is_some() {
+        return Err(Error::Protocol(
+            "a gateway and a connector cannot be combined".into(),
+        ));
+    }
+    if let Some(c) = &cfg.connector {
+        // The connector resolves and reaches the host itself; the first
+        // host it opens wins, as with TCP.
+        let mut last = None;
+        for host in hosts {
+            report(progress, ConnectStep::Connector);
+            match c.open(&host, cfg.port, deadline) {
+                Ok(s) => return Ok((Framer::over(s.write, s.read), None, host)),
+                Err(e) => {
+                    trace!("connector cannot reach {host}:{}: {e}", cfg.port);
+                    last = Some(e);
+                }
+            }
+        }
+        return Err(last.unwrap_or_else(|| Error::Protocol("no host to connect to".into())));
+    }
     if let Some(gw) = &cfg.gateway {
         // The gateway resolves and reaches the host itself.
         report(progress, ConnectStep::Gateway);
@@ -873,6 +938,11 @@ impl Client {
         }
         let (mut f, gateway_certificate_sha256, host, confirm) = loop {
             let (mut f, gateway_sha256, host) = open(cfg, deadline)?;
+            if cfg.connector.is_some() {
+                // The connector may have waited for the user (a new SSH
+                // host key); the next steps get their full time.
+                deadline = Instant::now() + cfg.timeout;
+            }
             f.set_read_timeout(Duration::from_millis(100))?;
             report(progress, ConnectStep::Tls);
             // MS-RDPEPS: the sharer's session id goes before X.224.
@@ -1006,11 +1076,12 @@ impl Client {
         let offer_udp = cfg.multitransport
             && !legacy
             && cfg.gateway.is_none()
+            && cfg.connector.is_none()
             && extended_data
             && handlers.iter().any(|h| h.name() == crate::dvc::DRDYNVC);
         if cfg.multitransport && !offer_udp {
             trace!(
-                "UDP transport not offered (gateway, legacy security, no extended data or no drdynvc)"
+                "UDP transport not offered (gateway, connector, legacy security, no extended data or no drdynvc)"
             );
         }
         let settings = gcc::ClientSettings {

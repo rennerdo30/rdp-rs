@@ -86,8 +86,8 @@ pub use autodetect::NetworkCharacteristics;
 pub use camera::{CameraBackend, CameraHandle, cameras};
 pub use channel::{ChannelOut, StaticChannel};
 pub use client::{
-    CertificateCheck, Client, ClientStats, CloseReason, Config, ConnectionInfo, PollOutcome,
-    ServerCertificate,
+    CertificateCheck, Client, ClientStats, CloseReason, Config, ConnectionInfo, Connector,
+    ConnectorStream, PollOutcome, ServerCertificate,
 };
 pub use cliprdr::{ClipboardBackend, ClipboardHandle, Cliprdr, cliprdr};
 pub use compress::Compression;
