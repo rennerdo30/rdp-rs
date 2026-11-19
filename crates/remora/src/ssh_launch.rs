@@ -75,10 +75,14 @@ pub fn ssh_args(
     port: u16,
     user: &str,
     key: Option<&Path>,
+    jump: Option<&str>,
 ) -> Result<Vec<OsString>, String> {
     check_host(host)?;
     check_user(user)?;
     let mut a: Vec<OsString> = Vec::new();
+    if let Some(j) = jump.map(str::trim).filter(|j| !j.is_empty()) {
+        a.extend(["-J".into(), jump_arg(j)?.into()]);
+    }
     if port != 22 && port != 0 {
         a.extend(["-p".into(), port.to_string().into()]);
     }
@@ -92,6 +96,32 @@ pub fn ssh_args(
     // Nothing after this is an option.
     a.extend(["--".into(), host.into()]);
     Ok(a)
+}
+
+/// `-J`'s value for a jump host (`[user@]host[:port]`), with the same
+/// checks as the host and user.
+fn jump_arg(j: &str) -> Result<String, String> {
+    let bad = || format!("{j:?} is not a jump host: write it as user@host or user@host:port.");
+    let t = crate::ssh_tunnel::parse(j, "u").ok_or_else(bad)?;
+    check_host(&t.host).map_err(|_| bad())?;
+    let explicit_user = j.contains('@');
+    if explicit_user {
+        check_user(&t.user).map_err(|_| bad())?;
+    }
+    let host = if t.host.contains(':') {
+        format!("[{}]", t.host)
+    } else {
+        t.host.clone()
+    };
+    let mut out = if explicit_user {
+        format!("{}@{host}", t.user)
+    } else {
+        host
+    };
+    if t.port != 22 {
+        out += &format!(":{}", t.port);
+    }
+    Ok(out)
 }
 
 /// A tab title Windows Terminal takes as one argument: printable, no `;`,
@@ -164,8 +194,9 @@ pub fn launch_for(
     port: u16,
     user: &str,
     key: Option<&Path>,
+    jump: Option<&str>,
 ) -> Result<Launch, String> {
-    let args = ssh_args(host, port, user, key)?;
+    let args = ssh_args(host, port, user, key, jump)?;
     let env = |k| std::env::var_os(k).map(PathBuf::from);
     let path = std::env::var_os("PATH");
     let ssh = find_ssh(env("SystemRoot").as_deref(), path.as_deref()).ok_or(NO_SSH)?;
@@ -199,11 +230,20 @@ mod tests {
     #[test]
     fn builds_ssh_arguments() {
         assert_eq!(
-            strs(&ssh_args("web1", 22, "", None).unwrap()),
+            strs(&ssh_args("web1", 22, "", None, None).unwrap()),
             ["--", "web1"]
         );
         assert_eq!(
-            strs(&ssh_args("10.0.0.5", 2222, "ops", Some(Path::new(r"C:\keys\id ed"))).unwrap()),
+            strs(
+                &ssh_args(
+                    "10.0.0.5",
+                    2222,
+                    "ops",
+                    Some(Path::new(r"C:\keys\id ed")),
+                    None
+                )
+                .unwrap()
+            ),
             [
                 "-p",
                 "2222",
@@ -216,10 +256,30 @@ mod tests {
             ]
         );
         assert_eq!(
-            strs(&ssh_args("fe80::1%3", 22, r"CORP\ann", None).unwrap()),
+            strs(&ssh_args("fe80::1%3", 22, r"CORP\ann", None, None).unwrap()),
             ["-l", r"CORP\ann", "--", "fe80::1%3"]
         );
-        assert!(ssh_args("host", 22, "ann@corp.example", None).is_ok());
+        assert!(ssh_args("host", 22, "ann@corp.example", None, None).is_ok());
+    }
+
+    #[test]
+    fn a_jump_host_goes_to_ssh_as_minus_j() {
+        assert_eq!(
+            strs(&ssh_args("db1", 22, "ops", None, Some("me@bastion:2222")).unwrap()),
+            ["-J", "me@bastion:2222", "-l", "ops", "--", "db1"]
+        );
+        assert_eq!(
+            strs(&ssh_args("db1", 22, "", None, Some("bastion")).unwrap())[..2],
+            ["-J", "bastion"],
+            "no user: ssh's own default"
+        );
+        assert_eq!(
+            strs(&ssh_args("db1", 22, "", None, Some("fd00::1")).unwrap())[1],
+            "[fd00::1]"
+        );
+        for bad in ["-oProxyCommand=x", "a;b", "me@x;calc", "me@\"q\"@h", "h:x"] {
+            assert!(ssh_args("db1", 22, "", None, Some(bad)).is_err(), "{bad:?}");
+        }
     }
 
     #[test]
@@ -234,17 +294,23 @@ mod tests {
             "[::1]",
             "host/x",
         ] {
-            assert!(ssh_args(host, 22, "u", None).is_err(), "host {host:?}");
+            assert!(
+                ssh_args(host, 22, "u", None, None).is_err(),
+                "host {host:?}"
+            );
         }
         for user in ["-oX=y", "a b", "u;calc", "u\"", "u'", "u\t"] {
-            assert!(ssh_args("host", 22, user, None).is_err(), "user {user:?}");
+            assert!(
+                ssh_args("host", 22, user, None, None).is_err(),
+                "user {user:?}"
+            );
         }
-        assert!(ssh_args("host", 22, "u", Some(Path::new(r"C:\k;calc"))).is_err());
+        assert!(ssh_args("host", 22, "u", Some(Path::new(r"C:\k;calc")), None).is_err());
     }
 
     #[test]
     fn windows_terminal_gets_a_new_tab() {
-        let args = ssh_args("web1", 22, "ops", None).unwrap();
+        let args = ssh_args("web1", 22, "ops", None, None).unwrap();
         let ssh = Path::new(r"C:\Windows\System32\OpenSSH\ssh.exe");
         let wt = Path::new(r"C:\Users\u\AppData\Local\Microsoft\WindowsApps\wt.exe");
         let l = command(ssh, Some(wt), "Web; prod\"1", args.clone());

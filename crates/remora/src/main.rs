@@ -411,7 +411,7 @@ fn main() {
         };
         let key = args.ssh_key.as_deref().map(std::path::Path::new);
         let title = args.title.clone().unwrap_or_else(|| t.host.clone());
-        let started = ssh_launch::launch_for(&title, &t.host, t.port, &t.user, key)
+        let started = ssh_launch::launch_for(&title, &t.host, t.port, &t.user, key, None)
             .and_then(|l| ssh_launch::start(&l).map(|()| l));
         match started {
             Ok(l) => println!(

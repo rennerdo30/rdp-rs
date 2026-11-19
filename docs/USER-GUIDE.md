@@ -563,9 +563,10 @@ not recorded.
 ### SSH connections
 
 Choose **SSH** under **Type** in the editor for a Linux server, a router or
-anything else you reach with SSH. It has a host, a port (22), a user and an
-optional **Key file**; it sits in the sidebar, Home and the command palette
-with an **SSH** tag, and groups and **Connect all** include it.
+anything else you reach with SSH. It has a host, a port (22), a user, an
+optional **Key file** and an optional **Jump host** (given to ssh as `-J`);
+it sits in the sidebar, Home and the command palette with an **SSH** tag,
+and groups and **Connect all** include it.
 
 - **Connect** opens Windows' own OpenSSH client (`ssh.exe`) in a terminal: a
   new Windows Terminal tab when Windows Terminal is installed, else a
@@ -753,8 +754,9 @@ How the vault is encrypted, and what is stored where, is in
   to one `.rdpbackup` file encrypted with your master password. It needs a
   master password; set one up first under **Security**.
 - **Import…** reads such a file, or the connections of
-  [mRemoteNG](#from-mremoteng) and of
-  [Remote Desktop Connection Manager](#from-remote-desktop-connection-manager-rdcman).
+  [mRemoteNG](#from-mremoteng), of
+  [Remote Desktop Connection Manager](#from-remote-desktop-connection-manager-rdcman)
+  and of [MobaXterm](#from-mobaxterm).
   Remora tells the kind of file from its content, not its name. The
   connections and groups are added to yours. Connections you already have
   (same name, host and group) are skipped.
@@ -822,6 +824,25 @@ Pick the `.rdg` file. Files from RDCMan 2.2 and from 2.7 to 2.93 are read.
   certificate, and credential profiles kept in RDCMan's own settings rather
   than in the file, cannot be read either: those connections come over with
   the rest of their settings.
+
+### From MobaXterm
+
+Pick `MobaXterm.ini` (in `%APPDATA%\MobaXterm`, or next to `MobaXterm.exe`
+for the portable edition), or a file from MobaXterm's **Export sessions**
+(`.mxtsessions`).
+
+- **What comes over:** folders become groups. RDP sessions keep their name,
+  host, port, user and RD Gateway (when it is set to Always or Detect); SSH
+  sessions come over as [SSH connections](#ssh-connections) with their host,
+  port, user and private key file. An SSH gateway comes over as the
+  connection's jump host, for RDP and SSH sessions alike.
+- **What doesn't:** VNC, Telnet, SFTP and other sessions are skipped and
+  counted. Remora takes one jump host, and not next to an RD Gateway: a
+  session with several SSH gateways, or with both, comes over without them,
+  and the result line says how many.
+- **Passwords:** MobaXterm keeps them apart from the sessions, encrypted with
+  its own master password, so none come over. Save them again in Remora, or
+  sign in with keys.
 
 ## Updates
 
