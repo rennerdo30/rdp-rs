@@ -97,6 +97,10 @@ Windows: download the setup or the portable zip from
 [docs/INSTALL.md](docs/INSTALL.md). Releases are prepared as described in
 [docs/RELEASING.md](docs/RELEASING.md).
 
+With Rust: `cargo install remora-client --version 0.1.0-beta.11 --locked` builds Remora from
+[crates.io](https://crates.io/crates/remora-client) and installs `remora`. The protocol
+library is [`rdp-proto`](https://crates.io/crates/rdp-proto) (`use rdp::...`).
+
 ## Features
 
 - **Connection:** X.224 negotiation (TLS, NLA, NLA with early user authorization), TLS upgrade, CredSSP v6 with NTLMv2 (MIC, key exchange, sealing, public key binding), MCS/GCC, licensing ("valid client"), capability exchange, finalization, reactivation.
