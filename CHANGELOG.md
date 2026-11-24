@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+## 0.1.0-beta.14
+
+- **Smaller recordings you can seek in.** Session recordings no longer cost the same per second whatever is on screen: a still desktop now takes about 2 MB a minute at 1080p instead of about 15, while text stays sharp. Recordings also have a keyframe every 2 seconds, so jumping or scrubbing in a player shows the right moment instead of the first frame (RDP-20).
 - **Imports in their own group.** Connections imported from mRemoteNG or MobaXterm land in one group named after the app (**mRemoteNG**, **MobaXterm**), with their folders inside it, instead of among your own connections at the top level. RDCMan's file already became a group of its own (RDP-89).
 
 ## 0.1.0-beta.13

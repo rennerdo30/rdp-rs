@@ -8,7 +8,8 @@
 //! repeating the last picture while nothing changes, so the video's timeline
 //! follows real time on the monotonic clock. A desktop resize mid-recording
 //! is letterboxed (and scaled down when larger) into the size the file
-//! started with.
+//! started with. The encoder runs quality-based VBR with a keyframe every two
+//! seconds: a still desktop costs next to nothing, and players can seek.
 
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
@@ -281,7 +282,18 @@ impl Pacer {
     }
 }
 
+/// Encoder quality (0..100) under quality-based rate control: text stays
+/// sharp, and a still desktop costs next to nothing.
+const QUALITY: u32 = 70;
+
+/// Frames between keyframes: one every two seconds, so a player can seek
+/// anywhere without decoding from the start.
+fn keyframe_spacing(fps: u32) -> u32 {
+    fps.max(1) * 2
+}
+
 /// Target bitrate: 4 Mbit/s at 1920x1080, by area, within 0.5..20 Mbit/s.
+/// The average under VBR when the encoder has no quality mode.
 fn bitrate(w: usize, h: usize) -> u32 {
     let b = 4_000_000u64 * (w * h) as u64 / (1920 * 1080);
     b.clamp(500_000, 20_000_000) as u32
@@ -483,6 +495,8 @@ mod sink {
                 .and_then(|t| {
                     t.SetUINT32(&MF_MT_AVG_BITRATE, super::bitrate(w, h))?;
                     t.SetUINT32(&MF_MT_MPEG2_PROFILE, eAVEncH264VProfile_Main.0 as u32)?;
+                    // Also set on the encoder in `tune`; some take only one.
+                    t.SetUINT32(&MF_MT_MAX_KEYFRAME_SPACING, super::keyframe_spacing(fps))?;
                     Ok(t)
                 })
                 .map_err(err("H.264 type"))?;
@@ -496,8 +510,70 @@ mod sink {
             writer
                 .SetInputMediaType(stream, &input, None)
                 .map_err(err("NV12 input"))?;
+            tune(&writer, stream, fps);
             writer.BeginWriting().map_err(err("start"))?;
             Ok((writer, stream))
+        }
+    }
+
+    /// Encoder settings the media types cannot carry, through its ICodecAPI
+    /// (before BeginWriting). Without them a hardware encoder may run plain
+    /// CBR with one keyframe: the AMD one pads every frame to the same size
+    /// (a still desktop costs the full bitrate) and the only keyframe is the
+    /// first, so a seek anywhere starts there. Rate control prefers
+    /// quality-based VBR and falls back to unconstrained VBR at
+    /// [`super::bitrate`]; a setting the encoder refuses is traced, and the
+    /// recording goes on with its default.
+    fn tune(writer: &IMFSinkWriter, stream: u32, fps: u32) {
+        use windows::Win32::System::Variant::{
+            VARIANT, VARIANT_0, VARIANT_0_0, VARIANT_0_0_0, VT_UI4,
+        };
+        use windows::core::{GUID, Interface};
+        // A VT_UI4 VARIANT holds its value in ulVal (nothing to free).
+        let ui4 = |v: u32| VARIANT {
+            Anonymous: VARIANT_0 {
+                Anonymous: std::mem::ManuallyDrop::new(VARIANT_0_0 {
+                    vt: VT_UI4,
+                    wReserved1: 0,
+                    wReserved2: 0,
+                    wReserved3: 0,
+                    Anonymous: VARIANT_0_0_0 { ulVal: v },
+                }),
+            },
+        };
+        // SAFETY: GetServiceForStream hands out an owned ICodecAPI pointer
+        // on success; the calls pass VARIANTs that outlive them.
+        unsafe {
+            let mut p = std::ptr::null_mut();
+            if let Err(e) =
+                writer.GetServiceForStream(stream, &GUID::zeroed(), &ICodecAPI::IID, &mut p)
+            {
+                rdp::trace!("recording: the encoder has no settings interface: {e}");
+                return;
+            }
+            let api = ICodecAPI::from_raw(p);
+            let set = |what: &str, api_id: &GUID, v: u32| {
+                api.SetValue(api_id, &ui4(v))
+                    .inspect_err(|e| rdp::trace!("recording: encoder refused {what} {v}: {e}"))
+                    .is_ok()
+            };
+            let quality = set(
+                "quality rate control",
+                &CODECAPI_AVEncCommonRateControlMode,
+                eAVEncCommonRateControlMode_Quality.0 as u32,
+            ) && set("quality", &CODECAPI_AVEncCommonQuality, super::QUALITY);
+            if !quality {
+                set(
+                    "VBR rate control",
+                    &CODECAPI_AVEncCommonRateControlMode,
+                    eAVEncCommonRateControlMode_UnconstrainedVBR.0 as u32,
+                );
+            }
+            set(
+                "GOP size",
+                &CODECAPI_AVEncMPVGOPSize,
+                super::keyframe_spacing(fps),
+            );
         }
     }
 
@@ -769,5 +845,72 @@ mod tests {
             "mvhd {secs} s, recorder {info:?}"
         );
         assert!(top.iter().any(|b| &b.0 == b"mdat"), "media data");
+    }
+
+    /// The body of the box at `path` (one type per level), if there is one.
+    fn find<'a>(data: &'a [u8], path: &[&[u8; 4]]) -> Option<&'a [u8]> {
+        let (first, rest) = path.split_first()?;
+        let body = boxes(data).into_iter().find(|b| &b.0 == *first)?.1;
+        if rest.is_empty() {
+            Some(body)
+        } else {
+            find(body, rest)
+        }
+    }
+
+    /// A still desktop costs next to nothing, and keyframes recur so a
+    /// player can seek: 4 s of a still 1920x1080 picture with fine detail.
+    /// Under the AMD encoder's default CBR every frame was padded to the
+    /// same 16.7 KB and only the first was a keyframe. Ignored by default
+    /// like the test above.
+    #[test]
+    #[ignore]
+    fn media_foundation_still_picture_is_small_and_seekable() {
+        let path = std::env::temp_dir().join(format!("remora-still-{}.mp4", std::process::id()));
+        let (w, h) = (1920, 1080);
+        let mut rec = Recorder::start(&path, w as u32, h as u32, 15).expect("recorder");
+        let mut fb = rdp::Framebuffer::new(w, h);
+        for (n, p) in fb.pixels.iter_mut().enumerate() {
+            // Lines of dark marks on white, like text.
+            let (x, y) = (n % w, n / w);
+            let v = (x as u32).wrapping_mul(2_654_435_761) ^ (y as u32).wrapping_mul(40_503);
+            *p = if y % 16 < 11 && v.wrapping_mul(2_246_822_519) >> 13 & 3 == 0 {
+                0x10_1010
+            } else {
+                WHITE
+            };
+        }
+        let start = Instant::now();
+        while start.elapsed() < Duration::from_secs(4) {
+            rec.frame(&fb);
+            std::thread::sleep(Duration::from_millis(40));
+        }
+        let info = rec.finish().expect("finished recording");
+        let data = std::fs::read(&path).expect("file");
+        let _ = std::fs::remove_file(&path);
+        let stbl = find(&data, &[b"moov", b"trak", b"mdia", b"minf", b"stbl"]).expect("stbl");
+        // Sample sizes (ISO/IEC 14496-12 8.7.3): version and flags, a
+        // common size (0: each listed), the count, then one per sample.
+        let stsz = find(stbl, &[b"stsz"]).expect("stsz");
+        let be = |b: &[u8], i: usize| u32::from_be_bytes(b[i..i + 4].try_into().unwrap());
+        assert_eq!(be(stsz, 4), 0, "frames of one padded size: CBR");
+        let mut sizes: Vec<u32> = (0..be(stsz, 8) as usize)
+            .map(|i| be(stsz, 12 + 4 * i))
+            .collect();
+        sizes.sort_unstable();
+        // Most frames repeat the still picture: a few bytes each.
+        assert!(
+            sizes[sizes.len() / 2] < 2_000,
+            "median frame {} bytes, {info:?}",
+            sizes[sizes.len() / 2]
+        );
+        // Sync samples (8.6.2); without the box every frame is one.
+        let stss = find(stbl, &[b"stss"]).expect("stss: not every frame a keyframe");
+        let keyframes = be(stss, 4);
+        // About one per 2 s (30 frames) over 60 frames.
+        assert!(
+            (2..=4).contains(&keyframes),
+            "{keyframes} keyframes, {info:?}"
+        );
     }
 }
