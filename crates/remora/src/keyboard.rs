@@ -52,6 +52,8 @@ pub struct KeyInput<'a> {
     pub dead: bool,
     /// The AltGr key of a layout that has one.
     pub altgr: bool,
+    /// A key-repeat press while the key is held.
+    pub repeat: bool,
 }
 
 impl<'a> KeyInput<'a> {
@@ -76,6 +78,7 @@ impl<'a> KeyInput<'a> {
             text: text.filter(|_| ev.state.is_pressed()),
             dead: matches!(ev.logical_key, Key::Dead(_)),
             altgr: matches!(ev.logical_key, Key::Named(NamedKey::AltGraph)),
+            repeat: ev.repeat,
         }
     }
 }
@@ -133,6 +136,12 @@ pub fn decide(k: &KeyInput, translate: bool, m: Mods) -> Decision {
     if !translate || k.scancode.is_some_and(is_modifier) || k.altgr {
         return Decision::Scancode;
     }
+    // This PC's Caps Lock already shapes the text, and the session's key
+    // for it carries the Shift; the remote's Caps Lock stays off, or it
+    // would turn `A` (Shift+A) back into `a` (RDP-91).
+    if k.scancode == Some(CAPS_LOCK) {
+        return Decision::Swallow;
+    }
     let altgr = m.altgr || (m.ctrl && m.alt);
     let shortcut = m.win || (!altgr && (m.ctrl || m.alt));
     if shortcut {
@@ -153,6 +162,9 @@ pub fn decide(k: &KeyInput, translate: bool, m: Mods) -> Decision {
     }
     Decision::Scancode
 }
+
+/// Caps Lock (set-1 scancode, not extended).
+pub const CAPS_LOCK: (u8, bool) = (0x3A, false);
 
 /// The keys of the main typing block (set-1 scancodes, not extended): the
 /// digit row, the three letter rows with their punctuation, the ISO key
@@ -204,6 +216,8 @@ pub struct Keys {
     unicode: bool,
     /// "No Unicode input" was logged.
     warned: bool,
+    /// This keyboard reports Caps Lock releases (RDP-91).
+    caps_releases: bool,
     /// Modifier keys the remote holds, in press order.
     held: Vec<(u8, bool)>,
     /// The held right Alt is this PC's AltGr.
@@ -224,6 +238,7 @@ impl Keys {
             sent_layout,
             unicode: false,
             warned: false,
+            caps_releases: false,
             held: Vec::new(),
             altgr: false,
             translated: Vec::new(),
@@ -266,6 +281,13 @@ impl Keys {
         out.extend(add.iter().rev().map(|&h| key(h, false)));
         out.extend(lift.iter().map(|&h| key(h, true)));
         out
+    }
+
+    /// Whether the remote's Caps Lock follows this PC's: only while keys
+    /// go as keys. Translated text is already shaped by the local Caps
+    /// Lock, and the remote keeps its own off (RDP-91).
+    pub fn caps_follows(&self, mode: KeyboardMode, local_klid: u32) -> bool {
+        !(self.unicode && self.translating(mode, local_klid))
     }
 
     /// The session is up; `unicode`: the server announced INPUT_FLAG_UNICODE.
@@ -324,6 +346,26 @@ impl Keys {
             }
             return out;
         };
+        if sc == CAPS_LOCK && self.caps_follows(mode, local_klid) {
+            // One whole tap per press (RDP-91). Some keyboards never report
+            // the Caps Lock release: Windows then marks every later press a
+            // repeat. A remote that got only the press holds the key, and
+            // every later press toggles nothing: Caps Lock stuck on. Until
+            // a release shows the keyboard sends them, every press is a tap;
+            // after that, held-key repeats are left out.
+            rdp::trace!(
+                "keyboard: Caps Lock {}{}",
+                if k.down { "press" } else { "release" },
+                if k.repeat { " (repeat)" } else { "" }
+            );
+            if !k.down {
+                self.caps_releases = true;
+            } else if !k.repeat || !self.caps_releases {
+                out.push(key(sc, true));
+                out.push(key(sc, false));
+            }
+            return out;
+        }
         if !k.down {
             if sc == RIGHT_ALT {
                 self.altgr = false;
@@ -759,6 +801,7 @@ mod tests {
                     format!("u{code:04X}{}", if down { "+" } else { "-" })
                 }
                 InputEvent::Mouse { .. } => "mouse".into(),
+                InputEvent::Sync { toggles } => format!("sync{toggles:02X}"),
             })
             .collect()
     }
@@ -954,6 +997,45 @@ mod tests {
         s.mode = KeyboardMode::Remote;
         assert_eq!(s.press(A, Some("a")), ["k1E+"]);
         assert_eq!(s.release(A), ["k1E-"]);
+    }
+
+    /// RDP-91: translated text already carries this PC's Caps Lock, so
+    /// the key stays here; with keys as keys it goes to the remote.
+    #[test]
+    fn caps_lock_goes_only_with_keys_as_keys() {
+        let mut s = S::new(KeyboardMode::Auto, GERMAN);
+        assert!(!s.keys.caps_follows(s.mode, s.local));
+        assert!(s.press(CAPS_LOCK, None).is_empty(), "Caps Lock kept here");
+        assert!(s.release(CAPS_LOCK).is_empty(), "and its release");
+        // Ctrl+Caps Lock too: the remote's Caps Lock must stay off.
+        assert_eq!(s.press((0x1D, false), None), ["k1D+"]);
+        assert!(s.press(CAPS_LOCK, None).is_empty());
+        assert!(s.release(CAPS_LOCK).is_empty());
+        assert_eq!(s.release((0x1D, false)), ["k1D-"]);
+        s.mode = KeyboardMode::Remote;
+        assert!(s.keys.caps_follows(s.mode, s.local));
+        let repeat = KeyInput {
+            scancode: Some(CAPS_LOCK),
+            down: true,
+            repeat: true,
+            ..Default::default()
+        };
+        // A keyboard that never reports the release: Windows marks every
+        // press after the first a repeat; each is still a whole tap.
+        assert_eq!(s.press(CAPS_LOCK, None), ["k3A+", "k3A-"]);
+        assert_eq!(s.send(repeat), ["k3A+", "k3A-"]);
+        assert_eq!(s.send(repeat), ["k3A+", "k3A-"]);
+        // Once a release shows up: a whole tap per press, the release
+        // already sent, and held-key repeats toggle nothing.
+        assert!(s.release(CAPS_LOCK).is_empty(), "release already sent");
+        assert_eq!(s.press(CAPS_LOCK, None), ["k3A+", "k3A-"]);
+        assert!(s.send(repeat).is_empty());
+        assert!(s.release(CAPS_LOCK).is_empty());
+        // No Unicode from the server: keys go as keys, Caps Lock with them.
+        s.mode = KeyboardMode::Auto;
+        s.keys.connected(false);
+        assert!(s.keys.caps_follows(s.mode, s.local));
+        assert_eq!(s.press(CAPS_LOCK, None), ["k3A+", "k3A-"]);
     }
 
     #[test]

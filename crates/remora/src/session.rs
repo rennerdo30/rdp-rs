@@ -444,6 +444,54 @@ pub fn release_modifiers() -> Vec<InputEvent> {
     .collect()
 }
 
+/// This PC's Caps, Num, Scroll and Kana Lock states as a synchronize event
+/// (MS-RDPBCGR 2.2.8.1.2.2.5), sent whenever a session gains the keyboard,
+/// as mstsc does on focus. Without it the remote toggle keys drift from the
+/// local ones: a Caps Lock pressed while another window had the keyboard
+/// changes only this PC. `caps_follows` false: the remote's Caps Lock is
+/// set off (translated typing, `Keys::caps_follows`).
+pub fn lock_sync(caps_follows: bool) -> Vec<InputEvent> {
+    match local_toggles() {
+        Some(mut toggles) => {
+            if !caps_follows {
+                toggles &= !rdp::input::FASTPATH_INPUT_SYNC_CAPS_LOCK;
+            }
+            vec![InputEvent::Sync { toggles }]
+        }
+        None => Vec::new(),
+    }
+}
+
+#[cfg(windows)]
+fn local_toggles() -> Option<u8> {
+    use rdp::input::{
+        FASTPATH_INPUT_SYNC_CAPS_LOCK, FASTPATH_INPUT_SYNC_KANA_LOCK, FASTPATH_INPUT_SYNC_NUM_LOCK,
+        FASTPATH_INPUT_SYNC_SCROLL_LOCK,
+    };
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+        GetKeyState, VK_CAPITAL, VK_KANA, VK_NUMLOCK, VK_SCROLL,
+    };
+    // SAFETY: plain call; the low bit of the result is the toggle state.
+    let on = |vk: u16| unsafe { GetKeyState(vk as i32) } & 1 != 0;
+    Some(
+        [
+            (VK_SCROLL, FASTPATH_INPUT_SYNC_SCROLL_LOCK),
+            (VK_NUMLOCK, FASTPATH_INPUT_SYNC_NUM_LOCK),
+            (VK_CAPITAL, FASTPATH_INPUT_SYNC_CAPS_LOCK),
+            (VK_KANA, FASTPATH_INPUT_SYNC_KANA_LOCK),
+        ]
+        .into_iter()
+        .filter(|&(vk, _)| on(vk))
+        .fold(0, |acc, (_, bit)| acc | bit),
+    )
+}
+
+/// winit does not tell the lock states: the remote keeps its own.
+#[cfg(not(windows))]
+fn local_toggles() -> Option<u8> {
+    None
+}
+
 pub fn mouse_button(
     button: winit::event::MouseButton,
     down: bool,
