@@ -203,6 +203,9 @@ mod tests {
             InputEvent::mouse_move(640, 400),
             InputEvent::mouse_button(PTRFLAGS_BUTTON2, true, 1, 2),
             InputEvent::wheel(-120, 3, 4),
+            InputEvent::Sync {
+                toggles: crate::input::FASTPATH_INPUT_SYNC_CAPS_LOCK,
+            },
         ];
         let got = parse_fastpath_input(&fastpath_input(&sent)).unwrap();
         assert_eq!(
@@ -238,6 +241,9 @@ mod tests {
                     flags: PTRFLAGS_WHEEL | PTRFLAGS_WHEEL_NEGATIVE | 0x88,
                     x: 3,
                     y: 4
+                },
+                ClientInput::Sync {
+                    toggles: SYNC_CAPS_LOCK
                 },
             ]
         );

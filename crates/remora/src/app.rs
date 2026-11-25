@@ -798,9 +798,36 @@ impl App {
         }
     }
 
+    /// The lock keys for session `id` as it gains the keyboard (RDP-91):
+    /// this PC's, but Caps Lock off while its typing is translated.
+    fn lock_sync(&self, id: u64) -> Vec<InputEvent> {
+        let mode = self
+            .win
+            .as_ref()
+            .and_then(|m| m.ui.tabs.iter().find(|t| t.id == id))
+            .map(|t| t.keyboard)
+            .unwrap_or_default();
+        let follows = self.sessions.get(&id).is_none_or(|s| {
+            s.keys
+                .borrow()
+                .caps_follows(mode, crate::keyboard::local_klid())
+        });
+        session::lock_sync(follows)
+    }
+
     /// A key for session `id`: a scancode, or the typed text as Unicode when
     /// the tab's Keyboard setting translates (RDP-32).
-    fn session_key(&self, id: u64, ev: &winit::event::KeyEvent) {
+    ///
+    /// `synthetic`: winit made the event up on a focus change (a release for
+    /// each key it thinks held as the window loses focus, a press as it gets
+    /// it back). Never sent: the remote gets its modifiers released and its
+    /// lock keys synchronized instead. A Japanese keyboard's 英数 key (the
+    /// Caps Lock scancode) is never reported released, so its made-up press
+    /// toggled the remote Caps Lock on every focus (RDP-91).
+    fn session_key(&self, id: u64, ev: &winit::event::KeyEvent, synthetic: bool) {
+        if synthetic {
+            return;
+        }
         let mode = self
             .win
             .as_ref()
@@ -1722,7 +1749,7 @@ impl App {
         })
     }
 
-    fn keyboard(&mut self, ev: winit::event::KeyEvent) {
+    fn keyboard(&mut self, ev: winit::event::KeyEvent, synthetic: bool) {
         // Ctrl+Shift+U installs an offered update (as in the other apps).
         let session_has_keys = self.win.as_ref().is_some_and(|m| m.ui.session_focus);
         if !session_has_keys
@@ -1786,7 +1813,7 @@ impl App {
             } else {
                 // Scancodes, or Unicode by the tab's Keyboard setting and for
                 // keys without one (touch keyboard, emoji panel).
-                self.session_key(id, &ev);
+                self.session_key(id, &ev, synthetic);
             }
             return;
         }
@@ -2622,6 +2649,8 @@ impl ApplicationHandler<UserEvent> for App {
                     keys.connected(info.unicode_input());
                     layout = Some(keys.sent_layout);
                 }
+                // The new session starts with this PC's lock keys.
+                self.send(id, self.lock_sync(id));
                 if let Some(m) = &mut self.win {
                     m.ui.session_started(id);
                 }
@@ -2948,8 +2977,17 @@ impl App {
                 self.win.as_mut().unwrap().ui.window_active = focused;
                 // Alt+Tab away leaves no Alt release behind.
                 self.win.as_mut().unwrap().ui.alt_key(false);
-                if !focused && let Some((id, _)) = self.win.as_ref().unwrap().ui.session_area {
-                    self.send(id, session::release_modifiers());
+                if let Some((id, _)) = self.win.as_ref().unwrap().ui.session_area {
+                    // Away: let go of the modifiers. Back: the remote lock
+                    // keys take this PC's (Caps Lock pressed meanwhile).
+                    self.send(
+                        id,
+                        if focused {
+                            self.lock_sync(id)
+                        } else {
+                            session::release_modifiers()
+                        },
+                    );
                 }
                 self.dirty();
             }
@@ -3040,9 +3078,13 @@ impl App {
             }
             WindowEvent::DroppedFile(path) => self.dropped_file(path),
             WindowEvent::ModifiersChanged(mods) => self.mods = mods.state(),
-            WindowEvent::KeyboardInput { event, .. } => {
+            WindowEvent::KeyboardInput {
+                event,
+                is_synthetic,
+                ..
+            } => {
                 self.last_input = std::time::Instant::now();
-                self.keyboard(event)
+                self.keyboard(event, is_synthetic)
             }
             _ => {}
         }
@@ -3405,6 +3447,7 @@ impl App {
             WindowEvent::Focused(focused) => {
                 if focused {
                     self.span_focus = Some(id);
+                    self.send(id, self.lock_sync(id));
                 } else {
                     if self.span_focus == Some(id) {
                         self.span_focus = None;
@@ -3470,7 +3513,11 @@ impl App {
                 let pos = self.spans[i].to_session(x, y, fb);
                 self.send(id, session::wheel(delta, pos).into_iter().collect());
             }
-            WindowEvent::KeyboardInput { event, .. } => {
+            WindowEvent::KeyboardInput {
+                event,
+                is_synthetic,
+                ..
+            } => {
                 self.last_input = std::time::Instant::now();
                 // Ctrl+Alt+Break leaves the monitors, as full screen elsewhere.
                 if event.state.is_pressed()
@@ -3483,7 +3530,7 @@ impl App {
                 {
                     return self.unspan(id);
                 }
-                self.session_key(id, &event);
+                self.session_key(id, &event, is_synthetic);
             }
             _ => {}
         }

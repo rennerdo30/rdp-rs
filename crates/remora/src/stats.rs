@@ -365,6 +365,7 @@ fn is_press(ev: &InputEvent) -> bool {
     match *ev {
         InputEvent::Key { down, .. } | InputEvent::Unicode { down, .. } => down,
         InputEvent::Mouse { flags, .. } => flags & PTRFLAGS_DOWN != 0,
+        InputEvent::Sync { .. } => false,
     }
 }
 

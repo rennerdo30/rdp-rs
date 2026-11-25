@@ -15,6 +15,13 @@ pub const PTRFLAGS_DOWN: u16 = 0x8000;
 /// send them.
 pub const INPUT_FLAG_UNICODE: u16 = 0x0010;
 
+/// Toggle key states of a synchronize event (TS_FP_SYNC_EVENT eventFlags,
+/// MS-RDPBCGR 2.2.8.1.2.2.5).
+pub const FASTPATH_INPUT_SYNC_SCROLL_LOCK: u8 = 0x01;
+pub const FASTPATH_INPUT_SYNC_NUM_LOCK: u8 = 0x02;
+pub const FASTPATH_INPUT_SYNC_CAPS_LOCK: u8 = 0x04;
+pub const FASTPATH_INPUT_SYNC_KANA_LOCK: u8 = 0x08;
+
 /// The client keyboard the server sets the session up for: keyboardLayout,
 /// keyboardType, keyboardSubType, keyboardFunctionKey and imeFileName of the
 /// Client Core Data (MS-RDPBCGR 2.2.1.3.2), repeated in the Input Capability
@@ -85,6 +92,12 @@ pub enum InputEvent {
         x: u16,
         y: u16,
     },
+    /// TS_FP_SYNC_EVENT (MS-RDPBCGR 2.2.8.1.2.2.5): sets the server's
+    /// toggle keys (FASTPATH_INPUT_SYNC_* bits) to the client's. Sent when
+    /// the session gains the keyboard, so Caps Lock and friends match.
+    Sync {
+        toggles: u8,
+    },
 }
 
 impl InputEvent {
@@ -137,6 +150,8 @@ impl InputEvent {
                 out.put_u16(x);
                 out.put_u16(y);
             }
+            // FASTPATH_INPUT_EVENT_SYNC (3); the toggles are the 5-bit eventFlags.
+            InputEvent::Sync { toggles } => out.put_u8((3 << 5) | (toggles & 0x1F)),
         }
     }
 }
@@ -179,6 +194,14 @@ mod tests {
             },
         ]);
         assert_eq!(pdu, vec![2 << 2, 6, 0x00, 0x1E, 0x03, 0x48]);
+    }
+
+    #[test]
+    fn sync_event_is_one_byte() {
+        let pdu = fastpath_input(&[InputEvent::Sync {
+            toggles: FASTPATH_INPUT_SYNC_CAPS_LOCK | FASTPATH_INPUT_SYNC_NUM_LOCK,
+        }]);
+        assert_eq!(pdu, vec![1 << 2, 3, 0x66]);
     }
 
     #[test]

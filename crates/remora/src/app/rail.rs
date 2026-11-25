@@ -439,6 +439,7 @@ impl App {
             WindowEvent::Focused(focused) => {
                 if focused {
                     self.app_focus = Some(id);
+                    self.send(id, self.lock_sync(id));
                     if let Some((w, h)) = ids {
                         h.set_focus(w, true);
                     }
@@ -492,9 +493,13 @@ impl App {
                     self.send(id, session::wheel(delta, pos).into_iter().collect());
                 }
             }
-            WindowEvent::KeyboardInput { event, .. } => {
+            WindowEvent::KeyboardInput {
+                event,
+                is_synthetic,
+                ..
+            } => {
                 self.last_input = Instant::now();
-                self.session_key(id, &event);
+                self.session_key(id, &event, is_synthetic);
             }
             _ => {}
         }
