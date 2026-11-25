@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.1.0-beta.15
+
 - **Caps Lock no longer gets stuck on.** Tabbing back into a session no longer turns the remote Caps Lock on, and Caps Lock (on a Japanese keyboard the 英数 key) switches it on and off each time. When a session connects or gets the keyboard back, the remote Caps, Num and Scroll Lock are set to this PC's. With **Automatic** or **Translate** typing, this PC's Caps Lock already decides the case, so the remote one stays off (RDP-91).
 
 ## 0.1.0-beta.14
